@@ -1,0 +1,178 @@
+"""Native PP boundary names shared by observation and control."""
+
+from contextvars import ContextVar
+from functools import partial
+
+
+class PipelineMessages:
+    def __init__(self, calls, *, wire_device=None):
+        self.calls = calls
+        self.wire_device = wire_device
+        self.message = ContextVar("pipeline_message", default=None)
+
+    def work(self):
+        work = self.calls.work(None)
+        work["context"] = {
+            "pipeline": PipelineABI.control_context(self.calls),
+            "message": None if self.message.get() is None else dict(self.message.get()),
+        }
+        return work
+
+    def signal_work(self, stream):
+        work = self.work()
+        work["context"]["record_stream"] = PipelineABI.stream_role(self.calls.scheduler, stream)
+        return work
+
+    def wait_work(self, producer, *, device, stream=None):
+        work = self.work()
+
+        # Waiting consumes the recorded producer; the current scheduler state locates this occurrence.
+        work["observation_context"] = work["context"]
+        work["context"] = {"producer": producer, "device_wait": device}
+        if device:
+            work["context"]["wait_stream"] = PipelineABI.stream_role(self.calls.scheduler, stream)
+        return work
+
+    def dictionary(self, direction, original, group, *args, **kwargs):
+        if not self.calls.enabled or group.world_size == 1:
+            return original(group, *args, **kwargs)
+        previous = self.message.set({"direction": direction, "kind": None, "field": None})
+        try:
+            return original(group, *args, **kwargs)
+        finally:
+            self.message.reset(previous)
+
+    def split(self, original, tensor_dict):
+        metadata, tensors = original(tensor_dict)
+        message = self.message.get()
+        if message is None or message["direction"] != "send":
+            return metadata, tensors
+
+        from sglang.srt.distributed.parallel_state import TensorMetadata
+
+        message["kind"] = tensor_dict.get("__msg_type__")
+        names = [name for name, value in metadata if isinstance(value, TensorMetadata)]
+        if self.wire_device is not None:
+            metadata = self.devices(metadata, "meta", self.wire_device)
+        return metadata, self.fields(zip(names, tensors, strict=True), paired=False)
+
+    def receive_metadata(self, original, group, *args, **kwargs):
+        metadata = original(group, *args, **kwargs)
+        message = self.message.get()
+        if message is None or message["direction"] != "receive":
+            return metadata
+        message["kind"] = dict(metadata).get("__msg_type__")
+        if self.wire_device is not None:
+            metadata = self.devices(metadata, self.wire_device, "meta")
+        return self.fields(metadata, paired=True)
+
+    @staticmethod
+    def devices(metadata, source, target):
+        from sglang.srt.distributed.parallel_state import TensorMetadata
+
+        translated = []
+        for name, value in metadata:
+            if isinstance(value, TensorMetadata) and value.device == source:
+
+                # Native device.type gives each descriptor its own string for pickle's memo table.
+                value = value._replace(device=target.encode().decode())
+            translated.append((name, value))
+        return translated
+
+    def fields(self, entries, *, paired):
+
+        # Attribute the native loop's current field, including equal-shaped tensors and sliced views.
+        for name, value in entries:
+            self.message.get()["field"] = name
+            yield (name, value) if paired else value
+
+    def install(self):
+        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
+
+        module = "sglang.srt.distributed.parallel_state."
+        for target, hook in (
+            (module + "GroupCoordinator.send_tensor_dict", partial(self.dictionary, "send")),
+            (module + "GroupCoordinator.recv_tensor_dict", partial(self.dictionary, "receive")),
+            (module + "_split_tensor_dict", self.split),
+            (module + "GroupCoordinator.recv_object", self.receive_metadata),
+        ):
+            HookRegistry.register(target, hook, HookType.AROUND)
+
+
+class PipelineABI:
+    stream_roles = ("schedule", "forward", "copy")
+
+    @staticmethod
+    def stream_declarations(recording):
+        declarations, waits = [], {}
+        for scope in recording["scopes"]:
+            context = scope["work"].get("context", {})
+            if scope["role"] == "signal_record":
+                port, = (port for port in scope["ports"] if port["use"] == "signal" and port["direction"] == "output")
+                declarations.append((port["point"], context["record_stream"]))
+            elif scope["role"] == "signal_wait":
+                port, = (port for port in scope["ports"] if port["use"] == "signal" and port["direction"] == "input")
+                declarations.append((port["point"], context["producer"]["record_stream"]))
+                if context["device_wait"]:
+                    declarations.append((scope["device_entry"], context["wait_stream"]))
+            elif scope["role"] == "stream_wait":
+                waits[scope["id"]] = context["streams"]
+                declarations.append((scope["device_entry"], context["streams"]["target"]))
+
+        for query in recording["state_queries"]:
+            if query["kind"] == "event":
+                context = recording["scopes"][query["scope"]]["work"]["context"]
+                declarations.append((query["point"], context["producer"]["record_stream"]))
+
+        # Declarations name native streams; runtime evidence supplies their actual identities.
+        points = {}
+        for point, role in declarations:
+            if role not in PipelineABI.stream_roles or points.setdefault(point, role) != role:
+                raise ValueError("native event has an invalid or conflicting logical stream role")
+        if any(role not in PipelineABI.stream_roles for streams in waits.values() for role in streams.values()):
+            raise ValueError("native stream wait has an unknown logical stream role")
+        return points, waits
+
+    @staticmethod
+    def pending_model_sends(scheduler):
+
+        # Empty request forwarding continues while idle; proxy/output sends still retain model work.
+        return scheduler.ps.pp_size > 1 and bool(scheduler.send_proxy_work or scheduler.send_output_work)
+
+    @staticmethod
+    def control_context(calls):
+        scheduler = calls.scheduler
+
+        # Fixed native slots identify placement, not polling rounds; absent and empty batches remain distinct.
+        return {
+            "current": None if scheduler.cur_batch is None else calls.progress(scheduler.cur_batch.reqs),
+            "slots": [None if batch is None else calls.progress(batch.reqs) for batch in scheduler.mbs],
+            "running_slots": [index for index, batch in enumerate(scheduler.running_mbs) if batch is scheduler.running_batch],
+        }
+
+    @staticmethod
+    def proxy_tensors(proxy):
+        import torch
+
+        # Native PP dictionaries also retain routing metadata such as the message kind.
+        return {name: value for name, value in proxy.tensors.items() if isinstance(value, torch.Tensor)}
+
+    @staticmethod
+    def tensor_parameters(tensor):
+        return {f"extent_{axis}": size for axis, size in enumerate(tensor.shape)}
+
+    @staticmethod
+    def gather_condition(tensor, dim, group):
+        return {"dtype": str(tensor.dtype), "dim": dim % tensor.ndim, "group": group}
+
+    @staticmethod
+    def streams(scheduler, target, source):
+        return {
+            direction: PipelineABI.stream_role(scheduler, stream)
+            for direction, stream in (("source", source), ("target", target))
+        }
+
+    @staticmethod
+    def stream_role(scheduler, stream):
+        stream = scheduler.device_module.current_stream() if stream is None else stream
+        return next(role for role in PipelineABI.stream_roles if stream == getattr(scheduler, f"{role}_stream"))

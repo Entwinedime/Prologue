@@ -1,0 +1,73 @@
+name: prologue
+
+x-build-proxy: &build-proxy
+  http_proxy: ${http_proxy:-${HTTP_PROXY:-}}
+  https_proxy: ${https_proxy:-${HTTPS_PROXY:-}}
+  HTTP_PROXY: ${HTTP_PROXY:-${http_proxy:-}}
+  HTTPS_PROXY: ${HTTPS_PROXY:-${https_proxy:-}}
+
+x-profile-common: &profile-common
+  init: true
+  working_dir: /workspace/trace-sim
+  network_mode: host
+  ipc: host
+  privileged: true
+  volumes:
+    - ../..:/workspace/trace-sim
+    - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+    - /usr/local/Ascend/add-ons:/usr/local/Ascend/add-ons:ro
+    - /usr/local/dcmi:/usr/local/dcmi:ro
+    - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+    - /usr/local/sbin:/usr/local/sbin:ro
+    - /models:/models:ro
+    - /root/models:/root/models
+    - /dev:/dev
+
+x-common-env: &common-env
+  ASCEND_RT_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES:-0}
+
+services:
+  control:
+    build:
+      context: ../..
+      dockerfile: docker/images/control/Dockerfile
+      network: none
+      args:
+        BASE_IMAGE: ${PROLOGUE_IMAGE_PREFIX:-prologue}-sglang:ubuntu22.04
+    image: ${PROLOGUE_IMAGE_PREFIX:-prologue}-control:ubuntu22.04
+    pull_policy: never
+    network_mode: none
+
+  sglang-profile:
+    <<: *profile-common
+    build:
+      context: ../..
+      dockerfile: docker/images/sglang/Dockerfile
+      network: ${PROLOGUE_BUILD_NETWORK:-default}
+      args:
+        <<: *build-proxy
+        BASE_IMAGE: ${PROLOGUE_IMAGE_PREFIX:-prologue}-sglang-env:ubuntu22.04
+        SGLANG_REVISION: ${SGLANG_REVISION:-}
+    image: ${PROLOGUE_IMAGE_PREFIX:-prologue}-sglang:ubuntu22.04
+    pull_policy: never
+    environment:
+      <<: *common-env
+      ASCEND_CUSTOM_OPP_PATH: /usr/local/Ascend/ascend-toolkit/latest/opp/vendors/batch_invariant
+      ASCEND_MF_STORE_URL: ${ASCEND_MF_STORE_URL:-}
+      ASCEND_MF_TRANSFER_PROTOCOL: ${ASCEND_MF_TRANSFER_PROTOCOL:-sdma}
+    command: bash
+
+  modeling:
+    working_dir: /workspace/trace-sim
+    network_mode: none
+    build:
+      context: ../..
+      dockerfile: docker/images/modeling/Dockerfile
+      network: ${PROLOGUE_BUILD_NETWORK:-default}
+      args:
+        <<: *build-proxy
+    image: ${PROLOGUE_IMAGE_PREFIX:-prologue}-modeling:ubuntu24.04
+    pull_policy: never
+    volumes:
+      - ../..:/workspace/trace-sim
+    command: bash

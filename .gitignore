@@ -1,0 +1,28 @@
+.cache/
+.ruff_cache/
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Build products and local environments
+build/
+cmake-build-*/
+compile_commands.json
+*.o
+*.so
+*.a
+*.dylib
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local runtime assets
+/data/
+/export_only_prof_dir/
+kernel_meta/
+
+# Local reference archive
+/deprecated/

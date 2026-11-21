@@ -1,0 +1,17 @@
+.git
+.env
+.env.*
+deprecated
+reference
+build
+cmake-build-*
+.cache
+.ruff_cache
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+kernel_meta
+data
+export_only_prof_dir

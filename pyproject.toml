@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=65"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prologue-collection"
+version = "0.0.0"
+requires-python = ">=3.10"
+description = "Native inference observations for Prologue"
+
+[project.entry-points."sglang.srt.plugins"]
+prologue = "prologue_collection.adapters.frameworks.sglang.hooks:install"
+
+[tool.setuptools.packages.find]
+where = ["src/collection", "src/workload", "src/adapters"]
+include = ["prologue_collection*", "prologue_workload*", "prologue_adapters*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.format]
+quote-style = "double"

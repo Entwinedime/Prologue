@@ -1,0 +1,51 @@
+#include "prologue/serving/service_times.hpp"
+
+#include <utility>
+#include <vector>
+
+#include "prologue/graph/graph.hpp"
+#include "prologue/templates/library.hpp"
+
+namespace prologue {
+
+ServiceTimes::ServiceTimes(ServiceDuration given, ExecutionInputs * conditions, const nlohmann::json & assets)
+    : given_(given), conditions_(conditions), assets_(assets) {}
+
+void ServiceTimes::bind(const std::string & group, nlohmann::json domain, std::span<const TemplateDefinition> definitions) {
+    participants_.try_emplace(group, std::move(domain), definitions, assets_);
+}
+
+std::optional<InvocationInput> ServiceTimes::action_input(const ServingAction & action) {
+    if (!conditions_) return std::nullopt;
+    return conditions_->invocation(action.task.group, "action", ExecutionInputs::action_identity(action));
+}
+
+GraphTiming ServiceTimes::action(const std::string & group, const CoarseGraph & graph, std::span<const TemplateInterval> origins,
+                                 const std::optional<InvocationInput> & observed) {
+    if (observed) return observed->timing(graph);
+    if (given_) return { std::vector<ServiceDuration>(graph.work.size(), given_), {} };
+
+    const auto began = std::chrono::steady_clock::now();
+    auto result = participants_.at(group).timing(graph, origins);
+    query_time_ += std::chrono::steady_clock::now() - began;
+    queries_ += graph.work.size();
+    return result;
+}
+
+ServiceDuration ServiceTimes::external(const std::string & group, const nlohmann::json & identity, WorkKind kind, const WorkFeatures & features) {
+    if (given_) return given_;
+
+    const auto began = std::chrono::steady_clock::now();
+    const auto duration = participants_.at(group).external(identity, kind, features);
+    query_time_ += std::chrono::steady_clock::now() - began;
+    ++queries_;
+    return duration;
+}
+
+nlohmann::json ServiceTimes::finish() const {
+    if (conditions_) return conditions_->finish();
+    if (given_) return {{ "duration_basis", "uniform_given_work_ns" }, { "given_work_ns", *given_ }};
+    return {{ "duration_basis", "independent_service_costs" }, { "cost_queries", queries_ }, { "cost_query_ns", query_time_.count() }};
+}
+
+} // namespace prologue
