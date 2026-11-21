@@ -89,13 +89,13 @@ class NativeHostSamples(ServingCuts):
     def collective_at_root(self):
         return self.parent.get() == 0
 
-    def observe_exchange(self, original, role, group, root_rank, gather, run):
+    def observe_exchange(self, original, role, group, root_rank, operand, run):
         work, parameters, bindings = None, None, None
+        if operand is not None:
+            parameters = PipelineABI.tensor_parameters(operand.tensor)
         if role == "gather":
-            _, tensor, dimension = gather
-            parameters = PipelineABI.tensor_parameters(tensor)
             group_role = self.groups.name(group)
-            bindings = {"collective": PipelineABI.gather_condition(tensor, dimension, group_role)}
+            bindings = {"collective": PipelineABI.gather_condition(operand.tensor, operand.gather_dim, group_role)}
             if self.pipeline is not None:
                 work = self.pipeline.messages.work()
         with self.native_call(role, original, work=work, parameters=parameters, bindings=bindings):

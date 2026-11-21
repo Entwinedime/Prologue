@@ -34,8 +34,9 @@ public:
                              const nlohmann::json & work) const {
         const auto states = worker_.state_inputs(work.value("bindings", nlohmann::json::object()), work);
         auto entry = selection_.select(action.action, action.condition, parameters, states);
-        worker_.bind(entry.frame, "local", work);
-        prologue::GraphInvocation call{ action.action, action.condition, parameters, library_.resources, work,
+        auto graph_work = work;
+        worker_.bind(entry.frame, "local", graph_work);
+        prologue::GraphInvocation call{ action.action, action.condition, parameters, library_.resources, std::move(graph_work),
                                       "local/" + std::to_string(action.scope), environment_, library_.domain, {} };
         for (auto & resource : call.resources) resource.rank = environment_.at("parallel").at("rank").get<std::int64_t>();
         for (const auto & [name, _] : entry.frame.constants) call.parameters.erase(name);

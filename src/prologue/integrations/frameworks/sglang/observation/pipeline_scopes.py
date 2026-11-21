@@ -57,10 +57,7 @@ class PipelineScopes(PipelineCuts):
         if not owner.active:
             return original(scheduler, mb_id, pp_proxy_tensors, mb_metadata, last_rank_comm_queue)
 
-        parameters, work = owner.model_work(scheduler.cur_batch)
-        with owner.call(
-            "launch", original, parameters=parameters, work=work, device=True, stream=scheduler.forward_stream,
-        ) as call, self.signals.observe():
+        with owner.model_call("launch", original, scheduler.cur_batch, stream=scheduler.forward_stream) as call, self.signals.observe():
             if pp_proxy_tensors is not None:
                 for name, tensor in PipelineABI.proxy_tensors(pp_proxy_tensors).items():
 

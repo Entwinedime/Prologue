@@ -119,15 +119,6 @@ class ExpertRoutes:
             result.extend([experts] * count)
         return result
 
-    def batch_counts(self, members, layer: int, padded_tokens: int) -> list[int]:
-        counts = [0] * self.layers[layer]["experts"]
-
-        # Prediction visits route intervals, not an expanded token-by-expert matrix.
-        for count, experts in self.batch_segments(members, layer, padded_tokens):
-            for expert in experts:
-                counts[expert] += count
-        return counts
-
     @staticmethod
     def interval(source: list[int], limit: int, field: str) -> tuple[int, int]:
         if (

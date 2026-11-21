@@ -123,12 +123,10 @@ CoarseGraph NativeActionGraphs::build(const ServingAction & action, const nlohma
     if (action.task.group != group_) throw std::invalid_argument("action sent to another participant's graph provider");
     const auto state_inputs = worker_.state_inputs(bindings, action.work);
     auto entry = select(action.name, action.condition, action.parameters, state_inputs);
-    worker_.bind(entry.frame, instance_, action.work);
     auto graph_work = action.work;
+    worker_.bind(entry.frame, instance_, graph_work);
     graph_work["bindings"] = bindings;
 
-    // Peer requirements are consumed bindings; each graph already publishes the resulting communication contract.
-    graph_work.erase("expert_peers");
     const auto live = action.work.at("live_batches").get<std::set<std::size_t>>();
     std::erase_if(batches_, [&](const auto & batch) { return !live.contains(batch.first); });
     GraphInvocation call{ action.name,  entry.condition, action.parameters,

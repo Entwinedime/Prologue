@@ -14,7 +14,7 @@ namespace prologue::sglang {
 class WorkerBindings {
 public:
     WorkerBindings(const TemplateLibrary & library, const nlohmann::json & environment);
-    void bind(TemplateFrame & frame, const std::string & instance, const nlohmann::json & work) const;
+    void bind(TemplateFrame & frame, const std::string & instance, nlohmann::json & work) const;
     std::map<std::string, StateBindings> state_inputs(const nlohmann::json & bindings, const nlohmann::json & work) const;
 
 private:

@@ -5,14 +5,32 @@ from __future__ import annotations
 import inspect
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
+from prologue.acquisition.observation.parameters import ScopeParameters
 from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
-
 from prologue.integrations.frameworks.sglang.observation.module_scopes import tensor_ports
 from prologue.integrations.runtimes.pytorch.layouts import GatherLayout
-from prologue.acquisition.observation.parameters import ScopeParameters
+
+
+@dataclass
+class CollectiveOperand:
+    coordinator: Any
+    tensor: Any
+    gather_dim: int | None = None
+
+    def implementation(self):
+        communicator = self.coordinator.npu_communicator
+        if communicator is None or communicator.disabled or not self.tensor.is_contiguous():
+            return None
+
+        operation = {"dimension": self.gather_dim} if self.gather_dim is not None else {"reduction": "sum"}
+        return {
+            "backend": f"{type(communicator).__module__}.{type(communicator).__qualname__}",
+            "input_layout": "contiguous", **operation,
+        }
 
 
 class DeviceCollectiveCuts:
@@ -32,13 +50,18 @@ class DeviceCollectiveCuts:
             return original(group, *args, **kwargs)
 
         root_rank = group.ranks[arguments.arguments["src"]] if original.__name__ == "broadcast" else None
-        gather = None
+        operand = None
+        role = "communication"
         if original.__name__ == "all_gather" and arguments.arguments["output_tensor_list"] is None:
-            gather = group, arguments.arguments["input_"], arguments.arguments["dim"]
-        role = "gather" if gather is not None and self.scopes.collective_at_root else "communication"
+            tensor = arguments.arguments["input_"]
+            operand = CollectiveOperand(group, tensor, arguments.arguments["dim"] % tensor.ndim)
+            if self.scopes.collective_at_root:
+                role = "gather"
+        elif original.__name__ == "all_reduce" and not self.scopes.collective_at_root:
+            operand = CollectiveOperand(group, arguments.arguments["input_"])
         with self.outer():
             return self.scopes.observe_exchange(
-                original, role, group.device_group, root_rank, gather, partial(original, group, *args, **kwargs),
+                original, role, group.device_group, root_rank, operand, partial(original, group, *args, **kwargs),
             )
 
     def distributed(self, signature, original, *args, **kwargs):
@@ -100,6 +123,7 @@ class NativeCommunications:
         self.cuts = DeviceCollectiveCuts(self)
         self.orders = {}
         self.action = None
+        self.pending_reductions = []
 
     @property
     def enabled(self):
@@ -130,48 +154,89 @@ class NativeCommunications:
             for tensor in outputs:
                 owner.tensors.written(tensor)
 
-    def observe_exchange(self, original, role, group, root_rank, gather, run):
+    def observe_exchange(self, original, role, group, root_rank, operand, run):
+        if operand is None:
+            with self.exchange(original, group, root_rank=root_rank, role=role):
+                return run()
+        if operand.gather_dim is None:
+            return self.reduce(original, group, operand, run)
+
         owner = self.observation
         standalone = role == "gather"
-        parameters, relations, shape = None, None, None
-        if gather is not None:
-            coordinator, tensor, dim = gather
-            with owner.tensors.metadata():
-                parameters = PipelineABI.tensor_parameters(tensor)
-                shape = list(parameters)
-                parent_shape = shape if standalone else owner.tensors.shape_rule(tensor)
-                relations = {} if standalone else dict(zip(shape, parent_shape, strict=True))
-                dim %= tensor.ndim
+        tensor, dim, peers = operand.tensor, operand.gather_dim, operand.coordinator.world_size
+        with owner.tensors.metadata():
+            parameters = PipelineABI.tensor_parameters(tensor)
+            shape = list(parameters)
+            parent_shape = shape if standalone else owner.tensors.shape_rule(tensor)
+            relations = {} if standalone else dict(zip(shape, parent_shape, strict=True))
 
         suffix, use = ("", "device") if standalone else (".layout", "metadata")
         with self.exchange(original, group, root_rank=root_rank, role=role, parameters=parameters, arguments=relations) as call:
-            if gather is not None:
-                with owner.tensors.metadata():
-                    communicator = coordinator.npu_communicator
-                    if communicator is not None and not communicator.disabled and tensor.is_contiguous():
-
-                        # This ABI reads geometry and the process group; PD queues and remote KV pools are outside the call.
-                        call.record["bindings"]["local_implementation"] = {
-                            "backend": f"{type(communicator).__module__}.{type(communicator).__qualname__}",
-                            "input_layout": "contiguous", "dimension": dim,
-                        }
-                    peers = coordinator.world_size
-                    call.record["guards"] = [GatherLayout.guard(tuple(tensor.shape), shape, dim, peers)]
-                    call.port(f"input{suffix}", "input", {**owner.tensors.observe(tensor, None), "shape_rule": shape}, use=use)
-                    if standalone:
-                        call.record["bindings"]["collective"] = PipelineABI.gather_condition(tensor, dim, call.record["bindings"]["collective_group"])
+            with owner.tensors.metadata():
+                implementation = operand.implementation()
+                if implementation is not None:
+                    call.record["bindings"]["local_implementation"] = implementation
+                call.record["guards"] = [GatherLayout.guard(tuple(tensor.shape), shape, dim, peers)]
+                call.port(f"input{suffix}", "input", {**owner.tensors.observe(tensor, None), "shape_rule": shape}, use=use)
+                if standalone:
+                    call.record["bindings"]["collective"] = PipelineABI.gather_condition(tensor, dim, call.record["bindings"]["collective_group"])
             result = run()
-            if shape is not None:
-                output_shape = list(shape)
-                output_shape[dim] = ["mul", peers, shape[dim]]
-                call.port(f"output{suffix}", "output", {**owner.tensors.observe(result, None), "shape_rule": output_shape}, use=use)
+            output_shape = list(shape)
+            output_shape[dim] = ["mul", peers, shape[dim]]
+            call.port(f"output{suffix}", "output", {**owner.tensors.observe(result, None), "shape_rule": output_shape}, use=use)
 
-                # Local axis names belong to this call; later callers see the producer's enclosing expressions.
-                with owner.tensors.metadata():
-                    parent_output = list(parent_shape)
-                    parent_output[dim] = ["mul", peers, parent_shape[dim]]
-                    owner.tensors.declare_shape(result, parent_output, scope=call.identity if standalone else call.record["parent"])
+            # Local axis names belong to this call; later callers see the producer's enclosing expressions.
+            with owner.tensors.metadata():
+                parent_output = list(parent_shape)
+                parent_output[dim] = ["mul", peers, parent_shape[dim]]
+                owner.tensors.declare_shape(result, parent_output, scope=call.identity if standalone else call.record["parent"])
             return result
+
+    def reduce(self, original, group, operand, run):
+        tensors = self.observation.tensors
+        with tensors.metadata():
+            parent_shape = tensors.declared_shape(operand.tensor)
+            parameters = PipelineABI.tensor_parameters(operand.tensor)
+            source = tensors.observe(operand.tensor, None)
+            implementation = operand.implementation()
+
+        # The collective preserves geometry even when its backend mutates the input storage.
+        with self.exchange(original, group, parameters={}, arguments={}) as call:
+            result = run()
+            if parent_shape is None:
+                returned = tensors.observe(result, None)
+                self.pending_reductions.append((call, parameters, source, implementation, returned["value"]))
+            else:
+                self.bind_reduction(call, parameters, source, implementation, parent_shape)
+            return result
+
+    @staticmethod
+    def bind_reduction(call, parameters, source, implementation, parent_shape):
+        call.record["parameters"] = parameters
+        call.record["arguments"] = dict(zip(parameters, parent_shape, strict=True))
+        if implementation is not None:
+            call.record["bindings"]["local_implementation"] = implementation
+        call.port("input.layout", "input", {**source, "shape_rule": list(parameters)}, use="metadata")
+
+    def bind_returned_operands(self):
+        scopes = self.observation.capture.scopes
+        for call, parameters, source, implementation, value in self.pending_reductions:
+            parent = scopes[call.record["parent"]]
+            rule = None
+
+            # A parent returning this exact tensor version declares its shape in the caller's namespace.
+            for port in parent["ports"]:
+                tensor = port.get("tensor")
+                if port["direction"] != "output" or not tensor or tensor["value"] != value or "shape_rule" not in tensor:
+                    continue
+                if (tensor["dtype"], tensor["shape"]) != (source["dtype"], source["shape"]):
+                    raise ValueError("native all-reduce changed the dtype or shape of its operand")
+                if rule is not None and rule != tensor["shape_rule"]:
+                    raise ValueError("the same returned reduction has conflicting parent shape declarations")
+                rule = tensor["shape_rule"]
+            if rule is not None:
+                self.bind_reduction(call, parameters, source, implementation, rule)
+        self.pending_reductions.clear()
 
     @contextmanager
     def exchange(self, original, group, *, root_rank=None, role="communication", parameters=None, arguments=None):

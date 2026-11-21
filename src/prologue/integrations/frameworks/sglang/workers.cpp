@@ -98,7 +98,7 @@ void WorkerBindings::bind_pool(const std::string & name, const nlohmann::json & 
     for (auto layer = source_begin; layer < source_end; ++layer) layers.emplace(layer, target_begin + (layer - source_begin));
 }
 
-void WorkerBindings::bind(TemplateFrame & frame, const std::string & instance, const nlohmann::json & work) const {
+void WorkerBindings::bind(TemplateFrame & frame, const std::string & instance, nlohmann::json & work) const {
     bind_worker(frame, instance, work);
     if (work.contains("transfer") || (frame.communication && frame.communication->operation == "transfer")) {
         auto & communication = frame.communication;
@@ -110,6 +110,9 @@ void WorkerBindings::bind(TemplateFrame & frame, const std::string & instance, c
         communication->members = transfer.at("members").get<std::vector<std::int64_t>>();
         communication->required = communication->members;
     }
+
+    // The bound communication ports now own their peers; child scopes need only the remaining work.
+    work.erase("expert_peers");
 }
 
 void WorkerBindings::bind_worker(TemplateFrame & frame, const std::string & instance, const nlohmann::json & work) const {

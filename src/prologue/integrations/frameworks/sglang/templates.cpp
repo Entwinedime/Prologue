@@ -200,6 +200,7 @@ private:
 } // namespace
 
 TemplateDeclarations NativeTemplates::describe(CoarseGraph graph) {
+    if (graph.environment.at("framework") != "sglang") throw std::invalid_argument("source framework has no SGLang template recipe");
     const ActionConditions conditions(graph);
     std::vector<EntrySpecification> entries;
     std::map<std::size_t, std::map<std::string, std::size_t>> transfer_peers;
@@ -279,19 +280,18 @@ TemplateDeclarations NativeTemplates::describe(CoarseGraph graph) {
     return { std::move(graph), std::move(entries) };
 }
 
-TemplateLibrary NativeTemplates::compile(CoarseGraph graph, std::vector<TemplateInterval> * origins) {
-    const auto declarations = describe(std::move(graph));
-    const auto & source = declarations.graph;
-    auto library = TemplateCompiler::compile(source, declarations.entries, domain(source.environment), origins);
+TemplateLibrary TemplateDeclarations::compile(std::vector<TemplateInterval> * origins) const {
+    const auto & environment = graph.environment;
+    auto library = TemplateCompiler::compile(graph, entries, NativeTemplates::domain(environment), origins);
 
     // All candidate libraries belong to one initialized model/layout; PD mode and capacity remain caller-owned.
     library.local_domain = nlohmann::json::object();
-    for (const auto field : { "framework", "device", "torch", "torch_npu" }) library.local_domain[field] = source.environment.at(field);
-    const auto & implementation = source.environment.at("implementation");
+    for (const auto field : { "framework", "device", "torch", "torch_npu" }) library.local_domain[field] = environment.at(field);
+    const auto & implementation = environment.at("implementation");
     for (const auto field : { "model", "dtype", "load_format", "framework_revision" }) library.local_domain[field] = implementation.at(field);
     library.local_domain["expert_layout"] = implementation.value("expert_layout", nlohmann::json());
-    library.local_domain["expert_layers"] = source.environment.value("expert_layers", nlohmann::json::array());
-    for (const auto field : { "logical_tp", "logical_pp", "logical_ep" }) library.local_domain[field] = source.environment.at("parallel").at(field);
+    library.local_domain["expert_layers"] = environment.value("expert_layers", nlohmann::json::array());
+    for (const auto field : { "logical_tp", "logical_pp", "logical_ep" }) library.local_domain[field] = environment.at("parallel").at(field);
     library.collect_local_implementations();
     library.validate();
     return library;

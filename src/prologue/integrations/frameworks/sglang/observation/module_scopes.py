@@ -107,7 +107,7 @@ class ModelScopes:
             rows = {"input": "model_tokens", "output": "model_tokens"}
             communicator = LayerCommunication.read(module)
             if role == "layer" and communicator is not None:
-                rows = communicator.rows()
+                rows = communicator.observe(observation)
             self.bindings[path] = {
                 "rows": rows,
                 "expert_layer": next(iter(expert_layers), None),

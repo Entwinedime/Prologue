@@ -109,14 +109,14 @@ constexpr std::string_view usage = "prologue project <native-facts.json> <coarse
                                    "prologue serve <templates-directory> <task.json> <result.json> [--trace <execution.jsonl>] "
                                    "[--execution-inputs <conditions.json> | --costs <costs.json>]\n";
 
-nlohmann::json work_identities(prologue::CoarseGraph source, const nlohmann::json & observation_window) {
+nlohmann::json work_identities(const prologue::sglang::TemplateDeclarations & source, const nlohmann::json & observation_window) {
     auto features = nlohmann::json::array();
-    for (const auto & scope : source.scopes) features.push_back(prologue::WorkFeatures(scope).document());
+    for (const auto & scope : source.graph.scopes) features.push_back(prologue::WorkFeatures(scope).document());
     auto intervals = nlohmann::json::array();
-    for (const auto & work : source.work) intervals.push_back({work.start, work.finish});
+    for (const auto & work : source.graph.work) intervals.push_back({work.start, work.finish});
 
     std::vector<prologue::TemplateInterval> origins;
-    const auto library = prologue::sglang::NativeTemplates::compile(std::move(source), &origins);
+    const auto library = source.compile(&origins);
     for (std::size_t i = 0; i < origins.size(); ++i) {
         intervals[i].push_back(origins[i].definition);
         intervals[i].push_back(origins[i].interval);
@@ -128,13 +128,13 @@ nlohmann::json work_identities(prologue::CoarseGraph source, const nlohmann::jso
             {"definitions", std::move(definitions)}, {"features", std::move(features)}, {"intervals", std::move(intervals)}};
 }
 
-nlohmann::json work_costs(const prologue::CoarseGraph & graph, const nlohmann::json & costs) {
+nlohmann::json work_costs(const prologue::sglang::TemplateDeclarations & source, const nlohmann::json & costs) {
     std::vector<prologue::TemplateInterval> origins;
-    const auto library = prologue::sglang::NativeTemplates::compile(graph, &origins);
+    const auto library = source.compile(&origins);
 
     nlohmann::json missing;
     const prologue::WorkCosts service(library.domain, library.definitions, costs);
-    auto timing = service.timing(graph, origins, &missing);
+    auto timing = service.timing(source.graph, origins, &missing);
     auto durations = nlohmann::json::array();
     for (const auto duration : timing.work_ns) durations.push_back(duration ? nlohmann::json(*duration) : nlohmann::json());
     return {{ "work_ns", std::move(durations) }, { "first_cost_gap", std::move(missing) }};
@@ -263,13 +263,12 @@ int main(int argc, char ** argv) {
         }
         else if ((command == "templates" || command == "work-identities") && argc == 4) {
             const auto document = read_json(argv[2]);
-            auto source = prologue::CoarseGraph::read(document);
-            if (source.environment.at("framework") != "sglang") throw std::invalid_argument("source framework has no template recipe adapter");
-            output = command == "templates" ? prologue::sglang::NativeTemplates::compile(std::move(source)).document()
-                                            : work_identities(std::move(source), document.at("evidence").at("window_ns"));
+            const auto source = prologue::sglang::NativeTemplates::describe(prologue::CoarseGraph::read(document));
+            output = command == "templates" ? source.compile().document() : work_identities(source, document.at("evidence").at("window_ns"));
         }
         else if (command == "work-costs" && argc == 5) {
-            output = work_costs(prologue::CoarseGraph::read(read_json(argv[2])), read_json(argv[3]));
+            const auto source = prologue::sglang::NativeTemplates::describe(prologue::CoarseGraph::read(read_json(argv[2])));
+            output = work_costs(source, read_json(argv[3]));
         }
         else if (command == "cost-points" && argc == 5) {
             output = prologue::WorkCosts::evaluate(read_json(argv[2]), read_json(argv[3]));

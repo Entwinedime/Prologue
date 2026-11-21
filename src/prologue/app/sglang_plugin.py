@@ -12,6 +12,11 @@ def install() -> None:
         return
     description = json.loads(Path(session).read_text())
     device_api = "torch.npu"
+    shard_transport = None
+    if description["local_shards"]:
+        from prologue.integrations.frameworks.sglang.ascend.shard_transport import ShardTransport
+
+        shard_transport = ShardTransport
 
     # A latency-only worker must start without the observer bridge or a device profiler.
     if description["latency_only"]:
@@ -20,10 +25,8 @@ def install() -> None:
 
         if description["host_timing"]:
             timing = NativeTiming(description, host_profile=AscendHostProfile)
-            if description.get("local_shards"):
-                from prologue.integrations.frameworks.sglang.observation.shard_transport import ShardTransport
-
-                ShardTransport(description["output"], timing.host.auxiliary).install(description)
+            if shard_transport is not None:
+                shard_transport(description["output"], timing.host.auxiliary).install(description)
         else:
             if getattr(ctypes.CDLL(None), "prologue_set_runtime_enabled", None) is not None:
                 raise ValueError("latency measurement requires the native observer to be unloaded")
@@ -40,4 +43,4 @@ def install() -> None:
     for target, hook in AscendProfiling.hooks().items():
         HookRegistry.register(target, hook, HookType.AROUND)
     markers = AscendMarkers(detailed_timing=description["service_reference"])
-    SGLangObservation(description, markers).install(device_api)
+    SGLangObservation(description, markers).install(device_api, shard_transport)

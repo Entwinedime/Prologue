@@ -44,7 +44,9 @@ class ExpertBatch:
                     conditions.add((local, "padding", any(begin <= expert < end for expert in experts)))
         return sorted(conditions)
 
-    def parameters(self, members, model_tokens: int) -> dict[str, int]:
+    def bind_batch(self, parameters: dict[str, int], members) -> dict:
+        """Bind local expert rows and return the peer inputs for this invocation."""
+        model_tokens = parameters["model_tokens"]
         self.routes.check_batch(members, model_tokens)
         if self.size == 1:
 
@@ -52,15 +54,16 @@ class ExpertBatch:
             return {}
         if model_tokens % self.size:
             raise ValueError("DeepEP input must be padded before splitting tokens across its group")
-        result = {}
-        for layer, geometry in self.routes.layers.items():
-            counts = self.routes.batch_counts(members, layer, model_tokens)
-            width = geometry["experts"] // self.size
-            begin = self.rank * width
 
-            # This backend duplicates a token for each selected expert, including multiple experts on one receiver.
-            result[self.layer_parameters[layer]] = sum(counts[begin:begin + width])
-        return result
+        peers = {}
+        for layer, key in self.layer_parameters.items():
+            sent, received = self.combine_counts(members, model_tokens, layer)
+
+            # Combine sends back one row for every expert selected on this worker.
+            parameters[key] = sum(sent)
+            peers[key] = [peer for peer, (outgoing, incoming) in enumerate(zip(sent, received, strict=True))
+                          if peer == self.rank or outgoing or incoming]
+        return {"expert_peers": peers}
 
     def combine_counts(self, members, model_tokens, layer):
         width = self.routes.layers[layer]["experts"] // self.size
@@ -79,15 +82,7 @@ class ExpertBatch:
                         received[receiver] += overlap * copies
                 sent[sender] += overlap * receivers[self.rank]
             position = end
-        return {"send": sent, "receive": received}
-
-    def required_peers(self, members, model_tokens):
-        result = {}
-        for layer, key in self.layer_parameters.items():
-            counts = self.combine_counts(members, model_tokens, layer)
-            result[key] = [peer for peer, (sent, received) in enumerate(zip(counts["send"], counts["receive"], strict=True))
-                           if peer == self.rank or sent or received]
-        return result
+        return sent, received
 
     def scope(self, enclosing, layer: int | None):
         parameters = {name: value for name, value in enclosing["parameters"].items() if not name.startswith("expert/")}

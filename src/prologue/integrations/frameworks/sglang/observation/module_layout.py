@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from functools import partial
+from functools import partial, update_wrapper
 from inspect import signature
 from typing import Any
 
@@ -18,16 +18,31 @@ class LayerCommunication:
         native = getattr(module, "layer_communicator", None)
         return cls(native) if isinstance(native, LayerCommunicator) else None
 
-    def rows(self) -> dict:
-        native = self.native
-        context = native._context
-        modes = native.layer_scatter_modes
+    def rows(self, mode):
+        context = self.native._context
 
         # Native group widths define token ownership; equal observed dimensions alone do not prove it.
-        return {
-            direction: ["floor_div", ["mul", "model_tokens", context.process_group_sizes[mode]], context.attn_tp_size]
-            for direction, mode in (("input", modes.layer_input_mode), ("output", modes.layer_output_mode))
-        }
+        return ["floor_div", ["mul", "model_tokens", context.process_group_sizes[mode]], context.attn_tp_size]
+
+    def observe(self, owner) -> dict:
+        modes = self.native.layer_scatter_modes
+        for method, mode in (("prepare_mlp", modes.attn_mode), ("postprocess_layer", modes.mlp_mode)):
+            original = getattr(self.native, method)
+            hook = partial(self.observe_hidden, owner, self.rows(mode), original)
+            setattr(self.native, method, update_wrapper(hook, original))
+        return {"input": self.rows(modes.layer_input_mode), "output": self.rows(modes.layer_output_mode)}
+
+    @staticmethod
+    def observe_hidden(owner, rows, original, hidden_states, *args, **kwargs):
+        if owner.active and owner.selected:
+            import torch
+            from sglang.srt.layers.communicator import get_attn_tp_context
+
+            # The ordinary layer ABI owns a flat token axis and a fixed hidden width on this shard.
+            with owner.tensors.metadata():
+                if isinstance(hidden_states, torch.Tensor) and hidden_states.ndim == 2 and not get_attn_tp_context().input_scattered:
+                    owner.tensors.declare_shape(hidden_states, [rows, hidden_states.shape[1]])
+        return original(hidden_states, *args, **kwargs)
 
     def document(self) -> dict:
         native = self.native

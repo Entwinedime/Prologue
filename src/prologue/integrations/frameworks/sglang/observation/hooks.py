@@ -207,26 +207,30 @@ class SGLangObservation:
     def batch_work(self, batch: Any) -> dict[str, Any]:
         return self.calls.batch_work(batch)
 
-    def model_work(self, batch: Any):
+    @contextmanager
+    def model_call(self, role, original, batch, *, stream=None):
         work = self.batch_work(batch)
         parameters = BatchTensors.parameters(batch, sum(member["new_tokens"] for member in work["members"]))
         parameters.update(BatchTensors.model_parameters(batch, parameters["input_tokens"]))
-        if self.routing is not None:
-            parameters.update(self.routing.geometry.parameters(work["members"], parameters["model_tokens"]))
-        return parameters, work
+        bindings = self.routing.geometry.bind_batch(parameters, work["members"]) if self.routing is not None else {}
+
+        with self.call(role, original, parameters=parameters, work=work, device=True, stream=stream) as call:
+            yield call
+
+            # Children inherit batch inputs while running. Only the model call owns the peer bindings.
+            call.record["work"].update(bindings)
 
     def run_batch(self, original: Any, scheduler: Any, batch: Any, *args: Any, **kwargs: Any) -> Any:
         if not self.active:
             return original(scheduler, batch, *args, **kwargs)
-        parameters, work = self.model_work(batch)
-        with self.request_state.members(batch), self.call("run_batch", original, parameters=parameters, work=work, device=True) as call:
+        with self.request_state.members(batch), self.model_call("run_batch", original, batch) as call:
             if self.resource_history is not None:
                 self.resource_history.batch(call.record["id"], batch)
             parent = self.capture.scopes[call.record["parent"]]
             if parent["role"] == "launch":
 
                 # PP launch and its run_batch child share the same declared batch ABI.
-                call.record["arguments"] = {name: name for name in parameters if name not in call.record["constants"]}
+                call.record["arguments"] = {name: name for name in call.record["parameters"] if name not in call.record["constants"]}
             result = original(scheduler, batch, *args, **kwargs)
             self.result_outputs(call, result)
             return result
@@ -327,6 +331,7 @@ class SGLangObservation:
                 })
             if self.window.phase == "source" and self.selected:
                 self.active = False
+                self.communications.bind_returned_operands()
                 self.implementation["scheduling"] = {
                     "chunked_prefill": scheduler.chunked_prefill_size is not None,
                     "mixed_batches": scheduler.is_mixed_chunk,
@@ -368,7 +373,7 @@ class SGLangObservation:
                 self.window.complete(self.parallel["rank"], scheduler.idle_sleeper is not None)
         return original(scheduler)
 
-    def install(self, device_api) -> None:
+    def install(self, device_api, shard_transport) -> None:
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
         from prologue.integrations.frameworks.sglang.observation.communications import NativeCommunications
@@ -391,14 +396,13 @@ class SGLangObservation:
         ModelScopes.install_engine_hooks(self)
         self.request_state.install()
         self.calls = FlowScopes(self)
-        communications = NativeCommunications(self)
-        if self.description.get("local_shards"):
-            from prologue.integrations.frameworks.sglang.observation.shard_transport import ShardTransport
+        self.communications = NativeCommunications(self)
+        if shard_transport is not None:
 
             # CPU protocol observers must see the original device operand, before staging changes its device.
-            ShardTransport(self.directory, self.tensors.auxiliary, communications.local_exchange).install(self.description)
+            shard_transport(self.directory, self.tensors.auxiliary, self.communications.local_exchange).install(self.description)
         NativeProfiles(self).install()
-        communications.install()
+        self.communications.install()
         self.kv_transfers = NativeKvScopes(self.calls, self)
         self.kv_transfers.install()
         self.calls.install()
