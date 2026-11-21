@@ -2,7 +2,7 @@
 
 一次任务是一个固定模型、非空配置集合和非空 request workload 集合。用户提供探索范围、采集部署及累计预算，系统选择代表来源并管理原生生命周期；用户不指定 base，不维护 KV、worker 或模板。
 
-配置集入口为 `prologue_workflow explore`。单目标自主预测、给定耗时和实测结构对照通过 `prologue_workflow predict` 选择各自的时间输入。模型、框架和配置的支持资格按实际证据声明。
+配置集入口为 `prologue.app explore`。单目标自主预测、给定耗时和实测结构对照通过 `prologue.app predict` 选择各自的时间输入。模型、框架和配置的支持资格按实际证据声明。
 
 ## 模型、配置和部署
 

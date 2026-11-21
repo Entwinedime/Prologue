@@ -41,7 +41,7 @@ modeling 使用 Ubuntu 24.04、GCC 13、C++23、CMake≥3.20、Ninja 和 nlohman
 
 ## 配置集性能探索
 
-`python3 -m prologue_workflow explore` 接受一个模型、候选配置集和 workload 集。它规划训练来源、准备模板和成本，然后从初态逐项预测。原生采集和成本补采共用原生秒数、尝试次数、后处理秒数及存储额度。每次采集和每项预测另受 `--timeout` 限制。
+`python3 -m prologue.app explore` 接受一个模型、候选配置集和 workload 集。它规划训练来源、准备模板和成本，然后从初态逐项预测。原生采集和成本补采共用原生秒数、尝试次数、后处理秒数及存储额度。每次采集和每项预测另受 `--timeout` 限制。
 
 宿主可用 `example/coarse_graph/run.py` 启动正式任务。默认配置输入在 `example/coarse_graph/input.json`，使用本地 `/models/Qwen3-8B` 和两个 TP1 池容量。部署需明确指定独占卡，例如 `{"physical_devices": [4]}`。PD 还需可达的 `store_url`。构建好业务镜像和 `build/coarse-graph/prologue` 后可执行以下命令。
 
@@ -69,7 +69,7 @@ python3 example/coarse_graph/run.py \
 
 ## 配置集合的有限来源规划
 
-在 modeling 环境运行 `PYTHONPATH=src/workflow:src/adapters:src/collection:src/workload python3 -m prologue_workflow plan-sources --input <集合输入.json> --output <新目录>`。这一入口划分实现域，在每域预先选择有限互补配置及workload组合，生成完整采集作业；不启动原生。
+在 modeling 环境运行 `PYTHONPATH=src python3 -m prologue.app plan-sources --input <集合输入.json> --output <新目录>`。这一入口划分实现域，在每域预先选择有限互补配置及workload组合，生成完整采集作业；不启动原生。
 
 输入严格包含 framework（当前为 sglang）、model、configurations 和 workloads。configurations 是非空数组，每项为唯一 id 和完整 instances；instances 与单任务采集/预测的表示一致，PD 两端同属一项配置。workloads 是非空请求集合数组，每项具有唯一 id，并沿用 requests、prefixes、ep_routes 的共同合同。
 
@@ -114,7 +114,7 @@ padding位置的基本数组/整数区间在ServingInput交接时检查，不等
 集合的原生时间和尝试额度只统计本集合拥有的采集，包括其失败尝试；引用的历史费用由原任务保留。所有域在本集合内产生的后处理继续计费。原生额度耗尽仍可生产已引用的观察，后处理额度独立约束；这不为未采集的域增加原生额度。
 
 ```bash
-PYTHONPATH=src/workflow:src/adapters:src/collection:src/workload python3 -m prologue_workflow acquire-sources \
+PYTHONPATH=src python3 -m prologue.app acquire-sources \
   --plan <来源计划目录> --deployment <部署.json> --output <集合目录> \
   --binary <modeling构建的prologue> --timeout <单次原生秒数> \
   --native-budget-seconds <原生累计秒数> --attempt-limit <原生累计尝试数> \
@@ -136,7 +136,7 @@ PYTHONPATH=src/workflow:src/adapters:src/collection:src/workload python3 -m prol
 正式外围入口在声明的设备上启动一个采集容器，模型只读挂载，输出归本次新目录；需要 Python≥3.10 和 Docker CLI。
 
 ```bash
-PYTHONPATH=src/workflow:src/adapters:src/collection:src/workload python3 -m prologue_workflow capture \
+PYTHONPATH=src python3 -m prologue.app capture \
   --input <job.json> --deployment <deployment.json> \
   --output <采集任务目录> --timeout 900 --budget-seconds 1800 --attempt-limit 2
 ```
@@ -175,15 +175,15 @@ bindings 在 run_batch 执行前及 PD prebuilt 准备结束时读取原生 req_
 
 此入口只负责一个原生任务的累计时间及次数；配置集合来源规划、跨任务额度和临时/保留存储限制仍需由整体任务流程完成，不能将这里的局部额度当作集合预算。
 
-容器内 `python3 -m prologue_collection capture --input <job.json> --output <新的来源目录>` 消费显式任务。顶层为 model、instances、workload、observe_all_workers；model 包含 path/dtype，workload 声明请求、可选前缀及 EP 路由。每个 instance 为 id、mode、configuration：普通 serving 使用一个 null 实例，PD 使用一对 prefill/decode 实例。两侧共享模型和 workload，分别声明并行配置与容量；PD 两侧 page_size 必须一致。入口存在不代表 PD 及全部配置已取得结构资格。
+容器内 `python3 -m prologue.app.capture_worker capture --input <job.json> --output <新的来源目录>` 消费显式任务。顶层为 model、instances、workload、observe_all_workers；model 包含 path/dtype，workload 声明请求、可选前缀及 EP 路由。每个 instance 为 id、mode、configuration：普通 serving 使用一个 null 实例，PD 使用一对 prefill/decode 实例。两侧共享模型和 workload，分别声明并行配置与容量；PD 两侧 page_size 必须一致。入口存在不代表 PD 及全部配置已取得结构资格。
 
 实例按列表顺序使用不重叠的连续可见设备区间及全局 rank；物理设备可见性由容器部署控制。采集以原生 Ascend transport 搬运 KV，不使用 FAKE transport；物理传输环境（包括原生依赖的 store 地址）由部署提供。两侧共同开始请求到达时钟，实际投递延迟另行记录，不改写 workload 的 arrival_ns。
 
 单机采集的投递起点、投递偏移、入口接收、worker 接收轮次和资源操作统一使用 `CLOCK_MONOTONIC_RAW`。request-delivery 显式标明 `monotonic_raw_ns`。来源解释在入口按各自 SDK 的 collectionTimeBegin/clockMonotonicRaw 锚点还原 RAW 时间：框架/主机 API 使用 host/start_info，设备任务使用其 device 的 start_info；不能将两种导出偏移混用。显式原生 API 和传输服务已经使用 RAW，直接交接，不先加偏移再减回。stream 拓扑仍用原生顺序坐标，时间证据独立保留。
 
-普通 serving 或一对 PD 实例可用 `prologue_workflow capture --latency-only` 观测一个提交组的请求性能。已运行的单机拓扑包含 TP、PP、EP、TP×PP 和非对称 PD。轻量观测复用相同的 Engine、预热、请求内容和投递方式，启动时卸载原生观察库并关闭 profiler。实际发送端记录请求拉取、首 token 和终止 token 发送完成的 RAW 时间及 token 数，各 rank 记录本地编译特化。PD 以 Prefill 的实际提交为延迟起点，以 Decode 的实际发布为输出。评价时核对 `specialization_loads` 及 request-delivery 中实际提交的偏差与顺序。图与模板生产要求原生图观测。
+普通 serving 或一对 PD 实例可用 `prologue.app capture --latency-only` 观测一个提交组的请求性能。已运行的单机拓扑包含 TP、PP、EP、TP×PP 和非对称 PD。轻量观测复用相同的 Engine、预热、请求内容和投递方式，启动时卸载原生观察库并关闭 profiler。实际发送端记录请求拉取、首 token 和终止 token 发送完成的 RAW 时间及 token 数，各 rank 记录本地编译特化。PD 以 Prefill 的实际提交为延迟起点，以 Decode 的实际发布为输出。评价时核对 `specialization_loads` 及 request-delivery 中实际提交的偏差与顺序。图与模板生产要求原生图观测。
 
-在 workflow 的 `PYTHONPATH` 中加入 `src/verification`，用 `python3 -m prologue_verification.latency_metrics` 计算逐请求 TTFT、TPOT 和吞吐。原生 TTFT 从实际提交给 Engine 起算，仿真从 workload 声明的提交时刻起算，两边均在调度器发布首 token 时结束。调度器取入时刻单独保留，可查提交后的等待。
+在仓库根目录设置 `PYTHONPATH=src`，用 `python3 -m prologue.verification.latency_metrics` 计算逐请求 TTFT、TPOT 和吞吐。原生 TTFT 从实际提交给 Engine 起算，仿真从 workload 声明的提交时刻起算，两边均在调度器发布首 token 时结束。调度器取入时刻单独保留，可查提交后的等待。
 
 CPU 成本采样使用 `capture --host-timing`。结构观测与主机采样共用原生调用切点。Ascend 观测器按 rank 记录 SDK 队列、驱动调用和线程活动，并用同次运行的独立 RAW 读数校准。`host-cost-samples` 配对同部署、配置和 workload 的两份观测，报告未配对的工作和排除的冷批次。主机采样可采用不同提交分组，实际组批和参数由原生观测决定。预热排空和缓存重置后进入测量窗口，预热 workload 与正式 workload 完全相同时复用提交分组。
 
@@ -220,7 +220,7 @@ role-plan的representatives决定结构复用，observed_roles决定本次实际
 capture.json 发布后，外围入口按实际 observed_roles 顺序执行 SDK 导出、解释和粗图构造。`--product templates`（默认）继续编译并连接来源模板；`--product graphs`只发布实测粗图，供独立目标对照使用。目标真值不依赖模板编译成功，不借模板选择或变换规则判断实测结构。未观察的等价 worker 不重复生产，也不从目录扫描猜测角色。
 
 ```bash
-PYTHONPATH=src/workflow:src/adapters:src/collection:src/workload python3 -m prologue_workflow produce \
+PYTHONPATH=src python3 -m prologue.app produce \
   --capture <已闭合的原始来源目录> --output <生产目录> \
   --binary <modeling构建的prologue> --budget-seconds 600
 ```
@@ -239,7 +239,7 @@ assets/<rank>.json 是代表模板；先在 work/<rank>-templates.json 编译各
 
 logs 保留各步骤日志；模板生产的 SDK trace、事实、粗图和连接前模板在整组连接成功后默认删除。--keep-intermediates 保留这些取证材料，并在事实中附带实测边界时间、在粗图中附带事件/工作对应的原生来源；默认不生成可选证据。每个生产容器也按本步骤剩余累计额度设置内部期限，协调器中断不解除该期限；恢复仍使用已经预留的计费记录。恢复已完成连接时直接使用 assets，不要求重建已释放的中间件。SDK 私有原始副本不属于保留明细。该入口不执行原生采集或配置集合来源选择；模板合同改变后重新生产，不为旧库提供兼容读取。
 
-单独诊断可在推理镜像中使用 `LD_PRELOAD= /opt/prologue/export-profile.sh --input <来源> --rank <rank> --output <新的导出目录>`；解释入口显式传入 `python3 -m prologue_collection interpret --input <来源> --rank <rank> --trace <导出目录>/trace.json --output <事实.json>`，不隐式搜索来源旁的历史 SDK 产物。解释时加 --evidence 生成 measurements 和仅供核对的 native_effects；随后在 modeling 内执行 `prologue project <事实.json> <粗图.json> --evidence`，生成可选 evidence。
+单独诊断可在推理镜像中使用 `LD_PRELOAD= /opt/prologue/export-profile.sh --input <来源> --rank <rank> --output <新的导出目录>`；解释入口显式传入 `python3 -m prologue.app.capture_worker interpret --input <来源> --rank <rank> --trace <导出目录>/trace.json --output <事实.json>`，不隐式搜索来源旁的历史 SDK 产物。解释时加 --evidence 生成 measurements 和仅供核对的 native_effects；随后在 modeling 内执行 `prologue project <事实.json> <粗图.json> --evidence`，生成可选 evidence。
 
 来源证据包含观察窗口、时钟、每个粗图事件的原生 span/顺序/实测纳秒，以及各工作对应的原生 span。设备 stream 的顺序号由 runtime 映射为 SDK 实测时间；没有实体任务的原生 stream 操作保留 null，不借用 CPU 时间或填零。事件锚点可来自同一串行资源上的相邻片段，工作归属单独记录。证据不参与模板身份或结构选择，不能把观察窗口直接当作请求到达原点，也不能把片段墙钟自动当作成本；跨 rank 时钟及调度时间旁路需要另外核对。
 
@@ -251,7 +251,7 @@ SDK未导出直接关联任务时，解释器核实实际执行方式。异步�
 
 张量检查直接对照原始端口集合、用途、几何、存储/版本、写入者及分配所有者，数据依赖不能被重分类为布局元数据。读取按原生声明的进入或返回边界消费；异步输出按实际通信完成，父调用转出子调用已经发布的同一版本时保留子调用的就绪点。该关系由原始发布顺序及调用层次核对，不用父调用的较晚返回替代。
 
-在 modeling 环境的仓库根目录运行 `PYTHONPATH=src/verification:src/collection:src/adapters:src/workload python3 -m prologue_verification.source_evidence --production <生产目录> --capture <原始采集目录> --output <新报告目录>`。仅加载无设备依赖的原始区间/计数转换和原生缓冲区布局类型，不安装推理框架或运行生产解释器；矩阵入口自动设置该路径。生产须保留 `--keep-intermediates` 的 SDK 导出、facts、graph 及测量/原生作用证据，原始采集提供同次运行的设备校准采样；两个目录均显式指定容器内路径，不依赖生产时宿主机的绝对路径。检查器不启动采集、重建模板或修改业务资产。
+在 modeling 环境的仓库根目录运行 `PYTHONPATH=src python3 -m prologue.verification.source_evidence --production <生产目录> --capture <原始采集目录> --output <新报告目录>`。仅加载无设备依赖的原始区间/计数转换和原生缓冲区布局类型，不安装推理框架或运行生产解释器；矩阵入口自动设置该路径。生产须保留 `--keep-intermediates` 的 SDK 导出、facts、graph 及测量/原生作用证据，原始采集提供同次运行的设备校准采样；两个目录均显式指定容器内路径，不依赖生产时宿主机的绝对路径。检查器不启动采集、重建模板或修改业务资产。
 
 报告分别说明来源映射与时间约束：直接用原始主机记录核对调用进入/返回及CPU/服务区间的计数器和RAW测量，核对原始状态访问声明、张量最后写入者，并由实际SDK记录/等待核对Event与Work的完成代次、等待端点和生产者到消费者的路径；返回true的查询核对观察路径，false不强加等待。从原始runtime、SDK和实际队列代次核对异步拷贝/stream等待未遗漏或重复，核对保留SDK任务的stream顺序，随后核对环境、调用层级/上下文、通信声明、完整边界及其语义归属、工作/顺序区间、端口、实际张量几何、KV/槽位区间、原生依赖及测量交接。时间检查保留中点测量上的名义倒置，同时核对每个rank是否存在同一套、位于实际独立查询区间内的分段仿射时钟关系，能满足该图全部已测依赖。只有原始采样快照可以成为分段点，相邻段共享该点的校正量，全部stream共用映射；两快照输入只有一段，不能补造中间锚点或逐边独立放宽偏移，也不回写校正时间。相容不等于精确时钟、原生关联正确或跨rank时间已校准；缺少测量仍为未知，不能填零。先核对生产清单完整对应原始采集的observed_roles，按共同框架ABI解释原始scope的参数/常量/调用绑定，再检查implementation、实际输入与guards、张量事实及分配所有者，以及声明的shape/token规则是否在解释和投影中保留原有语义；分配scope经过已有来源映射对应，不直接比较重编号前后的整数；声明比较允许二元add/mul/eq交换操作数，保留其他顺序和常量/变量区别；不根据观察值认定公式等价，不判断这些规则对目标配置是否成立，也不能证明原生观察没有遗漏。
 
@@ -278,7 +278,7 @@ SDK的任务编号及关联字段不是全局发生实例，编号复用不能�
 自主预测和实测结构对照共用这三个字段，分别由 `--costs` 和 `--execution-inputs` 提供时间。给定耗时模式在 JSON 增加 `given_work_ns`，单位为非负整数纳秒。每次运行提交一种时间来源。一个任务对应一个普通实例或一对 P/D 实例，微批次容量缺省时由原生调度器计算。
 
 ```bash
-PYTHONPATH=src/workflow:src/adapters:src/workload python3 -m prologue_workflow predict \
+PYTHONPATH=src python3 -m prologue.app predict \
   --production <已发布的来源集合目录> --input <prediction.json> \
   --binary <modeling构建的prologue> --costs <成本资产.json> \
   --output <新的输出目录> --timeout 180
@@ -288,7 +288,7 @@ PYTHONPATH=src/workflow:src/adapters:src/workload python3 -m prologue_workflow p
 
 性能查询使用实际参与者的成本域、实例化的归一化工作及其参数。每个参与者独立绑定成本，同一结构代表可以由多 rank 共用。首个缺模型或超出样本范围的工作由 `cost-gap.json` 报告，模板选择的首个缺口由 `template-gap.json` 记录。
 
-自主性能验证使用 `python3 -m prologue_verification.autonomous --capture <轻量采集任务目录> --production <来源集合> --input <目标.json> --costs <成本资产> --binary <prologue> --output <新目录> --timeout <秒>`。验证器先核对原生任务与目标的模型、配置及 workload，再检查轻量发布证据、提交次序及正式窗口的特化加载。相同目标输入和独立成本交给正式预测，产物保存逐请求和汇总误差。独立留出要在用例层另外固定与训练隔离的输入和来源。已有结果可用 `latency_metrics --prediction` 复核发布与指标，结论资格仅限两份结果的 token 对照。
+自主性能验证使用 `python3 -m prologue.verification.autonomous --capture <轻量采集任务目录> --production <来源集合> --input <目标.json> --costs <成本资产> --binary <prologue> --output <新目录> --timeout <秒>`。验证器先核对原生任务与目标的模型、配置及 workload，再检查轻量发布证据、提交次序及正式窗口的特化加载。相同目标输入和独立成本交给正式预测，产物保存逐请求和汇总误差。独立留出要在用例层另外固定与训练隔离的输入和来源。已有结果可用 `latency_metrics --prediction` 复核发布与指标，结论资格仅限两份结果的 token 对照。
 
 PD两端的worker必须来自同一主来源；局部来源即使实施域相同，也只能经既有合同导入批次动作或闭合内部实现，不能替换角色、资源或对端。用户不填写模板索引或逐worker环境；正式预测入口负责来源选择，示例不维护第二套装配规则。缺代表、重复代表或冲突环境直接报错，不扫描历史data、不选最新来源。worker可共用库，但资源和状态独立；同域匹配不表示任意参数范围已覆盖。
 
@@ -376,15 +376,15 @@ prologue_local_graphs expand <source-libraries.json> <action-inputs.json> <local
 
 每个目标worker由正式装配的SGLangTask.participants选择代表库，不能按同名rank文件假定一对一；C++构图入口再核对角色和目标域。输出以C++23禁止覆盖方式创建，写入关闭成功后才返回。每个给定动作输出一条 `local_graph`，构图失败保留该动作error并继续收齐；末尾 `local_summary` 核对attempted/built，缺末尾记录不能当作完整结果。图文件是验证明细，不作为模拟执行流或人类汇报。
 
-`PYTHONPATH=src/verification:src/collection:src/adapters:src/workload python3 -m prologue_verification.local_graphs --capture <native-case> --graphs <target-graphs> --expanded <local-jsonl-directory> --output <new-directory>` 独立读取各rank的 `rank-N.jsonl`，复用原生事实、内容和因果检查。报告local-graphs.json/md分别保存机器结论和精简说明。实际动作编号只标记这份给定输入，不跨运行硬配来源序号；本地依赖只检查保留作用域和端点的诱导子图，跨图路径不冒充局部构图义务。动态stream等待的合同参与内容核对，其实际前沿依赖单列交给连接/执行检查。
+`PYTHONPATH=src python3 -m prologue.verification.local_graphs --capture <native-case> --graphs <target-graphs> --expanded <local-jsonl-directory> --output <new-directory>` 独立读取各rank的 `rank-N.jsonl`，复用原生事实、内容和因果检查。报告local-graphs.json/md分别保存机器结论和精简说明。实际动作编号只标记这份给定输入，不跨运行硬配来源序号；本地依赖只检查保留作用域和端点的诱导子图，跨图路径不冒充局部构图义务。动态stream等待的合同参与内容核对，其实际前沿依赖单列交给连接/执行检查。
 
 同源还原和留出目标须在实验记录中分开；本例不给原生调度、成本、跨图绑定、物理资源或独立目标泛化资格。实验编排、case选择和比较维护在example，核心不为本例添加控制器、模式或验证分支。
 
 ## Serving 的受控执行输入
 
-公开 `prologue_workflow predict` 通过 `--execution-inputs <execution-inputs.json>` 接入结构验证用的目标时间。文件由 `actors`、`ingress`、`notifications`、`transfers` 和 `context_values` 组成，提供时间、可见性及显式原生调用绑定。组批、查询返回值、资源分配及图体由实际执行产生。提供时间条件后，缺记录、操作或工作不符、结束时有条件未消费均失败。自主预测选用 `--costs`，开发时也可显式声明 `given_work_ns`。一次运行使用一种时间来源。
+公开 `prologue.app predict` 通过 `--execution-inputs <execution-inputs.json>` 接入结构验证用的目标时间。文件由 `actors`、`ingress`、`notifications`、`transfers` 和 `context_values` 组成，提供时间、可见性及显式原生调用绑定。组批、查询返回值、资源分配及图体由实际执行产生。提供时间条件后，缺记录、操作或工作不符、结束时有条件未消费均失败。自主预测选用 `--costs`，开发时也可显式声明 `given_work_ns`。一次运行使用一种时间来源。
 
-全节点对照增加 `layouts`，在独立生成实际图后按作用域、资源职责、端口和工作区间匹配端点。用 `prologue action-layouts <带证据粗图> <rank-layouts.json>` 取得动作切图的来源映射，再用 `python3 -m prologue_verification.execution_inputs --layouts <目录>` 生成端点条件。`endpoints` 每项为 `[source_event, time_ns]`，原生 API 和 SDK 共同证实仅保留因果顺序的等待用 `null` 表示，由时间线按真实依赖推进。实体工作需要实测完成端点，缺测位置直接报告。具有独立服务依据的工作按该对起止时刻确定服务时长。独立对照同时核对原生测量、纯因果证据、实际完成、工作、必要边和状态。含 CPU 消息收发的线传输区间按其证据资格单列。
+全节点对照增加 `layouts`，在独立生成实际图后按作用域、资源职责、端口和工作区间匹配端点。用 `prologue action-layouts <带证据粗图> <rank-layouts.json>` 取得动作切图的来源映射，再用 `python3 -m prologue.verification.execution_inputs --layouts <目录>` 生成端点条件。`endpoints` 每项为 `[source_event, time_ns]`，原生 API 和 SDK 共同证实仅保留因果顺序的等待用 `null` 表示，由时间线按真实依赖推进。实体工作需要实测完成端点，缺测位置直接报告。具有独立服务依据的工作按该对起止时刻确定服务时长。独立对照同时核对原生测量、纯因果证据、实际完成、工作、必要边和状态。含 CPU 消息收发的线传输区间按其证据资格单列。
 
 同一工作通过模板定义内的位置、区间类型、资源职责和绑定后特征关联测量与查询。CPU 采用已切开的同线程工作，等待与搬运另行归属。设备记录保留实际 task 的运行时间和 task 间隔，后者由依赖及提交时序解释。搬运可用实际方向与字节数。请求编号、物理 stream 或 SDK 任务名仅用于追溯同次观测。
 
@@ -402,7 +402,7 @@ SGLang的schedule/forward/copy职责来自原生事件及等待声明，由Ascen
 
 `ingress` 按实例保存实际接收轮次 `{time_ns, requests}`，覆盖全部请求且不早于workload声明到达；原生代码仍决定如何组批。流程内input操作提供实际返回window，进入过晚直接失败；范围外空读取可以按原生停驻/排空取消，不能伪造成实测读取。输入结果继续由当前可用请求产生，条件不指定查询结果。明细保留全部input_read及in_flow；独立对照从实际session及原始接收还原真值，不以输入文件自证。
 
-在CPU control环境运行 `python3 -m prologue_verification.execution_inputs --capture <closed-native-case> --graphs <projected-graphs> --output <new-directory>`。全部实际参与者必须有原始记录和带evidence的粗图，只读真实事实，不读模板或预测。使用镜像已有的SciPy稀疏优化器提供候选基，再由SymPy以有理数重建并精确认证原始查询区间、全rank必要因果及严格取整单元。时钟只按真实独立快照分段，同物理设备的多个记录在重合区间保持同一映射；数值求解成功本身不取得资格，不能证明时明确未核对。CPU入口/返回保持直接RAW时间，设备具名端口按所选映射向上取整到纳秒，交给既有核心完成接口。输出execution-inputs-report.json记录所选实现和原始校准不确定性；全部必要事实齐全才发布execution-inputs.json。所选实现不是唯一精确测量，也不代表成本预测。
+在CPU control环境运行 `python3 -m prologue.verification.execution_inputs --capture <closed-native-case> --graphs <projected-graphs> --output <new-directory>`。全部实际参与者必须有原始记录和带evidence的粗图，只读真实事实，不读模板或预测。使用镜像已有的SciPy稀疏优化器提供候选基，再由SymPy以有理数重建并精确认证原始查询区间、全rank必要因果及严格取整单元。时钟只按真实独立快照分段，同物理设备的多个记录在重合区间保持同一映射；数值求解成功本身不取得资格，不能证明时明确未核对。CPU入口/返回保持直接RAW时间，设备具名端口按所选映射向上取整到纳秒，交给既有核心完成接口。输出execution-inputs-report.json记录所选实现和原始校准不确定性；全部必要事实齐全才发布execution-inputs.json。所选实现不是唯一精确测量，也不代表成本预测。
 
 没有实测时间的必要端口或工作完成保留缺口报告。动作逐端点条件可与 CPU 消息的进入、返回和线传输区间共用。结果以 `checked_causal_execution_inputs` 表示局部条件，以 `fully_matched_native_endpoints` 表示全节点条件。含 CPU 协议范围约束的逐端点动作对照以 `measured_action_endpoints_and_checked_cpu_protocol_bounds` 说明证据边界。执行器统计插入图的全部工作，协议就绪事件另计。
 
@@ -438,7 +438,7 @@ Event 返回 true 只说明完成不晚于查询返回，false 只说明完成�
 
 共同原生检查核对实际测得边界沿完整rank内DAG的因果次序；未测量节点不截断路径。发生倒置时停止，而非平移时间或只挑选相容调用。跨rank次序继续由模型通信、CPU协议及PD事实单独核对，局部时间相容不替代这些证明。
 
-独立动作比较在CPU control容器内使用 `PYTHONPATH=src/verification:src/collection:src/adapters:src/workload python3 -m prologue_verification.compare_actions --capture <closed-native-case> --graphs <projected-graphs> --execution <prediction.jsonl> --output <new-directory>`。它先调用与来源检查共用的原生阶段，再消费预测明细进行配对；原生图不依赖预测是否成功。它与时间提取共用逻辑工作身份，读取实际粗图及预测明细，不调用模板选择或实例化。实际完成时间通过已核对的具名端口对应原始测量；独立核对CPU边界及全部已消费设备端点是否具有一套由实际独立校准快照限定的共同分段仿射解释，不读取生成条件中的时钟映射自证。向上取整的开闭区间按精确有理数约束验证，不增加经验容差。 两者按共同框架ABI解释资源调用输入，其他原始字段仍逐项核对；随后核对 worker 记录与粗图的环境、scope 身份、绑定声明及查询归属，并逐个核对原始张量端口的 dtype、shape、value/storage 身份、版本和 buffer。原始记录必须具有统一状态查询数组，缺少记录不等于没有查询；作用或输出声明不能在图转换中丢失。每个动作按父子调用位置核对层次、参数、端口、数据张量的形状/别名/相对版本/生产者、工作种类及数量、逻辑 KV/槽位访问和通信参与者。运行地址和图事件编号不跨案例配对；元数据端口只比较布局，不把它声明成数据存储所有权。
+独立动作比较在CPU control容器内使用 `PYTHONPATH=src python3 -m prologue.verification.compare_actions --capture <closed-native-case> --graphs <projected-graphs> --execution <prediction.jsonl> --output <new-directory>`。它先调用与来源检查共用的原生阶段，再消费预测明细进行配对；原生图不依赖预测是否成功。它与时间提取共用逻辑工作身份，读取实际粗图及预测明细，不调用模板选择或实例化。实际完成时间通过已核对的具名端口对应原始测量；独立核对CPU边界及全部已消费设备端点是否具有一套由实际独立校准快照限定的共同分段仿射解释，不读取生成条件中的时钟映射自证。向上取整的开闭区间按精确有理数约束验证，不增加经验容差。 两者按共同框架ABI解释资源调用输入，其他原始字段仍逐项核对；随后核对 worker 记录与粗图的环境、scope 身份、绑定声明及查询归属，并逐个核对原始张量端口的 dtype、shape、value/storage 身份、版本和 buffer。原始记录必须具有统一状态查询数组，缺少记录不等于没有查询；作用或输出声明不能在图转换中丢失。每个动作按父子调用位置核对层次、参数、端口、数据张量的形状/别名/相对版本/生产者、工作种类及数量、逻辑 KV/槽位访问和通信参与者。运行地址和图事件编号不跨案例配对；元数据端口只比较布局，不把它声明成数据存储所有权。
 
 矩阵示例维护 `sources`、`targets` 和 `compare` 三个阶段。`sources` 规划、采集、生产并检查模板来源，`targets` 取得原生目标及其粗图，`compare` 每个案例调用一次正式结构验证入口。验证进程内复用核对后的目标参考。矩阵声明各域的 `exploration` 与 `deployment`，各目标的 `capture_input`、`prediction_input` 和 `configuration`，需要全节点对照时显式指定同目标 `layouts` 目录。`environment.json` 固定镜像及共享预算，同目录 `prologue` 固定程序。建库只消费已声明来源。
 
@@ -446,9 +446,9 @@ Event 返回 true 只说明完成不晚于查询返回，false 只说明完成�
 
 代表 worker 的局部来源映射和共同校准须成立，整组原生资格单独记录。三阶段在 `results/<矩阵名>` 发布精简索引 `sources.json`、`targets.json` 和 `comparisons.json`，单案例验证输出位于 `cases/<案例名>`。有完整执行记录时检查 `execution.jsonl`，预测失败仍可用 `execution.partial.jsonl` 核对实际完成的前缀。完整结构结论由实际证据覆盖决定。
 
-调用形式为 `python3 example/coarse_graph/matrix.py --root <运行根> --matrix <固定矩阵.json> --phase sources|targets|compare|fixed|autonomous`。`targets` 采集可供结构对照的真实图，声明 `detailed_capture: service-reference` 的用例同时供 `fixed` 使用。性能阶段读取域内的 `costs` 路径，`autonomous` 另取同一输入的轻量样本。全调查共用预算锁和原生设备占用锁，CPU 比较独立，已结束步骤不自动重试。普通失败与产物错误分别记录，执行状态不明时保留额度及进程身份并停止，检查真实进程后再恢复。采集、预测与验证由各自正式入口执行。
+调用形式为 `python3 example/coarse_graph/matrix.py --root <运行根> --matrix <固定矩阵.json> --phase sources|targets|compare|fixed|autonomous`。`targets` 采集结构对照所需的真实图，声明 `detailed_capture: service-reference` 的案例也可据此运行 `fixed`。性能阶段读取域内的 `costs`，`autonomous` 使用同一输入的独立轻量样本。已有参考可在案例的 `observation`（详细）和 `latency_observation`（轻量）给出原采集任务目录。矩阵核对完整原生输入、声明的部署、镜像及实际记录方式，相符即可在零原生额度下复用。各案例分别报告输入错误、来源资格和评价结果。新增采集共用设备锁和预算，终态步骤复用原记录。执行状态不明时保留额度及进程身份，核实后恢复。
 
-输入准备使用`PYTHONPATH=src/workflow:src/adapters:src/collection:src/workload python3 example/coarse_graph/prepare_matrix.py --root <运行根> --specification <覆盖声明.json> --stage <阶段> --seed <冻结交付提交> --phase sources|targets`。覆盖声明保留配置、请求取值范围、固定来源探针及抽样方法；同域固定库先发布来源并取得终态，再生成目标请求，整批实际装配通过后才发布输入。跨域任务先生成用户输入，再交给来源规划。已发布文件只允许相同内容接续，不重新抽样替换。EP路由属于实验输入构造，仍经正式请求/路由合同检查，不在示例实现原生组批或图变换。
+输入准备使用 `PYTHONPATH=src python3 example/coarse_graph/prepare_matrix.py --root <运行根> --specification <覆盖声明.json> --stage <阶段> --seed <冻结交付提交> --phase sources|targets`。独立矩阵先声明配置、训练探针、留出请求的取值范围和种子。目标按种子一次抽出，整批经请求合同核对后发布，同一输入可接续。建库使用事先给出的训练 workload 或已发布的集合。缺少适用模板的目标仍可取得原生参考，结构和自主预测再按该目标实际选用的来源分别报告。EP 路由随请求通过正式合同检查。
 
 请求按循环的`patterns`声明每个位置的prompt/output候选值及可选前缀；单值候选固定必要边界，多个候选在冻结后按seed选择。MoE模式还声明分层expert条件的偏移，可表达相同前缀仅在远端层路由不同；这些只是已有路由输入的构造，不是适配规则。固定库domain用`source`指定原`collection`，来源阶段只复核该集合拥有的计划、实际输入及原始事实，不规划、采集或占用物理卡；自动新来源domain仍走正式来源规划。
 
@@ -492,17 +492,17 @@ Event 返回 true 只说明完成不晚于查询返回，false 只说明完成�
 
 | 需要回答 | 开发时的入口或依据 | 优先检查 |
 | --- | --- | --- |
-| 真实时间下能否展开出同一执行 | `python3 -m prologue_verification.structure` | 先确认参考材料、逐工作时间覆盖与消费，再找第一个动作、模板绑定、依赖或资源效果差异 |
-| 同一执行图上的成本是否合理 | `python3 -m prologue_verification.fixed_graph` 调用 `prologue work-costs` 和 `prologue replay` | 先确认每项工作自身服务的测量资格，再核对实测基线、单元误差和影响输出的依赖链 |
-| 使用独立成本后实际结果如何 | `python3 -m prologue_verification.autonomous` 调用正式成本预测并对照轻量原生输出 | 固定图基线通过后，看自主运行与固定图的第一处时序、控制或状态分歧 |
+| 真实时间下能否展开出同一执行 | `python3 -m prologue.verification.structure` | 先确认参考材料、逐工作时间覆盖与消费，再找第一个动作、模板绑定、依赖或资源效果差异 |
+| 同一执行图上的成本是否合理 | `python3 -m prologue.verification.fixed_graph` 调用 `prologue work-costs` 和 `prologue replay` | 先确认每项工作自身服务的测量资格，再核对实测基线、单元误差和影响输出的依赖链 |
+| 使用独立成本后实际结果如何 | `python3 -m prologue.verification.autonomous` 调用正式成本预测并对照轻量原生输出 | 固定图基线通过后，看自主运行与固定图的第一处时序、控制或状态分歧 |
 
 按请求、逻辑进度、动作和实际角色关联工作。先核对原生运行、初态、输入、参考依赖及测量资格，再比较从同一初态生成的结果。优先离线读取已确认可复用的原生观察，模型及模板资产仍与独立目标隔离。`actions_matched` 只代表报告所列结构检查通过，发布整例结论时还需核对 `condition_inputs` 的实际工作与端点覆盖、未消费输入和校准。单图入口目前不提供整次 serving 的真实图核验、成本身份映射、输出指标评分或误差归因。
 
 单案例结构入口在能调度建模和控制容器的 Python 环境中调用。`--reference` 指目标原生图的生产目录，`--production` 指预测使用的模板来源集合。验证器从已核对的真实图生成各 rank 的动作布局并提取实测条件，随后记录参考核验、时间提取、预测及结构比较各自的墙钟。
 
 ```bash
-PYTHONPATH=src/verification:src/workflow:src/collection:src/adapters:src/workload \
-  python3 -m prologue_verification.structure \
+PYTHONPATH=src \
+  python3 -m prologue.verification.structure \
   --capture <原生采集目录> --reference <真实图生产目录> \
   --production <模板来源集合目录> --input <结构预测输入> \
   --binary <Docker构建的prologue> --output <验证输出目录> --timeout 180
@@ -516,7 +516,7 @@ PYTHONPATH=src/verification:src/workflow:src/collection:src/adapters:src/workloa
 
 框架/runtime 差异在相应 adapters，共同 instrumentation 和发布逻辑不导入具体实现。Python 应用只组织任务，不在采集侧实现预算平台，也不把模型/资源规则复制到 example。
 
-单案例验证由 `src/verification` 的 Python 入口组织，负责证据资格、比较与归因。固定图成本查询和时间线重算调用 C++23 的正式入口。结构入口共用一份经过核对的原生参考，在共同校准满足每条时间条件时复用该精确解。评价逐项核对原始测量、声明和实际完成时刻，独立因果检查继续使用两边各自的图。示例负责请求准备、矩阵和汇总。默认结果保持精简，原始 trace、完整图和状态明细按真实消费者在生产前选择。同一执行的诊断开关保持业务结果一致。
+单案例验证由 `src/prologue/verification` 的 Python 入口组织，负责证据资格、比较与归因。固定图成本查询和时间线重算调用 C++23 的正式入口。结构入口共用一份经过核对的原生参考，在共同校准满足每条时间条件时复用该精确解。评价逐项核对原始测量、声明和实际完成时刻，独立因果检查继续使用两边各自的图。示例负责请求准备、矩阵和汇总。默认结果保持精简，原始 trace、完整图和状态明细按真实消费者在生产前选择。同一执行的诊断开关保持业务结果一致。
 
 deprecated 仅为本地参考，不进入 Git 交付、CMake、import、安装或 fallback。官方与参考子模块保持各自归属，不把临时环境修改写入上游工作树。
 
