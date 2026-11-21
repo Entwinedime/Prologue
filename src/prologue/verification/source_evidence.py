@@ -189,12 +189,15 @@ class SourceEvidence:
                     has_work = span["kind"] not in {"wait", "boundary"} and (
                         span["kind"] == "host" or has_payload or "protocol_operand" in span)
                 if has_work:
-                    expected[index, span["scope"], key[0], span["kind"], start, finish] += 1
+                    copy = span.get("copy") if (begin, end) == (span["begin"], span["end"]) else None
+                    expected[index, span["scope"], key[0], span["kind"], start, finish,
+                             json.dumps(copy, sort_keys=True) if copy else None] += 1
                 else:
                     orders.add((start, finish, "order"))
 
         # Compare the whole partition, not just the pieces that survived projection.
-        actual = Counter((span, work["scope"], work["resource"], work["kind"], work["start"], work["finish"])
+        actual = Counter((span, work["scope"], work["resource"], work["kind"], work["start"], work["finish"],
+                          json.dumps(work["copy"], sort_keys=True) if "copy" in work else None)
                          for span, work in zip(self.evidence["work_spans"], self.graph["work"], strict=True))
         self.require(actual == expected,
                      f"source work coverage differs: {sum((expected - actual).values())} missing, {sum((actual - expected).values())} extra")

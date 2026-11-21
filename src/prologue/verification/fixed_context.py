@@ -7,6 +7,7 @@ from itertools import pairwise
 import json
 
 from prologue.integrations.platforms.ascend.host_alignment import ThreadService
+from prologue.integrations.platforms.ascend.trace import Interval, ThreadIntervals
 
 from .host_queues import HostQueueEvidence
 from .ingress import IngressEvidence
@@ -70,9 +71,14 @@ class FixedThreadActivity(ThreadService):
     futex_wait_ops = frozenset({0, 9})
     interrupt_flags = 0x08 | 0x10 | 0x40
 
-    def __init__(self, rows, dequeues, excluded):
+    def __init__(self, rows, dequeues, excluded, runtime):
         super().__init__(rows, dequeues, excluded)
         covered = [row for row in rows if row["thread"] in self.activity]
+        targeted = {row["thread"] for row in covered if "target_wakes" in row}
+        self.calls = ThreadIntervals([
+            Interval(row["begin_raw_ns"], row["end_raw_ns"], row["thread"], row)
+            for row in runtime if row["result"] == 0 and row["thread"] in targeted
+        ])
         self.runnable, self.blocked_at, self.sleep = {}, {}, {}
         self.kernel_threads = {row["thread"]: row["kernel_thread"] for row in rows if "kernel_thread" in row}
         self.wakes = defaultdict(list)
@@ -161,7 +167,20 @@ class FixedThreadActivity(ThreadService):
 
                 # Perf can record the switch-out later than the kernel wake inside the same syscall.
                 return self.waking(thread, entered, resumed)
-        return self.waking(thread, self.blocked_at.get(thread, {}).get(out, out), resumed)
+        blocked = self.blocked_at[thread].get(out)
+        wakes = self.waking(thread, blocked if blocked is not None else out, resumed)
+        if wakes or blocked is None:
+            return wakes
+
+        # An early wake can cross sched_switch. The enclosing native call must contain exactly one sleep and one wake.
+        call = self.calls.enclosing(Interval(out, resumed, thread, {}))
+        opened, closed, _ = self.activity[thread]
+        if call is None or not opened <= call.begin < call.end <= closed:
+            return ()
+        if self.within(self.sleep[thread], call.begin, call.end) != [(out, resumed)]:
+            return ()
+        witnesses = self.waking(thread, call.begin, call.end)
+        return witnesses if len(witnesses) == 1 and witnesses[0].raw_ns <= blocked else ()
 
 
 class FixedHostContext:
@@ -178,7 +197,7 @@ class FixedHostContext:
 
         # Waits triggered by work on other resources still follow their original dependencies.
         observer, dequeues, waits = evidence.replay_host_intervals()
-        self.active = FixedThreadActivity(rows, dequeues, [*observer, *waits])
+        self.active = FixedThreadActivity(rows, dequeues, [*observer, *waits], evidence.runtime)
         self.observer = ThreadService.by_thread(observer)
         self.queues = HostQueueEvidence(evidence, self.active)
 
