@@ -20,6 +20,10 @@ def install() -> None:
 
         if description["host_timing"]:
             timing = NativeTiming(description, host_profile=AscendHostProfile)
+            if description.get("local_shards"):
+                from prologue.integrations.frameworks.sglang.observation.shard_transport import ShardTransport
+
+                ShardTransport(description["output"], timing.host.auxiliary).install(description)
         else:
             if getattr(ctypes.CDLL(None), "prologue_set_runtime_enabled", None) is not None:
                 raise ValueError("latency measurement requires the native observer to be unloaded")

@@ -217,8 +217,16 @@ class NativeEffectEvidence:
     def inspect_measurements(self):
         checked = 0
         unmeasured = set()
+        peer_points = {point for producer, wait in self.staged_waits.items()
+                       for call in self.native["scopes"][producer]["local_exchanges"] for point in (call["begin"], wait)}
+        found_peers = set()
         for point in self.facts["measurements"]["coordinates"]:
             resource = self.facts["resources"][point["resource"]]
+            if resource["identity"] == "service/peer":
+                self.require(point["time_ns"] is None and not resource["serial"] and resource["role"] == "peer_transport",
+                             "single-device operand staging claims target transport time or serial order")
+                found_peers.add(point["order"])
+                continue
             if resource["kind"] == "stream":
                 if point["time_ns"] is None:
                     unmeasured.add((point["resource"], point["order"]))
@@ -232,9 +240,10 @@ class NativeEffectEvidence:
         native_only = {(effect["resource"], command[side])
                        for effect in self.facts["native_effects"] for command in effect["commands"]
                        if command["sdk"] is None for side in ("begin", "end")}
+        self.require(found_peers == peer_points, "external transfer boundaries differ from original posts and waits")
         self.require(unmeasured <= native_only, "device boundary loses a recorded timestamp or lacks an observed native command")
         logical = self.logical_coordinates.keys()
-        return {"checked_host_measurements": checked, "unmeasured_device_endpoints": len(unmeasured - logical),
+        return {"checked_host_measurements": checked, "external_transfer_endpoints": len(found_peers), "unmeasured_device_endpoints": len(unmeasured - logical),
                 "logical_wait_boundaries": len(unmeasured & logical)}
 
     def device_intervals(self):
@@ -372,6 +381,59 @@ class NativeEffectEvidence:
         return ({"synchronous_services": len(services), "executions": len(declared), "private_queues": len(expected),
                  "submitted_tasks": sum(expected.values())}, set(expected))
 
+    @cached_property
+    def staged_waits(self):
+        first = {}
+        for scope in self.native["scopes"]:
+            for port in scope["ports"]:
+                if port["direction"] != "input" or "producer" not in port:
+                    continue
+                producer = port["producer"]
+                if self.native["scopes"][producer].get("local_exchanges"):
+                    returned = scope["device_return"]
+                    first[producer] = min(first.get(producer, returned), returned)
+        return first
+
+    def supplied_protocols(self, graph):
+        expected = Counter()
+        posts = set()
+        for scope in self.native["scopes"]:
+            for call in scope.get("local_exchanges", ()):
+                endpoints = []
+                for field, side in (("begin", "exchange_begin"), ("end", "exchange_end")):
+                    point = call[field]
+                    self.require(self.native["points"][point] == {"scope": scope["id"], "side": side},
+                                 "supplied operand refers to another protocol marker")
+                    endpoints.append(self.sdk.event(self.point_connection(point)))
+                first, last = endpoints
+                self.require(first[0] == last[0] and first[1] < last[1], "protocol markers disagree on stream order")
+                begin, end = self.sdk.span(first)[1], self.sdk.span(last)[1]
+                exchange = scope["communication"]
+                kind = "collective" if exchange["members"] == exchange["required"] else "communication"
+                lane = f"stream/{first[0]}"
+                if scope.get("asynchronous"):
+                    self.require(scope["id"] in self.staged_waits, "staged peer operand has no original consuming Work.wait")
+                    payload, = [p for p in scope["ports"] if p["name"] == "payload"]
+                    sends = exchange["rank"] == exchange["members"][0]
+                    self.require(exchange["operation"] == "transfer" and call["operation"] == ("isend" if sends else "irecv")
+                                 and payload["direction"] == ("input" if sends else "output")
+                                 and call["dtype"] == payload["tensor"]["dtype"], "staged operand differs from the native transfer port")
+                    lane, begin, end = "service/peer", call["begin"], self.staged_waits[scope["id"]]
+                expected[self.source_scopes[scope["id"]], kind, lane, begin, end,
+                         call["operation"], call["dtype"], call["bytes"]] += 1
+                caller = self.points[call["begin"]]
+                posts.add((f"thread/{caller.thread}", caller.begin, lane, begin))
+
+        projected = Counter()
+        for span in self.facts["spans"]:
+            if operand := span.get("protocol_operand"):
+                resource = graph["resources"][span["resource"]]
+                projected[span["scope"], span["kind"], resource["identity"], span["begin"], span["end"],
+                          operand["operation"], operand["dtype"], operand["bytes"]] += 1
+        self.require(projected == expected, "projected protocol work differs from the original operand and stream markers")
+        self.require(len(posts) == expected.total(), "supplied operands repeat a native handoff")
+        return posts
+
     def inspect_payload(self, graph, private_streams, device_intervals, submissions, launches=None, payload_times=None):
         expected, counts = defaultdict(list), Counter()
         envelopes = ThreadIntervals(list(device_intervals.values()))
@@ -439,14 +501,17 @@ class NativeEffectEvidence:
                          "submission thread can take work before the original enqueue")
         return post
 
-    def inspect_submissions(self, launches=None):
+    def inspect_submissions(self, protocol_posts, launches=None):
         counts, links = Counter(), set()
         for edge in self.facts["dependencies"]:
             if edge["kind"] != "submission":
                 continue
             source, target = edge["source"], edge["target"]
             resources = [self.facts["resources"][self.facts["spans"][point["span"]]["resource"]] for point in (source, target)]
-            links.add((resources[0]["identity"], source["order"], resources[1]["identity"], target["order"]))
+            link = resources[0]["identity"], source["order"], resources[1]["identity"], target["order"]
+            links.add(link)
+            if link in protocol_posts:
+                continue
             if (resources[0]["kind"], resources[1]["kind"]) != ("thread", "stream"):
                 continue
             thread = int(resources[0]["identity"].split("/")[1])
@@ -469,6 +534,8 @@ class NativeEffectEvidence:
                 order = self.sdk.span(identity)[0] if task_kind == "EVENT_WAIT" else target["order"]
                 launches[identity] = post, order
             counts["driver_boundaries"] += 1
+        self.require(protocol_posts <= links, "supplied protocol work lacks its original caller handoff")
+        counts["supplied_protocol_operands"] = len(protocol_posts)
         return dict(counts), links
 
     def check_boundary(self, graph, event, resource, record, side, scope):
@@ -596,6 +663,19 @@ class NativeEffectEvidence:
                     reference, = [candidate for candidate in reference["ports"] if candidate["name"] == name]
                     self.require(event == reference["event"], "native boundary signal changes its referenced endpoint")
                     counts["boundary_signals"] += 1
+                    continue
+                if (producer := port.get("producer")) in self.staged_waits:
+                    identity = f"work/{producer}"
+                    self.require(observed["signal"] == identity, "staged signal changes its original Work handle")
+                    if port["direction"] == "output":
+                        self.require(event == ports["communication.complete", "output"]["event"],
+                                     "staged Work publishes a different completion from its transfer")
+                        producers[identity].add(event)
+                    else:
+                        self.require(event == ports["device.complete", "output"]["event"],
+                                     "staged Work is consumed before the receiver's continuation")
+                        consumers.append((identity, event))
+                    counts["staged_work_signals"] += 1
                     continue
                 connection = self.point_connection(port["point"]) if "point" in port else work[port["producer"]]
                 self.require(observed["signal"] == f"event/{connection}", "native signal changes its completion generation")

@@ -4,17 +4,31 @@ from pathlib import Path
 
 
 class AscendDeployment:
+    @staticmethod
+    def is_single_device(source: dict) -> bool:
+        mode = source.get("acquisition_mode", "full")
+        if mode not in ("full", "single_device"):
+            raise ValueError("Ascend acquisition_mode must be full or single_device")
+        return mode == "single_device"
+
     def __init__(self, source: dict, workers: int, transfer: bool) -> None:
-        if source.keys() - {"physical_devices", "store_url", "transfer_protocol"}:
+        if source.keys() - {"acquisition_mode", "physical_devices", "store_url", "transfer_protocol"}:
             raise ValueError("Ascend deployment contains unsupported fields")
+        self.single_device = self.is_single_device(source)
+
         devices = source["physical_devices"]
         if any(type(device) is not int or device < 0 for device in devices) or devices != sorted(set(devices)):
             raise ValueError("Ascend physical_devices must be distinct nonnegative integers in increasing order")
-        if len(devices) < workers:
+        if self.single_device and len(devices) != 1:
+            raise ValueError("single-device acquisition requires exactly one physical device")
+        if not self.single_device and len(devices) < workers:
             raise ValueError(f"native protocol requires {workers} physical devices, got {len(devices)}")
         self.source = source
-        self.devices = devices[:workers]
-        self.environment = {"ASCEND_RT_VISIBLE_DEVICES": ",".join(map(str, self.devices)), "OMP_NUM_THREADS": "1"}
+        self.devices = devices if self.single_device else devices[:workers]
+
+        # The container runtime mounts only the selected card; the native worker then sees device zero.
+        visibility = "ASCEND_VISIBLE_DEVICES" if self.single_device else "ASCEND_RT_VISIBLE_DEVICES"
+        self.environment = {visibility: ",".join(map(str, self.devices)), "OMP_NUM_THREADS": "1"}
         if transfer and not source.get("store_url"):
             raise ValueError("Ascend PD capture needs a reachable store_url")
         if "transfer_protocol" in source and "store_url" not in source:
@@ -35,8 +49,14 @@ class AscendDeployment:
             mounted = Path(path).resolve(strict=True)
             self.mounts.extend(["--mount", f"type=bind,src={mounted},dst={path},readonly"])
 
-    def options(self, *, detailed_timing=False, latency_only=False) -> list[str]:
-        arguments = ["--runtime", "ascend", "--privileged", "--ipc", "host", "--network", "host"]
+    def options(self, *, detailed_timing=False, host_timing=False, latency_only=False) -> list[str]:
+        arguments = ["--runtime", "ascend", "--ipc", "host", "--network", "host"]
+        if not self.single_device:
+            arguments.append("--privileged")
+        elif detailed_timing or host_timing:
+
+            # CPU timing opens perf events for the worker while the device cgroup keeps its single-card view.
+            arguments.extend(["--cap-add", "PERFMON"])
         arguments.extend(self.mounts)
 
         if detailed_timing:

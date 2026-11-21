@@ -85,7 +85,7 @@ class DeviceCollectiveCuts:
         for name in ("all_reduce", "quant_all_reduce", "all_gather", "all_gather_into_tensor", "reduce_scatter", "reduce_scatter_tensor", "all_to_all_single", "broadcast"):
             target = f"sglang.srt.distributed.parallel_state.GroupCoordinator.{name}"
             HookRegistry.register(target, partial(self.invoke, inspect.signature(getattr(GroupCoordinator, name))), HookType.AROUND)
-        for name in ("all_gather_into_tensor", "all_reduce", "broadcast"):
+        for name in ("all_gather_into_tensor", "all_gather", "all_reduce", "broadcast"):
             target = f"torch.distributed.{name}"
             HookRegistry.register(target, partial(self.distributed, inspect.signature(getattr(distributed, name))), HookType.AROUND)
         if expert_exchange is not None:
@@ -108,6 +108,27 @@ class NativeCommunications:
     @property
     def collective_at_root(self):
         return self.observation.capture.current.get() == 0
+
+    @contextmanager
+    def local_exchange(self, operation, source, outputs):
+        owner = self.observation
+        scope = owner.capture.current.get()
+        if not self.enabled or "communication" not in owner.capture.scopes[scope]:
+            yield
+            return
+
+        # These markers locate the target protocol service. Elapsed time between them belongs to acquisition.
+        runtime = owner.capture.runtime
+        begin = runtime.point(scope, "exchange_begin")
+        yield
+        end = runtime.point(scope, "exchange_end")
+        with owner.tensors.metadata():
+            owner.capture.scopes[scope].setdefault("local_exchanges", []).append({
+                "operation": operation, "begin": begin, "end": end, "bytes": source.numel() * source.element_size(),
+                "dtype": str(source.dtype),
+            })
+            for tensor in outputs:
+                owner.tensors.written(tensor)
 
     def observe_exchange(self, original, role, group, root_rank, gather, run):
         owner = self.observation

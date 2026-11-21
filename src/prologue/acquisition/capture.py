@@ -49,7 +49,9 @@ class CaptureProcess:
         self.latency_only = latency_only or host_timing
         self.service_reference = service_reference
         self.operation_limit = limit if limit is not None else OperationLimit()
-        self.options = launch.platform.options(detailed_timing=service_reference, latency_only=latency_only and not host_timing)
+        self.options = launch.platform.options(detailed_timing=service_reference, host_timing=host_timing,
+                                               latency_only=latency_only and not host_timing)
+        self.worker_options = launch.worker_options(reference=service_reference or (latency_only and not host_timing))
         self.model = Path(launch.serving.model["path"]).resolve(strict=True)
         destination = str(Path(launch.serving.model["path"]).absolute())
         self.output = arguments.output.resolve()
@@ -117,6 +119,7 @@ class CaptureProcess:
             "--mount", f"type=bind,src={output},dst=/capture",
             self.inputs["image"], "--signal=KILL", f"{allowance_ns / 1_000_000_000}s", "/opt/prologue/capture.sh",
             "--input", "/input.json", "--output", "/capture/source",
+            *self.worker_options,
             *(["--resource-trace"] if self.arguments.resource_trace else []),
             *(["--latency-only"] if self.latency_only and not self.host_timing else []),
             *(["--host-timing"] if self.host_timing else []),

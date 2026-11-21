@@ -28,6 +28,7 @@ class SGLangObservation:
         self.description = description
         self.framework_revision = NativeConfiguration.upstream_revision(os.environ.get("PROLOGUE_SGLANG_REVISION"))
         self.directory = Path(description["output"])
+        self.kv_pools = self.directory / "kv-pools"
         self.window = ObservationWindow(self.directory, description)
         self.capture = SemanticCapture(markers)
         self.request_state = RequestStateCalls(observe=description["resource_trace"])
@@ -141,13 +142,13 @@ class SGLangObservation:
             raise ValueError("MoE models require a declared expert topology and routes; dense models do not accept them")
         self.content.configure(self.roles.workers)
 
-    def plan_roles(self) -> None:
+    def plan_roles(self):
         peers = None
         if self.description["mode"] != "null":
             from prologue.integrations.frameworks.sglang.kv_peers import PdPeerBindings
 
             workers = {}
-            for path in (self.directory / "kv-pools").glob("*.json"):
+            for path in self.kv_pools.glob("*.json"):
                 worker = json.loads(path.read_text())
                 workers[worker["parallel"]["rank"]] = worker
             peers = PdPeerBindings(workers)
@@ -157,9 +158,9 @@ class SGLangObservation:
         self.worker_roles = plan["workers"]
         if self.description["observe_all_workers"]:
             plan["observed_roles"] = self.description["native_participants"]
-        self.selected = self.parallel["rank"] in plan["observed_roles"]
         if self.parallel["pp_rank"] == 0 and self.parallel["tp_rank"] == 0:
             write_json(Path(self.description["instance_directory"]) / "role-plan.json", plan, indent=2)
+        return plan["observed_roles"]
 
     def request(self, original: Any, scheduler: Any, request: Any) -> Any:
         self.window.begin(request.rid)
@@ -320,7 +321,7 @@ class SGLangObservation:
             if registration is not None:
 
                 # Every endpoint supplies layout evidence even when its computation is represented by another worker.
-                write_json(self.directory / "kv-pools" / f"{self.parallel['rank']}.json", {
+                write_json(self.kv_pools / f"{self.parallel['rank']}.json", {
                     "mode": self.description["mode"], "parallel": self.parallel, "layout": self.kv_layout.document(),
                     "page_size": self.implementation["page_size"], "registration": registration,
                 })
@@ -350,6 +351,8 @@ class SGLangObservation:
                 recording["reservation_receipts"] = self.kv_transfers.receipts
                 recording["kv_session"] = None if registration is None else registration["session"]
                 recording["kv_endpoint"] = None if registration is None else registration["control_endpoint"]
+                if registration is not None and self.description["local_shards"]:
+                    recording["kv_pool_directory"] = str(self.kv_pools.relative_to(self.directory))
                 if self.resource_history is not None:
                     recording["request_input_attempts"] = self.window.input_attempts
                     recording["action_values"] = self.action_values
@@ -388,8 +391,14 @@ class SGLangObservation:
         ModelScopes.install_engine_hooks(self)
         self.request_state.install()
         self.calls = FlowScopes(self)
+        communications = NativeCommunications(self)
+        if self.description.get("local_shards"):
+            from prologue.integrations.frameworks.sglang.observation.shard_transport import ShardTransport
+
+            # CPU protocol observers must see the original device operand, before staging changes its device.
+            ShardTransport(self.directory, self.tensors.auxiliary, communications.local_exchange).install(self.description)
         NativeProfiles(self).install()
-        NativeCommunications(self).install()
+        communications.install()
         self.kv_transfers = NativeKvScopes(self.calls, self)
         self.kv_transfers.install()
         self.calls.install()

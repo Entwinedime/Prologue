@@ -42,6 +42,11 @@ class AscendObservation:
         self.host_copies = []
         self.signal_inputs = {}
         self.work_completions = {}
+        self.peer_services = {}
+        self.waited_work = {
+            scope["id"]: port["producer"] for scope in raw["scopes"] for port in scope["ports"]
+            if port["use"] == "signal" and port["direction"] == "input" and "producer" in port
+        }
         self.scopes = []
         for identity, scope in enumerate(raw["scopes"]):
             if scope["id"] != identity or not scope["complete"]:
@@ -299,7 +304,6 @@ class AscendObservation:
                 # Preserve the actual return fence as a join; never retarget CPU completion to an earlier device task.
                 self.span(scope, boundary["resource"], boundary["end"], boundary["end"], "boundary")
                 self.edge(self.endpoint(transfer, "end"), self.endpoint(span, "end"), "signal")
-        self.resolve_work_completions()
         for task in self.streams.payload:
             source = task.source
             kind = source.record["args"]["Task Type"]
@@ -338,6 +342,40 @@ class AscendObservation:
         for span in self.spans:
             if span["kind"] == "communication" and self.resources[span["resource"]]["kind"] == "stream":
                 spans[span["scope"]].append(span)
+        first_wait = {}
+        for waiter, producer in self.waited_work.items():
+            if self.raw["scopes"][producer].get("local_exchanges"):
+                returned = self.raw["scopes"][waiter]["device_return"]
+                first_wait[producer] = min(first_wait.get(producer, returned), returned)
+
+        for scope, raw in enumerate(self.raw["scopes"]):
+            if "local_exchanges" not in raw:
+                continue
+            exchange = raw["communication"]
+            kind = "collective" if exchange["required"] == exchange["members"] else "communication"
+            resource = self.spans[self.device[scope]]["resource"]
+            for span in spans[scope]:
+                span["kind"] = "device"
+            for call in raw["local_exchanges"]:
+                first, last = (self.trace.device_points[call[key]] for key in ("begin", "end"))
+                if first.stream != last.stream or self.resource("stream", first.stream, "execution") != resource:
+                    raise ValueError("a local protocol cut must keep its caller stream")
+                if raw.get("asynchronous"):
+                    if scope not in first_wait or scope in self.peer_services:
+                        raise ValueError(f"staged Work {scope} needs one posted operand and a consuming wait")
+
+                    # Post and wait identify the handle's lifetime. A target service can finish independently of the caller.
+                    peer = self.resource("service", "peer", "peer_transport", serial=False)
+                    service = self.span(scope, peer, call["begin"], first_wait[scope], kind)
+                    self.peer_services[scope] = service
+                    self.edge(self.task_anchor(self.streams.task(first.task)), self.endpoint(service, "begin"), "data")
+                else:
+                    begin, end = self.streams.task(first.task).end, self.streams.task(last.task).end
+                    service = self.span(scope, resource, begin, end, kind)
+                self.spans[service]["protocol_operand"] = {key: call[key] for key in ("operation", "bytes", "dtype")}
+
+                # The native caller has presented this operand. Peers and the external transport still gate completion.
+                self.edge(self.host_anchor(first.host), self.endpoint(service, "begin"), "submission")
         for scope, calls in groups.items():
             if len(calls) != 1:
                 continue
@@ -407,21 +445,17 @@ class AscendObservation:
                 self.edge(self.endpoint(span, "end"), self.endpoint(caller, "end"), "signal")
 
     def resolve_work_completions(self) -> None:
-        producers = {scope for scope, raw in enumerate(self.raw["scopes"]) if raw.get("asynchronous", False)}
+        producers = {scope for scope, raw in enumerate(self.raw["scopes"])
+                     if raw.get("asynchronous", False) and scope not in self.peer_services}
         if not producers:
             return
-        consumers = {
-            scope: port["producer"]
-            for scope, raw in enumerate(self.raw["scopes"])
-            for port in raw["ports"] if port["use"] == "signal" and port["direction"] == "input" and "producer" in port
-        }
         for native, recorded in self.trace.synchronizations:
             if recorded is None:
                 continue
             owner = self.trace.owner(self.trace.origin(self.trace.native_api(native)))
-            if owner not in consumers:
+            producer = self.waited_work.get(owner)
+            if producer not in producers:
                 continue
-            producer = consumers[owner]
             api = self.trace.native_api(recorded)
             if self.trace.owner(self.trace.origin(api)) != producer:
                 continue
@@ -434,6 +468,11 @@ class AscendObservation:
         for scope in producers:
             if scope not in self.work_completions:
                 raise ValueError(f"native Work {scope} has no observed completion wait")
+
+    def work_end(self, producer: int) -> dict:
+        if producer in self.peer_services:
+            return self.endpoint(self.peer_services[producer], "end")
+        return self.task_anchor(self.work_completions[producer])
 
     def call_ports(self) -> None:
         observed = []
@@ -465,7 +504,7 @@ class AscendObservation:
                     })
             if "communication" in raw:
                 span = self.device[scope] if "device_entry" in raw else host
-                completion = self.task_anchor(self.work_completions[scope]) if raw.get("asynchronous", False) else self.endpoint(span, "end")
+                completion = self.work_end(scope) if raw.get("asynchronous", False) else self.endpoint(span, "end")
                 ports.append({
                     "name": "communication.complete", "direction": "output", "use": "control", "relation": "communication",
                     "at": completion,
@@ -481,6 +520,15 @@ class AscendObservation:
                             "signal": f"scope/{boundary['scope']}/{boundary['interval']}/{boundary['side']}",
                             "at": self.endpoint(span, boundary["side"]),
                         })
+                        continue
+                    if (producer := port.get("producer")) in self.peer_services:
+                        completed = self.work_end(producer)
+                        at = completed
+                        if port["direction"] == "input":
+                            at = self.endpoint(self.device[scope], "end")
+                            self.edge(completed, at, "signal")
+                        ports.append({"name": port["name"], "direction": port["direction"], "use": "signal",
+                                      "relation": "signal", "signal": f"work/{producer}", "at": at})
                         continue
                     task = self.work_completions[port["producer"]] if "producer" in port else self.streams.task(self.trace.device_points[port["point"]].task)
                     connection = task.source.record["args"]["connection_id"]
@@ -509,7 +557,7 @@ class AscendObservation:
                     "relation": relation, "at": self.endpoint(span, side),
                 }
                 if raw.get("asynchronous", False) and port["use"] == "device" and port["direction"] == "output":
-                    converted["at"] = self.task_anchor(self.work_completions[scope])
+                    converted["at"] = self.work_end(scope)
                 if tensor is not None:
                     converted["tensor"] = {name: tensor[name] for name in ("value", "storage", "version", "dtype", "shape", "writer", "allocation", "buffer")}
                     if "shape_rule" in tensor:
@@ -828,6 +876,7 @@ class AscendObservation:
         self.service_spans()
         self.device_spans()
         self.collective_spans()
+        self.resolve_work_completions()
         self.call_ports()
         self.state_accesses()
         self.synchronization()

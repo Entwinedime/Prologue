@@ -386,7 +386,7 @@ class FixedReference:
             measurements = document["measurements"]
             captured_collectives = {(lane, begin, end) for _, lane, begin, end, payload in measurements.get("collectives", ())
                                     if payload is not None}
-            services = ObservedServices(graph, document, {})
+            services = ObservedServices(graph, document, {}, physical_peers=case.joint_execution)
             isolated = case.measured_service_pairs(rank, graph, raw, resources=document["resources"])
             for index, piece in enumerate(graph["work"]):
                 start, finish = piece["start"], piece["finish"]

@@ -4,9 +4,11 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 import json
 
+from prologue.acquisition.observation import jointly_observed
 from prologue.artifacts import write_json
 from prologue.integrations.runtimes.pytorch.protocol_work import CpuProtocolWork
 from prologue.integrations.frameworks.sglang.configuration import CaptureInput
+from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
 from prologue.integrations.platforms.ascend.host_alignment import AscendHostAlignment
 from prologue.integrations.platforms.ascend.trace import AscendTrace
 from prologue.integrations.frameworks.sglang.acquisition.host_scopes import NativeHostCalls
@@ -97,12 +99,20 @@ class HostCostSamples:
     @classmethod
     def external_work(cls, capture):
         instances = cls.read(capture / "capture.json")["instances"]
-        records = {rank: cls.read(capture / "protocol" / f"rank-{rank}.json")
-                   for instance in instances for rank in instance["native_participants"]}
-        demands = {rank: [(identity, "host", features) for identity, features, _ in CpuProtocolWork.local(record)]
-                   for rank, record in records.items()}
-        for identity, features in CpuProtocolWork(records).wires():
-            demands[identity["source"]].append((identity, "transfer", features))
+        demands = {}
+        for instance in instances:
+            participants = instance["native_participants"]
+            for ranks in instance.get("profile_windows", [participants]):
+                directory = NativeProfiles.protocol_directory(capture, ranks, "profile_windows" in instance)
+                records = {rank: cls.read(directory / f"rank-{rank}.json") for rank in participants}
+                for rank in ranks:
+                    demands[rank] = [(identity, "host", features)
+                                     for identity, features, _ in CpuProtocolWork.local(records[rank])]
+
+                # Both endpoints of a message must come from the very same native request execution.
+                for identity, features in CpuProtocolWork(records).wires():
+                    if identity["source"] in ranks:
+                        demands[identity["source"]].append((identity, "transfer", features))
         return demands
 
     @staticmethod
@@ -150,7 +160,7 @@ class HostCostSamples:
         pairs, unmatched = source_calls.exact_pairs(observed_calls)
         self.qualification["unmatched_calls"] += unmatched
         local_pairs = source_calls.local_pairs(observed_calls, pairs)
-        collectives = self.collectives(records, rank)
+        collectives = self.collectives(records, rank) if jointly_observed(instance) else {}
         timing = probe["timing"]
         directory = path.parent
         queues = self.read(directory / timing["queues"])

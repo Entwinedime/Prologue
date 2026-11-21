@@ -67,9 +67,13 @@ NativeObservation NativeObservation::read(const nlohmann::json & source) {
                            index(span.at("resource"), result.resources.size(), "resource"),
                            order(span.at("begin")),
                            order(span.at("end")),
-                           work_kind(span.at("kind").get<std::string>()) };
+                           work_kind(span.at("kind").get<std::string>()),
+                           span.contains("protocol_operand") };
         if (region.begin > region.end || (region.begin == region.end && region.kind != WorkKind::Boundary && region.kind != WorkKind::Wait))
             throw std::invalid_argument("native work span must have distinct entry and return boundaries");
+        if (region.supplied_operand && (!result.scopes[region.scope].communication ||
+            (region.kind != WorkKind::Collective && region.kind != WorkKind::Communication)))
+            throw std::invalid_argument("a supplied peer operand requires a declared communication service");
         result.spans.push_back(region);
     }
 

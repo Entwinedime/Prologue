@@ -85,9 +85,11 @@ class StateLifetimes:
     @staticmethod
     def tensor_interval(graph, scope, resource):
         owner = graph["scopes"][scope]
-        if graph["resources"][resource]["kind"] == "stream" and owner.get("communication"):
+        if owner.get("communication"):
             completion, = [port for port in owner["ports"] if "rendezvous" in port]
-            return completion["rendezvous"], completion["event"]
+            boundaries = completion["rendezvous"], completion["event"]
+            if any(graph["events"][event]["resource"] == resource for event in boundaries):
+                return boundaries
         prefix = "device" if graph["resources"][resource]["kind"] == "stream" else "call"
         boundaries = {port["name"]: port["event"] for port in owner["ports"]}
         start, finish = boundaries[prefix + ".enter"], boundaries[prefix + (".complete" if prefix == "device" else ".return")]

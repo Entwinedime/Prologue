@@ -4,6 +4,7 @@ import json
 from collections import Counter, defaultdict
 from functools import cached_property
 
+from prologue.acquisition.observation import jointly_observed
 from prologue.integrations.frameworks.sglang.configuration import ServingInput
 
 from .actions import ActionIdentity
@@ -26,6 +27,8 @@ class NativeCase:
     def read(cls, capture, graphs):
         manifest = json.loads((capture / "capture.json").read_text())
         case = cls(capture, manifest, graphs)
+        if not case.joint_execution:
+            raise ValueError("a multi-worker target reference requires simultaneous execution on its physical topology")
         for instance in manifest["instances"]:
             for rank in instance["observed_roles"]:
                 graph = json.loads((graphs / f"{rank}-graph.json").read_text())
@@ -53,6 +56,10 @@ class NativeCase:
         self.control_declarations = defaultdict(set)
         self.findings = []
         self.observed_actions = 0
+
+    @cached_property
+    def joint_execution(self):
+        return all(map(jointly_observed, self.manifest["instances"]))
 
     @cached_property
     def sessions(self):

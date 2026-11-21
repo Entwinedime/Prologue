@@ -13,6 +13,7 @@ from prologue.acquisition.publication import SourceProductions
 from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.configuration import CaptureInput
 from prologue.integrations.runtimes.docker import OwnedContainers
+from prologue.verification.source_evidence import ProductionEvidence
 from prologue.workflow.limits import OperationLimit
 
 from run import TaskCommands
@@ -113,8 +114,8 @@ class MatrixRun:
 
     @staticmethod
     def mapped(report):
-        return (bool(report["ranks"]) and report["native_case"]["status"] in {"consistent", "incomplete"}
-                and all(row["mapping"] == "consistent" and row["timing"]["status"] == "compatible" for row in report["ranks"]))
+        return (report["native_case"]["status"] in {"consistent", "incomplete", "separate_worker_windows"}
+                and ProductionEvidence.workers_verified(report))
 
     def sources(self, domain):
         name = domain["id"]

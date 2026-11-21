@@ -40,7 +40,7 @@ class StructureVerification:
         checker = ProductionEvidence(args.reference, capture, self.output / "source-evidence", args.details)
         reference, evidence = checker.inspect()
         stages["reference_status"] = evidence["native_case"]["status"]
-        status = checker.publish(evidence)
+        status = checker.publish(evidence, require_joint=True)
         wall_ns["reference"] = monotonic_ns() - started
         if status:
             return self.finish("reference_unqualified", stages)

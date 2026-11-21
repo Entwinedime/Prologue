@@ -9,14 +9,15 @@ namespace prologue {
 namespace {
 
 std::pair<std::size_t, std::size_t> interval(const CoarseGraph & graph, std::size_t scope, std::size_t resource) {
-    const auto device = graph.resources.at(resource).kind == ResourceKind::Stream;
     const auto & owner = graph.scopes.at(scope);
-    if (device && owner.communication) {
+    if (owner.communication) {
 
-        // Communication owns its payload until actual completion, even if the caller stream has already returned.
+        // Payload ownership follows the declared rendezvous and completion, which may be on different resources.
         const auto & completion = *std::ranges::find_if(owner.ports, [](const auto & port) { return port.rendezvous.has_value(); });
-        return { *completion.rendezvous, completion.event };
+        if (graph.events[*completion.rendezvous].resource == resource || graph.events[completion.event].resource == resource)
+            return { *completion.rendezvous, completion.event };
     }
+    const auto device = graph.resources.at(resource).kind == ResourceKind::Stream;
     const auto start = owner.port(device ? "device.enter" : "call.enter", Direction::Input).event;
     const auto finish = owner.port(device ? "device.complete" : "call.return", Direction::Output).event;
     if (graph.events[start].resource != resource || graph.events[finish].resource != resource)

@@ -302,8 +302,15 @@ class StreamCommands:
             clocks[command.stream, command.begin] = interval.begin if interval else None
             clocks[command.stream, command.end] = interval.end if interval else None
 
+        external = {span["resource"] for span in spans
+                    if "protocol_operand" in span and not resources[span["resource"]]["serial"]}
         coordinates, device_services = [], []
         for resource, orders in enumerate(positions):
+            if resource in external:
+
+                # A local Work handle proves readiness and consumption. Its staging clock cannot measure target transport.
+                coordinates.extend({"resource": resource, "order": order, "time_ns": None} for order in sorted(orders))
+                continue
             descriptor = resources[resource]
             stream = int(descriptor["identity"].split("/")[1]) if descriptor["kind"] == "stream" else None
             for order in sorted(orders):

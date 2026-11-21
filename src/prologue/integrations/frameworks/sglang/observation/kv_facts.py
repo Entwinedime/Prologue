@@ -170,7 +170,8 @@ class NativeKvFacts:
             return self.recording
 
         # The target registration is independent native evidence; source pointer arithmetic cannot invent its layout.
-        for path in sorted((self.directory / "kv-pools").glob("*.json")):
+        pools = self.directory / self.recording.get("kv_pool_directory", "kv-pools")
+        for path in sorted(pools.glob("*.json")):
             recording = json.loads(path.read_text())
             session = recording["registration"]["session"]
             if session in self.registrations:

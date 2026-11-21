@@ -45,7 +45,8 @@ class ExplorationTask:
         self.source = read(args.input)
         model = Path(self.source["model"]["path"]).resolve(strict=True)
         self.source["model"] = {**self.source["model"], "path": str(model)}
-        self.planner = planner(self.source)
+        deployment = read(args.deployment)
+        self.planner = planner(self.source, deployment)
         self.reuse = args.reuse.resolve(strict=True) if args.reuse else None
         if self.root.is_relative_to(model) or (self.reuse and self.root.is_relative_to(self.reuse)):
             raise ValueError("exploration must own an output outside the model and prior task")
@@ -58,7 +59,7 @@ class ExplorationTask:
         self.budget = Usage(int(args.native_budget_seconds * 1e9), args.attempt_limit, int(args.postprocessing_budget_seconds * 1e9))
         self.limit = OperationLimit(self.root, args.storage_bytes)
         self.environment = {
-            "framework": self.source["framework"], "model": self.source["model"], "deployment": read(args.deployment),
+            "framework": self.source["framework"], "model": self.source["model"], "deployment": deployment,
             "model_config": hashlib.sha256((model / "config.json").read_bytes()).hexdigest(),
             "binary": hashlib.sha256(self.binary.read_bytes()).hexdigest(), "images": self.runtime,
         }

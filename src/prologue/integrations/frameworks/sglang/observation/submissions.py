@@ -65,9 +65,12 @@ class EngineSubmissions:
     async def run(self, endpoint: Any, clock: Any, barrier: Any, directory, ranks) -> None:
         origin_ns = clock.origin.value
         phase = "warmup" if self.prefix == "warmup" else "source"
-        records = [record for group in self.submissions for _, record in group]
+
+        # A second observer replays the same declared arrivals and gets its own measured delivery times.
+        groups = [[(payload, dict(record)) for payload, record in group] for group in self.submissions]
+        records = [record for group in groups for _, record in group]
         self.delivery = [{"clock": "monotonic_raw_ns", "origin_ns": origin_ns, "submissions": records}]
-        for index, group in enumerate(self.submissions):
+        for index, group in enumerate(groups):
             if index:
 
                 # Worker idle, not client completion, closes a group; both PD instances join before advancing time.

@@ -5,18 +5,6 @@ import json
 from pathlib import Path
 
 
-class SGLangAscendLaunch:
-    """Bind the native job geometry to the physical resources for this capture."""
-
-    def __init__(self, job, deployment):
-        from prologue.integrations.frameworks.sglang.configuration import CaptureInput
-        from prologue.integrations.platforms.ascend.deployment import AscendDeployment
-
-        self.job = job
-        self.serving = CaptureInput(job)
-        self.platform = AscendDeployment(deployment, self.serving.worker_count, len(self.serving.instances) > 1)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -100,12 +88,13 @@ def main() -> None:
         command.add_argument("--binary", type=Path, required=True)
         command.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
     arguments = parser.parse_args()
+    if arguments.command in {"capture", "acquire-sources", "acquire-costs", "explore"}:
+        from prologue.integrations.frameworks.sglang.ascend.launch import SGLangAscendLaunch
     if arguments.command in {"fit-costs", "acquire-costs", "explore"}:
         from prologue.integrations.frameworks.sglang.acquisition.cost_reuse import BatchHostReuse
-    if arguments.command in {"plan-sources", "explore"}:
-        from prologue.integrations.frameworks.sglang.acquisition.planning import SourcePlanning
     if arguments.command == "plan-sources":
         from prologue.acquisition.planning import PlanningProcess
+        from prologue.integrations.frameworks.sglang.acquisition.planning import SourcePlanning
 
         PlanningProcess(SourcePlanning(json.loads(arguments.input.read_text())), arguments.output).run()
     elif arguments.command == "produce":
@@ -142,7 +131,7 @@ def main() -> None:
         from prologue.app.prediction import PredictionProcess
         from prologue.workflow.exploration import ExplorationTask
 
-        task = ExplorationTask(arguments, planner=SourcePlanning, place=SGLangAscendLaunch,
+        task = ExplorationTask(arguments, planner=SGLangAscendLaunch.source_planner, place=SGLangAscendLaunch,
                                reuse_samples=BatchHostReuse.match, predictor=PredictionProcess)
         if not task.run():
             raise SystemExit(1)

@@ -75,7 +75,7 @@ private:
         if (span) {
             const auto & region = observation_.spans[*span];
             const bool timed = region.kind != WorkKind::Wait && region.kind != WorkKind::Boundary;
-            const bool payload = region.kind == WorkKind::Host || observation_.resources[resource].has_payload(begin, end);
+            const bool payload = region.kind == WorkKind::Host || region.supplied_operand || observation_.resources[resource].has_payload(begin, end);
             if (timed && payload) {
                 graph_.work.push_back({ region.scope, resource, region.kind, start, finish });
                 if (evidence_) evidence_->work_spans.push_back(*span);

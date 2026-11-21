@@ -11,12 +11,13 @@ from prologue.integrations.frameworks.sglang.acquisition.sources import Represen
 
 
 class SourcePlanning:
-    def __init__(self, source):
+    def __init__(self, source, *, joint_observation=True):
         if source.keys() != {"framework", "model", "configurations", "workloads"}:
             raise ValueError("source planning needs framework, model, configurations and workloads")
         if source["framework"] != "sglang":
             raise ValueError("source planning currently requires the SGLang adapter")
         self.source = source
+        self.joint_observation = joint_observation
         self.configurations = self.named(source["configurations"], "configurations")
         self.workloads = self.named(source["workloads"], "workloads")
         self.workloads = {identity: ServingInput.workload_input(workload) for identity, workload in self.workloads.items()}
@@ -103,8 +104,8 @@ class SourcePlanning:
                 capture = self.capture_inputs[job["id"]]
                 capture["warmup"] = capture["workload"]
 
-                # Collective service needs readiness and payload evidence from every actual participant.
-                capture["observe_all_workers"] = job["native_workers"] > 1
+                # Only a simultaneous physical capture can measure service across the target group.
+                capture["observe_all_workers"] = self.joint_observation and job["native_workers"] > 1
         configurations = list(dict.fromkeys(configuration for configuration, _ in pairs))
         workloads = list(dict.fromkeys(workload for _, workload in pairs))
         scope = {"configurations": configurations, "workloads": workloads, "count": len(pairs)}

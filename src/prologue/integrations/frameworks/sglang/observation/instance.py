@@ -18,7 +18,7 @@ from prologue.artifacts import write_json
 class NativeServingInstance:
     def __init__(
         self, source: CaptureInput, instance: InstanceConfiguration, output: Path, index: int, rank_offset: int,
-        *, resource_trace: bool, latency_only: bool, host_timing: bool, service_reference: bool,
+        *, resource_trace: bool, latency_only: bool, host_timing: bool, service_reference: bool, local_shards: bool,
     ) -> None:
         self.model = source.model
         self.observe_all_workers = source.observe_all_workers or service_reference
@@ -26,8 +26,10 @@ class NativeServingInstance:
         self.latency_only = latency_only
         self.host_timing = host_timing
         self.service_reference = service_reference
+        self.local_shards = local_shards
         self.output = output.resolve()
         self.instance = instance
+        self.instance_count, self.worker_count = len(source.instances), source.worker_count
         self.directory = self.output / "instances" / str(index)
         self.rank_offset = rank_offset
         configuration = instance.configuration
@@ -94,20 +96,31 @@ class NativeServingInstance:
         write_json(path, {"clock": "monotonic_raw_ns", "requests": list(requests.values()), "specialization_loads": loads}, replace=False)
         return {"latency": str(path.relative_to(self.output))}
 
-    def observe(self, engine, capture, clock, barrier) -> tuple[int, ...]:
-        engine.start_profile(output_dir=str(self.output / "native"), activities=["CPU", "GPU"], record_shapes=False, with_stack=False)
-        ObservationWindow.wait(self.output, self.roles, "profiler", "complete")
-        plan = json.loads((self.directory / "role-plan.json").read_text())
-        selected = tuple(plan["observed_roles"])
-        try:
-            barrier.wait()
-            self.generate(engine, "capture", capture, clock, barrier)
-            self.reset(engine, "source")
-            barrier.wait()
-        finally:
-            engine.stop_profile()
-            NativeProfiles.wait(self.output, selected, self.roles)
-        return selected
+    def observe(self, engine, capture, clock, barrier):
+        windows = None
+        round_index = 0
+        while True:
+            engine.start_profile(output_dir=str(self.output / "native"), activities=["CPU", "GPU"],
+                                 record_shapes=False, with_stack=False)
+            try:
+                ObservationWindow.wait(self.output, self.roles, "profiler", "complete")
+                if windows is None:
+                    plan = json.loads((self.directory / "role-plan.json").read_text())
+                    windows = NativeProfiles.windows(self.output, plan["observed_roles"], self.local_shards, self.instance_count)
+                selected = windows[round_index]
+                barrier.wait()
+                phase = f"capture/{selected[0]}" if self.local_shards else "capture"
+                self.generate(engine, phase, capture, clock, barrier)
+                self.reset(engine, "source")
+                barrier.wait()
+            finally:
+                engine.stop_profile()
+            protocol = NativeProfiles.protocol_directory(self.output, selected, self.local_shards)
+            participants = range(self.worker_count) if self.local_shards else self.roles
+            NativeProfiles.wait(self.output, selected, participants, protocol)
+            round_index += 1
+            if round_index == len(windows):
+                return plan["observed_roles"], [window for window in windows if window[0] in self.roles]
 
     def run(self, barrier, clock, bootstrap, rendezvous) -> dict:
         self.directory.mkdir()
@@ -123,7 +136,8 @@ class NativeServingInstance:
             "rendezvous": {"host": rendezvous["MASTER_ADDR"], "port": int(rendezvous["MASTER_PORT"])},
             "rank_offset": self.rank_offset, "native_participants": self.roles,
             "pp_size": self.pp, "ep_size": self.ep,
-            "observe_all_workers": self.observe_all_workers,
+            "observe_all_workers": self.observe_all_workers, "local_shards": self.local_shards,
+            "instance_count": self.instance_count, "worker_count": self.worker_count,
             "resource_trace": self.resource_trace,
             "latency_only": self.latency_only,
             "host_timing": self.host_timing,
@@ -144,14 +158,17 @@ class NativeServingInstance:
         if self.ep > 1:
             os.environ.update(DEEP_USE_ALLTOALL_MODE="1", DEEPEP_HCCL_BUFFSIZE="1024", HCCL_BUFFSIZE="1024")
 
-        from sglang.srt.entrypoints.engine import Engine
+        if self.local_shards:
+            from prologue.integrations.frameworks.sglang.observation.shard_engine import SingleDeviceEngine as Engine
+        else:
+            from sglang.srt.entrypoints.engine import Engine
 
         model = self.model
         configuration = self.configuration
         chunk_tokens = configuration["prefill_chunk_tokens"]
         options = {
             "model_path": model["path"], "dtype": model["dtype"], "device": NativeConfiguration.accelerator_device,
-            "tp_size": self.tp, "pp_size": self.pp, "base_gpu_id": self.rank_offset,
+            "tp_size": self.tp, "pp_size": self.pp, "base_gpu_id": 0 if self.local_shards else self.rank_offset,
             "nccl_port": int(rendezvous["MASTER_PORT"]),
             "attention_backend": configuration["attention_backend"],
             "page_size": configuration["page_size"],
@@ -199,7 +216,9 @@ class NativeServingInstance:
                 selected = ()
                 metrics = self.timing_metrics()
             else:
-                selected = self.observe(engine, capture, clock, barrier)
+                selected, windows = self.observe(engine, capture, clock, barrier)
+                if self.local_shards:
+                    metrics["profile_windows"] = windows
             captured_ns = time.monotonic_ns()
         finally:
             try:
@@ -219,7 +238,7 @@ class NativeServingInstance:
             metrics["cpu_transports"] = str(output.relative_to(self.output))
         return {
             "id": self.instance.identity, "mode": mode, "rank_offset": self.rank_offset, "observed_roles": selected,
-            "native_participants": self.roles,
+            "native_participants": self.roles, **({"placement": "single_device"} if self.local_shards else {}),
             "initialization_ns": initialized_ns - started_ns,
             "warmup_ns": warmed_ns - initialized_ns,
             "capture_ns": captured_ns - warmed_ns, **metrics,

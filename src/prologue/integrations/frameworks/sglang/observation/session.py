@@ -72,7 +72,7 @@ class NativeRendezvous:
 
 class NativeServingSession:
     def __init__(self, source, output: Path, *, resource_trace: bool = False, latency_only: bool = False,
-                 host_timing: bool = False, service_reference: bool = False) -> None:
+                 host_timing: bool = False, service_reference: bool = False, local_shards: bool = False) -> None:
         self.framework_revision = NativeConfiguration.upstream_revision(os.environ.get("PROLOGUE_SGLANG_REVISION"))
         serving = CaptureInput(source)
         self.output = output.resolve()
@@ -83,7 +83,7 @@ class NativeServingSession:
             instance = NativeServingInstance(
                 serving, description, self.output, index, offset,
                 resource_trace=resource_trace or service_reference, latency_only=latency_only,
-                host_timing=host_timing, service_reference=service_reference,
+                host_timing=host_timing, service_reference=service_reference, local_shards=local_shards,
             )
             self.instances.append(instance)
             offset += len(instance.roles)

@@ -38,6 +38,7 @@ struct NativeSpan {
     NativeOrder begin;
     NativeOrder end;
     WorkKind kind;
+    bool supplied_operand;
 };
 
 struct NativeAnchor {

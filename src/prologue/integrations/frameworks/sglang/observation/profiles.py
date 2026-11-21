@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any
 
 from prologue.artifacts import write_json
+from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
 
 
 class NativeProfiles:
     def __init__(self, observation: Any) -> None:
         self.observation = observation
+        self.windows_by_round = None
+        self.round = 0
         from prologue.integrations.runtimes.pytorch.protocol import CpuProtocol
 
         capture = observation.capture
@@ -21,11 +25,29 @@ class NativeProfiles:
         )
 
     @staticmethod
-    def wait(directory: Path, ranks, participants) -> None:
-        published = [directory / "native" / f"rank-{rank}" for rank in ranks]
-        protocols = [directory / "protocol" / f"rank-{rank}.json" for rank in participants]
+    def windows(directory, observed, single_device, instances):
+        if not single_device:
+            return [list(observed)]
+        if instances > 1:
 
-        # A PP ingress reply can precede downstream profiler shutdown; rename is each worker's publication boundary.
+            # Both PD pools execute every request. Exactly one role across both pools owns the device profiler.
+            plans = [directory / "instances" / str(index) / "role-plan.json" for index in range(instances)]
+            while not all(path.is_file() for path in plans):
+                time.sleep(0.05)
+            observed = [rank for path in plans for rank in json.loads(path.read_bytes())["observed_roles"]]
+        return [[rank] for rank in observed]
+
+    @staticmethod
+    def protocol_directory(directory, selected, single_device):
+        root = directory / "protocol"
+        return root / f"worker-{selected[0]}" if single_device else root
+
+    @staticmethod
+    def wait(directory: Path, ranks, participants, protocol_directory) -> None:
+        published = [directory / "native" / f"rank-{rank}" for rank in ranks]
+        protocols = [protocol_directory / f"rank-{rank}.json" for rank in participants]
+
+        # A new observer can take the device only after the previous profiler closed and every participant published.
         while not all(path.is_dir() for path in published) or not all(path.is_file() for path in protocols):
             time.sleep(0.05)
 
@@ -36,7 +58,20 @@ class NativeProfiles:
         if request.req_type == ProfileReqType.START_PROFILE:
 
             # All instances have drained warmup and published their real pool layouts before this request.
-            owner.plan_roles()
+            if self.windows_by_round is None:
+                self.windows_by_round = self.windows(owner.directory, owner.plan_roles(), owner.description["local_shards"],
+                                                     owner.description["instance_count"])
+            else:
+
+                # The preceding request drained and flushed its KV. This replay owns fresh ingress and group receipts.
+                owner.window = ObservationWindow(owner.directory, owner.description)
+            selected = self.windows_by_round[self.round]
+            owner.selected = owner.parallel["rank"] in selected
+            self.protocol_root = self.protocol_directory(owner.directory, selected, owner.description["local_shards"])
+            if owner.description["local_shards"]:
+
+                # A later replay can reuse a registration with a different request slot. Keep this window's peer facts together.
+                owner.kv_pools = self.protocol_root / "kv-pools"
         if owner.selected:
             result = original(manager, request)
         else:
@@ -52,7 +87,8 @@ class NativeProfiles:
         elif request.req_type == ProfileReqType.STOP_PROFILE and result.success:
 
             # Protocol facts cover every participant, including workers represented by another device profile.
-            write_json(owner.directory / "protocol" / f"rank-{owner.parallel['rank']}.json", self.protocol.document())
+            write_json(self.protocol_root / f"rank-{owner.parallel['rank']}.json", self.protocol.document(), replace=False)
+            self.round += 1
         return result
 
     def start(self, original: Any, manager: Any, output_dir: str, *args: Any, **kwargs: Any) -> Any:

@@ -21,6 +21,10 @@ class SourceEvidence:
         self.details = details
         self.counts = Counter()
         self.findings = []
+        external = {event for event, point in enumerate(self.evidence["events"])
+                    if "protocol_operand" in facts["spans"][point["span"]]
+                    and not graph["resources"][graph["events"][event]["resource"]]["serial"]}
+        self.unmeasured_boundaries = logical | external
         self.maximum_inversion_ns = 0
         self.coverage = {}
         self.clock, self.logical = clock, logical
@@ -182,7 +186,8 @@ class SourceEvidence:
                     self.require(end <= span["end"], f"resource {key} skips an active span boundary")
                     payload_index = bisect_right(payload_ends, begin)
                     has_payload = payload_index < len(payload) and payload[payload_index][0] < end
-                    has_work = span["kind"] not in {"wait", "boundary"} and (span["kind"] == "host" or has_payload)
+                    has_work = span["kind"] not in {"wait", "boundary"} and (
+                        span["kind"] == "host" or has_payload or "protocol_operand" in span)
                 if has_work:
                     expected[index, span["scope"], key[0], span["kind"], start, finish] += 1
                 else:
@@ -203,6 +208,11 @@ class SourceEvidence:
             self.counts["logical_condition_relations"] += 1
             return
         self.clock.constrain(kind, index, source, target)
+        if missing and missing <= self.unmeasured_boundaries:
+
+            # Preserve the unknown constraint count and distinguish every required external duration from lost measurements.
+            self.counts["external_transport_relations"] += 1
+            return
         begin, end = (self.evidence["events"][event]["time_ns"] for event in (source, target))
         issue = "unknown_time" if begin is None or end is None else "time_inversion" if begin > end else None
         if issue is None:
@@ -225,8 +235,11 @@ class SourceEvidence:
             self.timing(edge["kind"], index, edge["source"], edge["target"])
         for index, work in enumerate(self.graph["work"]):
             self.timing("work/" + work["kind"], index, work["start"], work["finish"])
+        timing = self.clock.report()
+        if timing["status"] == "incomplete" and timing["unknown_constraints"] == self.counts["external_transport_relations"]:
+            timing["status"] = "external_cost_required"
         return {
-            "mapping": "consistent", "timing": self.clock.report(),
+            "mapping": "consistent", "timing": timing,
             "events": len(self.graph["events"]), "work": len(self.graph["work"]),
             "coverage": self.coverage,
             "counts": dict(self.counts), "maximum_inversion_ns": self.maximum_inversion_ns, "findings": self.findings,
@@ -251,12 +264,15 @@ class ProductionEvidence:
         effects["host_fences"] = len(host_fences)
         contents = native_case.observe(rank, graph, native, logical_coordinates=native_evidence.logical_coordinates)
         measurements = native_evidence.inspect_measurements()
+        if native_case.joint_execution and measurements["external_transfer_endpoints"]:
+            raise ValueError("a physical reference cannot substitute single-device Work bounds for transport measurements")
         measurements["checked_device_measurements"] = effects["device_measurements"]
         device_intervals = native_evidence.device_intervals()
         boundaries = native_evidence.inspect_boundaries(graph, device_intervals)
         services, private_streams = native_evidence.inspect_services()
         launches = {} if retain_measurements else None
-        submissions, links = native_evidence.inspect_submissions(launches)
+        protocol_posts = native_evidence.supplied_protocols(graph)
+        submissions, links = native_evidence.inspect_submissions(protocol_posts, launches)
         payload_times = defaultdict(list) if retain_measurements else None
         payload = native_evidence.inspect_payload(graph, private_streams, device_intervals, links, launches, payload_times)
         generations = native_evidence.event_generations
@@ -312,7 +328,7 @@ class ProductionEvidence:
         for rank in publication["observed_roles"]:
             try:
                 facts = json.loads((native_case.graphs / f"{rank}-facts.json").read_text())
-                report = self.observe_rank(native_case, rank, facts, retain_measurements)
+                report = self.observe_rank(native_case, rank, facts, retain_measurements and native_case.joint_execution)
             except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
 
                 # A malformed or absent source is a finding; continue the remaining independent ranks.
@@ -320,7 +336,10 @@ class ProductionEvidence:
             reports.append({"rank": rank, **report})
 
         case_report = {"status": "unverified", "error": "one or more worker mappings are unverified"}
-        if all(report["mapping"] == "consistent" for report in reports):
+        if not native_case.joint_execution:
+            case_report = {"status": "separate_worker_windows", "windows": {
+                instance["id"]: instance["profile_windows"] for instance in capture["instances"]}}
+        elif all(report["mapping"] == "consistent" for report in reports):
             try:
                 native_case.finish()
                 case_report = native_case.report(self.details)
@@ -330,7 +349,15 @@ class ProductionEvidence:
                     "ranks": reports, "native_case": case_report}
         return native_case, document
 
-    def publish(self, document):
+    @staticmethod
+    def workers_verified(document):
+        timing = {"compatible"}
+        if document["native_case"]["status"] == "separate_worker_windows":
+            timing.add("external_cost_required")
+        return bool(document["ranks"]) and all(row["mapping"] == "consistent" and row["timing"]["status"] in timing
+                                               for row in document["ranks"])
+
+    def publish(self, document, *, require_joint=False):
         reports, case_report = document["ranks"], document["native_case"]
         self.output.mkdir(parents=True)
         (self.output / "source-evidence.json").write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
@@ -350,6 +377,7 @@ class ProductionEvidence:
         ]
         labels = {
             "consistent": "Consistent", "compatible": "Compatible within calibration bounds",
+            "external_cost_required": "Local clocks compatible with external transport timing pending",
             "inconsistent": "No shared calibration", "incomplete": "Missing measurements", "unverified": "Unverified",
         }
         for report in reports:
@@ -373,6 +401,7 @@ class ProductionEvidence:
                     f"{measurements['checked_device_measurements']} device endpoints against raw records. "
                     f"{measurements['unmeasured_device_endpoints']} stream boundaries lack measurements, and "
                     f"{measurements['logical_wait_boundaries']} logical wait boundaries have no device submission. "
+                    f"{measurements['external_transfer_endpoints']} posted transfer boundaries require external timing. "
                     "Synchronous transfers retain the driver's host timestamps, and device return fences retain SDK timestamps.", "",
                     f"Checked {streams['named_streams']} named streams, {payload.get('retained_payload_tasks', 0)} retained SDK payload tasks, "
                     f"and {payload.get('opaque_service_tasks', 0)} tasks in private service queues. "
@@ -387,6 +416,9 @@ class ProductionEvidence:
         lines.extend(["", f"Native group result `{case_report['status']}`."])
         if "error" in case_report:
             lines.extend(["", case_report["error"]])
+        elif case_report["status"] == "separate_worker_windows":
+            lines.extend(["", "Workers were profiled in separate native request executions on one physical device. "
+                          "Each worker's SDK mapping is checked independently. Target communication timing requires a physical group reference."])
         else:
             model = case_report["model_communication"]
             payload = case_report["pd_payload"]
@@ -404,17 +436,18 @@ class ProductionEvidence:
         lines.extend([
             "", "Nominal inversions use original midpoint timestamps. Each rank uses one calibration across all measured relations, "
             "including paths through logical waits. The original API, its observed prerequisites, and the absence of physical submissions "
-            "qualify logical waits and any data handed off at their returns. Work, resource accesses, and recorded signals require measured endpoints. "
+            "qualify logical waits and any data handed off at their returns. Local work, resource accesses, and recorded signals require measured endpoints. "
+            "A separately observed worker can establish a transport operand and its consumer while its target transport cost remains external. "
             "Compatibility establishes a feasible calibration on the original graph and timestamps. Exact offsets, capture completeness, "
             "and SDK attribution require their own evidence. `unknown_time` marks a required measurement gap.",
-            "", "Exit status 0 requires consistent mappings for every rank, consistent native group evidence, all required measurements, "
-            "independently supported logical waits, and a feasible shared calibration. Other outcomes return 1. The group check uses "
+            "", "Exit status 0 requires consistent worker mappings and local timing evidence. A joint target reference additionally "
+            "requires consistent physical group evidence and calibration. The group check uses "
             "native records for participant, CPU protocol, and binding evidence. The default JSON lists up to three nominal timing "
             "findings per category. `--details` includes every location.", "",
         ])
         (self.output / "source-evidence.md").write_text("\n".join(lines))
-        return 0 if reports and case_report["status"] == "consistent" and all(report["mapping"] == "consistent" and report["timing"]["status"] == "compatible"
-                                   for report in reports) else 1
+        group = case_report["status"] == "consistent" or (not require_joint and case_report["status"] == "separate_worker_windows")
+        return 0 if group and self.workers_verified(document) else 1
 
 
 def main():

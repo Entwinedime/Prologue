@@ -147,7 +147,7 @@ class FixedPerformance:
         checker = ProductionEvidence(args.reference, args.capture, self.output / "source-evidence", args.details)
         case, evidence = checker.inspect(retain_measurements=True)
         self.report["reference_status"] = evidence["native_case"]["status"]
-        if checker.publish(evidence) or case.groups.keys() != case.sources.keys():
+        if checker.publish(evidence, require_joint=True) or case.groups.keys() != case.sources.keys():
             return self.finish("reference_unqualified")
 
         reference = FixedReference(case)

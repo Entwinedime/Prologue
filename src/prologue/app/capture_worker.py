@@ -13,6 +13,7 @@ def main() -> None:
     capture = commands.add_parser("capture", help="run one normalized native observation job")
     capture.add_argument("--input", type=Path, required=True)
     capture.add_argument("--output", type=Path, required=True)
+    capture.add_argument("--local-shards", action="store_true", help="execute logical shards on the single mounted device")
     observation = capture.add_mutually_exclusive_group()
     observation.add_argument("--resource-trace", action="store_true", help="observe resources and input reads for independent comparison")
     observation.add_argument("--service-reference", action="store_true", help="observe structure, resources and same-run CPU activity")
@@ -33,7 +34,7 @@ def main() -> None:
         NativeServingSession(
             json.loads(arguments.input.read_text()), arguments.output,
             resource_trace=arguments.resource_trace, latency_only=arguments.latency_only,
-            host_timing=arguments.host_timing, service_reference=arguments.service_reference,
+            host_timing=arguments.host_timing, service_reference=arguments.service_reference, local_shards=arguments.local_shards,
         ).run()
     elif arguments.command == "export":
         from prologue.integrations.platforms.ascend.export import AscendExport

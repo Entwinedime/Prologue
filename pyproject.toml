@@ -19,6 +19,7 @@ where = ["src"]
 include = [
     "prologue", "prologue.app", "prologue.contracts.workload", "prologue.acquisition.observation",
     "prologue.integrations.frameworks.sglang", "prologue.integrations.frameworks.sglang.observation",
+    "prologue.integrations.frameworks.sglang.ascend",
     "prologue.integrations.platforms.ascend", "prologue.integrations.runtimes.pytorch",
 ]
 

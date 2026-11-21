@@ -359,9 +359,9 @@ void CoarseGraph::validate() const {
         if (piece.kind == WorkKind::Collective) {
             const auto & group = scopes[piece.scope].communication;
             if (!group || std::ranges::find(group->required, group->rank) == group->required.end()
-                || resources[piece.resource].kind == ResourceKind::Service
+                || (resources[piece.resource].kind == ResourceKind::Service && resources[piece.resource].serial)
                 || resources[piece.resource].rank != group->rank || !collective_scopes.insert(piece.scope).second)
-                throw std::invalid_argument("collective work requires one thread or stream interval per participating scope");
+                throw std::invalid_argument("collective work requires one interval on a participating thread, stream or concurrent service");
         }
         if (work_finish[piece.start]) throw std::invalid_argument("coarse work is charged twice at one entry boundary");
         work_finish[piece.start] = piece.finish;

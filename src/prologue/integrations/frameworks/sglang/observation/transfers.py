@@ -16,12 +16,13 @@ class TransferWork:
         self.context = context
 
     def wait(self, *args, **kwargs):
+        from torch.distributed import Work
+
         transfers = self.transfers
         if not transfers.calls.enabled:
             return self.native.wait(*args, **kwargs)
         work = transfers.messages.wait_work(self.context, device=False)
-        native = type(self.native)
-        implementation = f"{native.__module__}.{native.__qualname__}.wait"
+        implementation = f"{Work.__module__}.{Work.__qualname__}.wait"
         with transfers.consume(f"transfer_{self.direction}_wait", implementation, work, self.producer):
             return self.native.wait(*args, **kwargs)
 

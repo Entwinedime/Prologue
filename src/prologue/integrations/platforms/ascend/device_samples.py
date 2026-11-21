@@ -6,10 +6,9 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 
+from prologue.acquisition.observation import jointly_observed
 from prologue.artifacts import write_json
 from prologue.integrations.platforms.ascend.clock import DeviceCalibration
-
-
 from prologue.performance.samples import ServiceSamples, WorkCatalog
 
 
@@ -142,8 +141,9 @@ class CollectiveServices:
 class ObservedServices:
     """Resolve measurements from the same observation by their actual resource intervals."""
 
-    def __init__(self, graph, facts, collectives):
+    def __init__(self, graph, facts, collectives, *, physical_peers):
         self.graph, self.collectives = graph, collectives
+        self.physical_peers = physical_peers
         measurement = facts["measurements"]
         if (graph["environment"] != facts["environment"]
                 or graph["evidence"]["window_ns"] != measurement["window_ns"]):
@@ -186,9 +186,16 @@ class ObservedServices:
             return duration, None, payload
         if piece["kind"] == "communication":
             return None, None, None
-        if self.graph["resources"][lane]["kind"] != "stream":
+        resource = self.graph["resources"][lane]
+        if resource["kind"] != "stream":
             if piece["kind"] != "transfer":
                 return None, None, None
+            if resource["kind"] == "service" and not self.physical_peers:
+                scope = self.graph["scopes"][piece["scope"]]
+
+                # On one card this interval measures staging into another logical worker's pool.
+                if any(access["pool"] != "local" for field in ("kv_accesses", "slot_accesses") for access in scope[field]):
+                    return None, None, None
             copy = self.transfers.get((lane, begin, end))
             return (copy[0], [copy[1], copy[2]], None) if copy is not None else (None, None, None)
 
@@ -207,10 +214,10 @@ class CostSamples:
         production, rank = arguments.production, arguments.rank
         self.observation = {"production": str(production.resolve()), "rank": rank}
         root = arguments.projection or production
+        inputs = json.loads((root / "production.json").read_text())["inputs"]
         if arguments.projection is not None:
-            captures = [json.loads((directory / "production.json").read_text())["inputs"]["capture_path"]
-                        for directory in (root, production)]
-            if captures[0] != captures[1]:
+            original = json.loads((production / "production.json").read_text())["inputs"]
+            if inputs["capture_path"] != original["capture_path"]:
                 raise ValueError("regenerated cost evidence belongs to a different native observation")
         ranks = json.loads((root / "result.json").read_text())["observed_roles"]
         if rank not in ranks:
@@ -220,16 +227,18 @@ class CostSamples:
         facts = json.loads((work / f"{rank}-facts.json").read_text())
         measurement = facts["measurements"]
         peers = {}
-        if measurement["collectives"] or "pd_protocol" in measurement:
+        joint = all(map(jointly_observed, inputs["capture"]["instances"]))
+
+        # A PD notification or a collective needs its peers from the same physical execution.
+        if joint and (measurement["collectives"] or "pd_protocol" in measurement):
             peers = {actor: facts if actor == rank else json.loads((work / f"{actor}-facts.json").read_text())
                      for actor in ranks}
         collectives = {}
-        if measurement["collectives"]:
-            capture = Path(json.loads((root / "production.json").read_text())["inputs"]["capture_path"])
-            collectives = CollectiveServices(peers, capture, rank).samples
-        self.services = ObservedServices(self.catalog.graph, facts, collectives)
+        if peers and measurement["collectives"]:
+            collectives = CollectiveServices(peers, Path(inputs["capture_path"]), rank).samples
+        self.services = ObservedServices(self.catalog.graph, facts, collectives, physical_peers=joint)
         self.notifications = []
-        if "pd_protocol" in measurement:
+        if peers and "pd_protocol" in measurement:
             from prologue.integrations.frameworks.sglang.acquisition.pd_samples import PdNotificationSamples
 
             protocol = {actor: body["measurements"]["pd_protocol"] for actor, body in peers.items()}
