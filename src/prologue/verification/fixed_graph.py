@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from prologue.acquisition.recording import PublishedCapture
 from prologue.artifacts import write_json
 from prologue.integrations.runtimes.docker import ModelingProcess
 
@@ -144,7 +145,8 @@ class FixedPerformance:
     def run(self):
         args = self.arguments
         self.output.mkdir(parents=True)
-        checker = ProductionEvidence(args.reference, args.capture, self.output / "source-evidence", args.details)
+        recording = PublishedCapture(args.capture, conditions={"service_reference": True})
+        checker = ProductionEvidence(args.reference, recording.source, self.output / "source-evidence", args.details)
         case, evidence = checker.inspect(retain_measurements=True)
         self.report["reference_status"] = evidence["native_case"]["status"]
         if checker.publish(evidence, require_joint=True) or case.groups.keys() != case.sources.keys():
@@ -181,7 +183,8 @@ class FixedPerformance:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("capture", "reference", "costs", "binary", "output"):
+    parser.add_argument("--capture", type=Path, required=True, help="published native service-reference task")
+    for name in ("reference", "costs", "binary", "output"):
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
     parser.add_argument("--timeout", type=float, required=True, help="cumulative modeling allowance in seconds")

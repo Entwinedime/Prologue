@@ -8,10 +8,11 @@ from tempfile import TemporaryDirectory
 from time import monotonic_ns
 from types import SimpleNamespace
 
+from prologue.acquisition.publication import SourceProductions
+from prologue.acquisition.recording import PublishedCapture
+from prologue.app.prediction import PredictionProcess
 from prologue.artifacts import write_json
 from prologue.integrations.runtimes.docker import ModelingProcess
-from prologue.app.prediction import PredictionProcess
-from prologue.acquisition.publication import SourceProductions
 
 from .compare_actions import ActionComparison
 from .execution_inputs import NativeInputs
@@ -30,10 +31,11 @@ class StructureVerification:
     def run(self):
         args = self.arguments
         self.output.mkdir(parents=True)
-        capture = args.capture.resolve(strict=True)
+        recording = PublishedCapture(args.capture)
+        capture = recording.source
         wall_ns = {}
         stages = {
-            "capture": str(capture), "reference": str(args.reference.resolve(strict=True)),
+            "capture": str(recording.directory), "reference": str(args.reference.resolve(strict=True)),
             "production": str(args.production.resolve()), "wall_ns": wall_ns,
         }
         started = monotonic_ns()
@@ -105,7 +107,8 @@ class StructureVerification:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("capture", "reference", "production", "input", "binary", "output"):
+    parser.add_argument("--capture", type=Path, required=True, help="published detailed native capture task")
+    for name in ("reference", "production", "input", "binary", "output"):
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--timeout", type=float, required=True, help="allowance in seconds for each of layout preparation and prediction")
     parser.add_argument("--control-image", default="prologue-control:ubuntu22.04")

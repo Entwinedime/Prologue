@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.acquisition.domains import SourceDomain
 from prologue.acquisition.capture import CaptureProcess
+from prologue.acquisition.recording import PublishedCapture
 from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
 from prologue.acquisition.production import CaptureProduction
 
@@ -48,13 +49,16 @@ class SourceAcquisition:
         observations = json.loads(arguments.observations.read_text()) if arguments.observations is not None else {}
         if not isinstance(observations, dict) or observations.keys() - {str(identity) for identity in self.jobs}:
             raise ValueError("observation references name an unplanned source job")
-        self.observations = {int(key): Path(path).resolve(strict=True) for key, path in observations.items()}
-        for identity, directory in self.observations.items():
-            if self.output == directory or directory in self.output.parents:
+        self.observations = {}
+        self.sources = {identity: self.output / "sources" / str(identity) for identity in self.jobs}
+        for key, path in observations.items():
+            identity = int(key)
+            conditions = {"resource_trace": True} if arguments.resource_trace else None
+            recording = PublishedCapture(Path(path), self.jobs[identity], conditions=conditions)
+            if self.output.is_relative_to(recording.directory):
                 raise ValueError("source collection must not write inside a referenced native task")
-            CaptureProcess.published(directory, self.jobs[identity])
-        self.sources = {identity: self.observations.get(identity, self.output / "sources" / str(identity))
-                        for identity in self.jobs}
+            self.observations[identity] = recording
+            self.sources[identity] = recording.directory
 
         for value in (arguments.postprocessing_budget_seconds, arguments.timeout):
             if not math.isfinite(value) or value < 1e-9:
@@ -75,7 +79,7 @@ class SourceAcquisition:
                        "deployment": deployment, "images": images, "resource_trace": arguments.resource_trace,
                        "keep_intermediates": arguments.keep_intermediates}
         if self.observations:
-            self.inputs["observations"] = {str(key): str(path) for key, path in self.observations.items()}
+            self.inputs["observations"] = {str(key): str(recording.directory) for key, recording in self.observations.items()}
 
     @staticmethod
     def spending(directory):
@@ -122,6 +126,8 @@ class SourceAcquisition:
                 continue
             if SourceDomain.requested(launch.serving) != self.descriptions[identity]["structure"]:
                 raise ValueError("planned capture input differs from its source domain")
+            if identity in self.observations:
+                launch.require_recorded_placement(self.observations[identity].inputs["deployment"])
             launches[identity] = launch
         return launches, unavailable
 
@@ -134,18 +140,19 @@ class SourceAcquisition:
             raise AllowanceExhausted("source collection postprocessing allowance exhausted")
 
         # Explicit observations stay owned by their original task; only missing observations launch an Engine.
-        if identity not in self.observations:
+        recording = self.observations.get(identity)
+        if recording is None:
             CaptureProcess(SimpleNamespace(
                 output=source, timeout=self.arguments.timeout,
                 budget_seconds=allowance.native_ns / 1e9, attempt_limit=allowance.attempts,
                 source_image=self.inputs["images"]["source"], resource_trace=self.arguments.resource_trace,
             ), launch, self.limit).run()
-        publication = json.loads((source / "result.json").read_text())
+            recording = PublishedCapture(source, self.jobs[identity])
         CaptureProduction(SimpleNamespace(
-            capture=source / publication["source"], output=assets, binary=self.binary, product="templates",
+            output=assets, binary=self.binary, product="templates",
             budget_seconds=allowance.processing_ns / 1e9, source_image=self.inputs["images"]["source"],
             modeling_image=self.inputs["images"]["modeling"], keep_intermediates=self.arguments.keep_intermediates,
-        ), self.limit).run()
+        ), recording, self.limit).run()
         publication = json.loads((assets / "result.json").read_text())
         libraries = [json.loads((assets / path).read_text()) for path in publication["templates"]]
         if SourceDomain.observed(libraries) != self.descriptions[identity]["structure"]:

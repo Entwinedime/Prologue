@@ -1,6 +1,29 @@
 """Associate measured services with the normalized work intervals in a graph."""
 
 import json
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class RendezvousService:
+    lower_ns: int
+    upper_ns: int
+
+    @classmethod
+    def after_peers(cls, local_duration, completion, peer_readiness):
+        lower, upper = local_duration
+
+        # Service ends at this endpoint and starts when both it and its required peers are ready.
+        for first, last in peer_readiness:
+            lower = min(lower, completion[0] - last)
+            upper = min(upper, completion[1] - first)
+        if lower > 0 or lower == upper == 0:
+            return cls(lower, upper)
+        return None
+
+    @property
+    def duration_ns(self):
+        return (self.lower_ns + self.upper_ns) // 2
 
 
 class WorkCatalog:
@@ -46,7 +69,11 @@ class ServiceSamples:
         if copy is not None:
             row["copy"] = {"bytes": copy[0], "direction": copy[1]}
         if collective is not None:
-            row["collective"] = {"dtype": collective[0], "algorithm": collective[1], "elements": collective[2]}
+            payload = row.setdefault("collective", {"dtype": collective[0], "algorithm": collective[1],
+                                                      "elements": collective[2], "max_clock_radius_ns": 0})
+            radius = duration_ns.upper_ns - duration_ns.duration_ns
+            payload["max_clock_radius_ns"] = max(payload["max_clock_radius_ns"], radius)
+            duration_ns = duration_ns.duration_ns
         row["observations_ns"].append(duration_ns)
 
     def add_external(self, identity, kind, features, duration_ns, *, collective=None):

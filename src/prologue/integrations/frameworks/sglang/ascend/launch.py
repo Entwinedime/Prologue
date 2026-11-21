@@ -14,9 +14,15 @@ class SGLangAscendLaunch:
     def __init__(self, job, deployment):
         self.job = job
         self.serving = CaptureInput(job)
-        instances = self.serving.instances
-        self.platform = AscendDeployment(deployment, self.serving.worker_count, len(instances) > 1)
+        self.platform = self.placement(deployment)
         self.local_shards = self.platform.single_device and self.serving.worker_count > 1
+
+    def placement(self, deployment):
+        return AscendDeployment(deployment, self.serving.worker_count, len(self.serving.instances) > 1)
+
+    def require_recorded_placement(self, deployment):
+        if self.placement(deployment).environment != self.platform.environment:
+            raise ValueError("published capture uses a different placement from the planned source")
 
     def worker_options(self, *, reference):
         if self.local_shards and reference:

@@ -16,6 +16,8 @@ class AscendDeployment:
             raise ValueError("Ascend deployment contains unsupported fields")
         self.single_device = self.is_single_device(source)
 
+        # Local shard peers share a container. Only physical groups and PD need the host fabric or store.
+        self.network = "bridge" if self.single_device and not transfer else "host"
         devices = source["physical_devices"]
         if any(type(device) is not int or device < 0 for device in devices) or devices != sorted(set(devices)):
             raise ValueError("Ascend physical_devices must be distinct nonnegative integers in increasing order")
@@ -43,21 +45,19 @@ class AscendDeployment:
             self.environment["ASCEND_MF_STORE_URL"] = source["store_url"]
             self.environment["ASCEND_MF_TRANSFER_PROTOCOL"] = protocol
 
-        # Check host mounts while placing the job, before a multi-job plan starts any worker.
-        self.mounts = []
-        for path in ("/usr/local/Ascend/driver", "/etc/ascend_install.info", "/etc/hccn.conf"):
-            mounted = Path(path).resolve(strict=True)
-            self.mounts.extend(["--mount", f"type=bind,src={mounted},dst={path},readonly"])
-
     def options(self, *, detailed_timing=False, host_timing=False, latency_only=False) -> list[str]:
-        arguments = ["--runtime", "ascend", "--ipc", "host", "--network", "host"]
+        arguments = ["--runtime", "ascend", "--ipc", "host", "--network", self.network]
         if not self.single_device:
             arguments.append("--privileged")
         elif detailed_timing or host_timing:
 
-            # CPU timing opens perf events for the worker while the device cgroup keeps its single-card view.
-            arguments.extend(["--cap-add", "PERFMON"])
-        arguments.extend(self.mounts)
+            # Perf pins one ring per worker thread. Docker's default memlock limit fails for larger groups.
+            arguments.extend(["--cap-add", "PERFMON", "--ulimit", "memlock=-1:-1"])
+
+        # Offline placement comparison needs only the declaration. Native execution needs the driver mounts.
+        for path in ("/usr/local/Ascend/driver", "/etc/ascend_install.info", "/etc/hccn.conf"):
+            mounted = Path(path).resolve(strict=True)
+            arguments.extend(["--mount", f"type=bind,src={mounted},dst={path},readonly"])
 
         if detailed_timing:
 

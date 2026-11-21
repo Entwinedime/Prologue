@@ -13,7 +13,7 @@ class SourceProductions:
         collection = collection.resolve(strict=True)
         self.directory = collection
         inputs = json.loads((collection / "input.json").read_text())
-        self.plan, self.jobs = inputs["plan"], inputs["jobs"]
+        self.plan, self.jobs, self.deployment = inputs["plan"], inputs["jobs"], inputs["deployment"]
         publication = json.loads((collection / "result.json").read_text())
         self.unavailable = publication.get("unavailable", {})
         planned = {str(job["id"]) for job in self.plan["sources"]}

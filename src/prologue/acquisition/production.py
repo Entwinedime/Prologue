@@ -8,6 +8,7 @@ import subprocess
 import time
 from uuid import uuid4
 
+from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.artifacts import write_json
 from prologue.integrations.platforms.ascend.export import AscendExport
 from prologue.integrations.frameworks.sglang.acquisition.domains import SourceDomain
@@ -21,29 +22,31 @@ class CaptureProduction:
         state = directory / "production.json"
         return Usage(processing_ns=json.loads(state.read_text())["spent_ns"]) if state.is_file() else Usage()
 
-    def __init__(self, arguments, limit=None) -> None:
+    def __init__(self, arguments, recording, limit=None) -> None:
         self.arguments = arguments
         self.operation_limit = limit if limit is not None else OperationLimit()
         self.output = arguments.output.resolve()
-        self.capture = arguments.capture.resolve(strict=True)
+        self.capture = recording.source
         self.binary = arguments.binary.resolve(strict=True)
-        if self.output == self.capture or self.capture in self.output.parents:
-            raise ValueError("production must not write inside its immutable native capture")
+        if self.output.is_relative_to(recording.directory):
+            raise ValueError("production must not write inside its immutable native task")
         self.limit_ns = int(arguments.budget_seconds * 1_000_000_000)
         if self.limit_ns <= 0:
             raise ValueError("postprocessing budget must be positive")
 
-        capture = json.loads((self.capture / "capture.json").read_text())
-        self.ranks = [rank for instance in capture["instances"] for rank in instance["observed_roles"]]
-        if (not self.ranks or any(type(rank) is not int or rank < 0 for rank in self.ranks)
-                or len(set(self.ranks)) != len(self.ranks)):
-            raise ValueError("published capture must contain unique nonnegative integer workers")
+        if recording.inputs.get("latency_only"):
+            raise ValueError("source production requires a detailed native recording")
+        capture = recording.manifest
+        self.ranks = CapturedWorkers(capture["instances"]).observed
+        if not self.ranks:
+            raise ValueError("source production requires at least one profiled worker")
         images = {}
         for role, image in (("source", arguments.source_image), ("modeling", arguments.modeling_image)):
             images[role] = json.loads(subprocess.check_output(["docker", "image", "inspect", image], text=True))[0]
         if SourceDomain.image_revision(images["source"]) != capture["framework_revision"]:
             raise ValueError("source postprocessing image differs from the captured upstream SGLang revision")
-        self.inputs = {"capture_path": str(self.capture), "capture": capture, "images": {role: image["Id"] for role, image in images.items()},
+        self.inputs = {"capture_path": str(self.capture), "capture": capture, "native_image": recording.inputs["image"],
+                       "images": {role: image["Id"] for role, image in images.items()},
                        "product": arguments.product, "keep_intermediates": arguments.keep_intermediates}
 
     def publish_state(self) -> None:

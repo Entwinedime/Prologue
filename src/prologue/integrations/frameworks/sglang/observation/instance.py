@@ -107,20 +107,20 @@ class NativeServingInstance:
                 if windows is None:
                     plan = json.loads((self.directory / "role-plan.json").read_text())
                     windows = NativeProfiles.windows(self.output, plan["observed_roles"], self.local_shards, self.instance_count)
-                selected = windows[round_index]
+                window = windows[round_index]
                 barrier.wait()
-                phase = f"capture/{selected[0]}" if self.local_shards else "capture"
+                phase = f"capture/{window.observed[0]}" if window.replay else "capture"
                 self.generate(engine, phase, capture, clock, barrier)
                 self.reset(engine, "source")
                 barrier.wait()
             finally:
                 engine.stop_profile()
-            protocol = NativeProfiles.protocol_directory(self.output, selected, self.local_shards)
-            participants = range(self.worker_count) if self.local_shards else self.roles
-            NativeProfiles.wait(self.output, selected, participants, protocol)
+            participants = range(self.worker_count) if window.replay else self.roles
+            NativeProfiles.wait(self.output, window.observed, participants, window.protocol_directory(self.output))
             round_index += 1
             if round_index == len(windows):
-                return plan["observed_roles"], [window for window in windows if window[0] in self.roles]
+                replays = [item.observed for item in windows if item.replay and item.observed[0] in self.roles]
+                return plan["observed_roles"], replays
 
     def run(self, barrier, clock, bootstrap, rendezvous) -> dict:
         self.directory.mkdir()
@@ -159,7 +159,7 @@ class NativeServingInstance:
             os.environ.update(DEEP_USE_ALLTOALL_MODE="1", DEEPEP_HCCL_BUFFSIZE="1024", HCCL_BUFFSIZE="1024")
 
         if self.local_shards:
-            from prologue.integrations.frameworks.sglang.observation.shard_engine import SingleDeviceEngine as Engine
+            from prologue.integrations.frameworks.sglang.shard_engine import SingleDeviceEngine as Engine
         else:
             from sglang.srt.entrypoints.engine import Engine
 

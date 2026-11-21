@@ -22,7 +22,7 @@ def main() -> None:
     timing.add_argument("--costs", type=Path, help="predict service durations from an independent cost asset")
     production = commands.add_parser("produce", help="project a closed native capture into graphs or source templates")
     production.add_argument("--product", choices=("graphs", "templates"), default="templates")
-    production.add_argument("--capture", type=Path, required=True)
+    production.add_argument("--capture", type=Path, required=True, help="published native capture task directory")
     production.add_argument("--budget-seconds", type=float, required=True, help="cumulative allowance across resumes; may be explicitly raised")
     production.add_argument("--source-image", default="prologue-sglang:ubuntu22.04")
     production.add_argument("--keep-intermediates", action="store_true")
@@ -102,8 +102,9 @@ def main() -> None:
         PlanningProcess(SourcePlanning(json.loads(arguments.input.read_text())), arguments.output).run()
     elif arguments.command == "produce":
         from prologue.acquisition.production import CaptureProduction
+        from prologue.acquisition.recording import PublishedCapture
 
-        CaptureProduction(arguments).run()
+        CaptureProduction(arguments, PublishedCapture(arguments.capture)).run()
     elif arguments.command == "capture":
         from prologue.acquisition.capture import CaptureProcess
 
@@ -111,7 +112,7 @@ def main() -> None:
         CaptureProcess(arguments, launch, latency_only=arguments.latency_only, host_timing=arguments.host_timing,
                        service_reference=arguments.service_reference).run()
     elif arguments.command == "cost-samples":
-        from prologue.integrations.platforms.ascend.device_samples import CostSamples
+        from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples
 
         CostSamples(arguments).run()
     elif arguments.command == "host-cost-samples":

@@ -16,6 +16,7 @@ from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.ascend.host_samples import HostCostSamples
 from prologue.acquisition.capture import CaptureProcess
 from prologue.acquisition.production import CaptureProduction
+from prologue.acquisition.recording import PublishedCapture
 from prologue.integrations.runtimes.docker import ModelingCommand, OwnedContainers
 from prologue.performance.requirements import CostRequirements
 from prologue.performance.samples import WorkCatalog
@@ -29,10 +30,12 @@ def read(path):
 
 
 class CostSource:
-    def __init__(self, production, capture, job, output):
-        self.production, self.capture, self.job, self.output = production, capture, job, output
-        self.native = CaptureProcess.published(capture, job)
-        self.deployment = read(capture / "execution.json")["inputs"]["deployment"]
+    def __init__(self, production, capture, job, deployment, output):
+        self.production, self.output = production, output
+        self.deployment = deployment
+        self.recording = PublishedCapture(capture, job)
+        if read(production / "production.json")["inputs"]["capture_path"] != str(self.recording.source):
+            raise ValueError("training production belongs to a different native observation")
         self.ranks = read(production / "result.json")["observed_roles"]
         self.projection = production
         self.recipes = {recipe.name: recipe for recipe in HostCostSamples.recipes(job)}
@@ -104,7 +107,7 @@ class CostAcquisition:
                 raise ValueError("cost acquisition must own an output outside its training sources")
             if production not in self.sources:
                 directory = self.output / "sources" / str(len(self.sources))
-                source = CostSource(production, capture, bundle.jobs[str(identity)], directory)
+                source = CostSource(production, capture, bundle.jobs[str(identity)], bundle.deployment, directory)
                 self.sources[production] = source
                 yield source
 
@@ -188,14 +191,14 @@ class CostAcquisition:
         if allowance.processing_ns <= 0:
             raise AllowanceExhausted("cost projection allowance exhausted")
         CaptureProduction(SimpleNamespace(
-            capture=source.native, output=source.projection, binary=self.output / "prologue", product="graphs",
+            output=source.projection, binary=self.output / "prologue", product="graphs",
             budget_seconds=allowance.processing_ns / 1e9, source_image=self.images["source"],
             modeling_image=self.images["modeling"], keep_intermediates=True,
-        ), self.limit).run()
+        ), source.recording, self.limit).run()
 
     def inspect(self, source, requirements):
         self.project(source)
-        external = HostCostSamples.external_work(source.native)
+        external = HostCostSamples.external_work(source.recording.source)
         for rank in source.ranks:
             work = source.projection / "work"
             graph = work / f"{rank}-graph.json"
@@ -231,15 +234,17 @@ class CostAcquisition:
 
     def measure(self, source, recipe, allowance_ns):
         output = source.output / recipe
+        origin = source.recording.inputs
         launch = self.place(source.recipes[recipe].job, source.deployment)
+        launch.require_recorded_placement(origin["deployment"])
         CaptureProcess(SimpleNamespace(
             output=output, timeout=self.args.timeout,
-            budget_seconds=allowance_ns / 1e9, attempt_limit=1, source_image=self.images["source"], resource_trace=False,
+            budget_seconds=allowance_ns / 1e9, attempt_limit=1, source_image=origin["image"], resource_trace=False,
         ), launch, self.limit, host_timing=True).run()
         for rank in source.ranks:
             work = source.projection / "work"
             sample = self.samples_from(
-                source.output / f"{recipe}-{rank}-host.json", "host-cost-samples", detailed=source.capture, host=output,
+                source.output / f"{recipe}-{rank}-host.json", "host-cost-samples", detailed=source.recording.directory, host=output,
                 facts=work / f"{rank}-facts.json", trace=work / f"{rank}-sdk/trace.json",
                 graph=work / f"{rank}-graph.json", work_identities=source.output / f"{rank}-work.json",
             )

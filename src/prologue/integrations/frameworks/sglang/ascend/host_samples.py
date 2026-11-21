@@ -4,15 +4,15 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 import json
 
-from prologue.acquisition.observation import jointly_observed
+from prologue.acquisition.observation.workers import CapturedWorkers
+from prologue.acquisition.recording import PublishedCapture
 from prologue.artifacts import write_json
+from prologue.integrations.frameworks.sglang.ascend.launch import SGLangAscendLaunch
 from prologue.integrations.runtimes.pytorch.protocol_work import CpuProtocolWork
 from prologue.integrations.frameworks.sglang.configuration import CaptureInput
-from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
 from prologue.integrations.platforms.ascend.host_alignment import AscendHostAlignment
 from prologue.integrations.platforms.ascend.trace import AscendTrace
 from prologue.integrations.frameworks.sglang.acquisition.host_scopes import NativeHostCalls
-from prologue.acquisition.capture import CaptureProcess
 from prologue.performance.samples import ServiceSamples, WorkCatalog
 
 
@@ -99,19 +99,20 @@ class HostCostSamples:
     @classmethod
     def external_work(cls, capture):
         instances = cls.read(capture / "capture.json")["instances"]
+        workers = CapturedWorkers(instances)
         demands = {}
         for instance in instances:
             participants = instance["native_participants"]
-            for ranks in instance.get("profile_windows", [participants]):
-                directory = NativeProfiles.protocol_directory(capture, ranks, "profile_windows" in instance)
+            for window in workers.windows[instance["id"]]:
+                directory = window.protocol_directory(capture)
                 records = {rank: cls.read(directory / f"rank-{rank}.json") for rank in participants}
-                for rank in ranks:
+                for rank in window.observed:
                     demands[rank] = [(identity, "host", features)
                                      for identity, features, _ in CpuProtocolWork.local(records[rank])]
 
                 # Both endpoints of a message must come from the very same native request execution.
                 for identity, features in CpuProtocolWork(records).wires():
-                    if identity["source"] in ranks:
+                    if identity["source"] in window.observed:
                         demands[identity["source"]].append((identity, "transfer", features))
         return demands
 
@@ -127,19 +128,19 @@ class HostCostSamples:
     def run(self):
         detailed = self.arguments.detailed
         lightweight = self.arguments.host
-        source, host = (self.read(task / "execution.json")["inputs"] for task in (detailed, lightweight))
-        for field in ("deployment", "framework_revision"):
-            if source[field] != host[field]:
-                raise ValueError(f"host cost capture changes the measured native {field}")
+        source_recording, host_recording = PublishedCapture(detailed), PublishedCapture(lightweight)
+        source, host = source_recording.inputs, host_recording.inputs
+        if source["image"] != host["image"]:
+            raise ValueError("host cost capture changes the measured native image")
         inputs = ("model", "instances", "workload", "observe_all_workers")
         if any(source["job"][field] != host["job"][field] for field in inputs):
             raise ValueError("host cost capture changes the measured native workload or configuration")
-        source_root = CaptureProcess.published(detailed, source["job"])
-        host_root = CaptureProcess.published(lightweight, host["job"])
+        SGLangAscendLaunch(source["job"], source["deployment"]).require_recorded_placement(host["deployment"])
+        source_root, host_root = source_recording.source, host_recording.source
         catalog = WorkCatalog(self.arguments.graph, self.arguments.work_identities)
         graph = catalog.graph
         rank = graph["environment"]["parallel"]["rank"]
-        instance, = (candidate for candidate in self.read(lightweight / "result.json")["instances"]
+        instance, = (candidate for candidate in host_recording.manifest["instances"]
                      if rank in candidate["native_participants"])
         paths = {int(actor): host_root / relative for actor, relative in instance["host_samples"].items()}
         path = paths[rank]
@@ -160,7 +161,7 @@ class HostCostSamples:
         pairs, unmatched = source_calls.exact_pairs(observed_calls)
         self.qualification["unmatched_calls"] += unmatched
         local_pairs = source_calls.local_pairs(observed_calls, pairs)
-        collectives = self.collectives(records, rank) if jointly_observed(instance) else {}
+        collectives = self.collectives(records, rank) if CapturedWorkers([instance]).joint_execution else {}
         timing = probe["timing"]
         directory = path.parent
         queues = self.read(directory / timing["queues"])

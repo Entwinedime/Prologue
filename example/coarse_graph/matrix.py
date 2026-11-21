@@ -8,7 +8,7 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
-from prologue.acquisition.capture import CaptureProcess
+from prologue.acquisition.recording import PublishedCapture
 from prologue.acquisition.publication import SourceProductions
 from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.configuration import CaptureInput
@@ -114,7 +114,7 @@ class MatrixRun:
 
     @staticmethod
     def mapped(report):
-        return (report["native_case"]["status"] in {"consistent", "incomplete", "separate_worker_windows"}
+        return (report["native_case"]["status"] in {"consistent", "incomplete", "local_worker_observations"}
                 and ProductionEvidence.workers_verified(report))
 
     def sources(self, domain):
@@ -162,7 +162,7 @@ class MatrixRun:
             if str(identity) in published.unavailable:
                 checks.append({"job": identity, "mapped": False, **published.unavailable[str(identity)]})
                 continue
-            observation = CaptureProcess.published(published.captures[identity], published.jobs[str(identity)])
+            observation = PublishedCapture(published.captures[identity], published.jobs[str(identity)]).source
             output = self.results / "sources" / name / str(identity)
             command = [
                 "docker", "run", "--rm", "--init", "--runtime", "runc", "--network", "none",
@@ -223,7 +223,7 @@ class MatrixRun:
         conditions = {"image": self.images["source"], "deployment": deployment, mode.replace("-", "_"): True}
         if mode == "latency-only":
             conditions["host_timing"] = None
-        return CaptureProcess.published(owner, native, conditions=conditions)
+        return PublishedCapture(owner, native, conditions=conditions).directory
 
     def target(self, domain, case, capture_input):
         name = case["id"]
@@ -249,7 +249,7 @@ class MatrixRun:
         native = self.reference(domain, output, capture_input, mode)
         production = directory / "structure"
         code = self.process(f"{name}/produce", self.commands.command(
-            "prologue.app", "produce", "--capture", native, "--product", "graphs", "--output", production, "--binary", self.binary,
+            "prologue.app", "produce", "--capture", output, "--product", "graphs", "--output", production, "--binary", self.binary,
             "--source-image", self.images["source"], "--modeling-image", self.images["modeling"],
             "--budget-seconds", self.budget["operation_seconds"], "--keep-intermediates",
         ))

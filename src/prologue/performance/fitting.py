@@ -10,6 +10,7 @@ class ServiceCurve:
     def __init__(self, rows):
         groups = defaultdict(list)
         payloads = defaultdict(set)
+        clock_radii = {}
         for row in rows:
             point = tuple(sorted(row["features"]["axes"].items()))
             groups[point].extend(row["observations_ns"])
@@ -18,8 +19,10 @@ class ServiceCurve:
             if "collective" in row:
                 collective = row["collective"]
                 payloads[point].add(("collective", collective["dtype"], collective["algorithm"], collective["elements"]))
+                clock_radii[point] = max(clock_radii.get(point, 0), collective["max_clock_radius_ns"])
         self.ambiguous_payloads = sum(len(values) > 1 for values in payloads.values())
         points = [(dict(point), median(values)) for point, values in groups.items() if len(payloads[point]) <= 1]
+        self.clock_radius = max((radius for point, radius in clock_radii.items() if len(payloads[point]) == 1), default=None)
         self.points = len(points)
         if not points:
             return
@@ -65,8 +68,11 @@ class ServiceCurve:
         return (constant_loss - curve_loss) / count if count else 0
 
     def document(self):
-        return {"bounds": self.bounds, "axis": self.axis, "knots": self.knots, "points": self.points,
-                "ambiguous_payload_points": self.ambiguous_payloads}
+        model = {"bounds": self.bounds, "axis": self.axis, "knots": self.knots, "points": self.points,
+                 "ambiguous_payload_points": self.ambiguous_payloads}
+        if self.clock_radius is not None:
+            model["max_sample_clock_radius_ns"] = self.clock_radius
+        return model
 
 
 class DomainCosts:

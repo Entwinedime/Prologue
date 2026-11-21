@@ -6,6 +6,8 @@ import ctypes
 import json
 from bisect import bisect_right
 from decimal import Decimal
+from fractions import Fraction
+from math import ceil, floor
 from pathlib import Path
 
 
@@ -55,6 +57,24 @@ class DeviceCalibration:
         start, finish = first["end_raw_ns"], last["end_raw_ns"]
         upper = start - (offset * (start - finish) // counts)
         return lower, upper
+
+    def elapsed_bounds(self, start: int, finish: int) -> tuple[int, int]:
+        weights = {}
+        for time, sign in ((start, -1), (finish, 1)):
+            index, counter = self.counter_at(time)
+            first, last = self.counters[index:index + 2]
+            part = Fraction(counter - first, last - first)
+            for knot, weight in ((index, 1 - part), (index + 1, part)):
+                weights[knot] = weights.get(knot, 0) + sign * weight
+
+        # The two endpoints share clock knots. Their common offset cancels in a local duration.
+        lower = upper = 0
+        for knot, weight in weights.items():
+            sample = self.samples[knot]
+            a, b = weight * sample["begin_raw_ns"], weight * sample["end_raw_ns"]
+            lower += min(a, b)
+            upper += max(a, b)
+        return floor(lower), ceil(upper)
 
 
 class AscendClock(DeviceCalibration):

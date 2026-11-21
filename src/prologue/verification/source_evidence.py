@@ -321,11 +321,11 @@ class ProductionEvidence:
     def inspect(self, *, retain_measurements=False):
         publication = json.loads((self.production / "result.json").read_text())
         capture = json.loads((self.capture / "capture.json").read_text())
-        ranks = [rank for instance in capture["instances"] for rank in instance["observed_roles"]]
-        SourceEvidence.require(publication["observed_roles"] == ranks, "production omits or changes the captured worker set")
         native_case = NativeCase(self.capture, capture, self.production / "work")
+        ranks = native_case.workers.observed
+        SourceEvidence.require(publication["observed_roles"] == ranks, "production omits or changes the captured worker set")
         reports = []
-        for rank in publication["observed_roles"]:
+        for rank in ranks:
             try:
                 facts = json.loads((native_case.graphs / f"{rank}-facts.json").read_text())
                 report = self.observe_rank(native_case, rank, facts, retain_measurements and native_case.joint_execution)
@@ -337,8 +337,8 @@ class ProductionEvidence:
 
         case_report = {"status": "unverified", "error": "one or more worker mappings are unverified"}
         if not native_case.joint_execution:
-            case_report = {"status": "separate_worker_windows", "windows": {
-                instance["id"]: instance["profile_windows"] for instance in capture["instances"]}}
+            case_report = {"status": "local_worker_observations", "windows": {
+                owner: [list(window.observed) for window in windows] for owner, windows in native_case.workers.windows.items()}}
         elif all(report["mapping"] == "consistent" for report in reports):
             try:
                 native_case.finish()
@@ -352,7 +352,7 @@ class ProductionEvidence:
     @staticmethod
     def workers_verified(document):
         timing = {"compatible"}
-        if document["native_case"]["status"] == "separate_worker_windows":
+        if document["native_case"]["status"] == "local_worker_observations":
             timing.add("external_cost_required")
         return bool(document["ranks"]) and all(row["mapping"] == "consistent" and row["timing"]["status"] in timing
                                                for row in document["ranks"])
@@ -416,9 +416,9 @@ class ProductionEvidence:
         lines.extend(["", f"Native group result `{case_report['status']}`."])
         if "error" in case_report:
             lines.extend(["", case_report["error"]])
-        elif case_report["status"] == "separate_worker_windows":
-            lines.extend(["", "Workers were profiled in separate native request executions on one physical device. "
-                          "Each worker's SDK mapping is checked independently. Target communication timing requires a physical group reference."])
+        elif case_report["status"] == "local_worker_observations":
+            lines.extend(["", "Each worker's SDK mapping is checked in its recorded window. "
+                          "Target peer timing requires profiles from a shared execution on the physical topology."])
         else:
             model = case_report["model_communication"]
             payload = case_report["pd_payload"]
@@ -446,7 +446,7 @@ class ProductionEvidence:
             "findings per category. `--details` includes every location.", "",
         ])
         (self.output / "source-evidence.md").write_text("\n".join(lines))
-        group = case_report["status"] == "consistent" or (not require_joint and case_report["status"] == "separate_worker_windows")
+        group = case_report["status"] == "consistent" or (not require_joint and case_report["status"] == "local_worker_observations")
         return 0 if group and self.workers_verified(document) else 1
 
 

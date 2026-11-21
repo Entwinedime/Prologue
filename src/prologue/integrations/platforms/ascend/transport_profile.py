@@ -45,8 +45,9 @@ class AscendTransportProfile:
             if piece["kind"] != "collective":
                 continue
             duration, _, payload = services.service(piece)
-            if payload is None:
-                absent["unmeasured_peer_service"] += 1
+            if duration is None:
+                reason = "unmeasured_peer_service" if payload is None else "unqualified_endpoint_clock"
+                absent[reason] += 1
                 continue
             identity = features.get("transport")
             if identity is None:

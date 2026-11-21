@@ -8,11 +8,11 @@ from .dependencies import CausalGraph
 
 
 class CpuProtocolEvidence:
-    def __init__(self, capture, instances):
-        self.capture, self.instances = capture, instances
+    def __init__(self, capture, owners):
+        self.capture = capture
         self.counts, self.findings = Counter(), []
         self.native_threads = defaultdict(lambda: defaultdict(list))
-        self.native_groups, self.predicted_groups, self.actors = {}, {}, {}
+        self.native_groups, self.predicted_groups, self.actors = owners, {}, {}
         self.messages = {origin: defaultdict(dict) for origin in ("native", "predicted")}
         self.points = {origin: set() for origin in self.messages}
         self.edges = {origin: set() for origin in self.messages}
@@ -90,20 +90,7 @@ class CpuProtocolEvidence:
         return peers[rank]
 
     def load_native(self):
-        participants = []
-        for instance in self.instances:
-            if "native_participants" not in instance:
-                self.missing("missing_native_participant_manifest", instance=instance["id"])
-                continue
-            ranks = instance["native_participants"]
-            if not ranks or len(set(ranks)) != len(ranks) or not set(instance["observed_roles"]) <= set(ranks):
-                raise ValueError("CPU protocol requires the complete native participant manifest")
-            for rank in ranks:
-                if rank in self.native_groups:
-                    raise ValueError("CPU protocol repeats a native participant")
-                self.native_groups[rank] = instance["id"]
-                participants.append(rank)
-        for rank in participants:
+        for rank in self.native_groups:
             path = self.capture / "protocol" / f"rank-{rank}.json"
             if not path.is_file():
                 self.missing("missing_native_protocol", rank=rank)

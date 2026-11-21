@@ -25,24 +25,6 @@ class CaptureProcess:
         attempts = cls.attempts(directory)
         return Usage(sum(row["charged_ns"] for row in attempts), len(attempts))
 
-    @staticmethod
-    def published(directory: Path, job: dict, *, conditions=None) -> Path:
-        """Resolve an explicit completed observation without changing its native provenance."""
-        directory = directory.resolve(strict=True)
-        state = json.loads((directory / "execution.json").read_text())
-        if state["inputs"]["job"] != job or json.loads((directory / "input.json").read_text()) != job:
-            raise ValueError(f"published capture differs from the planned native input: {directory}")
-        if conditions is not None and any(state["inputs"].get(key) != value for key, value in conditions.items()):
-            raise ValueError(f"published capture differs from the requested recording conditions: {directory}")
-        attempts = state["attempts"]
-        if not attempts or attempts[-1]["status"] != "exited" or attempts[-1]["exit_code"] != 0:
-            raise ValueError(f"published capture has no successful terminal attempt: {directory}")
-        publication = json.loads((directory / "result.json").read_text())
-        source = (directory / publication["source"]).resolve(strict=True)
-        if not source.is_relative_to(directory):
-            raise ValueError("published source lies outside its native task")
-        return source
-
     def __init__(self, arguments, launch, limit=None, *, latency_only=False, host_timing=False, service_reference=False) -> None:
         self.arguments = arguments
         self.host_timing = host_timing

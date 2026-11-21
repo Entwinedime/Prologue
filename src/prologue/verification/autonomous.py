@@ -7,7 +7,7 @@ from subprocess import TimeoutExpired
 from types import SimpleNamespace
 
 from prologue.artifacts import write_json
-from prologue.acquisition.capture import CaptureProcess
+from prologue.acquisition.recording import PublishedCapture
 from prologue.app.prediction import PredictionProcess
 
 from .latency_metrics import LatencyComparison, NativeLatencyMetrics
@@ -31,8 +31,8 @@ class AutonomousVerification:
     def run(self):
         args = self.arguments
         self.output.mkdir(parents=True)
-        recorded = json.loads((args.capture / "execution.json").read_text())["inputs"]
-        capture = CaptureProcess.published(args.capture, recorded["job"])
+        recording = PublishedCapture(args.capture)
+        recorded = recording.inputs
         source = json.loads(args.input.read_text())
         fields = ("model", "instances", "workload")
         if source.keys() != set(fields) or any(source[field] != recorded["job"][field] for field in fields):
@@ -40,7 +40,7 @@ class AutonomousVerification:
         if not recorded.get("latency_only") or recorded.get("host_timing"):
             return self.finish("reference_requires_latency_capture")
 
-        native = NativeLatencyMetrics(capture).report()
+        native = NativeLatencyMetrics(recording.source).report()
         self.report["native"] = native
         if native["specialization_loads"] is None:
             return self.finish("reference_missing_specialization_evidence")

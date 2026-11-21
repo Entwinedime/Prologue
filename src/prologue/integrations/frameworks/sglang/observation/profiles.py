@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from prologue.acquisition.observation.workers import ProfileWindow
 from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
 
@@ -27,7 +28,7 @@ class NativeProfiles:
     @staticmethod
     def windows(directory, observed, single_device, instances):
         if not single_device:
-            return [list(observed)]
+            return [ProfileWindow(tuple(observed))]
         if instances > 1:
 
             # Both PD pools execute every request. Exactly one role across both pools owns the device profiler.
@@ -35,12 +36,7 @@ class NativeProfiles:
             while not all(path.is_file() for path in plans):
                 time.sleep(0.05)
             observed = [rank for path in plans for rank in json.loads(path.read_bytes())["observed_roles"]]
-        return [[rank] for rank in observed]
-
-    @staticmethod
-    def protocol_directory(directory, selected, single_device):
-        root = directory / "protocol"
-        return root / f"worker-{selected[0]}" if single_device else root
+        return [ProfileWindow((rank,), replay=True) for rank in observed]
 
     @staticmethod
     def wait(directory: Path, ranks, participants, protocol_directory) -> None:
@@ -65,10 +61,10 @@ class NativeProfiles:
 
                 # The preceding request drained and flushed its KV. This replay owns fresh ingress and group receipts.
                 owner.window = ObservationWindow(owner.directory, owner.description)
-            selected = self.windows_by_round[self.round]
-            owner.selected = owner.parallel["rank"] in selected
-            self.protocol_root = self.protocol_directory(owner.directory, selected, owner.description["local_shards"])
-            if owner.description["local_shards"]:
+            window = self.windows_by_round[self.round]
+            owner.selected = owner.parallel["rank"] in window.observed
+            self.protocol_root = window.protocol_directory(owner.directory)
+            if window.replay:
 
                 # A later replay can reuse a registration with a different request slot. Keep this window's peer facts together.
                 owner.kv_pools = self.protocol_root / "kv-pools"

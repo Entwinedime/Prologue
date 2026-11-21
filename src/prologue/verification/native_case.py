@@ -4,7 +4,7 @@ import json
 from collections import Counter, defaultdict
 from functools import cached_property
 
-from prologue.acquisition.observation import jointly_observed
+from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.integrations.frameworks.sglang.configuration import ServingInput
 
 from .actions import ActionIdentity
@@ -29,37 +29,30 @@ class NativeCase:
         case = cls(capture, manifest, graphs)
         if not case.joint_execution:
             raise ValueError("a multi-worker target reference requires simultaneous execution on its physical topology")
-        for instance in manifest["instances"]:
-            for rank in instance["observed_roles"]:
-                graph = json.loads((graphs / f"{rank}-graph.json").read_text())
-                raw = json.loads((capture / f"rank-{rank}.json").read_text())
-                case.observe(rank, graph, raw)
+        for rank in case.workers.observed:
+            graph = json.loads((graphs / f"{rank}-graph.json").read_text())
+            raw = json.loads((capture / f"rank-{rank}.json").read_text())
+            case.observe(rank, graph, raw)
         case.finish()
         return case
 
     def __init__(self, capture, manifest, graphs):
         self.capture, self.manifest, self.graphs = capture, manifest, graphs
-        self.groups = {rank: f"{instance['id']}/{rank}" for instance in manifest["instances"] for rank in instance["native_participants"]}
-        self.ranks = {rank: instance["id"] for instance in manifest["instances"] for rank in instance["native_participants"]}
-        self.observed_roles = {rank for instance in manifest["instances"] for rank in instance["observed_roles"]}
-        if (len(self.groups) != sum(len(instance["native_participants"]) for instance in manifest["instances"])
-                or len(self.observed_roles) != sum(len(instance["observed_roles"]) for instance in manifest["instances"])
-                or self.observed_roles - self.groups.keys()):
-            raise ValueError("native case has repeated participants or invalid observed workers")
+        self.workers = CapturedWorkers(manifest["instances"])
+        self.ranks = self.workers.owners
+        self.groups = {rank: f"{owner}/{rank}" for rank, owner in self.ranks.items()}
+        self.observed_roles = set(self.workers.observed)
+        self.joint_execution = self.workers.joint_execution
 
         self.sources, self.dependencies, self.clocks = {}, {}, {}
         self.logical = {}
         self.measurements = {}
         self.connections = Connections()
-        self.cpu = CpuProtocolEvidence(capture, manifest["instances"])
+        self.cpu = CpuProtocolEvidence(capture, self.ranks)
         self.protocol = PdStateEvidence()
         self.control_declarations = defaultdict(set)
         self.findings = []
         self.observed_actions = 0
-
-    @cached_property
-    def joint_execution(self):
-        return all(map(jointly_observed, self.manifest["instances"]))
 
     @cached_property
     def sessions(self):

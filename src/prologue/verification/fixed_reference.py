@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from itertools import chain
 import json
 
-from prologue.integrations.platforms.ascend.device_samples import ObservedServices
+from prologue.integrations.platforms.ascend.services import ObservedServices
 from prologue.serving.latency import RequestLatency
 
 from .fixed_context import ExternalWake, HostProgress
@@ -418,7 +418,7 @@ class FixedReference:
         if (piece["resource"], events[start]["order"], events[finish]["order"]) not in captured or (rank, finish) not in self.peers:
             return None
 
-        # Each observed completion includes service after its own required peers are ready.
+        # The reference reads its own realized clock and causal edges independently of all samples.
         readiness = [self.clock.timestamp(*event) for event in self.peers[rank, finish] | {(rank, start)}]
         completion = self.clock.timestamp(rank, finish)
         return None if completion is None or None in readiness else completion - max(readiness)
