@@ -123,7 +123,7 @@ padding位置的基本数组/整数区间在ServingInput交接时检查，不等
 
 `acquire-sources` 消费 `plan-sources` 的目录，顺序复用单任务 capture 和 produce。运行前核对全部任务的域、模型路径、部署设备数和编译程序，固定输入、部署及镜像 ID；首次采集前将程序保存到集合 inputs/prologue，各域只使用该副本。恢复时先按内容核对传入程序，不能混用中途重新编译的实现；互补作业在采集前固定，不在执行途中生成补采请求。
 
-已有正式采集可通过可选的 `--observations <引用.json>` 显式交接，JSON对象将计划来源任务号字符串映射到已发布采集任务的绝对路径。运行前核对完整原生输入、成功终态及任务内的发布路径；被引用任务只读，保留原镜像和尝试记录，不把它标成当前镜像采集。未引用的域正常采集，已引用域只进行当前规则下的生产和实际覆盖核对；缺事实、域不符或生产失败均停止，不自动改为补采。镜像变化不构成自动兼容，原始观察是否足够及原生实施域资格仍须有明确依据。
+已有采集通过 `--observations <引用.json>` 交接，JSON 对象将计划任务号映射到已发布采集任务的绝对路径。首次启动 worker 前核对完整原生输入、所需观测条件、末次成功尝试及有效部署。Ascend 按采集模式、实际使用的卡和传输环境核对部署。被引用的任务保留自己的实测镜像与费用。后处理镜像可在同一上游版本上重新生产，产出的模板仍须满足实施域和覆盖要求。
 
 集合的原生时间和尝试额度只统计本集合拥有的采集，包括其失败尝试；引用的历史费用由原任务保留。所有域在本集合内产生的后处理继续计费。原生额度耗尽仍可生产已引用的观察，后处理额度独立约束；这不为未采集的域增加原生额度。
 
@@ -159,7 +159,7 @@ PYTHONPATH=src python3 -m prologue.app capture \
 
 完整模式按各实例 TP×PP 之和确定物理卡数，从升序声明的 `physical_devices` 中依次取卡。原生逻辑设备 0、1……依次对应这些卡。代表 worker 复用可以减少观测和导出，原生并行组仍在实际设备上运行。[Ascend 可见设备顺序](https://www.hiascend.com/doc_center/source/zh/canncommercial/850/maintenref/envvar/envref_07_0028.html)
 
-单卡部署示例为 `{"acquisition_mode": "single_device", "physical_devices": [4]}`。Ascend runtime 将选定物理卡挂入非特权容器，原生 worker 使用容器内的设备 0。公开的 `capture` 和 `produce` 已在 TP1、TP2、TP8、PP3、TP2 × PP3、TP4 × EP4 和 Prefill TP1 / Decode TP2 上生成角色模板。各分片实际执行原生计算并交换张量。单卡 `explore` 按原生模块布局和职责选择详细采集的代表，完整模式可同时观察参与通信的物理卡。
+单卡部署示例为 `{"acquisition_mode": "single_device", "physical_devices": [4]}`。Ascend runtime 将选定物理卡挂入非特权容器，原生 worker 使用容器内的设备 0。公开的 `capture` 和 `produce` 已在 TP1、TP2、TP8、PP3、TP2 × PP3、TP4 × EP4 和 Prefill TP1 / Decode TP2 上生成角色模板。各分片实际执行原生计算并交换张量。单卡单实例的本地进程组使用容器独立网络，PD 使用主机网络连接外部存储。单卡 `explore` 按原生模块布局和职责选择详细采集的代表，完整模式可同时观察参与通信的物理卡。
 
 单卡模式下，每个 Engine 只启动并预热一次。所有实例共同按代表角色的顺序重放请求，每个窗口由一个角色使用设备 profiler。`capture.json` 的 `profile_windows` 列出各实例负责的窗口，`protocol/worker-<rank>/` 保留该次执行中各参与者的协议记录。所有实例等本轮 profiler 关闭、各角色发布协议记录后才开始下一轮。不同窗口的时间分别用于本地服务采样，跨角色通信及 PD 通知的时延需要同一次物理执行的观测。
 
@@ -191,7 +191,7 @@ CPU P2P 的 source/protocol/rank-<rank>.json 是连接参与者所需的正式�
 
 bindings 在 run_batch 执行前及 PD prebuilt 准备结束时读取原生 req_to_token 表的有效序列，保留请求、实际批次槽位和所属 scope；不从最近一次缓存匹配推断请求绑定。每项从逻辑 begin 起，按顺序记录 ranges 中的 [物理页号, 页内起点, 页内终点)，相邻连续位置合并，非连续地址保持原样。预测 binding 使用相同范围表示，直接取图访问时核心解析的结果；原生是整条有效序列，预测是该图声明的访问区间，比较时按请求与逻辑区间对应。页号及 scope/事件编号都是运行内身份，不能直接当作跨运行相等条件。
 
---source-image 可指定镜像，启动前解析为实际 ID。input.json 保存原生任务；execution.json 保存模型挂载、部署、镜像及各次尝试的命令、期限、退出码、实际用时和计入额度。attempts/<序号>/capture.log 保存本次原生输出，attempts/<序号>/source/ 保存原始来源。只有确认原生正常退出、专属容器已清理并读取到闭合 source/capture.json，才发布 result.json；其中 source 给出 produce --capture 应使用的相对路径。
+--source-image 可指定镜像，启动前解析为实际 ID。input.json 保存原生任务。execution.json 保存模型挂载、部署、镜像及各次尝试的命令、期限、退出码、实际用时和计入额度。attempts/<序号>/capture.log 保存本次原生输出，attempts/<序号>/source/ 保存原始来源。原生正常退出、专属容器清理并读取到闭合的 `source/capture.json` 后，任务发布 `result.json`。离线生产及三条正式验证路径的 `--capture` 均接收已发布任务根目录，核对成功尝试后读取原始观测。单独使用底层证据检查工具时，可从 `result.json` 的 `source` 定位其输入。
 
 --timeout 限定一次尝试，外部协调进程和容器内的系统 timeout 同时执行该期限，避免协调进程被强杀后原生仍无限运行；--budget-seconds 和 --attempt-limit 是同一采集任务跨恢复的累计上限，可以显式提高，失败不清零。每次命令至多启动一次原生运行；重复命令先核对输入、部署和实际镜像，取得任务锁并恢复未结算尝试。正常成功且来源完整时复用已有事实；失败且仍有额度时，本次明确调用才启动下一个尝试，不在内部循环重试。
 
@@ -221,9 +221,11 @@ CPU 成本采样使用 `capture --host-timing`。结构观测与主机采样共�
 
 `acquire-costs` 使用一个或多个训练来源集合，产物 `costs.json` 可直接交给 `predict --costs`。来源保留明细时直接读取粗图和事实；来源已经精简时，可从其已发布的原生观测在当前任务内重新投影，采样仍归属原训练来源。除训练来源观察到的工作，可重复传入 `--demand <粗图> <工作身份文件>` 或 `--gap <预测目录/cost-gap.json>`；它们只声明需求。用 `--samples` 提供已经资格检查的训练样本。相同执行域优先查已有样本。SGLang 可将运行环境、局部调用及特征一致的闭合批次数组操作的主机实测复用于其他角色，资产保留原样本位置。
 
-补采按训练来源的原提交分组或逐请求分组，继续走原生 Engine。配置集探索用代表请求预热。轻量观察若出现首次特化加载，按实际原生调用范围排除受影响的样本，剩余需求可触发一次按原分组预热的测量。采到的实际批次和调用匹配详细来源后才进入模型。`--timeout`、`--native-budget-seconds`、`--postprocessing-budget-seconds`、`--attempt-limit` 和 `--storage-bytes` 约束该任务。报告区分预算停止、可观察但没有合格实测和无已知配方。每份在线缺口只记录停止位置的工作，后续未展开路径的需求仍未知。
+单卡 CPU 计时容器使用 `PERFMON` 并放开进程的 `memlock` 限额，使观测器能为每个原生线程映射 perf 环形缓冲区。容器仍只暴露声明的那张设备。CPU 补采根据集合声明分配设备，并在原始实测镜像中按原提交分组或逐请求分组运行 Engine。配对前核对详细观测与轻量计时的镜像、有效部署、模型和请求。配置集探索用代表请求预热。轻量观察若出现首次特化加载，按实际原生调用范围排除受影响的样本，剩余需求可触发一次按原分组预热的测量。采到的实际批次和调用匹配详细来源后才进入模型。`--timeout`、`--native-budget-seconds`、`--postprocessing-budget-seconds`、`--attempt-limit` 和 `--storage-bytes` 约束该任务。报告区分预算停止、可观察但没有合格实测和无已知配方。每份在线缺口只记录停止位置的工作，后续未展开路径的需求仍未知。
 
-Ascend 从同一次 HCCL 提交队列识别设备通信区间，独立保留本地整理工作。采样核对同一原生调用的全体参与者、算法、dtype 和元素数。跨设备校准能确定最后就绪者时，使用其同设备区间估计共同服务。执行使用所有参与者的就绪时间和该服务成本推导通信完成，调用输出继续受本地整理及原有依赖约束。无法确定对端或负载的观察保留为缺测。
+Ascend 按同一 HCCL 通道的提交顺序配对各参与者，核对 SDK 操作数。点对点传输核对两端的类型与元素数，可变载荷交换还要核对逐对端收发行数。每个端点用自己的设备完成时间减去本端及所需对端中的最晚就绪时间。用独立校时范围计算服务时长的上下界。同卡起止共用的时钟偏移会抵消。可确定为正的范围取中点，样本组保留最大校时半径；精确的零时长单独成立。
+
+`cost-samples --transport-only` 的 `unqualified_endpoint_clock` 表示参与者和载荷已经对齐，但该端点的时钟证据不足以给出服务时长。单卡分片只能发布实际取得的本地成本，真实跨卡通信由选定的物理通信资产提供。资产中的 `source_image` 标明实际运行 worker 的镜像。固定图的实测参考独立读取该目标的通信边和校准时钟。
 
 成本资产按 `domains` 保存各实现域的规范定义和模型。`fit-costs` 可以读取多个实现域的样本，每域独立拟合。正式预测按已选模板库的实际实现域为各参与者装配成本。CPU 协议本地服务用各自角色的成本，线传输用发送角色的成本。它们与动作图共用成本查询，协议工作身份保留操作、逻辑通道、源/目标和 dtype，实际元素数量与元素字节数作为查询特征。
 
@@ -241,21 +243,21 @@ role-plan的representatives决定结构复用，observed_roles决定本次实际
 
 ## 离线图与模板生产入口
 
-capture.json 发布后，外围入口按实际 observed_roles 顺序执行 SDK 导出、解释和粗图构造。`--product templates`（默认）继续编译并连接来源模板；`--product graphs`只发布实测粗图，供独立目标对照使用。目标真值不依赖模板编译成功，不借模板选择或变换规则判断实测结构。未观察的等价 worker 不重复生产，也不从目录扫描猜测角色。
+原生采集任务发布后，生产入口从末次成功尝试读取 `capture.json`，核对上游版本和发布内容，再按实际 observed_roles 执行 SDK 导出、解释和粗图构造。`--product templates`（默认）继续编译并连接来源模板；`--product graphs`只发布实测粗图，供独立目标对照使用。目标真值不依赖模板编译成功，不借模板选择或变换规则判断实测结构。未观察的等价 worker 不重复生产，也不从目录扫描猜测角色。
 
 ```bash
 PYTHONPATH=src python3 -m prologue.app produce \
-  --capture <已闭合的原始来源目录> --output <生产目录> \
+  --capture <已发布的原生采集任务目录> --output <生产目录> \
   --binary <modeling构建的prologue> --budget-seconds 600
 ```
 
 独立目标使用同一入口并添加 `--product graphs --keep-intermediates`；后者保留来源对应和实测时间证据，供对照器检查。
 
-入口需要 Python≥3.10 和 Docker CLI；可用 --source-image、--modeling-image 指定镜像。生产前固定实际 image ID，将可执行文件保存到 inputs/prologue；来源只读挂载，全部后处理在相应容器执行，不挂载设备或网络。生产目录不能位于来源目录内。
+入口需要 Python≥3.10 和 Docker CLI；可用 --source-image、--modeling-image 指定镜像。生产前固定实际 image ID，将可执行文件保存到 inputs/prologue；原始来源只读挂载，后处理在对应容器离线执行。生产目录位于原生采集任务之外。
 
 SDK 的写入行为由 Ascend adapter 隔离：只复制原始 FRAMEWORK、profiler 元数据及 CANN host/device 记录到本次工作目录，不复制此前导出的 trace、数据库或分析报告。SDK 在私有副本上运行，成功后交付 trace.json 并删除副本；原始来源不被修改。离线 launcher 加载 CANN 环境，将驱动接口开发库追加到运行库搜索路径末尾，不挂载物理驱动。SDK 返回成功不代表事实完整，后续解释仍核对设备点、API/队列及 payload 依据；各步骤标准输出与错误日志保留，不自动重跑模型或悄悄复用来源目录中的旧导出。
 
-production.json 保存输入、步骤完成情况、失败原因和累计单调时钟用时；.lock 保证单一写者。相同命令恢复时核对输入及二进制内容，已完成的步骤不重复运行。--budget-seconds 是跨恢复累计上限，可以显式提高；启动操作前预留剩余额度，正常返回或可捕获中断按实际用时结算，超时后的必要清理也计入用时；进程被强杀导致无法结算时保守计入该次预留额度。恢复清理记录的本次容器和未完成步骤产物，不触碰其他运行；Docker 失败不能被当作容器已经消失，无法确认清理时保留待恢复状态。输入、镜像或程序改变须使用新的生产目录，不把旧状态升级为新规则。
+`production.json` 分别保存原生实测镜像（`inputs.native_image`）与后处理镜像（`inputs.images`），同时记录步骤、失败原因和累计单调时钟用时。旧训练观测可从原任务重新离线生产。.lock 保证单一写者。相同命令恢复时核对输入及二进制内容，已完成的步骤不重复运行。--budget-seconds 是跨恢复累计上限，可以显式提高；启动操作前预留剩余额度，正常返回或可捕获中断按实际用时结算，超时后的必要清理也计入用时；进程被强杀导致无法结算时保守计入该次预留额度。恢复清理记录的本次容器和未完成步骤产物，不触碰其他运行；Docker 失败不能被当作容器已经消失，无法确认清理时保留待恢复状态。输入、镜像或程序改变须使用新的生产目录，不把旧状态升级为新规则。
 
 assets/<rank>.json 是代表模板；先在 work/<rank>-templates.json 编译各角色，再连接同一次采集内已声明且相容的局部实现，全部成功后发布 assets 和 result.json 索引。这只表示来源编译完成，不表示独立结构验证通过；连接不改变完整 worker 域、角色状态或原始观察。inputs/templates.json 是本次源库列表，连接步骤不查找其他生产目录。
 
@@ -396,7 +398,7 @@ prologue_local_graphs actions <observed-target.json> <action-inputs.json>
 prologue_local_graphs expand <source-libraries.json> <action-inputs.json> <local-graphs.jsonl>
 ```
 
-来源模板须预先冻结。source-libraries.json是库路径数组，首项为当前worker的代表库，其余为正式装配所需的其他来源；入口复用正式batch变换和局部实现连接。actions由框架adapter描述真实动作，只导出环境、动作条件、参数和逻辑work，包含原生传输调用已声明的路由。expand仅取得这些输入与来源库，再调用正式模板选择、共享调用绑定和实例化；生成容器不挂载目标图、输出shape、内部依赖或模型文件，也不编译目标模板。给定条件的正确性本身属于前提，不能用本检查反证。外部存储、池与信号采用符号绑定，不处理实际分配史或跨图执行。
+来源模板须预先冻结。source-libraries.json是库路径数组，首项为当前worker的代表库，其余为正式装配所需的其他来源；入口复用正式batch变换和局部实现连接。actions由框架adapter描述真实动作，只导出环境、动作条件、参数和逻辑work，包含原生传输调用已声明的路由。EP 模型调用按 workload 路由、实际成员和补齐行推导各层所需对端，与原生控制共用同一实现。记录在该调用结束前发布一份对端输入，完成 worker 绑定后，具体通信端口保存所需对端。expand仅取得这些输入与来源库，再调用正式模板选择、共享调用绑定和实例化；生成容器不挂载目标图、输出shape、内部依赖或模型文件，也不编译目标模板。给定条件的正确性本身属于前提，不能用本检查反证。外部存储、池与信号采用符号绑定，不处理实际分配史或跨图执行。
 
 每个目标worker由正式装配的SGLangTask.participants选择代表库，不能按同名rank文件假定一对一；C++构图入口再核对角色和目标域。输出以C++23禁止覆盖方式创建，写入关闭成功后才返回。每个给定动作输出一条 `local_graph`，构图失败保留该动作error并继续收齐；末尾 `local_summary` 核对attempted/built，缺末尾记录不能当作完整结果。图文件是验证明细，不作为模拟执行流或人类汇报。
 
@@ -527,7 +529,7 @@ Event 返回 true 只说明完成不晚于查询返回，false 只说明完成�
 ```bash
 PYTHONPATH=src \
   python3 -m prologue.verification.structure \
-  --capture <原生采集目录> --reference <真实图生产目录> \
+  --capture <已发布的原生采集任务目录> --reference <真实图生产目录> \
   --production <模板来源集合目录> --input <结构预测输入> \
   --binary <Docker构建的prologue> --output <验证输出目录> --timeout 180
 ```
