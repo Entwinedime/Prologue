@@ -5,11 +5,10 @@ import hashlib
 import json
 from pathlib import Path
 
-from prologue_adapters.artifacts import write_json
-from prologue_adapters.sglang.configuration import CaptureInput
-from prologue_workload import WorkloadContent
-from prologue_workload.expert_routes import ExpertRoutes
-from prologue_workflow.source_productions import SourceProductions
+from prologue.artifacts import write_json
+from prologue.contracts.workload import WorkloadContent
+from prologue.contracts.workload.expert_routes import ExpertRoutes
+from prologue.integrations.frameworks.sglang.configuration import CaptureInput
 
 
 class MatrixInputs:
@@ -101,8 +100,6 @@ class MatrixInputs:
     def run(self, phase):
         models = self.specification["models"]
         if phase == "targets":
-            sources = {domain["id"]: SourceProductions(Path(domain["source"]["collection"]))
-                       for domain in self.domains.values() if "source" in domain}
             inputs = []
             for case in self.cases:
                 domain = self.domains[case["domain"]]
@@ -112,11 +109,9 @@ class MatrixInputs:
                 common = {"model": model["model"], "instances": configuration["instances"], "workload": workload}
                 native = {**common, "observe_all_workers": True}
                 CaptureInput(native)
-                if domain["id"] in sources:
-                    sources[domain["id"]].prepare(common)
                 inputs.append((case, native, common))
 
-            # A conflicting fixed source must not leave a partially published request draw.
+            # Freeze the whole request draw from its declared inputs, independently of template or cost coverage.
             for case, native, prediction in inputs:
                 self.publish(case["capture_input"], native)
                 self.publish(case["prediction_input"], prediction)
@@ -129,12 +124,10 @@ class MatrixInputs:
         for domain in self.domains.values():
             if "source" in domain:
                 continue
-            workloads = domain["source_workloads"]
+            workloads = domain.get("source_workloads")
             if not workloads:
-                workloads = [json.loads((self.root / case["capture_input"]).read_text())["workload"]
-                             for case in self.cases if case["domain"] == domain["id"]]
+                raise ValueError(f"independent domain {domain['id']} needs training workloads or a published source")
 
-            # Explicit source probes stay independent of drawn targets; ordinary exploration sees its actual requested inputs.
             self.publish(domain["exploration"], {
                 "framework": "sglang", "model": models[domain["model"]]["model"],
                 "configurations": domain["configurations"], "workloads": workloads,

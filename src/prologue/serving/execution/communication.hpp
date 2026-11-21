@@ -1,0 +1,60 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <map>
+#include <optional>
+#include <set>
+#include <span>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+#include "prologue/serving/execution/timeline.hpp"
+#include "prologue/serving/execution/timing.hpp"
+#include "prologue/graph/types.hpp"
+
+namespace prologue {
+
+// Ordered communication channels are independent of native control-message transport.
+class CommunicationLinks {
+public:
+    void insert(const CoarseGraph & graph, std::span<const std::size_t> events,
+                std::span<const ServiceDuration> durations, Timeline & timeline);
+    bool empty() const;
+    std::set<std::size_t> retained_events() const;
+    nlohmann::json payload_coverage() const;
+
+private:
+    struct Collective {
+        std::size_t ready;
+        std::size_t finish;
+        std::int64_t service_ns;
+    };
+    struct Endpoint {
+        std::size_t ready;
+        std::size_t completion;
+        std::vector<std::int64_t> required;
+        std::optional<Collective> collective;
+        bool connected = false;
+    };
+    struct Exchange {
+        std::string operation;
+        std::vector<std::int64_t> members;
+        std::map<std::tuple<Direction, std::string, bool>, TensorLayout> payload;
+        bool collective;
+        std::map<std::int64_t, Endpoint> endpoints;
+    };
+
+    std::map<std::pair<std::string, std::int64_t>, std::size_t> positions_;
+    std::map<std::pair<std::string, std::size_t>, Exchange> pending_;
+    std::size_t payload_endpoints_ = 0;
+    std::size_t unknown_endpoints_ = 0;
+    std::size_t shape_fields_ = 0;
+    std::size_t dtype_fields_ = 0;
+};
+
+} // namespace prologue

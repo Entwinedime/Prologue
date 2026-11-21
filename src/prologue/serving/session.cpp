@@ -1,6 +1,6 @@
 #include "prologue/serving/session.hpp"
 
-#include "prologue/execution/communication.hpp"
+#include "prologue/serving/execution/communication.hpp"
 #include "prologue/serving/service_times.hpp"
 #include "prologue/templates/library.hpp"
 

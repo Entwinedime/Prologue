@@ -6,8 +6,8 @@ from datetime import datetime, timedelta
 from itertools import islice
 from pathlib import Path
 
-from prologue_adapters.artifacts import write_json
-from prologue_adapters.sglang.configuration import ServingInput
+from prologue.artifacts import write_json
+from prologue.integrations.frameworks.sglang.configuration import ServingInput
 
 
 def convert(path: Path, first_row: int, count: int) -> dict:

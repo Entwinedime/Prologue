@@ -9,7 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include "prologue/contracts/serving.hpp"
-#include "prologue/execution/timing.hpp"
+#include "prologue/serving/execution/timing.hpp"
 
 namespace prologue {
 

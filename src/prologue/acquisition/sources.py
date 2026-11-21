@@ -1,0 +1,198 @@
+"""Execute a finite source plan using the existing capture and production owners."""
+
+import fcntl
+import filecmp
+import json
+import math
+import shutil
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
+
+from prologue.artifacts import write_json
+from prologue.integrations.frameworks.sglang.acquisition.domains import SourceDomain
+from prologue.acquisition.capture import CaptureProcess
+from prologue.workflow.limits import AllowanceExhausted, OperationLimit
+from prologue.acquisition.production import CaptureProduction
+
+
+class SourceAcquisition:
+    def __init__(self, arguments, place, limit=None):
+        self.arguments = arguments
+        self.output = arguments.output.resolve()
+        plan_root = arguments.plan.resolve(strict=True)
+        plan = json.loads((plan_root / "plan.json").read_text())
+        deployment = json.loads(arguments.deployment.read_text())
+        self.jobs, self.descriptions = {}, {}
+        for description in plan["sources"]:
+            identity = description["id"]
+            if type(identity) is not int or identity < 0 or identity in self.jobs:
+                raise ValueError("source plan needs distinct nonnegative source job IDs")
+            path = (plan_root / description["source"]["input"]).resolve(strict=True)
+            if not path.is_relative_to(plan_root):
+                raise ValueError("planned capture input lies outside its plan directory")
+            job = json.loads(path.read_text())
+            launch = place(job, deployment)
+            serving = launch.serving
+            structure = description["structure"]
+            if SourceDomain.requested(serving) != structure:
+                raise ValueError("planned capture input differs from its source domain")
+            coverage = description["required_coverage"]
+            if coverage.keys() - structure["instances"].keys():
+                raise ValueError("planned source coverage names an undeclared serving mode")
+            model = Path(serving.model["path"]).resolve(strict=True)
+            if self.output == model or model in self.output.parents:
+                raise ValueError("source collection must not write inside a model directory")
+            self.jobs[identity] = launch
+            self.descriptions[identity] = {"structure": structure, "required_coverage": coverage}
+        if not self.jobs:
+            raise ValueError("source acquisition needs a nonempty plan")
+
+        observations = json.loads(arguments.observations.read_text()) if arguments.observations is not None else {}
+        if not isinstance(observations, dict) or observations.keys() - {str(identity) for identity in self.jobs}:
+            raise ValueError("observation references name an unplanned source job")
+        self.observations = {int(key): Path(path).resolve(strict=True) for key, path in observations.items()}
+        for identity, directory in self.observations.items():
+            if self.output == directory or directory in self.output.parents:
+                raise ValueError("source collection must not write inside a referenced native task")
+            CaptureProcess.published(directory, self.jobs[identity].job)
+        self.sources = {identity: self.observations.get(identity, self.output / "sources" / str(identity))
+                        for identity in self.jobs}
+
+        for value in (arguments.postprocessing_budget_seconds, arguments.timeout):
+            if not math.isfinite(value) or value < 1e-9:
+                raise ValueError("collection operation and postprocessing times must be finite and positive")
+        if (not math.isfinite(arguments.native_budget_seconds) or arguments.native_budget_seconds < 0
+                or arguments.attempt_limit < 0 or arguments.storage_bytes <= 0):
+            raise ValueError("collection needs nonnegative native allowances and positive storage")
+        self.binary = arguments.binary.resolve(strict=True)
+        if not self.binary.is_file():
+            raise ValueError("source collection requires a compiled executable")
+
+        self.native_ns = int(arguments.native_budget_seconds * 1_000_000_000)
+        self.production_ns = int(arguments.postprocessing_budget_seconds * 1_000_000_000)
+        self.limit = limit if limit is not None else OperationLimit(self.output, arguments.storage_bytes)
+        images = {role: subprocess.check_output(["docker", "image", "inspect", image, "--format", "{{.Id}}"], text=True).strip()
+                  for role, image in (("source", arguments.source_image), ("modeling", arguments.modeling_image))}
+        self.inputs = {"plan": plan, "jobs": {str(key): launch.job for key, launch in self.jobs.items()},
+                       "deployment": deployment, "images": images, "resource_trace": arguments.resource_trace,
+                       "keep_intermediates": arguments.keep_intermediates}
+        if self.observations:
+            self.inputs["observations"] = {str(key): str(path) for key, path in self.observations.items()}
+
+    def usage(self):
+        native, production, attempts = {}, {}, {}
+        for identity in self.jobs:
+            path = self.sources[identity] / "execution.json"
+            records = []
+
+            # Referenced observations remain charged to their original capture owner.
+            if identity not in self.observations and path.exists():
+                records = json.loads(path.read_text())["attempts"]
+            native[identity] = sum(record["charged_ns"] for record in records)
+            attempts[identity] = len(records)
+            path = self.output / "assets" / str(identity) / "production.json"
+            production[identity] = json.loads(path.read_text())["spent_ns"] if path.exists() else 0
+        return native, production, attempts
+
+    def status(self, error):
+        native, production, attempts = self.usage()
+        write_json(self.output / "status.json", {
+            "native_charged_ns": sum(native.values()), "postprocessing_ns": sum(production.values()),
+            "native_attempts": sum(attempts.values()), "retained_bytes": self.limit.bytes_used(),
+            "limits": {"native_ns": self.native_ns, "postprocessing_ns": self.production_ns,
+                       "native_attempts": self.arguments.attempt_limit, "storage_bytes": self.arguments.storage_bytes},
+            "error": error,
+        }, indent=2)
+
+    def prepare(self):
+        path = self.output / "input.json"
+        executable = self.output / "inputs/prologue"
+        if path.exists():
+            if json.loads(path.read_text()) != self.inputs or not filecmp.cmp(self.binary, executable, shallow=False):
+                raise ValueError("collection inputs, program, images or retention policy changed; use a new directory")
+        else:
+            if any(path.name != ".lock" for path in self.output.iterdir()):
+                raise ValueError("new source collection requires an empty directory")
+            executable.parent.mkdir()
+            shutil.copyfile(self.binary, executable)
+            executable.chmod(0o500)
+            write_json(path, self.inputs, indent=2, replace=False)
+
+        # Every source job uses this task's program, even if the external build changes during native capture.
+        self.binary = executable
+
+    def acquire(self, identity):
+        native, production, attempts = self.usage()
+        production_allowance = production[identity] + max(0, self.production_ns - sum(production.values()))
+        if production_allowance <= 0:
+            raise AllowanceExhausted("source collection postprocessing allowance exhausted")
+        source = self.sources[identity]
+        assets = self.output / "assets" / str(identity)
+
+        # Explicit observations stay owned by their original task; only missing observations launch an Engine.
+        if identity not in self.observations:
+            native_allowance = native[identity] + max(0, self.native_ns - sum(native.values()))
+            attempt_allowance = attempts[identity] + max(0, self.arguments.attempt_limit - sum(attempts.values()))
+            if min(native_allowance, attempt_allowance) <= 0:
+                raise AllowanceExhausted("source collection native allowance exhausted")
+
+            CaptureProcess(SimpleNamespace(
+                output=source, timeout=self.arguments.timeout,
+                budget_seconds=native_allowance / 1_000_000_000, attempt_limit=attempt_allowance,
+                source_image=self.inputs["images"]["source"], resource_trace=self.arguments.resource_trace,
+            ), self.jobs[identity], self.limit).run()
+        publication = json.loads((source / "result.json").read_text())
+        CaptureProduction(SimpleNamespace(
+            capture=source / publication["source"], output=assets, binary=self.binary, product="templates",
+            budget_seconds=production_allowance / 1_000_000_000, source_image=self.inputs["images"]["source"],
+            modeling_image=self.inputs["images"]["modeling"], keep_intermediates=self.arguments.keep_intermediates,
+        ), self.limit).run()
+        publication = json.loads((assets / "result.json").read_text())
+        libraries = [json.loads((assets / path).read_text()) for path in publication["templates"]]
+        if SourceDomain.observed(libraries) != self.descriptions[identity]["structure"]:
+            raise ValueError(f"source {identity} compiled a different native implementation")
+
+        # Input opportunities use metadata; initialized native expert modules must confirm that partition.
+        expert_count = self.inputs["plan"]["expert_count"]
+        if expert_count is not None and any(layer["experts"] != expert_count
+                                            for library in libraries for layer in library["domain"]["expert_layers"]):
+            raise ValueError(f"source {identity} initialized a different expert count from its plan")
+        SourceDomain.require_coverage(libraries, self.descriptions[identity]["required_coverage"])
+
+    def run(self, *, allow_incomplete=False):
+        self.output.mkdir(parents=True, exist_ok=True)
+        with (self.output / ".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.prepare()
+            error = None
+            try:
+                available, unavailable = [], {}
+                for identity in self.jobs:
+                    try:
+                        self.acquire(identity)
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, RuntimeError) as failure:
+                        if not allow_incomplete:
+                            raise
+                        self.limit.check()
+                        if isinstance(failure, AllowanceExhausted):
+                            status = "budget_exhausted"
+                        else:
+                            recorded = (self.sources[identity] / "result.json").is_file()
+                            status = "source_failed" if recorded else "native_unavailable"
+                        unavailable[str(identity)] = {"status": status, "message": str(failure)}
+                    else:
+                        available.append(identity)
+                self.limit.check()
+                write_json(self.output / "result.json", {
+                    "productions": [f"assets/{identity}" for identity in available],
+                    "captures": [str(self.sources[identity]) for identity in available],
+                    "unavailable": unavailable,
+                    "qualification": "partial_sources" if unavailable else "compiled_initial_sources",
+                    "limits": self.inputs["plan"]["limits"],
+                }, indent=2)
+            except BaseException as failure:
+                error = f"{type(failure).__name__}: {failure}"
+                raise
+            finally:
+                self.status(error)

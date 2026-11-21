@@ -9,7 +9,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "prologue/execution/timing.hpp"
+#include "prologue/serving/execution/timing.hpp"
 #include "prologue/performance/work_costs.hpp"
 #include "prologue/serving/execution_inputs.hpp"
 

@@ -1,0 +1,267 @@
+"""Interleave native calls with their caller's execution segments."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from typing import Any
+
+from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
+
+
+@dataclass
+class ActionCall:
+    operation: str
+    parameters: dict[str, int]
+    work: dict[str, Any]
+    inputs: dict[str, Any] = field(default_factory=dict)
+    outputs: dict[str, Any] = field(default_factory=dict)
+    condition: dict[str, Any] = field(default_factory=dict)
+    guards: tuple = ()
+    input_use: str = "device"
+
+
+@dataclass
+class CallFrame:
+    operation: str
+    original: Any
+    parameters: dict[str, int]
+    work: dict[str, Any]
+    inputs: Any = None
+    guards: tuple = ()
+    host_only: bool = False
+    outputs: list[dict[str, Any]] = field(default_factory=list)
+    entry: str = "call.enter"
+    exit: str = ""
+    entry_context: dict = field(default_factory=dict)
+    exit_context: dict = field(default_factory=dict)
+    segment: Any = None
+    values: dict = field(default_factory=dict)
+    observations: list[int] = field(default_factory=list)
+    tensor_inputs: dict = field(default_factory=dict)
+    metadata_inputs: dict = field(default_factory=dict)
+    tensor_allocations: dict = field(default_factory=dict)
+    tensor_outputs: dict = field(default_factory=dict)
+    condition: dict = field(default_factory=dict)
+    host_inputs: dict = field(default_factory=dict)
+    device_tail: bool = False
+
+    @property
+    def terminal(self):
+        return self.exit == "call.return"
+
+    @property
+    def host_fragment(self):
+        return self.host_only or self.device_tail and not self.terminal
+
+    @property
+    def continuation(self):
+        return {
+            "owner": self.operation, "entry": self.entry, "exit": self.exit,
+            "entry_context": self.entry_context, "exit_context": self.exit_context,
+        }
+
+    def child(self, work):
+
+        # Preserve the caller's logical position, not a run-local call counter or resource binding.
+        if "observation_context" in self.work:
+            work.setdefault("observation_context", self.work["observation_context"])
+        work["callers"] = [*self.work.get("callers", ()), {
+            "owner": self.operation, "context": self.work.get("context", {}),
+            "entry": self.entry, "entry_context": self.entry_context,
+        }]
+
+
+class CallSegments:
+    def __init__(self) -> None:
+        self.current = ContextVar("native_call_segments", default=None)
+        self.reading = ContextVar("native_state_read", default=None)
+        self.communicating = ContextVar("native_cpu_protocol", default=None)
+
+    @property
+    def protocol_enabled(self):
+        return self.enabled
+
+    def enclosing(self, frame):
+        return nullcontext()
+
+    def fragment(self, frame):
+        raise NotImplementedError
+
+    def request_id(self, native_id):
+        raise NotImplementedError
+
+    def read_boundary(self, kind, original, work, condition):
+        raise NotImplementedError
+
+    def device_collective(self, original, arguments):
+        return original(**arguments)
+
+    @contextmanager
+    def read(self, kind, original, work, *, read=None):
+        work = dict(work)
+        work["context"] = {**work["context"], "query": kind}
+        condition = {"query": kind}
+        if read is not None:
+            work["context"]["read"] = read
+            condition["read"] = read
+
+        # Finish preceding CPU work before observing state; do not add a wait for the queried producer.
+        with self.separate("query", work), self.read_boundary(kind, original, work, condition) as query:
+            query["clocks"] = []
+            previous = self.reading.set(query)
+            try:
+                yield query
+            finally:
+                self.reading.reset(previous)
+
+    def clock_sample(self, original, query):
+        value = original()
+        return value, round(value * 1_000_000_000)
+
+    def clock_read(self, original, description):
+        if not self.enabled:
+            return self.clock_sample(original, None)[0]
+        reading = self.reading.get()
+        if reading is not None:
+
+            # A poll's internal clock belongs to that read, not to a second independently expanded query.
+            value, ticks = self.clock_sample(original, reading)
+            reading["clocks"].append({"read": description, "result": ticks})
+            return value
+        parent = self.current.get()
+        work = self.scheduler_work() if parent is None else dict(parent.work)
+        with self.read("clock", original, work, read=description) as query:
+            value, query["result"] = self.clock_sample(original, query)
+        return value
+
+    def progress(self, requests):
+
+        # Logical request progress is comparable across runs; native slots and object handles are not.
+        return [
+            {
+                "id": self.request_id(req.rid), "generated_tokens": len(req.output_ids),
+                "committed_tokens": req.kv_committed_len,
+                "extend": None if req.extend_range is None else [req.extend_range.start, req.extend_range.end],
+            }
+            for req in requests
+        ]
+
+    def request_work(self, request, begin=0, end=None):
+        end = len(request.origin_input_ids) if end is None else end
+        work = self.work(None, [{"id": request.rid, "context_tokens": begin, "new_tokens": end - begin}])
+
+        # Token coverage describes the graph's accesses; request progress identifies this native invocation.
+        work["context"] = {"request": self.progress((request,))[0]}
+        return work
+
+    def scheduler_work(self):
+        scheduler = self.scheduler
+        queues = {
+            "waiting": scheduler.waiting_queue,
+            "running": scheduler.running_batch.reqs,
+            "previous": scheduler.last_batch.reqs if scheduler.last_batch is not None else (),
+            "chunked": (scheduler.chunked_req,) if scheduler.chunked_req is not None else (),
+        }
+        mode = scheduler.server_args.disaggregation_mode
+        if mode == "prefill":
+            queues.update(
+                bootstrap=scheduler.disagg_prefill_bootstrap_queue.queue,
+                transferring=scheduler.disagg_prefill_inflight_queue,
+            )
+        elif mode == "decode":
+            prealloc = scheduler.disagg_decode_prealloc_queue
+            queues.update(
+                prealloc=[entry.req for entry in prealloc.queue],
+                pending=[entry.req for entry in prealloc.pending_reqs],
+                retracted=prealloc.retracted_queue,
+                transferring=[entry.req for entry in scheduler.disagg_decode_transfer_queue.queue],
+            )
+
+        # Snapshot native membership and progress, without inventing a unique identity for repeated polls.
+        work = self.work(None)
+        work["context"] = {name: self.progress(requests) for name, requests in queues.items()}
+        if scheduler.ps.pp_size > 1:
+            work["context"]["pipeline"] = PipelineABI.control_context(self)
+        return work
+
+    def resume(self, frame, entry="call.enter", context=None, tensor_inputs=None):
+        frame.entry = entry
+        frame.entry_context = {} if context is None else context
+        frame.exit = ""
+        frame.exit_context = {}
+        if entry != "call.enter" and tensor_inputs is not None:
+
+            # A resource-only child leaves borrowed inputs live; explicit returns replace the continuation contract.
+            frame.tensor_inputs = dict(tensor_inputs)
+        frame.tensor_outputs = {}
+        frame.segment = self.fragment(frame)
+        frame.segment.__enter__()
+
+    def suspend(self, frame, boundary, context=None, error=None):
+        segment, frame.segment = frame.segment, None
+        if segment is None:
+            return
+        frame.exit = boundary
+        frame.exit_context = {} if context is None else context
+        segment.__exit__(type(error) if error is not None else None, error, error.__traceback__ if error is not None else None)
+
+    @contextmanager
+    def separate(self, operation, work):
+        parent = self.current.get()
+        context = work.get("context", {})
+        if parent is not None:
+            parent.child(work)
+            self.suspend(parent, operation, context)
+        previous = self.current.set(None)
+        try:
+            yield
+        finally:
+            self.current.reset(previous)
+
+        # Independently submitted actions must not also appear inside their caller's segment.
+        if parent is not None:
+            self.resume(parent, operation, context)
+
+    @contextmanager
+    def call(
+        self, operation, original, *, parameters=None, work=None, inputs=None, guards=(),
+        host_only=False, device_tail=False, tensor_inputs=None, tensor_outputs=None, metadata_inputs=None, allocations=None, condition=None, host_inputs=None,
+    ):
+        parent = self.current.get()
+        work = dict(parent.work if work is None else work)
+        context = work.get("context", {})
+        if parent is not None:
+            parent.child(work)
+            self.suspend(parent, operation, context)
+
+        # Continuations inherit their owner's inputs; independent resource APIs supply their own explicit inputs.
+        frame = CallFrame(
+            operation, original,
+            dict(parent.parameters if parameters is None else parameters),
+            work, inputs, guards, host_only,
+            tensor_inputs={} if tensor_inputs is None else tensor_inputs,
+            metadata_inputs={} if metadata_inputs is None else metadata_inputs,
+            tensor_allocations={} if allocations is None else allocations,
+            condition={} if condition is None else condition,
+            host_inputs={} if host_inputs is None else host_inputs,
+            device_tail=device_tail,
+        )
+        previous = self.current.set(frame)
+        try:
+            with self.enclosing(frame):
+                self.resume(frame)
+                try:
+                    yield frame
+                except BaseException as error:
+                    self.suspend(frame, "call.error", error=error)
+                    raise
+                else:
+                    self.suspend(frame, "call.return")
+        finally:
+            self.current.reset(previous)
+
+        # Resume only after a successful child return; a failing call cannot publish another successful segment.
+        if parent is not None:
+            self.resume(parent, operation, context, tensor_outputs)

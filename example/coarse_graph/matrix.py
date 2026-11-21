@@ -8,12 +8,12 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
-from prologue_adapters.artifacts import write_json
-from prologue_adapters.sglang.configuration import CaptureInput
-from prologue_workflow.capture import CaptureProcess
-from prologue_workflow.containers import OwnedContainers
-from prologue_workflow.limits import OperationLimit
-from prologue_workflow.source_productions import SourceProductions
+from prologue.acquisition.capture import CaptureProcess
+from prologue.acquisition.publication import SourceProductions
+from prologue.artifacts import write_json
+from prologue.integrations.frameworks.sglang.configuration import CaptureInput
+from prologue.integrations.runtimes.docker import OwnedContainers
+from prologue.workflow.limits import OperationLimit
 
 from run import TaskCommands
 
@@ -126,7 +126,7 @@ class MatrixRun:
             return {"id": name, "collection": str(collection), "source_kind": "fixed_library"} | self.source_evidence(name, collection)
         plan = self.root / "assets" / self.name / name / "plan"
         code = self.process(f"{name}/plan", self.commands.command(
-            "prologue_workflow", "plan-sources", "--input", self.root / domain["exploration"], "--output", plan,
+            "prologue.app", "plan-sources", "--input", self.root / domain["exploration"], "--output", plan,
         ))
         result = {"id": name, "plan_exit": code, "plan": str(plan)}
         if code:
@@ -138,7 +138,7 @@ class MatrixRun:
         collection = self.root / "sources" / self.name / name
         model = json.loads((self.root / domain["exploration"]).read_text())["model"]["path"]
         command = self.commands.command(
-            "prologue_workflow", "acquire-sources", "--plan", plan, "--deployment", self.root / domain["deployment"], "--output", collection,
+            "prologue.app", "acquire-sources", "--plan", plan, "--deployment", self.root / domain["deployment"], "--output", collection,
             "--binary", self.binary, "--source-image", self.images["source"], "--modeling-image", self.images["modeling"],
             "--timeout", self.budget["task_seconds"], "--native-budget-seconds", native,
             "--postprocessing-budget-seconds", processing, "--attempt-limit", jobs,
@@ -158,14 +158,17 @@ class MatrixRun:
         checks = []
         for job in published.plan["sources"]:
             identity = job["id"]
+            if str(identity) in published.unavailable:
+                checks.append({"job": identity, "mapped": False, **published.unavailable[str(identity)]})
+                continue
             observation = CaptureProcess.published(published.captures[identity], published.jobs[str(identity)])
             output = self.results / "sources" / name / str(identity)
             command = [
                 "docker", "run", "--rm", "--init", "--runtime", "runc", "--network", "none",
                 "--mount", f"type=bind,src={self.repository},dst={self.repository}",
-                "--env", "PYTHONPATH=src/verification:src/collection:src/adapters:src/workload",
+                "--env", "PYTHONPATH=src",
                 "--workdir", str(self.repository), "--entrypoint", "timeout", self.images["control"],
-                "--signal=KILL", str(self.budget["operation_seconds"]), "python3", "-m", "prologue_verification.source_evidence",
+                "--signal=KILL", str(self.budget["operation_seconds"]), "python3", "-m", "prologue.verification.source_evidence",
                 "--production", str(published.paths[identity]), "--capture", str(observation), "--output", str(output),
             ]
             self.process(f"{name}/source-evidence-{identity}", command)
@@ -175,39 +178,60 @@ class MatrixRun:
                            "native_group_status": None if report is None else report["native_case"]["status"]})
         return {"status": "ready" if all(row["mapped"] for row in checks) else "source-evidence-unqualified", "jobs": checks}
 
-    def prepare_targets(self, domains, sources, targets):
-        for domain in domains:
-            source = sources.get(domain["id"], {"status": "not-executed"})
-            published = SourceProductions(Path(source["collection"])) if source["status"] == "ready" else None
-            for case in domain["targets"]:
-                native = json.loads((self.root / case["capture_input"]).read_text())
-                prediction = json.loads((self.root / case["prediction_input"]).read_text())
-                serving = CaptureInput(native)
-                changed = [name for name in ("model", "instances", "workload") if native[name] != prediction[name]]
-                if changed:
-                    raise ValueError(f"{case['id']}: native and prediction inputs differ in {changed}")
-                requests = [request["id"] for request in serving.workload["requests"]]
-                if serving.submission_groups != [requests]:
-                    raise ValueError(f"{case['id']}: a target requires one timed cohort in declared request order")
+    @staticmethod
+    def selected_source(source, prediction):
+        if "jobs" not in source:
+            return {"source_status": source["status"]}
 
-                # A missing source is a separate finding; available libraries must use the real prediction assembly.
-                if published is not None:
-                    try:
-                        published.prepare(prediction)
-                    except ValueError as error:
-                        raise ValueError(f"{case['id']}: {error}") from error
-                target = targets.get(case["id"], {})
-                if "observation" in case or "native" in target:
-                    owner = self.root / case.get("observation", f"targets/{self.name}/{case['id']}/native")
-                    observation = CaptureProcess.published(owner, native)
-                    if "native" in target and observation != Path(target["native"]).resolve(strict=True):
-                        raise ValueError(f"{case['id']}: target report refers to a different native observation")
+        published = SourceProductions(Path(source["collection"]))
+        jobs = published.jobs_for(prediction)
+        if not jobs:
+            return {"source_status": "source-unavailable", "source_failure": published.failure(prediction)}
 
-    def target(self, domain, case):
+        # Only evidence for libraries consumed by this prediction can qualify its source.
+        mapped = {row["job"] for row in source["jobs"] if row["mapped"]}
+        return {"source_status": "ready" if mapped.issuperset(jobs) else "source-evidence-unqualified", "source_jobs": jobs}
+
+    def evaluate(self, phase, domain, case, source, target):
+        native = json.loads((self.root / case["capture_input"]).read_text())
+        prediction = json.loads((self.root / case["prediction_input"]).read_text())
+        serving = CaptureInput(native)
+        changed = [name for name in ("model", "instances", "workload") if native[name] != prediction[name]]
+        if changed:
+            raise ValueError(f"native and prediction inputs differ in {changed}")
+        requests = [request["id"] for request in serving.workload["requests"]]
+        if serving.submission_groups != [requests]:
+            raise ValueError("a target requires one timed cohort in declared request order")
+        if phase == "targets":
+            return self.target(domain, case, native)
+
+        # Only the structure and fixed-graph paths consume the detailed target recording.
+        if phase in {"compare", "fixed"} and target["status"] == "produced":
+            owner = self.root / case.get("observation", f"targets/{self.name}/{case['id']}/native")
+            observation = self.reference(domain, owner, native, case.get("detailed_capture", "resource-trace"))
+            if observation != Path(target["native"]).resolve(strict=True):
+                raise ValueError("target report refers to a different native observation")
+        if phase == "compare":
+            return self.compare(case, prediction, source, target)
+        if phase == "autonomous" and "latency_observation" in case:
+            self.reference(domain, self.root / case["latency_observation"], native, "latency-only")
+        return self.performance(phase, domain, case, prediction, source, target)
+
+    def reference(self, domain, owner, native, mode):
+        deployment = json.loads((self.root / domain["deployment"]).read_text())
+        conditions = {"image": self.images["source"], "deployment": deployment, mode.replace("-", "_"): True}
+        if mode == "latency-only":
+            conditions["host_timing"] = None
+        return CaptureProcess.published(owner, native, conditions=conditions)
+
+    def target(self, domain, case, capture_input):
         name = case["id"]
         directory = self.root / "targets" / self.name / name
         task = self.root / case["capture_input"]
         result = {"id": name}
+        mode = case.get("detailed_capture", "resource-trace")
+        if mode not in {"resource-trace", "service-reference"}:
+            raise ValueError("a structure target needs a detailed native observation")
         if "observation" in case:
 
             # An explicit immutable task replaces collection; the same complete input check still precedes production.
@@ -215,19 +239,16 @@ class MatrixRun:
             result["observation"] = str(output)
         else:
             output = directory / "native"
-            mode = case.get("detailed_capture", "resource-trace")
-            if mode not in {"resource-trace", "service-reference"}:
-                raise ValueError("a structure target needs a detailed native observation")
             timeout = case.get("detailed_timeout_seconds", self.budget["task_seconds"])
             code = self.observe(f"{name}/capture", domain, task, output, mode, timeout)
             result["capture_exit"] = code
             if code:
                 return result | {"status": "native-capture-failed"}
 
-        native = CaptureProcess.published(output, json.loads(task.read_text()))
+        native = self.reference(domain, output, capture_input, mode)
         production = directory / "structure"
         code = self.process(f"{name}/produce", self.commands.command(
-            "prologue_workflow", "produce", "--capture", native, "--product", "graphs", "--output", production, "--binary", self.binary,
+            "prologue.app", "produce", "--capture", native, "--product", "graphs", "--output", production, "--binary", self.binary,
             "--source-image", self.images["source"], "--modeling-image", self.images["modeling"],
             "--budget-seconds", self.budget["operation_seconds"], "--keep-intermediates",
         ))
@@ -236,24 +257,25 @@ class MatrixRun:
 
     def observe(self, step, domain, task, output, mode, timeout):
         command = self.commands.command(
-            "prologue_workflow", "capture", "--input", task, "--deployment", self.root / domain["deployment"], "--output", output,
+            "prologue.app", "capture", "--input", task, "--deployment", self.root / domain["deployment"], "--output", output,
             "--source-image", self.images["source"], "--timeout", timeout, "--budget-seconds", timeout,
             "--attempt-limit", 1, f"--{mode}", model=json.loads(task.read_text())["model"]["path"],
         )
         return self.step(step, command, {"native_seconds": timeout + 60, "native_attempts": 1},
                          timeout + 60, output / "execution.json")
 
-    def compare(self, case, source, target):
+    def compare(self, case, prediction, source, target):
         name = case["id"]
-        result = {"id": name, "source_status": source["status"], "target_status": target["status"]}
+        result = {"id": name, "target_status": target["status"]}
         if target["status"] != "produced":
             return result | {"status": "target-prerequisite-unqualified"}
-        if source["status"] != "ready":
+        result.update(self.selected_source(source, prediction))
+        if result["source_status"] != "ready":
             return result | {"status": "source-prerequisite-unqualified"}
 
         output = self.results / "cases" / name
         command = self.commands.command(
-            "prologue_verification.structure", "--capture", target["native"], "--reference", target["production"],
+            "prologue.verification.structure", "--capture", target["native"], "--reference", target["production"],
             "--production", source["collection"], "--input", self.root / case["prediction_input"], "--output", output,
             "--binary", self.binary, "--modeling-image", self.images["modeling"], "--control-image", self.images["control"],
             "--timeout", self.budget["task_seconds"],
@@ -267,7 +289,7 @@ class MatrixRun:
             return result | {"status": "verification-error"}
         return result | json.loads(path.read_text()) | {"report": str(path)}
 
-    def performance(self, phase, domain, case, source, target):
+    def performance(self, phase, domain, case, prediction, source, target):
         name = case["id"]
         result = {"id": name}
         if phase == "fixed" and case.get("detailed_capture") != "service-reference":
@@ -281,15 +303,17 @@ class MatrixRun:
             evidence = ("--capture", target["native"], "--reference", target["production"])
         else:
             module = "autonomous"
-            latency = self.root / "targets" / self.name / name / "latency"
-            timeout = case.get("latency_timeout_seconds", self.budget["task_seconds"])
-            code = self.observe(f"{name}/latency", domain, self.root / case["capture_input"], latency, "latency-only", timeout)
-            if code:
-                return result | {"status": "native-capture-failed", "capture_exit": code}
+            latency = self.root / case.get("latency_observation", f"targets/{self.name}/{name}/latency")
+            if "latency_observation" not in case:
+                timeout = case.get("latency_timeout_seconds", self.budget["task_seconds"])
+                code = self.observe(f"{name}/latency", domain, self.root / case["capture_input"], latency, "latency-only", timeout)
+                if code:
+                    return result | {"status": "native-capture-failed", "capture_exit": code}
 
             # Keep the frozen native observation even when the current prediction asset is unusable.
             result["native_task"] = str(latency)
-            if source["status"] != "ready":
+            result.update(self.selected_source(source, prediction))
+            if result["source_status"] != "ready":
                 return result | {"status": "source-prerequisite-unqualified"}
             evidence = ("--capture", latency, "--production", source["collection"],
                         "--input", self.root / case["prediction_input"], "--control-image", self.images["control"])
@@ -297,7 +321,7 @@ class MatrixRun:
         output = self.results / phase / name
         timeout = self.budget["operation_seconds"]
         command = self.commands.command(
-            f"prologue_verification.{module}", *evidence, "--costs", self.root / domain["costs"], "--output", output,
+            f"prologue.verification.{module}", *evidence, "--costs", self.root / domain["costs"], "--output", output,
             "--binary", self.binary, "--modeling-image", self.images["modeling"], "--timeout", timeout,
         )
         allowance = (2 * timeout if phase == "fixed" else timeout) + 60
@@ -324,12 +348,8 @@ class MatrixRun:
                 path = self.results / f"{name}.json"
                 results[name] = json.loads(path.read_text()) if path.exists() else {}
             sources, targets, records = (results[name] for name in ("sources", "targets", report))
-            if phase != "sources":
-
-                # Check the entire selected range before spending any native allowance or comparing unlike inputs.
-                self.prepare_targets(domains, sources, targets)
             needs_native = (
-                phase == "autonomous"
+                phase == "autonomous" and any("latency_observation" not in case for domain in domains for case in domain["targets"])
                 or phase == "sources" and any("source" not in domain for domain in domains)
                 or phase == "targets" and any("observation" not in case for domain in domains for case in domain["targets"])
             )
@@ -343,15 +363,10 @@ class MatrixRun:
                     try:
                         if phase == "sources":
                             result = self.sources(domain)
-                        elif phase == "targets":
-                            result = self.target(domain, case)
                         else:
                             source = sources.get(domain["id"], {"status": "not-executed"})
                             target = targets.get(case["id"], {"status": "not-executed"})
-                            if phase == "compare":
-                                result = self.compare(case, source, target)
-                            else:
-                                result = self.performance(phase, domain, case, source, target)
+                            result = self.evaluate(phase, domain, case, source, target)
                     except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
 
                         # Bad artifacts have a terminal finding; unresolved processes still stop above.

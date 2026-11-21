@@ -5,7 +5,7 @@
 
 #include "prologue/serving/action_graphs.hpp"
 #include "prologue/serving/control.hpp"
-#include "prologue/execution/dependencies.hpp"
+#include "prologue/serving/execution/dependencies.hpp"
 
 namespace prologue {
 

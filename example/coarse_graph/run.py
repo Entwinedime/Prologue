@@ -33,7 +33,7 @@ class TaskCommands:
             command.extend(["--mount", f"type=bind,src={source},dst={destination}" + (",readonly" if readonly else "")])
         command.extend([
             "--workdir", str(self.repository),
-            "--env", "PYTHONPATH=src/workflow:src/verification:src/adapters:src/collection:src/workload",
+            "--env", "PYTHONPATH=src",
             "--entrypoint", "python3", self.images["control"], "-m", module,
         ])
         return command + [str(value) for value in arguments]
@@ -54,7 +54,7 @@ def main():
     images = {role: getattr(options, f"{role}_image") for role in ("source", "control", "modeling")}
     commands = TaskCommands(repository, images)
     if "--help" in remaining or "-h" in remaining:
-        raise SystemExit(subprocess.call(commands.command("prologue_workflow", "explore", "--help")))
+        raise SystemExit(subprocess.call(commands.command("prologue.app", "explore", "--help")))
     if options.deployment is None:
         parser.error("--deployment is required")
 
@@ -72,7 +72,7 @@ def main():
     model = json.loads(options.input.read_text())["model"]["path"]
     for role, image in images.items():
         arguments.extend(("--" + role + "-image", image))
-    command = commands.command("prologue_workflow", "explore", *arguments, *remaining, model=model, files=files.items())
+    command = commands.command("prologue.app", "explore", *arguments, *remaining, model=model, files=files.items())
     raise SystemExit(subprocess.call(command))
 
 

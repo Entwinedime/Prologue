@@ -1,0 +1,166 @@
+"""Capture one native job with cumulative accounting and explicit invocation-by-invocation retries."""
+
+import fcntl
+import json
+import math
+import subprocess
+import time
+from pathlib import Path
+from uuid import uuid4
+
+from prologue.artifacts import write_json
+from prologue.integrations.frameworks.sglang.acquisition.domains import SourceDomain
+from prologue.integrations.runtimes.docker import OwnedContainers
+from prologue.workflow.limits import AllowanceExhausted, OperationLimit
+
+
+class CaptureProcess:
+    @staticmethod
+    def published(directory: Path, job: dict, *, conditions=None) -> Path:
+        """Resolve an explicit completed observation without changing its native provenance."""
+        directory = directory.resolve(strict=True)
+        state = json.loads((directory / "execution.json").read_text())
+        if state["inputs"]["job"] != job or json.loads((directory / "input.json").read_text()) != job:
+            raise ValueError(f"published capture differs from the planned native input: {directory}")
+        if conditions is not None and any(state["inputs"].get(key) != value for key, value in conditions.items()):
+            raise ValueError(f"published capture differs from the requested recording conditions: {directory}")
+        attempt = state["attempts"][-1]
+        if attempt["status"] != "exited" or attempt["exit_code"] != 0:
+            raise ValueError(f"published capture has no successful terminal attempt: {directory}")
+        publication = json.loads((directory / "result.json").read_text())
+        source = (directory / publication["source"]).resolve(strict=True)
+        if not source.is_relative_to(directory):
+            raise ValueError("published source lies outside its native task")
+        return source
+
+    def __init__(self, arguments, launch, limit=None, *, latency_only=False, host_timing=False, service_reference=False) -> None:
+        self.arguments = arguments
+        self.host_timing = host_timing
+        self.latency_only = latency_only or host_timing
+        self.service_reference = service_reference
+        self.operation_limit = limit if limit is not None else OperationLimit()
+        self.options = launch.platform.options(detailed_timing=service_reference, latency_only=latency_only and not host_timing)
+        self.model = Path(launch.serving.model["path"]).resolve(strict=True)
+        destination = str(Path(launch.serving.model["path"]).absolute())
+        self.output = arguments.output.resolve()
+        if self.output == self.model or self.model in self.output.parents:
+            raise ValueError("capture output must not write inside the model directory")
+        for value in (arguments.timeout, arguments.budget_seconds):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError("native timeout and cumulative budget must be positive finite seconds")
+        if arguments.attempt_limit <= 0:
+            raise ValueError("native attempt limit must be positive")
+        self.limit_ns = int(arguments.budget_seconds * 1_000_000_000)
+        self.timeout_ns = int(arguments.timeout * 1_000_000_000)
+        if min(self.limit_ns, self.timeout_ns) < 1:
+            raise ValueError("native allowances must be at least one nanosecond")
+        image = json.loads(subprocess.check_output(["docker", "image", "inspect", arguments.source_image], text=True))[0]
+        self.inputs = {
+            "job": launch.job, "deployment": launch.platform.source, "image": image["Id"], "framework_revision": SourceDomain.image_revision(image),
+            "model_path": str(self.model), "model_destination": destination,
+            "resource_trace": arguments.resource_trace or service_reference,
+        }
+        if self.latency_only:
+            self.inputs["latency_only"] = True
+        if self.host_timing:
+            self.inputs["host_timing"] = True
+        if self.service_reference:
+            self.inputs["service_reference"] = True
+
+    def save(self) -> None:
+        write_json(self.output / "execution.json", self.state, indent=2)
+
+    def prepare(self) -> None:
+        path = self.output / "execution.json"
+        if path.exists():
+            self.state = json.loads(path.read_text())
+            if self.state["inputs"] != self.inputs or json.loads((self.output / "input.json").read_text()) != self.inputs["job"]:
+                raise ValueError("capture inputs, deployment or image changed; use a new task directory")
+            return
+        if any(path.name != ".lock" for path in self.output.iterdir()):
+            raise ValueError("new capture task requires an empty directory")
+        self.state = {"inputs": self.inputs, "attempts": []}
+        write_json(self.output / "input.json", self.inputs["job"], indent=2, replace=False)
+        self.save()
+
+    def recover(self, attempt: dict) -> None:
+        owned = OwnedContainers([attempt["container"]])
+        if attempt["exit_code"] is None and owned.remaining():
+            status = json.loads(subprocess.check_output([
+                "docker", "inspect", attempt["container"], "--format", "{{json .State}}",
+            ], text=True))
+            if status["Status"] == "exited":
+                attempt["exit_code"] = status["ExitCode"]
+
+        # A retained container supplies exit evidence after client interruption; a raw manifest alone does not.
+        owned.close()
+        attempt["status"] = "exited" if attempt["exit_code"] == 0 else "failed"
+        attempt["error"] = None if attempt["status"] == "exited" else "interrupted native attempt; reserved time remains charged"
+        self.save()
+
+    def capture(self, allowance_ns: int) -> None:
+        number = len(self.state["attempts"]) + 1
+        output = self.output / "attempts" / str(number)
+        container = f"prologue-capture-{uuid4().hex}"
+        command = [
+            "docker", "run", "--init", "--name", container, *self.options,
+            "--workdir", str(Path.cwd()), "--entrypoint", "/usr/bin/timeout",
+            "--mount", f"type=bind,src={self.model},dst={self.inputs['model_destination']},readonly",
+            "--mount", f"type=bind,src={self.output / 'input.json'},dst=/input.json,readonly",
+            "--mount", f"type=bind,src={output},dst=/capture",
+            self.inputs["image"], "--signal=KILL", f"{allowance_ns / 1_000_000_000}s", "/opt/prologue/capture.sh",
+            "--input", "/input.json", "--output", "/capture/source",
+            *(["--resource-trace"] if self.arguments.resource_trace else []),
+            *(["--latency-only"] if self.latency_only and not self.host_timing else []),
+            *(["--host-timing"] if self.host_timing else []),
+            *(["--service-reference"] if self.service_reference else []),
+        ]
+        attempt = {
+            "number": number, "container": container, "command": command, "timeout_ns": allowance_ns,
+            "charged_ns": allowance_ns, "elapsed_ns": None, "exit_code": None, "status": "running", "error": None,
+        }
+
+        # Reserve before launch; the container's own deadline also survives a killed coordinator.
+        self.state["attempts"].append(attempt)
+        self.save()
+        started_ns = time.monotonic_ns()
+        try:
+            output.mkdir(parents=True)
+            with (output / "capture.log").open("x") as log:
+                attempt["exit_code"] = self.operation_limit.run(command, log, allowance_ns / 1_000_000_000)
+            self.save()
+            if attempt["exit_code"]:
+                raise subprocess.CalledProcessError(attempt["exit_code"], command)
+        except BaseException as error:
+            attempt["error"] = f"{type(error).__name__}: {error}"
+            raise
+        finally:
+            OwnedContainers([container]).close()
+            attempt["elapsed_ns"] = time.monotonic_ns() - started_ns
+            attempt["charged_ns"] = attempt["elapsed_ns"]
+            attempt["status"] = "exited" if attempt["exit_code"] == 0 else "failed"
+            self.save()
+
+    def run(self) -> None:
+        self.output.mkdir(parents=True, exist_ok=True)
+        with (self.output / ".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.prepare()
+            attempts = self.state["attempts"]
+            if attempts and attempts[-1]["status"] == "running":
+                self.recover(attempts[-1])
+            spent_ns = sum(attempt["charged_ns"] for attempt in attempts)
+            if not attempts or attempts[-1]["status"] != "exited":
+                if len(attempts) >= self.arguments.attempt_limit or spent_ns >= self.limit_ns:
+                    raise AllowanceExhausted("cumulative native time or attempt allowance exhausted")
+                self.operation_limit.check()
+                self.capture(min(self.timeout_ns, self.limit_ns - spent_ns))
+
+            # A completed attempt is reused even if final publication was interrupted; no second Engine is needed.
+            source = self.output / "attempts" / str(attempts[-1]["number"]) / "source"
+            capture = json.loads((source / "capture.json").read_text())
+            write_json(self.output / "result.json", {
+                "source": str(source.relative_to(self.output)), **capture,
+                "native_charged_ns": sum(attempt["charged_ns"] for attempt in attempts), "attempts": len(attempts),
+            }, indent=2)
+        print(f"Created {self.output / 'result.json'}")
