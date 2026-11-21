@@ -8,12 +8,19 @@ from statistics import mean
 from prologue.artifacts import write_json
 from prologue.serving.latency import RequestLatency, percentile95
 
+from .reference import ReferenceRecording
+
 
 class NativeLatencyMetrics:
-    def __init__(self, source):
+    @classmethod
+    def from_source(cls, source):
+        instances = cls.read(source / "capture.json")["instances"]
+        return cls(source, instances, ReferenceRecording.sessions(source, instances))
+
+    def __init__(self, source, instances, sessions):
         self.source = source
-        instances = self.read(source / "capture.json")["instances"]
-        roles = {instance["mode"]: self.read_instance(index, instance) for index, instance in enumerate(instances)}
+        roles = {instance["mode"]: self.read_instance(index, instance, sessions[index])
+                 for index, instance in enumerate(instances)}
         if len(instances) == 1 and roles.keys() == {"null"}:
             self.ingress = self.emitter = roles["null"]
         elif len(instances) == 2 and roles.keys() == {"prefill", "decode"}:
@@ -28,9 +35,8 @@ class NativeLatencyMetrics:
         if all(role["specializations"] is not None for role in roles.values()):
             self.specializations = [event for role in roles.values() for event in role["specializations"]]
 
-    def read_instance(self, index, instance):
+    def read_instance(self, index, instance, session):
         directory = self.source / "instances" / str(index)
-        session = self.read(directory / "session.json")
         requests = session["content"]["requests"]
         delivery, = self.read(directory / "request-delivery.json")["capture"]
         if delivery["clock"] != "monotonic_raw_ns":
@@ -130,6 +136,41 @@ class NativeLatencyMetrics:
                 "specialization_loads": self.specializations}
 
 
+def compare_request_metrics(reference, predicted):
+    actual = {row["id"]: row for row in reference["requests"]}
+    estimates = {row["id"]: row for row in predicted["requests"]}
+    if len(actual) != len(reference["requests"]) or len(estimates) != len(predicted["requests"]) or actual.keys() != estimates.keys():
+        raise ValueError("request metrics require the same unique request identities")
+
+    differences = {identity: {"id": identity} for identity in actual}
+    accuracy = {}
+    for metric in ("ttft_ns", "tpot_ns"):
+        errors = []
+        zero = missing = 0
+        for identity, row in actual.items():
+            observed, estimate = row[metric], estimates[identity][metric]
+            if (observed is None) != (estimate is None):
+                raise ValueError(f"request {identity} changes the applicability of {metric}")
+            delta = None if observed is None else estimate - observed
+            differences[identity][metric] = delta
+
+            # A one-token request has no TPOT. A measured zero has a signed error but no relative denominator.
+            if observed is None:
+                missing += 1
+            elif observed == 0:
+                zero += 1
+            else:
+                errors.append(abs(delta) / observed)
+        accuracy[metric] = {"mape_percent": mean(errors) * 100 if errors else None, "requests": len(errors),
+                            "total_requests": len(actual), "not_applicable": missing, "zero_denominators": zero}
+
+    observed_rate, predicted_rate = reference["tokens_per_second"], predicted["tokens_per_second"]
+    return {"accuracy": accuracy, "delta_from_baseline": {
+        "requests": list(differences.values()), "p95_ttft_ns": predicted["p95_ttft_ns"] - reference["p95_ttft_ns"],
+        "tokens_per_second": None if observed_rate is None or predicted_rate is None else predicted_rate - observed_rate,
+    }}
+
+
 class LatencyComparison:
     def __init__(self, native, prediction):
         self.native = native
@@ -140,14 +181,7 @@ class LatencyComparison:
         result = self.result
         workload = [{**truth, "arrival_ns": truth["declared_ns"]} for truth in self.native["requests"]]
         prediction = RequestLatency.predicted(result, workload).report()
-        requests = prediction["requests"]
-        accuracy = {}
-        for metric in ("ttft_ns", "tpot_ns"):
-            actual = [row[metric] for row in self.native["requests"]]
-            errors = [abs(row[metric] - observed) / observed for row, observed in zip(requests, actual, strict=True) if observed]
-            accuracy[metric] = {"mape_percent": mean(errors) * 100 if errors else None,
-                                "requests": len(errors), "zero_denominators": actual.count(0)}
-        return {"result": str(self.path), **prediction, "accuracy": accuracy,
+        return {"result": str(self.path), **prediction, **compare_request_metrics(self.native, prediction),
                 "cost_queries": result["cost_queries"], "cost_query_ns": result["cost_query_ns"]}
 
 
@@ -157,7 +191,7 @@ def main():
     parser.add_argument("--prediction", type=Path, nargs="+", help="existing result JSONs for a publication-only comparison")
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
-    rows = [NativeLatencyMetrics(path).report() for path in arguments.capture]
+    rows = [NativeLatencyMetrics.from_source(path).report() for path in arguments.capture]
     if arguments.prediction is not None:
         for row, prediction in zip(rows, arguments.prediction, strict=True):
             row["comparison_basis"] = "token_publications_only"

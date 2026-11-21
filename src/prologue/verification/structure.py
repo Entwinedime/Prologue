@@ -8,14 +8,13 @@ from tempfile import TemporaryDirectory
 from time import monotonic_ns
 from types import SimpleNamespace
 
-from prologue.acquisition.publication import SourceProductions
-from prologue.acquisition.recording import PublishedCapture
 from prologue.app.prediction import PredictionProcess
 from prologue.artifacts import write_json
 from prologue.integrations.runtimes.docker import ModelingProcess
 
 from .compare_actions import ActionComparison
 from .execution_inputs import NativeInputs
+from .reference import ReferenceRecording
 from .source_evidence import ProductionEvidence
 
 
@@ -31,13 +30,21 @@ class StructureVerification:
     def run(self):
         args = self.arguments
         self.output.mkdir(parents=True)
-        recording = PublishedCapture(args.capture)
+        recording = ReferenceRecording(args.capture)
         capture = recording.source
         wall_ns = {}
         stages = {
             "capture": str(recording.directory), "reference": str(args.reference.resolve(strict=True)),
             "production": str(args.production.resolve()), "wall_ns": wall_ns,
         }
+        source = json.loads(args.input.read_text())
+        if difference := recording.input_difference(recording.inputs["job"], source):
+            return self.finish("input_mismatch", stages | {"input_difference": difference})
+        sources = PredictionProcess.sources(args.production)
+        training = stages["training"] = recording.training(production=sources, target=source)
+        if training["status"] != "separate":
+            return self.finish(training["status"], stages)
+
         started = monotonic_ns()
         checker = ProductionEvidence(args.reference, capture, self.output / "source-evidence", args.details)
         reference, evidence = checker.inspect()
@@ -47,7 +54,6 @@ class StructureVerification:
         if status:
             return self.finish("reference_unqualified", stages)
 
-        source = json.loads(args.input.read_text())
         if difference := reference.input_difference(source):
             return self.finish("input_mismatch", stages | {"input_difference": difference})
 
@@ -68,8 +74,6 @@ class StructureVerification:
         if extracted["status"] != "extracted":
             return self.finish("timing_unavailable", stages)
 
-        sources = SourceProductions(args.production)
-        stages["source_observation_reused"] = any(capture.is_relative_to(path.resolve()) for path in sources.captures.values())
         prediction = self.output / "prediction"
         command = SimpleNamespace(input=args.input, production=args.production, output=prediction, timeout=args.timeout,
                                   binary=args.binary, modeling_image=args.modeling_image, control_image=args.control_image,
@@ -97,6 +101,12 @@ class StructureVerification:
         stages["coverage"] = report["coverage"]
         stages["actions_compared"] = report["actions_compared"]
         if "prediction_error" in stages:
+            if rejected := report["first_rejected_action"]:
+                stages["first_rejected_action"] = rejected
+                return self.finish("measured_layout_difference", stages)
+            if gap := PredictionProcess.gap(prediction):
+                status, path = gap
+                return self.finish(status, stages | {"evidence": str(path)})
             return self.finish("prediction_failed", stages)
         if report["status"] != "actions_matched":
             return self.finish(report["status"], stages)

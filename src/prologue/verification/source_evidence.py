@@ -326,8 +326,13 @@ class ProductionEvidence:
         capture = json.loads((self.capture / "capture.json").read_text())
         native_case = NativeCase(self.capture, capture, self.production / "work")
         ranks = native_case.workers.observed
-        SourceEvidence.require(publication["observed_roles"] == ranks, "production omits or changes the captured worker set")
         reports = []
+        document = {"production": str(self.production.resolve()), "capture": str(self.capture.resolve()), "ranks": reports}
+        origin = json.loads((self.production / "production.json").read_text())["inputs"]["capture_path"]
+        if Path(origin).resolve() != self.capture.resolve() or publication["observed_roles"] != ranks:
+            return native_case, {**document, "native_case": {"status": "unverified",
+                                 "error": "graph production and native capture differ in origin or observed workers"}}
+
         for rank in ranks:
             try:
                 facts = json.loads((native_case.graphs / f"{rank}-facts.json").read_text())
@@ -348,20 +353,22 @@ class ProductionEvidence:
                 case_report = native_case.report(self.details)
             except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
                 case_report = {"status": "unverified", "error": str(error)}
-        document = {"production": str(self.production.resolve()), "capture": str(self.capture.resolve()),
-                    "ranks": reports, "native_case": case_report}
-        return native_case, document
+        return native_case, {**document, "native_case": case_report}
 
     @staticmethod
-    def workers_verified(document):
+    def qualification(document):
+        status = document["native_case"]["status"]
         timing = {"compatible"}
-        if document["native_case"]["status"] == "local_worker_observations":
+        if status == "local_worker_observations":
             timing.add("external_cost_required")
-        return bool(document["ranks"]) and all(row["mapping"] == "consistent" and row["timing"]["status"] in timing
-                                               for row in document["ranks"])
+        workers = bool(document["ranks"]) and all(row["mapping"] == "consistent" and row["timing"]["status"] in timing
+                                                  for row in document["ranks"])
+        return {"local_templates": workers and status in {"consistent", "incomplete", "local_worker_observations"},
+                "joint_reference": workers and status == "consistent"}
 
     def publish(self, document, *, require_joint=False):
         reports, case_report = document["ranks"], document["native_case"]
+        eligibility = document["qualification"] = self.qualification(document)
         self.output.mkdir(parents=True)
         (self.output / "source-evidence.json").write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
         lines = [
@@ -449,8 +456,7 @@ class ProductionEvidence:
             "findings per category. `--details` includes every location.", "",
         ])
         (self.output / "source-evidence.md").write_text("\n".join(lines))
-        group = case_report["status"] == "consistent" or (not require_joint and case_report["status"] == "local_worker_observations")
-        return 0 if group and self.workers_verified(document) else 1
+        return 0 if eligibility["joint_reference" if require_joint else "local_templates"] else 1
 
 
 def main():

@@ -379,11 +379,10 @@ class ConsumedInputs:
                     raise ValueError(f"rank {rank} event {event} completes outside its declared native timestamp")
                 self.counts["timed_boundaries"] += 1
 
-    def graph(self, group, row, contents):
-        if self.expected is None:
-            return None
-        root = row["graph"]["scopes"][0]
-        record = self.pending.pop(group)
+    def matched_invocation(self, group, root):
+        record = self.pending.get(group)
+        if record is None:
+            raise ValueError(f"no native invocation witness for {group}")
         if root["role"] == "cpu_service":
             execution = root["bindings"]["cpu_protocol"]["execution"]
             operation = "cpu"
@@ -393,21 +392,31 @@ class ConsumedInputs:
             identity = {key: value for key, value in ActionIdentity.record(root, group).items() if key != "group"}
         if record["operation"] != operation or record["identity"] != identity:
             raise ValueError("instantiated graph differs from its consumed execution condition")
+        return record
+
+    def graph(self, group, row, contents):
+        if self.expected is None:
+            return None
+        root = row["graph"]["scopes"][0]
+        record = self.matched_invocation(group, root)
+        del self.pending[group]
         ports = {(port["name"], port["direction"]): row["event_ids"][port["event"]] for port in root["ports"]}
-        if operation == "action":
-            bindings = self.bindings.get((group, record["source"]["scope"]), {})
+        if record["operation"] == "action":
+            scope = record["source"]["scope"]
+            bindings = self.bindings.get((group, scope), {})
             if root["work"]["bindings"] != bindings or contents.invocation_bindings(0, group) != bindings:
                 raise ValueError("instantiated graph changes its native invocation binding")
             self.counts["bound_invocations"] += bool(bindings)
-            for boundary in self.ports[group, record["source"]["scope"]]:
+            for boundary in self.ports[group, scope]:
                 event = row["event_ids"][contents.boundary_event(0, boundary["at"])]
                 self.boundaries[event][self.ranks[group], boundary["event"]] = None
-            self.measured_graph = (self.ranks[group], record["source"]["scope"], contents, row["event_ids"], {}, row["work_ns"])
-        else:
-            begin, end = self.cpu_times[group, tuple(record["source"]["post"]), record["source"]["phase"]]
-            self.boundaries[ports["call.enter", "input"]][None, begin] = None
-            self.boundaries[ports["call.return", "output"]][None, end] = None
-        return record["source"]["scope"] if operation == "action" else None
+            self.measured_graph = (self.ranks[group], scope, contents, row["event_ids"], {}, row["work_ns"])
+            return scope
+
+        begin, end = self.cpu_times[group, tuple(record["source"]["post"]), record["source"]["phase"]]
+        self.boundaries[ports["call.enter", "input"]][None, begin] = None
+        self.boundaries[ports["call.return", "output"]][None, end] = None
+        return None
 
     def check_measured_graph(self, rank, root, target, event_ids, matches, durations):
         source, raw, _ = self.case.sources[rank]

@@ -5,7 +5,7 @@ from collections import Counter, defaultdict
 from functools import cached_property
 
 from prologue.acquisition.observation.workers import CapturedWorkers
-from prologue.integrations.frameworks.sglang.configuration import ServingInput
+from prologue.integrations.platforms.ascend.reference import NativeEffectEvidence
 
 from .actions import ActionIdentity
 from .bindings import BindingComparison
@@ -15,9 +15,9 @@ from .cpu_protocol import CpuProtocolEvidence
 from .dependencies import CausalGraph
 from .pd_payload import PdPayloadEvidence
 from .protocol_reads import PdStateEvidence
+from .reference import ReferenceRecording
 from .resource_effects import ResourceEffectComparison
 from .source_clock import ClockConstraints
-from prologue.integrations.platforms.ascend.reference import NativeEffectEvidence
 
 
 class NativeCase:
@@ -56,26 +56,14 @@ class NativeCase:
 
     @cached_property
     def sessions(self):
-        return [json.loads((self.capture / "instances" / str(index) / "session.json").read_text())
-                for index, _ in enumerate(self.manifest["instances"])]
+        return ReferenceRecording.sessions(self.capture, self.manifest["instances"])
 
     def input_difference(self, source):
-        target = ServingInput(source)
         for _, raw, _ in self.sources.values():
             native = raw["environment"]["implementation"]
-            if target.model != {"path": native["model"]["_name_or_path"], "dtype": native["dtype"].removeprefix("torch.")}:
+            if source["model"] != {"path": native["model"]["_name_or_path"], "dtype": native["dtype"].removeprefix("torch.")}:
                 return "model"
-        instances = self.manifest["instances"]
-        if len(instances) != len(target.instances):
-            return "instances"
-        for observed, session, instance in zip(instances, self.sessions, target.instances, strict=True):
-            captured = dict(session["serving_input"])
-            configuration = captured.pop("configuration")
-            if observed["id"] != instance.identity or observed["mode"] != instance.mode or configuration != instance.configuration.values:
-                return f"instance:{instance.identity}"
-            if captured != target.workload:
-                return "workload"
-        return None
+        return ReferenceRecording.session_difference(source, self.manifest["instances"], self.sessions)
 
     def observe(self, rank, graph, raw, logical_coordinates=None):
         if rank not in self.observed_roles or rank in self.sources:

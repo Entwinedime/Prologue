@@ -13,6 +13,7 @@ from .execution_inputs import ConsumedInputs
 from .stream_queues import StreamSynchronization
 from .native_case import NativeCase
 from .ingress import IngressEvidence
+from .local_graphs import LocalActionComparison
 from .dependencies import ActionBoundaries, ActionOrderComparison, CausalGraph
 from .protocol_reads import PdPollingEvidence, PdPredictionEvidence
 from .state_values import ActionResults, StateValueComparison
@@ -56,6 +57,27 @@ class ActionComparison:
             self.finding(category, identity, detail)
             different = True
         return not different
+
+    def rejected_action(self, row, conditions):
+        group, step, graph = row["group"], row["step"], row["graph"]
+        root = graph["scopes"][0]
+        record = conditions.matched_invocation(group, root)
+        if step + 1 != conditions.positions[group] or record["operation"] != "action":
+            raise ValueError("rejected graph differs from the witnessed native action position")
+
+        # This graph never entered the timeline. Check its contents and intrinsic dependencies separately from the executed prefix.
+        rank, scope = conditions.ranks[group], record["source"]["scope"]
+        case = self.reference
+        source, _, identities = case.sources[rank]
+        observed = source.graph["scopes"][scope]
+        comparison = LocalActionComparison()
+        comparison.compare(case, rank, scope, graph)
+        return {
+            "group": group, "step": step, "site": root["site"], "action": identities[scope],
+            "native": {"worker": str(case.capture / f"rank-{rank}.json"), "scopes": observed["bindings"]["source_scopes"],
+                       "graph": str(case.graphs / f"{rank}-graph.json"), "scope": scope},
+            "local_checks": dict(comparison.counts), "examples": comparison.findings,
+        }
 
     def publish(self, report):
         self.output.mkdir(parents=True)
@@ -183,6 +205,7 @@ class ActionComparison:
         protocol_readiness = native_case.readiness
         protocol = PdPredictionEvidence(protocol_source, protocol_readiness, ingress.origin_ns)
         contexts = ContextValues()
+        rejected = None
         with self.execution.open("rb") as stream:
             for line in stream:
                 if not line.endswith(b"\n"):
@@ -202,6 +225,10 @@ class ActionComparison:
                     row["identity"] = contexts.decode(row["identity"])
 
                 condition_inputs.observe(row)
+                if kind == "rejected_layout":
+                    rejected = self.rejected_action(row, condition_inputs)
+                    self.counts["measured_layout_difference"] += 1
+                    continue
                 execution_times.observe(row)
                 stream_synchronization.observe(row)
                 cpu_protocol.observe(row)
@@ -500,6 +527,7 @@ class ActionComparison:
             "inputs": {"capture": str(self.capture.resolve()), "graphs": str(self.graphs.resolve()),
                        "execution": str(self.execution.resolve())},
             "native_case": native_evidence,
+            "first_rejected_action": rejected,
             "native_actions_checked": observed_actions, "predicted_actions_checked": sum(predicted_counts.values()),
             "actions_compared": compared,
             "actions_contents_matched": matched,

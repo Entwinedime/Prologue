@@ -16,7 +16,6 @@ from types import SimpleNamespace
 from prologue.acquisition.costs import CostAcquisition
 from prologue.acquisition.fitting import TransportSamples
 from prologue.acquisition.planning import PlanningProcess
-from prologue.acquisition.publication import SourceProductions
 from prologue.acquisition.sources import SourceAcquisition
 from prologue.artifacts import write_json
 from prologue.performance.requirements import CostRequirements, WorkPoint
@@ -118,7 +117,7 @@ class ExplorationTask:
         prior_result = read(self.reuse / "result.json")
         self.reuse_status = ("considered" if prior.get("transport_samples", {}) == self.transport_samples.selection
                              else "transport_profile_changed")
-        return [ExplorationAsset(SourceProductions(Path(row["production"])), Path(row["costs"]))
+        return [ExplorationAsset(self.predictor.sources(Path(row["production"])), Path(row["costs"]))
                 for row in prior_result["assets"]]
 
     def prepare_sources(self, pending):
@@ -138,7 +137,7 @@ class ExplorationTask:
                 **allowance, output=self.training, plan=directory, deployment=self.root / "inputs/deployment.json",
                 observations=None, keep_intermediates=True, resource_trace=self.args.details,
             ), self.place, self.limit).run(allow_incomplete=True)
-        return SourceProductions(self.training)
+        return self.predictor.sources(self.training)
 
     def prepare_costs(self, generation, fresh, prior_jobs, gaps, previous):
         directory = self.cost_task / str(generation)

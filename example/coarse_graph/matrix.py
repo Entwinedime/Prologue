@@ -2,6 +2,7 @@
 
 import argparse
 import fcntl
+import hashlib
 import json
 import re
 import time
@@ -10,10 +11,10 @@ from pathlib import Path
 
 from prologue.acquisition.recording import PublishedCapture
 from prologue.acquisition.publication import SourceProductions
+from prologue.app.prediction import PredictionProcess
 from prologue.artifacts import write_json
-from prologue.integrations.frameworks.sglang.configuration import CaptureInput
 from prologue.integrations.runtimes.docker import OwnedContainers
-from prologue.verification.source_evidence import ProductionEvidence
+from prologue.verification.reference import ReferenceRecording
 from prologue.workflow.limits import OperationLimit
 
 from run import TaskCommands
@@ -112,11 +113,6 @@ class MatrixRun:
         # Reserve coordinator shutdown too; the child's declared work allowance remains unchanged.
         return self.step(name, command, {"processing_seconds": allowance + 60}, allowance + 60)
 
-    @staticmethod
-    def mapped(report):
-        return (report["native_case"]["status"] in {"consistent", "incomplete", "local_worker_observations"}
-                and ProductionEvidence.workers_verified(report))
-
     def sources(self, domain):
         name = domain["id"]
         if "source" in domain:
@@ -175,7 +171,7 @@ class MatrixRun:
             self.process(f"{name}/source-evidence-{identity}", command)
             path = output / "source-evidence.json"
             report = json.loads(path.read_text()) if path.exists() else None
-            checks.append({"job": identity, "report": str(path), "mapped": report is not None and self.mapped(report),
+            checks.append({"job": identity, "report": str(path), "mapped": report is not None and report["qualification"]["local_templates"],
                            "native_group_status": None if report is None else report["native_case"]["status"]})
         return {"status": "ready" if all(row["mapped"] for row in checks) else "source-evidence-unqualified", "jobs": checks}
 
@@ -184,7 +180,7 @@ class MatrixRun:
         if "jobs" not in source:
             return {"source_status": source["status"]}
 
-        published = SourceProductions(Path(source["collection"]))
+        published = PredictionProcess.sources(Path(source["collection"]))
         jobs = published.jobs_for(prediction)
         if not jobs:
             return {"source_status": "source-unavailable", "source_failure": published.failure(prediction)}
@@ -196,21 +192,16 @@ class MatrixRun:
     def evaluate(self, phase, domain, case, source, target):
         native = json.loads((self.root / case["capture_input"]).read_text())
         prediction = json.loads((self.root / case["prediction_input"]).read_text())
-        serving = CaptureInput(native)
-        changed = [name for name in ("model", "instances", "workload") if native[name] != prediction[name]]
-        if changed:
-            raise ValueError(f"native and prediction inputs differ in {changed}")
-        requests = [request["id"] for request in serving.workload["requests"]]
-        if serving.submission_groups != [requests]:
-            raise ValueError("a target requires one timed cohort in declared request order")
+        if difference := ReferenceRecording.input_difference(native, prediction):
+            raise ValueError(f"native and prediction inputs differ in {difference}")
         if phase == "targets":
             return self.target(domain, case, native)
 
         # Only the structure and fixed-graph paths consume the detailed target recording.
         if phase in {"compare", "fixed"} and target["status"] == "produced":
             owner = self.root / case.get("observation", f"targets/{self.name}/{case['id']}/native")
-            observation = self.reference(domain, owner, native, case.get("detailed_capture", "resource-trace"))
-            if observation != Path(target["native"]).resolve(strict=True):
+            recording = self.reference(domain, owner, native, case.get("detailed_capture", "resource-trace"))
+            if recording.directory != Path(target["native"]).resolve(strict=True):
                 raise ValueError("target report refers to a different native observation")
         if phase == "compare":
             return self.compare(case, prediction, source, target)
@@ -223,7 +214,7 @@ class MatrixRun:
         conditions = {"image": self.images["source"], "deployment": deployment, mode.replace("-", "_"): True}
         if mode == "latency-only":
             conditions["host_timing"] = None
-        return PublishedCapture(owner, native, conditions=conditions).directory
+        return PublishedCapture(owner, native, conditions=conditions)
 
     def target(self, domain, case, capture_input):
         name = case["id"]
@@ -246,14 +237,18 @@ class MatrixRun:
             if code:
                 return result | {"status": "native-capture-failed"}
 
-        native = self.reference(domain, output, capture_input, mode)
-        production = directory / "structure"
-        code = self.process(f"{name}/produce", self.commands.command(
-            "prologue.app", "produce", "--capture", output, "--product", "graphs", "--output", production, "--binary", self.binary,
+        recording = self.reference(domain, output, capture_input, mode)
+
+        # A physical target has one observed graph across all source modes in this frozen matrix.
+        identity = hashlib.sha256(f"{recording.directory}\0{recording.attempt_id}".encode()).hexdigest()
+        step = f"graphs/{identity}"
+        production = self.root / "targets" / self.name / step
+        code = self.process(step, self.commands.command(
+            "prologue.app", "produce", "--capture", recording.directory, "--product", "graphs", "--output", production, "--binary", self.binary,
             "--source-image", self.images["source"], "--modeling-image", self.images["modeling"],
             "--budget-seconds", self.budget["operation_seconds"], "--keep-intermediates",
         ))
-        result.update(native=str(native), production=str(production), production_exit=code)
+        result.update(native=str(recording.directory), production=str(production), production_exit=code)
         return result | {"status": "target-production-failed" if code else "produced"}
 
     def observe(self, step, domain, task, output, mode, timeout):

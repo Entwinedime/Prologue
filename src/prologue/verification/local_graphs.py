@@ -11,9 +11,8 @@ from .dependencies import ActionBoundaries, CausalGraph
 from .native_case import NativeCase
 
 
-class LocalComparison:
-    def __init__(self, capture, graphs, expanded, output):
-        self.capture, self.graphs, self.expanded, self.output = capture, graphs, expanded, output
+class LocalActionComparison:
+    def __init__(self):
         self.counts, self.findings = Counter(), []
 
     def finding(self, category, rank, scope, detail):
@@ -79,6 +78,12 @@ class LocalComparison:
         self.counts["dependencies_matched"] += not changes
         for category, detail in changes:
             self.finding(category, rank, scope, detail)
+
+
+class LocalComparison(LocalActionComparison):
+    def __init__(self, capture, graphs, expanded, output):
+        super().__init__()
+        self.capture, self.graphs, self.expanded, self.output = capture, graphs, expanded, output
 
     def worker(self, case, rank):
         expected = case.sources[rank][2]

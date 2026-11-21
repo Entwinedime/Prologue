@@ -6,11 +6,12 @@ from pathlib import Path
 from subprocess import TimeoutExpired
 from types import SimpleNamespace
 
-from prologue.artifacts import write_json
-from prologue.acquisition.recording import PublishedCapture
+from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.app.prediction import PredictionProcess
+from prologue.artifacts import write_json
 
 from .latency_metrics import LatencyComparison, NativeLatencyMetrics
+from .reference import ReferenceRecording
 
 
 class AutonomousVerification:
@@ -31,16 +32,30 @@ class AutonomousVerification:
     def run(self):
         args = self.arguments
         self.output.mkdir(parents=True)
-        recording = PublishedCapture(args.capture)
+        recording = ReferenceRecording(args.capture)
         recorded = recording.inputs
         source = json.loads(args.input.read_text())
-        fields = ("model", "instances", "workload")
-        if source.keys() != set(fields) or any(source[field] != recorded["job"][field] for field in fields):
-            return self.finish("input_mismatch")
-        if not recorded.get("latency_only") or recorded.get("host_timing"):
+        if (not recorded.get("latency_only") or recorded.get("host_timing") or "attention_sites" in recorded["job"]
+                or not all("latency" in instance for instance in recording.manifest["instances"])):
             return self.finish("reference_requires_latency_capture")
+        if difference := recording.input_difference(recorded["job"], source):
+            self.report["input_difference"] = difference
+            return self.finish("input_mismatch")
 
-        native = NativeLatencyMetrics(recording.source).report()
+        instances = recording.manifest["instances"]
+        if not CapturedWorkers(instances).joint_execution:
+            return self.finish("reference_requires_joint_execution")
+        sessions = recording.sessions(recording.source, instances)
+        if difference := recording.session_difference(source, instances, sessions):
+            self.report["input_difference"] = difference
+            return self.finish("input_mismatch")
+
+        sources = PredictionProcess.sources(args.production)
+        training = self.report["training"] = recording.training(production=sources, target=source, costs=args.costs)
+        if training["status"] != "separate":
+            return self.finish(training["status"])
+
+        native = NativeLatencyMetrics(recording.source, instances, sessions).report()
         self.report["native"] = native
         if native["specialization_loads"] is None:
             return self.finish("reference_missing_specialization_evidence")
@@ -65,9 +80,13 @@ class AutonomousVerification:
                                   binary=args.binary, modeling_image=args.modeling_image, control_image=args.control_image,
                                   execution_inputs=None, costs=args.costs, execution_trace=args.details)
         try:
-            PredictionProcess(command).run(source=source)
+            PredictionProcess(command).run(source=source, productions=sources)
         except (RuntimeError, TimeoutError, TimeoutExpired) as error:
             self.report["prediction_error"] = str(error)
+            if gap := PredictionProcess.gap(output):
+                status, path = gap
+                self.report["evidence"] = str(path)
+                return self.finish(status)
             return self.finish("prediction_failed")
 
         self.report["prediction"] = LatencyComparison(native, output / "result.json").report()

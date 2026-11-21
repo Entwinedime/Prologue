@@ -6,11 +6,12 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from prologue.acquisition.recording import PublishedCapture
 from prologue.artifacts import write_json
 from prologue.integrations.runtimes.docker import ModelingProcess
 
 from .fixed_reference import FixedReference
+from .latency_metrics import compare_request_metrics
+from .reference import ReferenceRecording
 from .source_evidence import ProductionEvidence
 
 
@@ -93,16 +94,6 @@ class FixedPerformance:
                     visited.add(source)
         return {**first, "baseline_ns": baseline[target], "tight_predecessor": predecessor}
 
-    @staticmethod
-    def metric_errors(baseline, modeled):
-        errors = []
-        for original, replayed in zip(baseline["requests"], modeled["requests"], strict=True):
-            tpot = None if original["tpot_ns"] is None else replayed["tpot_ns"] - original["tpot_ns"]
-            errors.append({"id": original["id"], "ttft_ns": replayed["ttft_ns"] - original["ttft_ns"], "tpot_ns": tpot})
-        actual_rate, predicted_rate = (row["tokens_per_second"] for row in (baseline, modeled))
-        return {"requests": errors, "p95_ttft_ns": modeled["p95_ttft_ns"] - baseline["p95_ttft_ns"],
-                "tokens_per_second": None if actual_rate is None or predicted_rate is None else predicted_rate - actual_rate}
-
     def replay(self, reference, model, scratch, estimates):
         measured = [interval.service_ns for interval in reference.intervals]
         plan = reference.timeline()
@@ -137,7 +128,7 @@ class FixedPerformance:
         outcomes = {}
         for name, stamps in replayed.items():
             metrics = reference.metrics(stamps)
-            outcomes[name] = {"request_metrics": metrics, "delta_from_baseline": self.metric_errors(baseline["request_metrics"], metrics),
+            outcomes[name] = {"request_metrics": metrics, **compare_request_metrics(baseline["request_metrics"], metrics),
                               "first_timing_difference": self.first_drift(reference, plan, scenarios[name], times, stamps)}
         self.report["scenarios"] = outcomes
         return self.finish("compared")
@@ -145,12 +136,21 @@ class FixedPerformance:
     def run(self):
         args = self.arguments
         self.output.mkdir(parents=True)
-        recording = PublishedCapture(args.capture, conditions={"service_reference": True})
+        recording = ReferenceRecording(args.capture, conditions={"service_reference": True})
+        training = self.report["training"] = recording.training(costs=args.costs)
+        if training["status"] != "separate":
+            return self.finish(training["status"])
         checker = ProductionEvidence(args.reference, recording.source, self.output / "source-evidence", args.details)
         case, evidence = checker.inspect(retain_measurements=True)
         self.report["reference_status"] = evidence["native_case"]["status"]
         if checker.publish(evidence, require_joint=True) or case.groups.keys() != case.sources.keys():
             return self.finish("reference_unqualified")
+
+        job = recording.inputs["job"]
+        target = {field: job[field] for field in recording.target_fields}
+        if difference := recording.input_difference(job, target) or case.input_difference(target):
+            self.report["input_difference"] = difference
+            return self.finish("input_mismatch")
 
         reference = FixedReference(case)
         self.report["reference_gaps"] = reference.gaps

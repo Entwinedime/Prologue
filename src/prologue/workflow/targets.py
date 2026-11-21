@@ -96,8 +96,7 @@ class ExplorationTarget:
             requests = metrics.pop("requests")
             write_json(output / "request-latency.json", requests)
             return {"status": "predicted", **metrics}, result
-        for status, name in (("template_gap", "template-gap.json"), ("cost_gap", "cost-gap.json")):
-            path = output / name
-            if path.is_file():
-                return {"status": status}, path
+        if gap := self.predictor.gap(output):
+            status, path = gap
+            return {"status": status}, path
         return None, None

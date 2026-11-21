@@ -8,11 +8,12 @@ import time
 from contextlib import ExitStack
 from uuid import uuid4
 
+from prologue.acquisition.publication import PredictionSources
 from prologue.artifacts import write_json
-from prologue.integrations.frameworks.sglang.acquisition.domains import SourceDomain
+from prologue.integrations.frameworks.sglang.acquisition.domains import SGLangTask, SourceDomain
+from prologue.integrations.frameworks.sglang.acquisition.planning import SourcePlanning
 from prologue.integrations.runtimes.docker import OwnedContainers
 from prologue.workflow.limits import OperationLimit
-from prologue.acquisition.publication import SourceProductions
 
 
 class PredictionProcess:
@@ -21,10 +22,22 @@ class PredictionProcess:
         self.limit = limit if limit is not None else OperationLimit()
 
     @staticmethod
+    def sources(collection):
+        return PredictionSources(collection, SourcePlanning.primary, SGLangTask)
+
+    @staticmethod
     def recover(output):
         path = output / "containers.json"
         if path.exists():
             OwnedContainers(json.loads(path.read_text())).close()
+
+    @staticmethod
+    def gap(output):
+        for status, name in (("template_gap", "template-gap.json"), ("cost_gap", "cost-gap.json")):
+            evidence = output / name
+            if evidence.is_file():
+                return status, evidence
+        return None
 
     def run(self, *, source=None, productions=None) -> None:
         args = self.arguments
@@ -41,7 +54,7 @@ class PredictionProcess:
             if type(given_duration) is not int or not 0 <= given_duration < 1 << 63:
                 raise ValueError("select a timing asset or provide given_work_ns as nonnegative signed 64-bit nanoseconds")
 
-        productions = SourceProductions(args.production) if productions is None else productions
+        productions = self.sources(args.production) if productions is None else productions
         templates, primary, document = productions.prepare(source)
         if given_duration is not None:
             document["given_work_ns"] = given_duration

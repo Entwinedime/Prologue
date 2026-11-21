@@ -2,12 +2,9 @@
 
 import json
 
-from prologue.integrations.frameworks.sglang.acquisition.domains import SGLangTask
-from prologue.integrations.frameworks.sglang.acquisition.planning import SourcePlanning
-
 
 class SourceProductions:
-    """Own the published source plan, native inputs and primary/local assembly."""
+    """Read the source jobs and their published captures and libraries."""
 
     def __init__(self, collection):
         collection = collection.resolve(strict=True)
@@ -26,11 +23,20 @@ class SourceProductions:
         # Explicit observations keep their original owners, which may live outside this collection.
         self.captures = {job["id"]: collection / name for job, name in zip(jobs, publication["captures"], strict=True)}
 
+
+class PredictionSources(SourceProductions):
+    """Resolve a target using the framework selected by the prediction entrypoint."""
+
+    def __init__(self, collection, select_primary, task_type):
+        super().__init__(collection)
+        self.select_primary = select_primary
+        self.task_type = task_type
+
     def select(self, source):
-        return SourcePlanning.primary(self.plan, source, available=self.paths)
+        return self.select_primary(self.plan, source, available=self.paths)
 
     def failure(self, source):
-        primary = SourcePlanning.primary(self.plan, source, available={int(key) for key in self.unavailable})
+        primary = self.select_primary(self.plan, source, available={int(key) for key in self.unavailable})
         if primary is None:
             return {"status": "source_missing", "message": "target implementation has no planned primary source"}
         return {"job": primary, **self.unavailable[str(primary)]}
@@ -63,5 +69,5 @@ class SourceProductions:
                 templates.append(path)
                 libraries.append(json.loads(path.read_text()))
             productions.append(libraries)
-        document = SGLangTask(productions[0], productions[1:]).document(source)
+        document = self.task_type(productions[0], productions[1:]).document(source)
         return templates, productions[0], document
