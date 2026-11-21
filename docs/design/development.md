@@ -69,6 +69,18 @@ python3 example/coarse_graph/run.py \
 
 外围任务期限与框架内部等待策略分别配置。SGLang PD 的 `SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT` 和 `SGLANG_DISAGGREGATION_WAITING_TIMEOUT` 默认各 300 秒，由所选原生镜像决定。source 与 control 使用相同策略，记录实际值与镜像 ID。超时先核对触发者及实际进展，再决定调整期限或修复执行。
 
+### 给单卡任务提供物理通信样本
+
+在独立的完整拓扑训练来源上，对每个实际观察的 rank 运行一次 `cost-samples --transport-only`。`--production` 指向保留中间事实的单项生产目录，`--work-identities` 指向同一粗图经 `prologue work-identities` 生成的工作身份。导出只用已有记录，文件包含实测服务、HCCL 算法及元素数、参与者、设备放置和软件来源。
+
+```bash
+python3 -m prologue.app cost-samples --transport-only \
+  --production /training/collection/assets/0 --rank 0 \
+  --work-identities /training/assets/sources/0/0-work.json --output /calibration/tp2-rank-0.json
+```
+
+将导出的文件交给 `explore` 或 `acquire-costs` 的 `--transport-samples /calibration/tp2-rank-*.json`。单卡端只需这些文件和本地训练来源。规划查询、固定图和自主预测共用同一项成本判定。外接值只支付相符的通信服务，CPU 提交、等待和后续计算仍有各自的证据要求。更换物理通信样本时新建任务，用 `--reuse` 指向上一任务，在合格的本地样本和模板上重新准备成本。
+
 ## 配置集合的有限来源规划
 
 在 modeling 环境运行 `PYTHONPATH=src python3 -m prologue.app plan-sources --input <集合输入.json> --output <新目录>`。这一入口划分实现域，在每域预先选择有限互补配置及workload组合，生成完整采集作业；不启动原生。
@@ -145,7 +157,17 @@ PYTHONPATH=src python3 -m prologue.app capture \
 
 采集任务可包含 `submission_groups`：非空请求 ID 数组的数组，必须恰好覆盖所有请求一次；未提供时整个 workload 是一组。规划器自动生成此采集选项，探索输入和目标 workload 不增加字段。每组内部按 arrival_ns 调度；本组所有请求完成返回、所有worker到达原生空闲且所有实例到达屏障后，使用新的共同 RAW 起点提交下一组。只有一个 Engine、预热和 profiler 窗口，原生继续维护批次与资源，组间不 flush/reset。`request-delivery.json` 保留整个观察的 origin_ns，并为每次提交记录 group、组内 arrival_ns、相对全局原点的 scheduled_ns 和实际 submitted_ns；不能把串行探针误读为原来的并发 workload。
 
-deployment 的 physical_devices 是按升序排列的不重复非负物理卡号；取前若干张，数量由各实例 TP×PP 之和决定。Ascend runtime 只支持升序可见设备，容器中的逻辑设备 0、1……依次对应这些卡；adapter 在启动前核对，不静默重排角色映射。[官方环境变量说明](https://www.hiascend.com/doc_center/source/zh/canncommercial/850/maintenref/envvar/envref_07_0028.html)。代表 worker 复用减少观察和导出，不减少运行原生并行协议所需的卡。PD 还需声明可达的 store_url，可选 transfer_protocol 只接受 sdma 或 device_rdma，默认 sdma；非法值在启动前拒绝，避免原生退回默认协议。部署信息不进入模型或 workload 合同。Ascend adapter 提供驱动挂载、设备可见性和传输环境，外围应用不修改原生通信实现。
+完整模式按各实例 TP×PP 之和确定物理卡数，从升序声明的 `physical_devices` 中依次取卡。原生逻辑设备 0、1……依次对应这些卡。代表 worker 复用可以减少观测和导出，原生并行组仍在实际设备上运行。[Ascend 可见设备顺序](https://www.hiascend.com/doc_center/source/zh/canncommercial/850/maintenref/envvar/envref_07_0028.html)
+
+单卡部署示例为 `{"acquisition_mode": "single_device", "physical_devices": [4]}`。Ascend runtime 将选定物理卡挂入非特权容器，原生 worker 使用容器内的设备 0。公开的 `capture` 和 `produce` 已在 TP1、TP2、TP8、PP3、TP2 × PP3、TP4 × EP4 和 Prefill TP1 / Decode TP2 上生成角色模板。各分片实际执行原生计算并交换张量。单卡 `explore` 按原生模块布局和职责选择详细采集的代表，完整模式可同时观察参与通信的物理卡。
+
+单卡模式下，每个 Engine 只启动并预热一次。所有实例共同按代表角色的顺序重放请求，每个窗口由一个角色使用设备 profiler。`capture.json` 的 `profile_windows` 列出各实例负责的窗口，`protocol/worker-<rank>/` 保留该次执行中各参与者的协议记录。所有实例等本轮 profiler 关闭、各角色发布协议记录后才开始下一轮。不同窗口的时间分别用于本地服务采样，跨角色通信及 PD 通知的时延需要同一次物理执行的观测。
+
+PP 点对点传输保持原生异步句柄的生命周期。发送时暂存实际张量，接收方的原生等待完成时将结果写回设备。采集器把暂存和恢复耗时计入采集开销。目标图用发送、接收双方就绪和完成端口连接独立传输服务，张量所有权保留到通信完成。单卡来源可验证本地工作和传输端口，跨卡传输时间另行取证。
+
+单卡专家并行沿用 DeepEP 普通 AllToAll 的路由、重排与合并，跨角色交换使用原生分配的收发长度。一个 worker 的原生权重超过其设备内存份额时，采集器按层暂存权重的完整存储，保留 Ascend 分块格式和张量视图。共享权重留在设备。采集器单独标记搬运区间，模型成本只使用符合目标执行条件的服务样本。
+
+PD 还需声明可达的 `store_url`，可选 `transfer_protocol` 接受 `sdma` 或 `device_rdma`，默认 `sdma`。部署端在启动前核对设备和传输设置。
 
 --resource-trace 可选，默认关闭；开启后，选定观察的 worker 额外发布 source/resources/rank-<rank>.json，记录原生槽位/页分配与释放、前缀匹配/插入/锁/淘汰接口的实际结果及当时容量。操作关联原生语义调用，包含本地单调时钟区间；页、token 位置和槽位减去 SGLang 的保留区后使用零起点，缓存节点号仍是本次原生树的局部身份。初始化保留空闲队列，窗口结束在 flush 前保存最终容量。
 
@@ -213,7 +235,7 @@ rank 事实中的 `request_ingress` 记录首个 PP 阶段从外部取入、尚�
 
 Ascend PD 部署必须为两侧设置同一个 `ASCEND_MF_STORE_URL=tcp://<可达地址>:<空闲端口>`；完整原生 Engine 在 Prefill 端启动配置服务，不额外启动第二份服务。Compose 将该变量传入采集容器，`ASCEND_MF_TRANSFER_PROTOCOL` 默认 sdma；device_rdma 还需真实硬件、网络和原生配置条件，参数合法不等于已取得跨机运行资格。使用 `--device` 限定设备时，`ASCEND_RT_VISIBLE_DEVICES` 使用容器中驱动枚举的编号，例如只挂载宿主卡 4/5 时为 0/1；不能直接沿用宿主编号。开始模型采集前核对设备可见性和传输部署条件，避免以完整模型启动排查环境。单独调用传输引擎的诊断不包含 Engine 生命周期，不能据此推断正式入口缺少配置服务。
 
-输出目录必须不存在，失败目录不自动恢复或覆盖。instances/<序号>/ 保存该 Engine 的 session、role-plan、request-delivery 和窗口关闭标记；rank-<全局rank>.json、native/rank-<全局rank>/、runtime/ 保存角色事实、原始 profiler 及原生 API/阶段记录。PD 的 kv-pools/<全局rank>.json 在统一预热排空及采集排空时发布每个真实端点的注册和布局，小型注册事实不要求该角色导出完整 trace。模型/本地池角色事实在初始化时交换，最终代表在全部实例预热排空后、profiler 启动前确定；该请求内不执行 world collective，以免阻塞 PP 请求转发。capture.json 只在所有实例正常收尾后发布，记录各实例角色及初始化/预热/采集时间；中途产生文件不等于任务完成。
+原生观测使用新的输出目录。`instances/<序号>/` 保存各 Engine 的 session、role-plan、request-delivery 和窗口关闭标记。`rank-<全局rank>.json`、`native/rank-<全局rank>/`、`runtime/` 分别保存角色事实、原始 profiler 和原生 API 记录。PD 完整模式在 `kv-pools/` 发布每个端点的注册和布局。单卡重放时，角色事实中的 `kv_pool_directory` 指向同一窗口所有端点的注册，确保传输地址、页和请求槽来自同一次执行。各实例预热排空后确定代表，全部正常收尾后发布 `capture.json`，记录角色及初始化、预热和采集耗时。
 
 role-plan的representatives决定结构复用，observed_roles决定本次实际观察，二者分别维护。EP输入的Prefill/Decode接收机会和padding来自已验证的workload路由及原生专家划分；若某结构类的原代表缺少其他成员的输入机会，预先有限增选观察者，不改变代表映射或用户路由。生产按实际观察清单编译和连接，额外观察可提供合同相容的局部实现；原生协议仍全员参与。机会覆盖不证明实际批次已触发全部分支，最终资格仍需观察、guard和完整对照。
 

@@ -109,3 +109,107 @@
 **验证**　Qwen3-8B TP1 从空目录经公开入口完成建库和预测，原生尝试两次，累计约 222 秒；已有资产上的新到达序列零次补采。仅保留精简来源时，原目录保持原样，离线重新得到相同的 444 条设备样本、51 项定义。三路对照分别运行 TP1 和 PP3，两者的训练观测均与真实目标分开。TP1 匹配 107 个动作，固定图配对 8,601 项工作，闭环单请求 TTFT / TPOT 误差为 0.21% / 4.98%。[冷启动](../../../data/architecture-acquisition-performance/r2/cold-qwen.json) · [离线重新派生](../../../data/architecture-acquisition-performance/r2/compact-projection.json) · [两种拓扑的三路结果](../../../data/architecture-acquisition-performance/r2/handoff.json)
 
 **结论与限制**　PP3 在可比较范围匹配 454 个动作。固定图的 9,402 项工作全部配对，但现有重算器遇到 676 个外部协议端点即停止请求级重算；其后续验证需要建立这些端点的释放与完成依据。自主预测所需的 1,696 字节 CPU 发送落在 1,968 字节训练点之外，上一阶段代码对同一输入给出同一缺口。结构、固定图和闭环三份结论均已保留。这些开发案例没有计入最后的独立验收。
+
+## 2026-11-21 — F1.1，物理隔离与原生 TP1
+
+**范围**　从已推送的 R2 交付提交 `f905312` 开始。首先检验容器能否真正限制设备，以及原生 profiler 能否在该容器中取得建库所需的观测。单卡路径限用物理卡 4。TP1 分配一次 360 秒的原生尝试；后续 TP2 训练只读取模型与本地输入，独立双卡参考留给验证侧。
+
+**改动与验证**　Ascend 部署在单卡模式使用厂商 runtime 的物理设备挂载及 cgroup 隔离。非特权容器实见一个 NPU 字符设备，PyTorch 在其中完成张量计算。随后公开 `capture` 采集一次，计费约 122 秒，`produce` 用这份原始观测发布 rank 0 的模板，涵盖原生层范围 [0, 36)。[设备实测](../../../data/architecture-acquisition-performance/f1/physical-visibility.json) · [TP1 来源](../../../data/architecture-acquisition-performance/f1/tp1-single.json)
+
+**多角色取证**　同一物理卡上，两个 CPU 进程通过 Gloo 建立真实 TP 角色，依次用 SGLang 原生加载器读取 Qwen3-8B 的 BF16 checkpoint。每个角色都执行 128 个 token 的首层注意力准备，本地 Q/K/V 权重与原 checkpoint 的对应切片逐元素相等。一次开发取证约 101 秒，额度 480 秒。取证结束后单独读取已有双卡角色记录，核对每个 rank 的 4 个 KV 头及 K、V 各 1,024 字节/token。该双卡参考使用 dummy 权重，数值结果不跨两种权重比较。[两个角色的几何对照](../../../data/architecture-acquisition-performance/f1/tp2-geometry.json)
+
+**结论与限制**　原生 TP1 可从公开入口建库，TP2 的本地权重分片与注意力准备已有实测。TP2 局部取证尚未贯通正式建库流程。KV 写后读、下一段所需的真实通信输入和请求级预测分别在后续片段验证。
+
+## 2026-11-21 — F1.2–F1.4：同一卡上的原生 TP2 请求
+
+**范围：** 用 Qwen3-8B 检查两个逻辑角色是否能在物理卡 4 上完成同一请求，并将采集侧对端输入的准备与目标通信区分。此前用真实 checkpoint 执行的是首层 QKV 准备函数，本批完整请求按结构采集合同使用 dummy 权重。
+
+**改动：** 接入原生 Engine 的 worker 启动入口。SGLang 维护组批、请求槽位与 KV 页；框架适配器在集合通信切口取各分片真实计算的张量，用 Gloo 完成对应运算并将结果交回下段。物理设备互斥和准备耗时由采集侧承担。
+
+**验证：** 一次原生尝试计费 123.7 秒。两个角色都在 36 层完成 Prefill 和 Decode；Decode 沿用 Prefill 的八页 KV 并写入下一页。两个角色按相同顺序执行 146 次求和与两次收集，通信载荷逐项一致。离线建库在 rank 0 的第一个设备标记处停止。其原始设备目录无活动数据文件，同次 rank 1 有一份。[请求级取证](../../../data/architecture-acquisition-performance/f1/tp2-native-boundaries.json)
+
+**结论与限制：** F1.1、F1.2 达到交接条件。已确认原生请求能完成，逐角色设备工作及建库仍需完整轨迹。单卡采集用来准备对端输入的时长不能作为目标跨卡时延。
+
+## 2026-11-21 — F1.3–F1.4：逐角色设备轨迹、KV 写读与通信切口
+
+**范围：** 沿用 Qwen3-8B、普通 TP2、128-token Prefill 和一步 Decode，原生进程只见物理卡 4。解决上一批设备 profiler 同时开启导致的记录缺失。
+
+**改动：** 原生角色计划先选代表。Engine 统一预热，每次重放从原生 KV 清空后开始，只让一个代表占用设备 profiler；每轮单独保存请求交付和同轮所有参与者的协议记录。图投影分别表达 SDK 观测到的设备工作和目标执行需要的通信服务。来源检查从原始设备标记和操作数核对通信切口，独立目标验证要求同时运行的物理拓扑。
+
+**验证：** 一次公开采集计费 125.7 秒，包含两轮观测和一次预热。复用该原始记录离线发布两份模板，每个角色独立核对 1,345 个设备任务、36 层 Prefill 写入和 Decode 对原页的读取、148 项通信工作。另一次双进程单卡数值检查用不同的 BF16 输入完成收集、求和和后继张量运算，逐项核对输出。[来源与模板证据](../../../data/architecture-acquisition-performance/f1/tp2-shard-source.json) · [实际操作数核对](../../../data/architecture-acquisition-performance/f1/tp2-values.json)
+
+**结论与限制：** F1.3 和 F1.4 达到本地验收条件。这两轮观测可以给出各角色的工作和通信需求，真实双卡通信时延需要外接来源。目标的多角色展开与连接另由 F1.5 对照。
+
+## 2026-11-21 — F1.5：独立双卡目标上的 TP2 端口因果
+
+**范围：** 以单卡两个正式训练任务建库，复用独立双卡 Qwen3-8B 的 17-token Prefill 与后续 Decode。两个训练任务共启动两次、计费 298.4 秒。双卡目标沿用现有原始记录。
+
+**改动：** 追查首次展开中缺少的通信提交，发现本地通信有设备开始与结束标记，投影丢失了调用方交出操作数的时点。平台适配器现将原始调用方标记连到对应服务入口，独立检查按线程位置、设备流位置和操作数逐一核对。执行器原有的提交条件继续适用。
+
+**验证：** 用同一批原始训练记录离线重新建库，新增原生尝试为零。主来源每个 rank 核对 5,489 个设备任务和 666 次通信提交。独立双卡的首层 attention 设备任务序列、求和数据量和首个后继算子在两端均一致。给定每项工作 1,000 ns 后，公开预测入口生成完整的三个输出 token。在首个 Prefill 与首次 Decode 中各自核对了两条目标设备时间线和四条参与者就绪到完成的连接。[来源检查](../../../data/architecture-acquisition-performance/f1/tp2-handoff/evidence/source-evidence.json) · [算子与载荷](../../../data/architecture-acquisition-performance/f1/tp2-native-path.json) · [展开证据](../../../data/architecture-acquisition-performance/f1/tp2-handoff/expanded-protocol.json)
+
+**结论与限制：** F1.5 达到局部分片、通信端口与后继因果的验收条件。实测时间注入的整图对照在 rank 0 第 37 步发现布局差异。双卡 HCCL 拥有额外的通信流和主机提交工作，本批单卡轨迹不能逐项提供这部分证据。统一给定的耗时仅用于检查展开。[整图对照](../../../data/architecture-acquisition-performance/f1/tp2-reference/result.json)
+
+## 2026-11-21 — F1.6：TP8 代表角色复用于独立 rank
+
+**范围：** Qwen3-8B TP8，128-token Prefill 和一次 Decode。物理卡 4 独立建库，另在八张物理卡运行同配置、独立请求身份的开发参考。各启动一次，原生计费分别增加 162.2 秒和 128.4 秒。
+
+**改动：** 采集规划从部署获取是否可以同时观察整个物理组。单卡的正式探索入口沿用代表角色选择，完整部署保留全组同时取证。对 TP1、TP8 的规划核对表明两种部署使用相同的工作负载、预热和来源任务。
+
+**验证：** 八个分片在同一张卡上执行，顺序观察 rank 0、1，rank 1 的模板供 rank 1–7 展开。对留作检查的物理 rank 7，逐一核对了 72 次 attention 的张量端口与 KV 读写、两次 all-gather 的输入输出布局，以及 148 次通信的操作数大小。给定每项工作 1,000 ns 时，首个 Prefill 和首次 Decode 的首层求和各含八个参与者的 64 条就绪到完成连接。[角色选择](../../../data/architecture-acquisition-performance/f1/tp8-representatives/native/attempts/1/source/instances/0/role-plan.json) · [展开与独立目标对照](../../../data/architecture-acquisition-performance/f1/tp8-representatives/tp8-role-reuse.json)
+
+**结论与限制：** F1.6 完成。本例省下六个角色的详细观测窗口，八个分片都执行了数值计算。该短请求可支持上述结构复用结论。跨卡延迟、物理通信流内部布局与不同 rank 的成本复用另行验收。
+
+## 2026-11-21 — F1.7 完成 PP3 首、中、尾段交接
+
+**范围**　Mistral-7B-v0.3，TP1 × PP3，17-token Prefill 和两步 Decode。复用 R2 的独立三卡目标，单卡来源与目标使用不同的请求身份。
+
+**实现**　原生三个流水段保留各自的层、张量和等待句柄。暂存发生在物理传输适配层，目标图单独表达异步传输服务。通信载荷的生命周期由其就绪和完成端口决定，结构检查按实测缓冲区版本找到下游消费者。
+
+**验证**　首次尝试在预热时把内部主机暂存误识别为调度器消息。修正观测顺序后，在物理卡 4 上一次启动、三个观测窗口生成三份模板，计费 130.8 秒。确认隐藏状态、残差和 token 的真实生产与消费，展开的 42 个收发端点组成 21 条消息，84 条就绪到完成连接均与独立目标相符。另用同一张卡完成双缓冲反序等待及回传的 BF16 数值检查。[端口和连接](../../../data/architecture-acquisition-performance/f1/pp3-shards/observed/pp3-handoff.json) · [本地实测资格](../../../data/architecture-acquisition-performance/f1/pp3-shards/observed/verified-local/source-evidence.json)
+
+**边界**　给定的 1,000 ns 用于驱动目标图展开。暂存耗时归入采集开销，物理跨卡时延仍需要独立成本资产。
+
+## 2026-11-21 — F1.8 完成 TP2 × PP3 组合
+
+**范围**　Mistral-7B-v0.3，每个流水段有两个 TP 角色。单卡六个观察窗口共用一次启动，计费 155.3 秒。独立六卡目标单独启动一次，计费 129.7 秒。
+
+**实现与复核**　组内聚合在模型前向之外也会发生，设备租约现覆盖聚合操作数的暂存和恢复。六个逻辑角色沿用原生 TP 组与 PP 组。在 17-token Prefill 上，两个 PP 接收段各自将两个分片聚合为完整的隐藏状态与残差。按实际缓冲区版本和依赖，追到六个角色的四类操作（发送、接收、聚合、模型读写），包括尾段的输出 token。单卡来源、独立目标与展开的本地依赖逐项相符，展开还核对了 32 条 PP 和 16 条 TP 就绪到完成连接。[组合对照](../../../data/architecture-acquisition-performance/f1/tp2-pp3/combined-handoff.json)
+
+**边界**　完整请求生成了三个 token。上述逐项连接对照覆盖首个微批次。物理传输耗时和全部工作节点的等价性留在各自验收项。
+
+## 2026-11-21 — F1.9 专家交换与分片驻留，F1.10 独立参考
+
+**范围**　Qwen3-30B-A3B TP4 × EP4，5-token Prefill 和一次 Decode 在同一请求的不同层覆盖均匀与倾斜路由。Qwen3-8B Prefill TP1 / Decode TP2 单独取得真实 KV 交接参考。
+
+**改动**　单卡上四个原生专家分片的权重合计超过可用容量。平台按层暂存原生存储，保留分块格式、填充和共享视图，原生模型继续持有原张量。四个 worker 各装入 15,285,252,096 字节权重，其中 14,974,083,072 字节分布在可暂存的 48 层。完整模式的通信记录显示模型在专家交换前还会做 reduce-scatter，单卡通信适配已接入这一原语。
+
+**验证与边界**　独立四卡采集一次，计费 161.7 秒，生成四份参考图。专家算子单卡实测逐元素核对了两种负载的返回值。另在真实设备上核对普通与分块权重的两轮暂存恢复，覆盖非对齐形状和共享视图。完整模型单卡的前两次尝试分别因安装包缺模块、预热缺 reduce-scatter 暂存而退出，计费 71.6 和 243.4 秒。PD 独立三卡采集一次，计费 138.0 秒。两项均以单卡来源与独立目标核对完成作为验收条件。[分块权重检查](../../../data/architecture-acquisition-performance/f1/expert-shards/packed.json) · [四卡参考](../../../data/architecture-acquisition-performance/f1/expert-shards/full/structure/result.json) · [PD 原生参考](../../../data/architecture-acquisition-performance/f1/pd-shards/full/native/result.json)
+
+**F1.9 收尾**　第三次单卡尝试在预热超时，计费 642.9 秒。Python 与原生进程栈均定位到 DeepEP 构造物理 HCCL 组的等待。单卡适配器给原生普通 AllToAll 提供实际进程组，沿用原始分发、重排、专家计算与合并。修正后单卡一次启动计费 267.6 秒，仅详细观察 rank 0、1。独立四卡各层记录和输入合同一致，展开四个角色后，48 层各有 Prefill、Decode 两种形状，dispatch/combine 的 3,072 条跨角色依赖全部匹配。两种负载下的逐元素数值另由算子实验覆盖。完整模型验证使用结构采集权重、给定工作耗时和独立请求身份。[完整模型对照](../../../data/architecture-acquisition-performance/f1/expert-shards/expert-handoff.json)
+
+## 2026-11-21 — F1.10 PD 的页、分片与准入
+
+**实现**　所有实例共用单卡观测顺序，每轮保存所有端点当次的 KV 注册。第一次运行完成了请求，但两个 profiler 重叠 170.8 毫秒，首个 Decode 角色未取得设备轨迹，计费 146.6 秒。将 profiler 交接条件从本实例扩大到所有参与者后，单卡重新运行一次，计费 150.3 秒，三个窗口各自取得设备轨迹，模板全部建成。独立三卡参考复用原观测。[首次交接](../../../data/architecture-acquisition-performance/f1/pd-shards/failed-window-overlap/profile-handoff.json) · [修正后交接](../../../data/architecture-acquisition-performance/f1/pd-shards/single_device/profile-handoff.json)
+
+**验证**　17-token 请求占用两页。按原生发送地址、接收地址和两端注册追到 36 层的 K、V 分片，两个接收端分别拥有 head 0–3 和 4–7，共传输 4,718,592 字节 KV 与 3,200 字节元数据。用单卡模板和给定耗时独立展开目标，两个 Decode 角色的 72 个首次逐层读取都能沿真实图边追到本端准入及传输完成。三卡原生图按同一条件独立核对。[交接证据](../../../data/architecture-acquisition-performance/f1/pd-shards/pd-handoff.json)
+
+**计时边界**　跨角色的服务样本需要真实物理对端。公开的样本命令在两种来源上各保留 2,856 项本地设备工作观测。三卡还取得 4 个传输、6 个通知和 296 个集合通信服务观测。单卡各分片之间的 KV 搬运及不同观测窗口的对端时钟均排除在物理跨卡样本之外。请求级性能归入后续阶段。[完整模式](../../../data/architecture-acquisition-performance/f1/pd-shards/timing-qualification/full/qualification.json) · [单卡模式](../../../data/architecture-acquisition-performance/f1/pd-shards/timing-qualification/single_device/qualification.json)
+
+## 2026-11-21 — F1.11 双模式成本与阶段对照
+
+**取证**　单卡容器采集 CPU 服务时间时需要 `PERFMON` 才能打开本 worker 的计数器。用同一容器配置核对权限后，PP3 经正式入口完成一次结构采集和一次轻量 CPU 采集，共计费 259.4 秒。TP2 复用两份已有结构来源，两次轻量采集共计费 262.1 秒。两种配置均发布了本地成本。[权限对照](../../../data/architecture-acquisition-performance/f1/stage-comparison/single-host-timing-probe.json) · [PP3](../../../data/architecture-acquisition-performance/f1/stage-comparison/training-pp3/result.json) · [TP2](../../../data/architecture-acquisition-performance/f1/stage-comparison/tp2-single-costs/status.json)
+
+**开发对照**　复用原有独立物理目标。完整来源的 TP2 对齐 200 个动作，固定图和自主闭环均取得可比结果。完整来源的 PP3 对齐 454 个动作，固定图的 676 个外部协议端点缺少时间依据，自主闭环停在成本缺口。单卡来源下，TP2 在首次 Prefill 的集合通信内部出现时序布局差异，PP3 在首次 `isend` 出现差异。TP2 对应的 151 个作用域中，73 次求和与 1 次收集的内部工作不同，二者均保留了对外端口。剩余四项单卡性能对照将使用明确登记物理通信来源的资产。[TP2 定位](../../../data/architecture-acquisition-performance/f1/stage-comparison/tp2-action-layout.json) · [逐项结果](../../../data/architecture-acquisition-performance/f1/stage-comparison/cases/)
+
+## 2026-11-21 — F1.11 外接通信成本与阶段交付
+
+**范围**　以 R2 交付 `f905312` 为起点。单卡本地执行和协议连接覆盖七种具名配置。开发对照为 TP2、PP3 各两种来源、三条路径。独立物理训练来源提供校准，开发目标只供比较。
+
+**改动**　框架适配器执行实际逻辑分片、交接操作数和逐层暂存权重，平台负责设备可见性和物理记录。Ascend 从共同执行的物理对端导出服务、HCCL 实现、设备放置和操作数。共同 C++ 成本查询按目标绑定后的参与者、实现、dtype、形状选择外接估值。CPU 工作、网络服务与同卡暂存分开计费。Python 负责采集资格和拟合，单卡任务可以导入已有校准并复用本地采样。
+
+**验证**　完整来源的 TP2 三路取得可比结果。经过独立校准，单卡来源在真实图上对 PP3 的 42/42 项和 TP2 的 6/444 项设备通信给出估值。两项任务均为零新增原生尝试。在单卡训练图逐项撤去外接样本，变化只发生在 PP3 的 42 次收发与 TP2 的 18 次收集。改变形状、dtype、参与组、rank、实现、设备域，或者将服务索要为 CPU 工作，均得到了缺口。混用不同物理放置被拒绝，冲突算法只影响对应点。默认采集镜像由正式 Dockerfile 重建，单卡容器实际完成了 32 字节权重的暂存、恢复和数值核对。[阶段交付](../../../data/architecture-acquisition-performance/f1/handoff.json) · [资格检查](../../../data/architecture-acquisition-performance/f1/stage-comparison/physical-profiles/binding-check.json) · [默认镜像](../../../data/architecture-acquisition-performance/f1/stage-comparison/default-image.json)
+
+**结论与限制**　12/12 项均出具正式结果。单卡来源的 TP2、PP3 严格整图对照分别停在首次模型执行与首次点对点发送的内部布局。TP2 的 438 项 all-reduce 未具备可推导的传输量，PP3 的 676 个外部端点缺少参考时刻。R3 接手共同端口和成本身份，F2 接手缺失样本的定向规划。这些结果用于开发，精度与泛化留出仍归 V。
+
+**阶段审查**　对照 R2 基线沿原生启动、设备与权重生命周期、协议端口、样本发布和三路评价复核本阶段改动。`src/` 的 47 个变更业务源文件净增 857 行，`example/` 的两个脚本净增 6 行，另核对了 CMake、Dockerfile 和打包清单。归并了从规划和采集判断物理部署的入口，物理对端的资格在来源处确定。正式证据查询共用 C++ 实现。源码和示例通过 Python 语法与静态错误检查，改动通过 Git 空白检查；保留的失败结果与阶段报告链接逐项存在。
