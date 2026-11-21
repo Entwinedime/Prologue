@@ -17,10 +17,15 @@ namespace {
 class RecordedFeatures {
 public:
     explicit RecordedFeatures(const nlohmann::json & document)
-        : phase_(document.at("phase").get_ref<const std::string &>()),
+        : document_(document), phase_(document.at("phase").get_ref<const std::string &>()),
           axes_(document.at("axes").get_ref<const nlohmann::json::object_t &>()) {}
 
     std::string_view phase() const { return phase_; }
+
+    const nlohmann::json * transport() const {
+        const auto found = document_.find("transport");
+        return found == document_.end() ? nullptr : &*found;
+    }
 
     std::optional<double> value(const std::string & axis) const {
         const auto found = axes_.find(axis);
@@ -29,6 +34,7 @@ public:
     }
 
 private:
+    const nlohmann::json & document_;
     std::string_view phase_;
     const nlohmann::json::object_t & axes_;
 };
@@ -162,6 +168,17 @@ WorkCosts::Estimate WorkCosts::estimate(std::optional<std::size_t> definition, s
     return { &match->second, match->second.estimate(features) };
 }
 
+template<class Features>
+WorkCosts::Estimate WorkCosts::work_estimate(std::optional<std::size_t> definition, std::size_t interval, WorkKind kind,
+                                            const Features & features) const {
+    const auto measured = estimate(definition, interval, features);
+    if (measured.service_ns || kind != WorkKind::Collective || !features.transport()) return measured;
+
+    // The profile point already binds the actual payload and participants. It supplies only the peer service.
+    const auto point = external_index(*features.transport(), kind);
+    return point ? estimate(point, 0, WorkFeatures(Parameters{})) : measured;
+}
+
 std::string_view WorkCosts::Estimate::status() const {
     if (service_ns) return "covered";
     return model ? "outside_sample_ranges" : "unseen_work";
@@ -174,7 +191,7 @@ CostGap WorkCosts::gap(const Estimate & estimate, const WorkFeatures & features,
     }
     details["status"] = estimate.status();
     details["domain"] = domain_;
-    details["features"] = features.document();
+    details["features"] = features.document(details.at("work") == work_name(WorkKind::Collective));
     details["sample_bounds"] = std::move(bounds);
     return CostGap(std::move(details));
 }
@@ -190,7 +207,7 @@ GraphTiming WorkCosts::timing(const CoarseGraph & graph, std::span<const Templat
         const auto & scope = graph.scopes[work.scope];
         auto & geometry = features[work.scope];
         if (!geometry) geometry.emplace(scope);
-        const auto cost = estimate(model_indices_.at(origin.definition), origin.interval, *geometry);
+        const auto cost = work_estimate(model_indices_.at(origin.definition), origin.interval, work.kind, *geometry);
         if (!cost.service_ns && (!first_gap || first_gap->is_null())) {
             auto missing = gap(cost, *geometry, {
                 { "action_site", graph.scopes.front().info.site },
@@ -227,9 +244,8 @@ nlohmann::json WorkCosts::evaluate(const nlohmann::json & groups, const nlohmann
                 throw std::invalid_argument("cost point requires a definition, interval, and features");
             const auto definition = point[0].get<std::size_t>();
             const auto interval = point[1].get<std::size_t>();
-            definitions.at(definition).at("work").at(interval);
-
-            const auto estimate = costs.estimate(costs.model_indices_[definition], interval, RecordedFeatures(point[2]));
+            const auto kind = work_kind(definitions.at(definition).at("work").at(interval).at("kind").get<std::string>());
+            const auto estimate = costs.work_estimate(costs.model_indices_[definition], interval, kind, RecordedFeatures(point[2]));
             const auto duration = estimate.service_ns ? nlohmann::json(*estimate.service_ns) : nlohmann::json();
             estimates.push_back(nlohmann::json::array({ estimate.status(), duration }));
         }

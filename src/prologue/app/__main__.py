@@ -44,6 +44,7 @@ def main() -> None:
     samples.add_argument("--projection", type=Path, help="regenerated graph and facts for the same native observation")
     samples.add_argument("--rank", type=int, required=True)
     samples.add_argument("--work-identities", type=Path, required=True)
+    samples.add_argument("--transport-only", action="store_true", help="export only independently measured peer services and physical placement")
     samples.add_argument("--output", type=Path, required=True)
     hosts = commands.add_parser("host-cost-samples", help="qualify independently measured native host services")
     for name in ("detailed", "host", "facts", "trace", "graph", "work-identities", "output"):
@@ -75,6 +76,8 @@ def main() -> None:
     exploration.add_argument("--reuse", type=Path, help="published prior exploration task")
     exploration.add_argument("--details", action="store_true", help="retain source intermediates and emit target execution traces")
     exploration.add_argument("--control-image", default="prologue-control:ubuntu22.04")
+    for command in (sampling, exploration):
+        command.add_argument("--transport-samples", type=Path, nargs="+", default=[], help="external peer service profiles for the target placement")
     for command in (acquisition, sampling, exploration):
         command.add_argument("--timeout", type=float, required=True, help="maximum seconds per native attempt")
         command.add_argument("--native-budget-seconds", type=float, required=True)
@@ -125,8 +128,10 @@ def main() -> None:
         SourceAcquisition(arguments, SGLangAscendLaunch).run()
     elif arguments.command == "acquire-costs":
         from prologue.acquisition.costs import CostAcquisition
+        from prologue.acquisition.fitting import TransportSamples
 
-        CostAcquisition(arguments, SGLangAscendLaunch, BatchHostReuse.match).run()
+        profiles = TransportSamples(arguments.transport_samples)
+        CostAcquisition(arguments, SGLangAscendLaunch, BatchHostReuse.match, transport_samples=profiles).run()
     elif arguments.command == "explore":
         from prologue.app.prediction import PredictionProcess
         from prologue.workflow.exploration import ExplorationTask

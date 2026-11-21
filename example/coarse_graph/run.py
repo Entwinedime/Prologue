@@ -46,6 +46,7 @@ def main():
     parser.add_argument("--deployment", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--reuse", type=Path)
+    parser.add_argument("--transport-samples", type=Path, nargs="+", default=[])
     parser.add_argument("--binary", type=Path, default=repository / "build/coarse-graph/prologue")
     parser.add_argument("--source-image", default="prologue-sglang:ubuntu22.04")
     parser.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
@@ -69,6 +70,10 @@ def main():
             mounted.mkdir(parents=True, exist_ok=True)
         files[mounted] = name != "output"
         arguments.extend(("--" + name, path))
+    if options.transport_samples:
+        profiles = [path.resolve(strict=True) for path in options.transport_samples]
+        files.update((path, True) for path in profiles)
+        arguments.extend(("--transport-samples", *profiles))
     model = json.loads(options.input.read_text())["model"]["path"]
     for role, image in images.items():
         arguments.extend(("--" + role + "-image", image))

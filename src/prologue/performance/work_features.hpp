@@ -23,7 +23,8 @@ public:
 
     std::string_view phase() const { return phase_; }
     std::optional<double> value(std::string_view axis) const;
-    nlohmann::json document() const;
+    const nlohmann::json * transport() const { return transport_.is_null() ? nullptr : &transport_; }
+    nlohmann::json document(bool include_transport = true) const;
 
 private:
     enum BatchAxis { Members, QueryTokens, ContextTokens, MaxContextTokens, MaxQueryTokens, AttentionPairs, BatchAxisCount };
@@ -37,6 +38,7 @@ private:
 
     std::map<std::string, std::int64_t, std::less<>> parameters_;
     std::string_view phase_;
+    nlohmann::json transport_;
     std::array<double, BatchAxisCount> batch_{};
     std::size_t batch_axis_count_{};
 };

@@ -41,7 +41,7 @@ class CostSource:
 
 
 class CostAcquisition:
-    def __init__(self, args, place, reuse_samples, limit=None, *, prior_jobs=None, prior_costs=()):
+    def __init__(self, args, place, reuse_samples, limit=None, *, transport_samples, prior_jobs=None, prior_costs=()):
         self.args = args
         self.place = place
         self.reuse_samples = reuse_samples
@@ -68,13 +68,17 @@ class CostAcquisition:
         paths = list(args.samples)
         for path in prior_costs:
             asset = read(path)
-            paths.extend(Path(name) for name in asset["sources"])
+            paths.extend(Path(name) for name in asset["sources"] if name not in asset.get("transport_samples", {}))
 
             # Preserve cross-role bindings by requalifying their coordinates against the original measured rows.
             for sample in asset["reused"]:
                 self.demand.targets[str(path)] = "previously_qualified_role_work"
                 self.demand.samples(str(path), sample)
         self.samples = {path: read(path) for path in dict.fromkeys(path.resolve(strict=True) for path in paths)}
+        if any("transport_profile" in source for source in self.samples.values()):
+            raise ValueError("select physical peer service profiles with --transport-samples")
+        self.samples.update(transport_samples.sources)
+        self.transport_samples = transport_samples.selection
         self.gaps = {path.resolve(strict=True): read(path) for path in args.gap}
         self.graphs = {graph.resolve(strict=True): identities.resolve(strict=True) for graph, identities in args.demand}
         self.inputs = {
@@ -86,6 +90,8 @@ class CostAcquisition:
             self.inputs["prior_jobs"] = {str(path): sorted(jobs) for path, jobs in self.prior_jobs.items()}
         if prior_costs:
             self.inputs["prior_costs"] = [str(path) for path in prior_costs]
+        if self.transport_samples:
+            self.inputs["transport_samples"] = self.transport_samples
 
     def load_sources(self, collection, selected=None):
         bundle = SourceProductions(collection)
@@ -314,6 +320,7 @@ class CostAcquisition:
         }
         return {
             "domains": fitted.domains, "sources": [str(path) for path in self.samples], "reused": reused,
+            "transport_samples": self.transport_samples,
             "demand": self.demand.report(counts, missing, reasons), "recipes": evidence,
             **self.spending(self.output).document(), "retained_bytes": self.limit.bytes_used(),
             "status": "covered" if not missing else "native_budget_exhausted" if deferred else "uncovered",

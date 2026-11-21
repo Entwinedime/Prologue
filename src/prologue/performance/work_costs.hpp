@@ -75,6 +75,8 @@ private:
 
     template<class Features>
     Estimate estimate(std::optional<std::size_t> definition, std::size_t interval, const Features & features) const;
+    template<class Features>
+    Estimate work_estimate(std::optional<std::size_t> definition, std::size_t interval, WorkKind kind, const Features & features) const;
     CostGap gap(const Estimate & estimate, const WorkFeatures & features, nlohmann::json details) const;
 
     nlohmann::json domain_;

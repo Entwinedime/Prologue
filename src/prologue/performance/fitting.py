@@ -20,8 +20,9 @@ class ServiceCurve:
                 payloads[point].add(("collective", collective["dtype"], collective["algorithm"], collective["elements"]))
         self.ambiguous_payloads = sum(len(values) > 1 for values in payloads.values())
         points = [(dict(point), median(values)) for point, values in groups.items() if len(payloads[point]) <= 1]
+        self.points = len(points)
         if not points:
-            raise ValueError("no usable feature points for service work")
+            return
         axes = tuple(points[0][0])
         if any(set(values) != set(axes) for values, _ in points):
             raise ValueError("same service work has inconsistent cost features")
@@ -30,7 +31,6 @@ class ServiceCurve:
                        for axis in axes}
         self.knots = [[0, round(median(value for _, value in points))]]
         self.axis = None
-        self.points = len(points)
 
         # Compare interpolation and a constant on the same interior points, withheld one coordinate at a time.
         best_gain = 0
@@ -85,14 +85,19 @@ class DomainCosts:
             for row in source["samples"]:
                 groups[indices[row["definition"]], row["interval"], row["features"]["phase"]].append(row)
 
-        self.curves = {key: ServiceCurve(rows).document() for key, rows in sorted(groups.items())}
+        self.curves = {key: ServiceCurve(rows) for key, rows in sorted(groups.items())}
 
     def document(self, domain):
-        return {
+        result = {
             "domain": domain, "definitions": self.definitions,
-            "models": [{"definition": definition, "interval": interval, "phase": phase, **model}
-                       for (definition, interval, phase), model in self.curves.items()],
+            "models": [{"definition": definition, "interval": interval, "phase": phase, **curve.document()}
+                       for (definition, interval, phase), curve in self.curves.items() if curve.points],
         }
+        unresolved = [{"definition": definition, "interval": interval, "phase": phase, "ambiguous_payload_points": curve.ambiguous_payloads}
+                      for (definition, interval, phase), curve in self.curves.items() if not curve.points]
+        if unresolved:
+            result["unmodeled"] = unresolved
+        return result
 
 
 class FittedCosts:
@@ -100,6 +105,12 @@ class FittedCosts:
 
     def __init__(self, sources):
         grouped = defaultdict(list)
+        placements = {}
         for source in sources:
+            if profile := source.get("transport_profile"):
+                target = cost_identity(profile["logical_workers"])
+                physical = profile["placement"], profile["source_image"]
+                if placements.setdefault(target, physical) != physical:
+                    raise ValueError("transport profiles select different placements or runtimes for the same logical workers")
             grouped[cost_identity(source["domain"])].append(source)
         self.domains = [DomainCosts(rows).document(rows[0]["domain"]) for rows in grouped.values()]

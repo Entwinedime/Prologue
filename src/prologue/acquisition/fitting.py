@@ -1,5 +1,6 @@
 """Qualify training samples against required work before publishing fitted costs."""
 
+import hashlib
 import json
 from collections import Counter, defaultdict
 from contextlib import nullcontext
@@ -10,6 +11,22 @@ from prologue.integrations.runtimes.docker import ModelingProcess
 from prologue.performance.fitting import FittedCosts
 from prologue.performance.requirements import CostRequirements
 from prologue.performance.samples import WorkCatalog
+
+
+class TransportSamples:
+    """Select immutable external calibrations without importing a donor's local work or templates."""
+
+    def __init__(self, paths):
+        self.sources, self.selection = {}, {}
+        for path in dict.fromkeys(p.resolve(strict=True) for p in paths):
+            content = path.read_bytes()
+            source = json.loads(content)
+            if "transport_profile" not in source or any(
+                    "external" not in definition or definition["work"] != [{"kind": "collective"}]
+                    for definition in source["definitions"]):
+                raise ValueError(f"expected a physical peer service profile at {path}")
+            self.sources[path] = source
+            self.selection[str(path)] = hashlib.sha256(content).hexdigest()
 
 
 class FitCosts:

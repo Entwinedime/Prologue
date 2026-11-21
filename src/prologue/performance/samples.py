@@ -25,13 +25,16 @@ class WorkCatalog:
             definition, interval = self.positions[piece["start"], piece["finish"]]
             if self.definitions[definition]["work"][interval]["kind"] != piece["kind"]:
                 raise ValueError("normalized work identity changes the measured interval kind")
-            yield piece, definition, interval, self.features[piece["scope"]]
+            features = self.features[piece["scope"]]
+            if "transport" in features and piece["kind"] != "collective":
+                features = {"phase": features["phase"], "axes": features["axes"]}
+            yield piece, definition, interval, features
 
 
 class ServiceSamples:
-    def __init__(self, catalog):
+    def __init__(self, catalog, *, external_only=False):
         self.catalog = catalog
-        self.definitions = list(catalog.definitions)
+        self.definitions = [] if external_only else list(catalog.definitions)
         self.rows = {}
         self.external = {}
 
@@ -46,12 +49,12 @@ class ServiceSamples:
             row["collective"] = {"dtype": collective[0], "algorithm": collective[1], "elements": collective[2]}
         row["observations_ns"].append(duration_ns)
 
-    def add_external(self, identity, kind, features, duration_ns):
+    def add_external(self, identity, kind, features, duration_ns, *, collective=None):
         key = json.dumps(identity, sort_keys=True)
         if key not in self.external:
             self.external[key] = len(self.definitions)
             self.definitions.append({"external": identity, "work": [{"kind": kind}]})
-        self.add(self.external[key], 0, features, duration_ns)
+        self.add(self.external[key], 0, features, duration_ns, collective=collective)
 
     def document(self, unmeasured):
         return {

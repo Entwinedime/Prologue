@@ -9,6 +9,7 @@ from pathlib import Path
 from prologue.acquisition.observation import jointly_observed
 from prologue.artifacts import write_json
 from prologue.integrations.platforms.ascend.clock import DeviceCalibration
+from prologue.integrations.platforms.ascend.transport_profile import AscendTransportProfile
 from prologue.performance.samples import ServiceSamples, WorkCatalog
 
 
@@ -237,6 +238,12 @@ class CostSamples:
         if peers and measurement["collectives"]:
             collectives = CollectiveServices(peers, Path(inputs["capture_path"]), rank).samples
         self.services = ObservedServices(self.catalog.graph, facts, collectives, physical_peers=joint)
+        self.profile = None
+        if arguments.transport_only:
+            if not joint or not peers:
+                raise ValueError("a transport profile requires a joint physical observation of the peer group")
+            self.profile = AscendTransportProfile(Path(inputs["capture_path"]), peers, work / f"{rank}-sdk/trace.json",
+                                                  self.observation, inputs["images"]["source"])
         self.notifications = []
         if peers and "pd_protocol" in measurement:
             from prologue.integrations.frameworks.sglang.acquisition.pd_samples import PdNotificationSamples
@@ -245,6 +252,9 @@ class CostSamples:
             self.notifications = list(PdNotificationSamples(protocol).intervals(rank))
 
     def run(self):
+        if self.profile is not None:
+            write_json(self.output, self.profile.samples(self.catalog, self.services), replace=False)
+            return
         samples, absent = ServiceSamples(self.catalog), Counter()
         for piece, definition, interval, features in self.catalog:
             duration_ns, copy, collective = self.services.service(piece)

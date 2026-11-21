@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from prologue.acquisition.costs import CostAcquisition
+from prologue.acquisition.fitting import TransportSamples
 from prologue.acquisition.planning import PlanningProcess
 from prologue.acquisition.production import CaptureProduction
 from prologue.acquisition.publication import SourceProductions
@@ -65,6 +66,9 @@ class ExplorationTask:
         }
         self.inputs = {"source": self.source, "environment": self.environment, "details": args.details,
                        "reuse": str(self.reuse) if self.reuse else None}
+        self.transport_samples = TransportSamples(args.transport_samples)
+        if self.transport_samples.selection:
+            self.inputs["transport_samples"] = self.transport_samples.selection
         self.training = self.root / "collection"
         self.cost_task = self.root / "assets"
         self.reuse_status = None
@@ -109,7 +113,8 @@ class ExplorationTask:
             self.reuse_status = "different_model_deployment_or_runtime"
             return []
         prior_result = read(self.reuse / "result.json")
-        self.reuse_status = "considered"
+        self.reuse_status = ("considered" if prior.get("transport_samples", {}) == self.transport_samples.selection
+                             else "transport_profile_changed")
         return [ExplorationAsset(SourceProductions(Path(row["production"])), Path(row["costs"]))
                 for row in prior_result["assets"]]
 
@@ -143,7 +148,8 @@ class ExplorationTask:
             **allowance, output=self.cost_task, production=[fresh.directory] if fresh else [], samples=[], demand=[], gap=gaps,
         )
         prior_costs = list(dict.fromkeys(asset.costs for asset in previous))
-        CostAcquisition(arguments, self.place, self.reuse_samples, self.limit, prior_jobs=prior_jobs, prior_costs=prior_costs).run()
+        CostAcquisition(arguments, self.place, self.reuse_samples, self.limit, transport_samples=self.transport_samples,
+                        prior_jobs=prior_jobs, prior_costs=prior_costs).run()
         return costs
 
     def explore(self):
@@ -163,13 +169,15 @@ class ExplorationTask:
                 missing_templates.append(target)
                 continue
             asset, row = match
-            rows[target] = row
+            refresh_costs = self.reuse_status == "transport_profile_changed"
+            rows[target] = target.identity if refresh_costs else row
             if row["status"] == "template_gap":
                 missing_templates.append(target)
-            elif row["status"] == "cost_gap":
+            elif refresh_costs or row["status"] == "cost_gap":
                 selected[target] = asset.sources
                 existing_jobs[asset.production].update(asset.sources.jobs_for(target.input))
-                gaps.append(self.root / row["evidence"])
+                if row["status"] == "cost_gap":
+                    gaps.append(self.root / row["evidence"])
 
         fresh = None
         if missing_templates:

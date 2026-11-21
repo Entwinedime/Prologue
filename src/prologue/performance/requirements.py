@@ -21,13 +21,18 @@ class WorkPoint:
     interval: int
     phase: str
     axes: tuple
+    transport: str | None = None
 
     @classmethod
     def at(cls, domain, definition, interval, features):
-        return cls(domain, definition, interval, features["phase"], tuple(sorted(features["axes"].items())))
+        transport = cost_identity(features["transport"]) if "transport" in features else None
+        return cls(domain, definition, interval, features["phase"], tuple(sorted(features["axes"].items())), transport)
 
     def features(self):
-        return {"phase": self.phase, "axes": dict(self.axes)}
+        result = {"phase": self.phase, "axes": dict(self.axes)}
+        if self.transport is not None:
+            result["transport"] = json.loads(self.transport)
+        return result
 
 
 class CostRequirements:
@@ -130,7 +135,9 @@ class CostRequirements:
                 "definition": index, "interval": point.interval, "phase": point.phase, "status": status,
                 "kind": definition["work"][point.interval]["kind"], "points": [],
             })
-            value = {"axes": dict(point.axes), "targets": dict(self.points[point])}
+            value = point.features()
+            del value["phase"]
+            value["targets"] = dict(self.points[point])
             if reasons is not None:
                 value["reason"] = reasons[point]
             row["points"].append(value)

@@ -8,10 +8,37 @@
 
 namespace prologue {
 
+namespace {
+
+nlohmann::json transport_operand(const GraphScope & scope) {
+    if (!scope.communication) return nullptr;
+    auto ports = nlohmann::json::object();
+    for (const auto & port : scope.ports) {
+        if (!port.tensor) continue;
+        if (!port.tensor->shape_rule) return nullptr;
+        ports[std::string(direction_name(port.direction))][port.name] = {
+            { "dtype", port.tensor->dtype }, { "shape", port.tensor->shape },
+        };
+    }
+    if (ports.empty()) return nullptr;
+
+    // A target binds its own ranks and tensor geometry. Stream IDs and posting ordinals belong to the observation.
+    const auto & group = *scope.communication;
+    nlohmann::json identity{
+        { "operation", group.operation }, { "members", group.members }, { "required", group.required },
+        { "rank", group.rank }, { "implementation", scope.info.implementation }, { "ports", std::move(ports) },
+    };
+    const auto local = scope.info.bindings.find("local_implementation");
+    if (local != scope.info.bindings.end()) identity["local_implementation"] = *local;
+    return identity;
+}
+
+} // namespace
+
 WorkFeatures::WorkFeatures(Parameters parameters)
     : parameters_(std::make_move_iterator(parameters.begin()), std::make_move_iterator(parameters.end())) {}
 
-WorkFeatures::WorkFeatures(const GraphScope & scope) {
+WorkFeatures::WorkFeatures(const GraphScope & scope) : transport_(transport_operand(scope)) {
     const auto & info = scope.info;
     if (!info.parameters.contains("members")) {
 
@@ -69,12 +96,14 @@ std::optional<double> WorkFeatures::value(std::string_view axis) const {
     return batch_[static_cast<std::size_t>(batch - axes.begin())];
 }
 
-nlohmann::json WorkFeatures::document() const {
+nlohmann::json WorkFeatures::document(bool include_transport) const {
     auto axes = nlohmann::json::object();
     const auto names = batch_axes();
     for (std::size_t index = 0; index < names.size(); ++index) axes[names[index]] = batch_[index];
     for (const auto & [name, value] : parameters_) axes[std::string(parameter_prefix_) + name] = value;
-    return {{ "phase", phase_ }, { "axes", std::move(axes) }};
+    nlohmann::json result{{ "phase", phase_ }, { "axes", std::move(axes) }};
+    if (include_transport && transport()) result["transport"] = transport_;
+    return result;
 }
 
 } // namespace prologue
