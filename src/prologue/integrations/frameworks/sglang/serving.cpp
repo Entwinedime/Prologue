@@ -61,7 +61,7 @@ nlohmann::json serve(const std::map<std::size_t, TemplateLibrary> & libraries, c
     }
     std::optional<ExecutionInputs> inputs;
     if (!timing.is_null()) inputs.emplace(timing, control_observer);
-    ServiceTimes service_times(duration, inputs ? &*inputs : nullptr, costs);
+    ServiceTimes service_times(duration, inputs ? &*inputs : nullptr, costs, execution_observer);
     const nlohmann::json empty;
     const auto & ingress = timing.is_null() ? empty : timing.at("ingress");
     if (!ingress.is_null() && !ingress.is_object()) throw std::invalid_argument("ingress must be an instance mapping");

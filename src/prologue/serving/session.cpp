@@ -51,7 +51,7 @@ nlohmann::json ServingSession::run() {
 
             // Resolve all service times before this action can commit any events or dependency bindings.
             const auto timing = times_.action(action->task.group, graph, origins, supplied);
-            const auto events = participant.dependencies.insert(graph, timeline_, timing.work_ns, pools, timing.boundaries);
+            const auto events = participant.dependencies.insert(graph, timeline_, timing, pools);
             communication.insert(graph, events, timing.work_ns, timeline_);
             const auto returned = events.at(graph.scopes.front().port("call.return", Direction::Output).event);
             auto caller_returned = returned;

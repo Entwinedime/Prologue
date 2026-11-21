@@ -43,8 +43,7 @@ public:
     static std::vector<std::int64_t> replay(std::span<const std::int64_t> releases_ns, std::span<const TimedDependency> dependencies);
 
     // Accept a validated graph and bound input readiness; check resources, durations and boundary conditions here.
-    std::vector<std::size_t> insert(const CoarseGraph & graph, std::span<const ServiceDuration> work_ns, std::span<const ExecutionInput> inputs,
-                                    std::span<const BoundaryCondition> boundaries = {});
+    std::vector<std::size_t> insert(const CoarseGraph & graph, const GraphTiming & timing, std::span<const ExecutionInput> inputs);
     std::optional<EventCompletion> advance(std::optional<std::int64_t> until_ns = {});
     bool completed(std::size_t event) const;
     bool in_flight(std::size_t event) const;

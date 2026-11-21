@@ -19,10 +19,13 @@
 
 namespace prologue {
 
+nlohmann::json service_estimates(const GraphTiming & timing);
+
 class ExecutionTrace final : public ExecutionObserver, public ResourceObserver, public ControlObserver {
 public:
     explicit ExecutionTrace(const std::filesystem::path & path);
-    void inserted(const CoarseGraph & graph, std::span<const std::size_t> events, std::span<const ServiceDuration> work_ns, std::int64_t time_ns) override;
+    void inserted(const CoarseGraph & graph, std::span<const std::size_t> events, const GraphTiming & timing, std::int64_t time_ns) override;
+    void rejected_layout(const CoarseGraph & graph, std::string_view group, std::size_t step) override;
     void connected(std::size_t source, std::size_t target, Relation relation, std::int64_t delay_ns,
                    std::optional<std::size_t> activation) override;
     void activated(std::size_t event, std::int64_t time_ns) override;

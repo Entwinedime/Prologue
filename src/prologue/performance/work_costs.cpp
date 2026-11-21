@@ -46,7 +46,7 @@ CostGap::CostGap(nlohmann::json details)
     : std::runtime_error("no qualified service cost at " + details.at("site").get<std::string>()),
       details_(std::move(details)) {}
 
-WorkCosts::Model::Model(const nlohmann::json & model) {
+WorkCosts::Model::Model(const nlohmann::json & model, std::size_t ordinal) : binding(ordinal) {
     for (const auto & [name, range] : model.at("bounds").get_ref<const nlohmann::json::object_t &>()) {
         const auto & values = range.get_ref<const nlohmann::json::array_t &>();
         if (values.size() != 2) throw std::invalid_argument("cost feature bounds require two coordinates");
@@ -150,13 +150,15 @@ WorkCosts::WorkCosts(nlohmann::json domain, const nlohmann::json & asset, const 
         }
         models_[index].resize(work.size());
     }
-    for (const auto & model : selected->at("models").get_ref<const nlohmann::json::array_t &>()) {
+    const auto & bindings = selected->at("models").get_ref<const nlohmann::json::array_t &>();
+    for (std::size_t ordinal = 0; ordinal < bindings.size(); ++ordinal) {
+        const auto & model = bindings[ordinal];
         const auto definition = model.at("definition").get<std::size_t>();
         const auto interval = model.at("interval").get<std::size_t>();
         auto & phases = models_.at(definition).at(interval);
         if (model.at("family") == "startup_transfer" && measured.at(definition).at("work").at(interval).at("kind") != "transfer")
             throw std::invalid_argument("a startup transfer model must price a transfer interval");
-        if (!phases.try_emplace(model.at("phase").get<std::string>(), model).second)
+        if (!phases.try_emplace(model.at("phase").get<std::string>(), model, ordinal).second)
             throw std::invalid_argument("cost asset repeats a work interval and phase");
     }
 
@@ -199,14 +201,20 @@ WorkCosts::Estimate WorkCosts::estimate(std::optional<std::size_t> definition, s
 
 template<class Features>
 WorkCosts::Estimate WorkCosts::work_estimate(std::optional<std::size_t> definition, std::size_t interval, WorkKind kind,
-                                            const Features & features) const {
-    if (kind == WorkKind::Transfer && features.transport())
-        return estimate(external_index(*features.transport(), kind), 0, features);
+                                             const Features & features, const nlohmann::json * explicit_service) const {
+    const auto * operand = features.transport();
+    if (explicit_service) {
+        if (operand && *operand != *explicit_service)
+            throw std::invalid_argument("cost query operand differs from its declared external service");
+        return estimate(definition, interval, features);
+    }
+    if (kind == WorkKind::Transfer && operand)
+        return estimate(external_index(*operand, kind), 0, features);
     const auto measured = estimate(definition, interval, features);
-    if (measured.service_ns || kind != WorkKind::Collective || !features.transport()) return measured;
+    if (measured.service_ns || kind != WorkKind::Collective || !operand) return measured;
 
     // The profile point already binds the actual payload and participants. It supplies only the peer service.
-    const auto point = external_index(*features.transport(), kind);
+    const auto point = external_index(*operand, kind);
     return point ? estimate(point, 0, WorkFeatures(Parameters{})) : measured;
 }
 
@@ -227,11 +235,13 @@ CostGap WorkCosts::gap(const Estimate & estimate, const WorkFeatures & features,
     return CostGap(std::move(details));
 }
 
-GraphTiming WorkCosts::timing(const CoarseGraph & graph, std::span<const TemplateInterval> origins, nlohmann::json * first_gap) const {
+GraphTiming WorkCosts::timing(const CoarseGraph & graph, std::span<const TemplateInterval> origins, nlohmann::json * first_gap,
+                             bool record_bindings) const {
     if (origins.size() != graph.work.size()) throw std::logic_error("cost queries require one origin per instantiated work interval");
     WorkCoordinates coordinates(graph);
     GraphTiming result;
     result.work_ns.reserve(graph.work.size());
+    if (record_bindings) result.model_bindings.reserve(graph.work.size());
     for (std::size_t index = 0; index < graph.work.size(); ++index) {
         const auto & work = graph.work[index];
         const auto & origin = origins[index];
@@ -250,12 +260,13 @@ GraphTiming WorkCosts::timing(const CoarseGraph & graph, std::span<const Templat
             (*first_gap)["work_index"] = index;
         }
         result.work_ns.push_back(cost.service_ns);
+        if (record_bindings) result.model_bindings.push_back(cost.model ? std::optional(cost.model->binding) : std::nullopt);
     }
     return result;
 }
 
 std::int64_t WorkCosts::external(const nlohmann::json & identity, WorkKind kind, const WorkFeatures & features) const {
-    const auto cost = estimate(external_index(identity, kind), 0, features);
+    const auto cost = work_estimate(external_index(identity, kind), 0, kind, features, &identity);
     if (cost.service_ns) return *cost.service_ns;
 
     throw gap(cost, features, {{ "site", identity.at("operation") }, { "work", work_name(kind) },
@@ -263,7 +274,7 @@ std::int64_t WorkCosts::external(const nlohmann::json & identity, WorkKind kind,
                                    { "interval", 0 }});
 }
 
-nlohmann::json WorkCosts::evaluate(const nlohmann::json & groups, const nlohmann::json & asset) {
+nlohmann::json WorkCosts::evaluate(const nlohmann::json & groups, const nlohmann::json & asset, bool bindings) {
     auto results = nlohmann::json::array();
     for (const auto & group : groups.get_ref<const nlohmann::json::array_t &>()) {
         const auto & definitions = group.at("definitions").get_ref<const nlohmann::json::array_t &>();
@@ -274,10 +285,14 @@ nlohmann::json WorkCosts::evaluate(const nlohmann::json & groups, const nlohmann
                 throw std::invalid_argument("cost point requires a definition, interval, and features");
             const auto definition = point[0].get<std::size_t>();
             const auto interval = point[1].get<std::size_t>();
-            const auto kind = work_kind(definitions.at(definition).at("work").at(interval).at("kind").get<std::string>());
-            const auto estimate = costs.work_estimate(costs.model_indices_[definition], interval, kind, RecordedFeatures(point[2]));
-            const auto duration = estimate.service_ns ? nlohmann::json(*estimate.service_ns) : nlohmann::json();
-            estimates.push_back(nlohmann::json::array({ estimate.status(), duration }));
+            const auto & declared = definitions.at(definition);
+            const auto kind = work_kind(declared.at("work").at(interval).at("kind").get<std::string>());
+            const auto service = declared.find("external");
+            const auto estimate = costs.work_estimate(costs.model_indices_[definition], interval, kind, RecordedFeatures(point[2]),
+                                                      service == declared.end() ? nullptr : &*service);
+            auto row = nlohmann::json::array({estimate.status(), estimate.service_ns ? nlohmann::json(*estimate.service_ns) : nullptr});
+            if (bindings) row.push_back(estimate.model ? nlohmann::json(estimate.model->binding) : nullptr);
+            estimates.push_back(std::move(row));
         }
         results.push_back(std::move(estimates));
     }

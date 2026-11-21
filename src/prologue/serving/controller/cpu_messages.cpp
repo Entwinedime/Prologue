@@ -76,7 +76,7 @@ CpuMessages::Service CpuMessages::service(const nlohmann::json & key, const Endp
     } else {
         timing.work_ns.push_back(estimate(endpoint, execution, execution.at("operation").get_ref<const std::string &>(), WorkKind::Host));
     }
-    const auto events = timeline_.insert(graph, timing.work_ns, inputs, timing.boundaries);
+    const auto events = timeline_.insert(graph, timing, inputs);
     ++service_count_;
     return { events[0], events[1], std::move(position) };
 }

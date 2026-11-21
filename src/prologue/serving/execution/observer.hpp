@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 
 #include "prologue/serving/execution/timing.hpp"
 #include "prologue/graph/types.hpp"
@@ -16,7 +17,8 @@ class CoarseGraph;
 class ExecutionObserver {
 public:
     virtual ~ExecutionObserver() = default;
-    virtual void inserted(const CoarseGraph & graph, std::span<const std::size_t> events, std::span<const ServiceDuration> work_ns, std::int64_t time_ns) = 0;
+    virtual void inserted(const CoarseGraph & graph, std::span<const std::size_t> events, const GraphTiming & timing, std::int64_t time_ns) = 0;
+    virtual void rejected_layout(const CoarseGraph & graph, std::string_view group, std::size_t step) = 0;
     virtual void connected(std::size_t source, std::size_t target, Relation relation, std::int64_t delay_ns,
                            std::optional<std::size_t> activation) = 0;
     virtual void activated(std::size_t event, std::int64_t time_ns) = 0;

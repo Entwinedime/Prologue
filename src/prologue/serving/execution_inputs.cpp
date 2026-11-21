@@ -1,4 +1,5 @@
 #include "prologue/serving/execution_inputs.hpp"
+#include "prologue/serving/execution/observer.hpp"
 
 #include <algorithm>
 #include <set>
@@ -178,13 +179,15 @@ std::size_t boundary(const CoarseGraph & graph, const nlohmann::json & selector)
 
 } // namespace
 
-GraphTiming InvocationInput::timing(const CoarseGraph & graph) const {
+GraphTiming InvocationInput::timing(const CoarseGraph & graph, ExecutionObserver * observer) const {
     if (layouts) {
         const auto layout = graph.action_layout();
         const auto & endpoints = record.at("endpoints").get_ref<const nlohmann::json::array_t &>();
-        if (layout.identity != layouts->at(record.at("layout").get<std::size_t>()) || endpoints.size() != layout.events.size())
+        if (layout.identity != layouts->at(record.at("layout").get<std::size_t>()) || endpoints.size() != layout.events.size()) {
+            if (observer) observer->rejected_layout(graph, position.group, position.step);
             throw std::invalid_argument("first measured action layout divergence at " + position.group + " step " + std::to_string(position.step)
                                         + " (" + graph.scopes.front().info.site + ")");
+        }
 
         // Timed endpoints pin a boundary; a pure order witness supplies only its original identity.
         GraphTiming result{ std::vector<ServiceDuration>(graph.work.size()), {} };

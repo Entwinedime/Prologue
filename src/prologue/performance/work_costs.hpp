@@ -36,9 +36,10 @@ private:
 class WorkCosts {
 public:
     WorkCosts(nlohmann::json domain, std::span<const TemplateDefinition> definitions, const nlohmann::json & asset);
-    GraphTiming timing(const CoarseGraph & graph, std::span<const TemplateInterval> origins, nlohmann::json * first_gap = nullptr) const;
+    GraphTiming timing(const CoarseGraph & graph, std::span<const TemplateInterval> origins, nlohmann::json * first_gap = nullptr,
+                       bool record_bindings = false) const;
     std::int64_t external(const nlohmann::json & identity, WorkKind kind, const WorkFeatures & features) const;
-    static nlohmann::json evaluate(const nlohmann::json & groups, const nlohmann::json & asset);
+    static nlohmann::json evaluate(const nlohmann::json & groups, const nlohmann::json & asset, bool bindings);
 
 private:
     struct Bound {
@@ -63,10 +64,11 @@ private:
     };
 
     struct Model {
-        explicit Model(const nlohmann::json & model);
+        Model(const nlohmann::json & model, std::size_t binding);
         template<class Features>
         ServiceDuration estimate(const Features & features) const;
 
+        std::size_t binding;
         std::map<std::string, Bound, std::less<>> bounds;
         std::optional<std::string> axis;
         std::variant<BoundedCurve, StartupTransfer> formula;
@@ -88,7 +90,8 @@ private:
     template<class Features>
     Estimate estimate(std::optional<std::size_t> definition, std::size_t interval, const Features & features) const;
     template<class Features>
-    Estimate work_estimate(std::optional<std::size_t> definition, std::size_t interval, WorkKind kind, const Features & features) const;
+    Estimate work_estimate(std::optional<std::size_t> definition, std::size_t interval, WorkKind kind, const Features & features,
+                           const nlohmann::json * explicit_service = nullptr) const;
     CostGap gap(const Estimate & estimate, const WorkFeatures & features, nlohmann::json details) const;
 
     nlohmann::json domain_;

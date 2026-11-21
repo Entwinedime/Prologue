@@ -8,8 +8,8 @@
 
 namespace prologue {
 
-ServiceTimes::ServiceTimes(ServiceDuration given, ExecutionInputs * conditions, const nlohmann::json & assets)
-    : given_(given), conditions_(conditions), assets_(assets) {}
+ServiceTimes::ServiceTimes(ServiceDuration given, ExecutionInputs * conditions, const nlohmann::json & assets, ExecutionObserver * observer)
+    : given_(given), conditions_(conditions), assets_(assets), observer_(observer) {}
 
 void ServiceTimes::bind(const std::string & group, nlohmann::json domain, std::span<const TemplateDefinition> definitions) {
     participants_.try_emplace(group, std::move(domain), definitions, assets_);
@@ -22,11 +22,11 @@ std::optional<InvocationInput> ServiceTimes::action_input(const ServingAction & 
 
 GraphTiming ServiceTimes::action(const std::string & group, const CoarseGraph & graph, std::span<const TemplateInterval> origins,
                                  const std::optional<InvocationInput> & observed) {
-    if (observed) return observed->timing(graph);
+    if (observed) return observed->timing(graph, observer_);
     if (given_) return { std::vector<ServiceDuration>(graph.work.size(), given_), {} };
 
     const auto began = std::chrono::steady_clock::now();
-    auto result = participants_.at(group).timing(graph, origins);
+    auto result = participants_.at(group).timing(graph, origins, nullptr, observer_ != nullptr);
     query_time_ += std::chrono::steady_clock::now() - began;
     queries_ += graph.work.size();
     return result;

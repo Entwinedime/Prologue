@@ -100,8 +100,8 @@ constexpr std::string_view usage = "prologue project <native-facts.json> <coarse
                                    "prologue action-layouts <observed-coarse.json> <layouts.json>\n"
                                    "prologue templates <coarse.json> <templates.json>\n"
                                    "prologue work-identities <observed-coarse.json> <work.json>\n"
-                                   "prologue work-costs <observed-coarse.json> <costs.json> <services.json>\n"
-                                   "prologue cost-points <points.json> <costs.json> <estimates.json>\n"
+                                   "prologue work-costs <observed-coarse.json> <costs.json> <services.json> [--bindings]\n"
+                                   "prologue cost-points <points.json> <costs.json> <estimates.json> [--bindings]\n"
                                    "prologue link-templates <source-libraries.json> <output-directory>\n"
                                    "prologue instantiate <templates.json> <invocation.json> <coarse.json>\n"
                                    "prologue execute <coarse.json> <given-timing.json> <execution.json> [--trace <execution.jsonl>]\n"
@@ -128,16 +128,15 @@ nlohmann::json work_identities(const prologue::sglang::TemplateDeclarations & so
             {"definitions", std::move(definitions)}, {"features", std::move(features)}, {"intervals", std::move(intervals)}};
 }
 
-nlohmann::json work_costs(const prologue::sglang::TemplateDeclarations & source, const nlohmann::json & costs) {
+nlohmann::json work_costs(const prologue::sglang::TemplateDeclarations & source, const nlohmann::json & costs, bool bindings) {
     std::vector<prologue::TemplateInterval> origins;
     const auto library = source.compile(&origins);
 
     nlohmann::json missing;
     const prologue::WorkCosts service(library.domain, library.definitions, costs);
-    auto timing = service.timing(source.graph, origins, &missing);
-    auto durations = nlohmann::json::array();
-    for (const auto duration : timing.work_ns) durations.push_back(duration ? nlohmann::json(*duration) : nlohmann::json());
-    return {{ "work_ns", std::move(durations) }, { "first_cost_gap", std::move(missing) }};
+    auto result = prologue::service_estimates(service.timing(source.graph, origins, &missing, bindings));
+    result["first_cost_gap"] = std::move(missing);
+    return result;
 }
 
 std::int64_t nonnegative(const nlohmann::json & value) {
@@ -194,7 +193,7 @@ nlohmann::json execute(const prologue::CoarseGraph & graph, const nlohmann::json
     if (timing.at("initial_inputs") != "ready") throw std::invalid_argument("graph execution requires explicitly ready initial inputs");
     auto supplied = prologue::GraphTiming::conditioned(graph, std::move(work_ns), std::move(boundaries));
     prologue::Timeline timeline(graph.resources, observer);
-    const auto events = timeline.insert(graph, supplied.work_ns, {}, supplied.boundaries);
+    const auto events = timeline.insert(graph, supplied, {});
     std::size_t completed = 0;
     while (timeline.advance()) ++completed;
     if (!timeline.done()) throw std::runtime_error("graph execution stalled with " + std::to_string(events.size() - completed) + " unfinished boundaries");
@@ -266,12 +265,15 @@ int main(int argc, char ** argv) {
             const auto source = prologue::sglang::NativeTemplates::describe(prologue::CoarseGraph::read(document));
             output = command == "templates" ? source.compile().document() : work_identities(source, document.at("evidence").at("window_ns"));
         }
-        else if (command == "work-costs" && argc == 5) {
-            const auto source = prologue::sglang::NativeTemplates::describe(prologue::CoarseGraph::read(read_json(argv[2])));
-            output = work_costs(source, read_json(argv[3]));
-        }
-        else if (command == "cost-points" && argc == 5) {
-            output = prologue::WorkCosts::evaluate(read_json(argv[2]), read_json(argv[3]));
+        else if ((command == "work-costs" || command == "cost-points") && (argc == 5 || (argc == 6 && std::string_view(argv[5]) == "--bindings"))) {
+            destination = argv[4];
+            const auto input = read_json(argv[2]);
+            const auto costs = read_json(argv[3]);
+            if (command == "work-costs") {
+                const auto source = prologue::sglang::NativeTemplates::describe(prologue::CoarseGraph::read(input));
+                output = work_costs(source, costs, argc == 6);
+            }
+            else output = prologue::WorkCosts::evaluate(input, costs, argc == 6);
         }
         else if (command == "replay" && argc == 5) {
             output = replay(read_json(argv[2]), read_json(argv[3]));

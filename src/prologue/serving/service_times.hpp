@@ -17,7 +17,7 @@ namespace prologue {
 
 class ServiceTimes {
 public:
-    ServiceTimes(ServiceDuration given, ExecutionInputs * conditions, const nlohmann::json & assets);
+    ServiceTimes(ServiceDuration given, ExecutionInputs * conditions, const nlohmann::json & assets, ExecutionObserver * observer);
 
     void bind(const std::string & group, nlohmann::json domain, std::span<const TemplateDefinition> definitions);
     bool modeled() const { return !assets_.is_null(); }
@@ -32,6 +32,7 @@ private:
     ServiceDuration given_;
     ExecutionInputs * conditions_;
     const nlohmann::json & assets_;
+    ExecutionObserver * observer_;
     std::map<std::string, WorkCosts> participants_;
     std::size_t queries_ = 0;
     std::chrono::nanoseconds query_time_{};

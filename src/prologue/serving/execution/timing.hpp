@@ -29,6 +29,9 @@ struct GraphTiming {
     std::vector<ServiceDuration> work_ns;
     std::vector<BoundaryCondition> boundaries;
 
+    // Trace-only indices into this participant's fitted asset, in graph work order.
+    std::vector<std::optional<std::size_t>> model_bindings{};
+
     // Unknown work needs its own condition or a bound from an actual causal successor; neither supplies its service cost.
     static GraphTiming conditioned(const CoarseGraph & graph, std::vector<ServiceDuration> work_ns, std::vector<BoundaryCondition> boundaries);
 };

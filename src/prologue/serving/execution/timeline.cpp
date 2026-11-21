@@ -65,8 +65,9 @@ std::vector<std::int64_t> Timeline::replay(std::span<const std::int64_t> release
     return times;
 }
 
-std::vector<std::size_t> Timeline::insert(const CoarseGraph & graph, std::span<const ServiceDuration> work_ns, std::span<const ExecutionInput> inputs,
-                                          std::span<const BoundaryCondition> boundaries) {
+std::vector<std::size_t> Timeline::insert(const CoarseGraph & graph, const GraphTiming & timing, std::span<const ExecutionInput> inputs) {
+    const auto & work_ns = timing.work_ns;
+    const auto & boundaries = timing.boundaries;
     if (work_ns.size() != graph.work.size()) throw std::invalid_argument("execution requires one service duration or completion condition per work interval");
     std::vector<std::size_t> resources;
     for (const auto & resource : graph.resources) {
@@ -118,7 +119,7 @@ std::vector<std::size_t> Timeline::insert(const CoarseGraph & graph, std::span<c
     }
     unfinished_ += graph.events.size();
     work_count_ += graph.work.size();
-    if (observer_) observer_->inserted(graph, identities, work_ns, now_ns_);
+    if (observer_) observer_->inserted(graph, identities, timing, now_ns_);
     for (const auto & [event, boundary] : conditions) {
         if (const auto & window = boundary->window) {
             auto & node = events_.at(offset + event);

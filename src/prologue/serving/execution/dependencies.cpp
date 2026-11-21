@@ -90,8 +90,8 @@ void GraphDependencies::invalidate_slot(std::size_t slot, const std::string & fi
     if (found != slots_.end() && found->second.release(timeline)) slots_.erase(found);
 }
 
-std::vector<std::size_t> GraphDependencies::insert(const CoarseGraph & graph, Timeline & timeline, std::span<const ServiceDuration> durations,
-                                                   const std::map<std::string, GraphDependencies *> & pools, std::span<const BoundaryCondition> boundaries) {
+std::vector<std::size_t> GraphDependencies::insert(const CoarseGraph & graph, Timeline & timeline, const GraphTiming & timing,
+                                                   const std::map<std::string, GraphDependencies *> & pools) {
     std::set<std::string> exposed;
     for (const auto & port : graph.scopes.front().ports) {
         if (port.use == PortUse::Data && port.direction == Direction::Output) exposed.insert(port.tensor->storage);
@@ -237,7 +237,7 @@ std::vector<std::size_t> GraphDependencies::insert(const CoarseGraph & graph, Ti
     }
     std::vector<ExecutionInput> inputs;
     for (const auto & [source, target, relation] : dependencies) inputs.push_back({ source, target, relation });
-    const auto events = timeline.insert(graph, durations, inputs, boundaries);
+    const auto events = timeline.insert(graph, timing, inputs);
     observations_.clear();
 
     if (observer_) {

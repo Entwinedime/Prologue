@@ -14,6 +14,7 @@
 namespace prologue {
 
 class ControlObserver;
+class ExecutionObserver;
 
 struct InputPosition {
     std::string group;
@@ -26,7 +27,7 @@ struct InvocationInput {
     const nlohmann::json * layouts;
 
     const nlohmann::json & bindings() const;
-    GraphTiming timing(const CoarseGraph & graph) const;
+    GraphTiming timing(const CoarseGraph & graph, ExecutionObserver * observer = nullptr) const;
 };
 
 // Positions retain an already checked causal prefix; operation and work must still match at every step.

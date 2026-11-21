@@ -23,23 +23,36 @@ std::size_t ExecutionTrace::context_value(const nlohmann::json & value) {
     return entry->second;
 }
 
-void ExecutionTrace::inserted(const CoarseGraph & graph, std::span<const std::size_t> events, std::span<const ServiceDuration> work_ns, std::int64_t time_ns) {
-
+nlohmann::json service_estimates(const GraphTiming & timing) {
     auto durations = nlohmann::json::array();
-    for (const auto duration : work_ns) durations.push_back(duration ? nlohmann::json(*duration) : nlohmann::json(nullptr));
+    for (const auto duration : timing.work_ns) durations.push_back(duration ? nlohmann::json(*duration) : nullptr);
+
+    nlohmann::json result{{ "work_ns", std::move(durations) }};
+    if (!timing.model_bindings.empty()) {
+        auto & bindings = result["model_bindings"] = nlohmann::json::array();
+        for (const auto binding : timing.model_bindings) bindings.push_back(binding ? nlohmann::json(*binding) : nullptr);
+    }
+    return result;
+}
+
+void ExecutionTrace::inserted(const CoarseGraph & graph, std::span<const std::size_t> events, const GraphTiming & timing, std::int64_t time_ns) {
 
     // Input and template assets own the environment. The trace declares each shared context value before its first use.
     auto document = graph.document(false);
     for (auto & scope : document.at("scopes")) {
         ContextValues::encode(scope.at("work"), [this](const auto & value) { return context_value(value); });
     }
-    stream_ << nlohmann::json{
-        { "kind", "graph" },
-        { "time_ns", time_ns },
-        { "graph", std::move(document) },
-        { "event_ids", std::vector<std::size_t>(events.begin(), events.end()) },
-        { "work_ns", std::move(durations) }
-    } << '\n';
+    auto record = service_estimates(timing);
+    record["kind"] = "graph";
+    record["time_ns"] = time_ns;
+    record["graph"] = std::move(document);
+    record["event_ids"] = events;
+    stream_ << record << '\n';
+}
+
+void ExecutionTrace::rejected_layout(const CoarseGraph & graph, std::string_view group, std::size_t step) {
+    // This action has no timeline events. Preserve its own graph for comparison with the witnessed native call.
+    stream_ << nlohmann::json{{ "kind", "rejected_layout" }, { "group", group }, { "step", step }, { "graph", graph.document(false) }} << '\n';
 }
 
 void ExecutionTrace::connected(std::size_t source, std::size_t target, Relation relation, std::int64_t delay_ns,
