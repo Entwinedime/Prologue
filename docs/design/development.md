@@ -219,7 +219,9 @@ CPU 成本采样使用 `capture --host-timing`。结构观测与主机采样共�
 
 用 `fit-costs --samples` 发布离线拟合资产。指定 `--check`、`--demand <粗图> <工作身份文件>` 或 `--gap` 检查实际样本或需求时，传入 `--binary <Docker 构建的 prologue>`。检查与补采规划将工作坐标按域批量交给同一 C++23 成本查询，由其返回覆盖状态和耗时。
 
-`acquire-costs` 使用一个或多个训练来源集合，产物 `costs.json` 可直接交给 `predict --costs`。来源保留明细时直接读取粗图和事实，已经精简时，可从已发布的原生观测重新投影。默认需求来自训练来源。传入 `--demand <粗图> <工作身份文件>` 或 `--gap <预测目录/cost-gap.json>` 时，任务以显式请求的工作为采样和验收范围，训练来源提供可复用的样本及原生入口。两个选项均可重复。用 `--samples` 提供已经资格检查的训练样本。同域已有实测优先。SGLang 可将运行环境、局部调用及特征一致的闭合批次数组操作的主机实测复用于其他角色，资产保留原样本位置。
+`acquire-costs` 使用一个或多个训练来源集合，产物 `costs.json` 可直接交给 `predict --costs`。来源保留明细时直接读取粗图和事实，已经精简时，可从已发布的原生观测重新投影。成本任务在拟合后回收自己的投影及工作索引，训练需求通过原生采集清单和 rank 定位。用 `--keep-intermediates` 保留明细。任务的 `status.json` 记录实际占用及计费。清理或发布中断时，以同一输入重跑即可继续发布已完成的拟合。
+
+默认需求来自训练来源。传入 `--demand <粗图> <工作身份文件>` 或 `--gap <预测目录/cost-gap.json>` 时，任务以显式请求的工作为采样和验收范围，训练来源提供可复用的样本及原生入口。两个选项均可重复。用 `--samples` 提供已经资格检查的训练样本。同域已有实测优先。SGLang 可将运行环境、局部调用及特征一致的闭合批次数组操作的主机实测复用于其他角色，资产保留原样本位置。
 
 单卡 CPU 计时容器使用 `PERFMON` 并放开进程的 `memlock` 限额，使观测器能为每个原生线程映射 perf 环形缓冲区。容器仍只暴露声明的那张设备。CPU 补采根据集合声明分配设备，并在原始实测镜像中按原提交分组或逐请求分组运行 Engine。配对前核对详细观测与轻量计时的镜像、有效部署、模型和请求。配置集探索用代表请求预热。轻量观察若出现首次特化加载，按实际原生调用范围排除受影响的样本，剩余需求可触发一次按原分组预热的测量。采到的实际批次和调用匹配详细来源后才进入模型。`--timeout`、`--native-budget-seconds`、`--postprocessing-budget-seconds`、`--attempt-limit` 和 `--storage-bytes` 约束该任务。报告区分预算停止、可观察但没有合格实测和无已知配方。每份在线缺口只记录停止位置的工作，后续未展开路径的需求仍未知。
 
@@ -228,6 +230,8 @@ Ascend 按同一 HCCL 通道的提交顺序配对各参与者，核对 SDK 操�
 `cost-samples --transport-only` 的 `unqualified_endpoint_clock` 表示参与者和载荷已经对齐，但该端点的时钟证据不足以给出服务时长。单卡分片只能发布实际取得的本地成本，真实跨卡通信由选定的物理通信资产提供。资产中的 `source_image` 标明实际运行 worker 的镜像。固定图的实测参考独立读取该目标的通信边和校准时钟。
 
 成本资产按 `domains` 保存各实现域的规范定义和模型。`fit-costs` 可以读取多个实现域的样本，每域独立拟合。正式预测按已选模板库的实际实现域为各参与者装配成本。CPU 协议本地服务用各自角色的成本，线传输用发送角色的成本。它们与动作图共用成本查询，协议工作身份保留操作、逻辑通道、源/目标和 dtype，实际元素数量与元素字节数作为查询特征。
+
+要追查模板中某项工作的估值，给 `predict` 加 `--execution-trace`。在展开图中按 rank、调用位置、请求成员和操作数定位该工作，读取同一下标的 `work_ns` 和 `model_bindings`。绑定下标指向该参与者成本域的 `models`。其中每个 `training_rows` 项是两个从零开始的下标，依次指向成本文件的 `sources` 和对应样本文件的 `samples`。由此可以看到实际特征、重复测量和来源。批量查询 `cost-points` 和固定图查询 `work-costs` 都可加 `--bindings` 返回同一绑定下标。域外查询保留已找到的模型和实测范围，缺少模型则返回空下标。
 
 采样和在线查询采用同一特征提取。数据端口及局部 guard 提供工作形状，局部 KV 读取决定是否使用序列上下文与计算量。KV backing 张量的容量是元数据。实际参与 Attention 的长度来自已绑定的请求成员。
 
@@ -400,7 +404,7 @@ prologue_local_graphs expand <source-libraries.json> <action-inputs.json> <local
 
 来源模板须预先冻结。source-libraries.json是库路径数组，首项为当前worker的代表库，其余为正式装配所需的其他来源；入口复用正式batch变换和局部实现连接。actions由框架adapter描述真实动作，只导出环境、动作条件、参数和逻辑work，包含原生传输调用已声明的路由。EP 模型调用按 workload 路由、实际成员和补齐行推导各层所需对端，与原生控制共用同一实现。记录在该调用结束前发布一份对端输入，完成 worker 绑定后，具体通信端口保存所需对端。expand仅取得这些输入与来源库，再调用正式模板选择、共享调用绑定和实例化；生成容器不挂载目标图、输出shape、内部依赖或模型文件，也不编译目标模板。给定条件的正确性本身属于前提，不能用本检查反证。外部存储、池与信号采用符号绑定，不处理实际分配史或跨图执行。
 
-每个目标worker由正式装配的SGLangTask.participants选择代表库，不能按同名rank文件假定一对一；C++构图入口再核对角色和目标域。输出以C++23禁止覆盖方式创建，写入关闭成功后才返回。每个给定动作输出一条 `local_graph`，构图失败保留该动作error并继续收齐；末尾 `local_summary` 核对attempted/built，缺末尾记录不能当作完整结果。图文件是验证明细，不作为模拟执行流或人类汇报。
+采集层读取已发布的来源、任务和文件。预测入口选择 SGLang 的主来源选择器与角色装配器，正式工作流与验证共用这个入口。每个目标 worker 由 `SGLangTask.participants` 选择代表库，不能按同名rank文件假定一对一；C++构图入口再核对角色和目标域。输出以C++23禁止覆盖方式创建，写入关闭成功后才返回。每个给定动作输出一条 `local_graph`，构图失败保留该动作error并继续收齐；末尾 `local_summary` 核对attempted/built，缺末尾记录不能当作完整结果。图文件是验证明细，不作为模拟执行流或人类汇报。
 
 `PYTHONPATH=src python3 -m prologue.verification.local_graphs --capture <native-case> --graphs <target-graphs> --expanded <local-jsonl-directory> --output <new-directory>` 独立读取各rank的 `rank-N.jsonl`，复用原生事实、内容和因果检查。报告local-graphs.json/md分别保存机器结论和精简说明。实际动作编号只标记这份给定输入，不跨运行硬配来源序号；本地依赖只检查保留作用域和端点的诱导子图，跨图路径不冒充局部构图义务。动态stream等待的合同参与内容核对，其实际前沿依赖单列交给连接/执行检查。
 
@@ -466,7 +470,9 @@ Event 返回 true 只说明完成不晚于查询返回，false 只说明完成�
 
 独立动作比较在CPU control容器内使用 `PYTHONPATH=src python3 -m prologue.verification.compare_actions --capture <closed-native-case> --graphs <projected-graphs> --execution <prediction.jsonl> --output <new-directory>`。它先调用与来源检查共用的原生阶段，再消费预测明细进行配对；原生图不依赖预测是否成功。它与时间提取共用逻辑工作身份，读取实际粗图及预测明细，不调用模板选择或实例化。实际完成时间通过已核对的具名端口对应原始测量；独立核对CPU边界及全部已消费设备端点是否具有一套由实际独立校准快照限定的共同分段仿射解释，不读取生成条件中的时钟映射自证。向上取整的开闭区间按精确有理数约束验证，不增加经验容差。 两者按共同框架ABI解释资源调用输入，其他原始字段仍逐项核对；随后核对 worker 记录与粗图的环境、scope 身份、绑定声明及查询归属，并逐个核对原始张量端口的 dtype、shape、value/storage 身份、版本和 buffer。原始记录必须具有统一状态查询数组，缺少记录不等于没有查询；作用或输出声明不能在图转换中丢失。每个动作按父子调用位置核对层次、参数、端口、数据张量的形状/别名/相对版本/生产者、工作种类及数量、逻辑 KV/槽位访问和通信参与者。运行地址和图事件编号不跨案例配对；元数据端口只比较布局，不把它声明成数据存储所有权。
 
-矩阵示例维护 `sources`、`targets` 和 `compare` 三个阶段。`sources` 规划、采集、生产并检查模板来源，`targets` 取得原生目标及其粗图，`compare` 每个案例调用一次正式结构验证入口。验证进程内复用核对后的目标参考。矩阵声明各域的 `exploration` 与 `deployment`，各目标的 `capture_input`、`prediction_input` 和 `configuration`，需要全节点对照时显式指定同目标 `layouts` 目录。`environment.json` 固定镜像及共享预算，同目录 `prologue` 固定程序。建库只消费已声明来源。
+矩阵可按 `sources`、`targets`、`compare`、`fixed`、`autonomous` 分步运行。前两步核对训练来源和物理目标，后三步分别做实测时间下的结构比较、固定真实图的成本比较和自主预测评分。同一冻结矩阵内，两种来源使用同一份物理目标时，只投影一份粗图。每个比较结果保留自己的来源和计分范围。
+
+域可声明 `exploration` 以规划训练，也可直接指定已发布的 `source.collection`。域的 `deployment` 描述原生目标部署，固定图和自主闭环读取 `costs`。每个目标给出 `capture_input` 与 `prediction_input`。结构验证从该目标重新提取所需布局。`environment.json` 固定镜像及共享预算，同目录的 `prologue` 固定程序。
 
 矩阵先核对整个选中范围的采集与预测是否使用相同的 model、instances 和 workload。每个目标以一个请求组按声明到达时间提交，组内保持同刻请求的声明顺序。已发布目标及显式 observation 仍须匹配原生任务的完整输入。已有合格来源集合通过正式预测装配核对实际库和参与者。来源不合格的案例仍可取得目标原生事实，并保留预测的资格缺口。
 
@@ -534,7 +540,7 @@ PYTHONPATH=src \
   --binary <Docker构建的prologue> --output <验证输出目录> --timeout 180
 ```
 
-入口先核对原生参考及目标模型、配置和请求，再提取实测条件、预测和对照。`result.json` 记录逐步结论与 `source_observation_reused`。全节点通过与通过已检查范围分别报告，独立资格还要核对参考是否参与建库和开发。
+入口先核对目标模型、配置、请求和提交分组。三条验证路径的 `result.json` 用 `training` 记录本次目标的原生尝试，以及它与所选模板或成本训练来源的关系。目标曾用于训练时返回 `reference_used_for_training`，样本来源缺少可核对身份时返回 `training_origin_unverified`。三路均核对每个原生实例记录的配置和请求内容，包含前缀与专家路由。详细取证还核对 rank 实际加载的模型；轻量计时需要在目标物理拓扑同时执行。候选因实测布局不符而被拒绝时，`first_rejected_action` 给出原生 rank、调用范围和局部差异，已执行动作仍按实际数量计数。独立矩阵还须在冻结时核对整个留出集与开发、训练数据的用途。
 
 ## 目录与依赖
 

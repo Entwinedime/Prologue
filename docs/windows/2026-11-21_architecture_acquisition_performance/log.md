@@ -357,3 +357,53 @@
 **验证**　原短请求训练中两端原先分别有 160、62 个合格区间，现各有 222 个。rank 1 的两个 Decode 缺项分别取得 146 次 all-reduce、3 次 all-gather，最大区间半宽分别为 1.582、2.232 微秒。另一份五请求记录的 rank 1 从 73 个合格区间增至 666 个。重新解释记录和拟合均使用零原生额度。单卡公开入口另做一次冷任务，3 次原生启动合计 263.69 秒，分别用于角色模板、主机提交计时及本地读回。用合格物理成本替换不完整的外接成本后，相同的单卡模板完成预测，额外原生次数为零。两种模式都核对了五种资产起点，充分复用时资产后处理也为零。[分项测量](../../../data/architecture-acquisition-performance/f2/readback-services/notify-calibration/target-qualification.json) · [只更换成本的对照](../../../data/architecture-acquisition-performance/f2/readback-services/notify-calibration/public/cost-only-handoff.json)
 
 **结论与限制**　F2 的 7 个片段完成。阶段审查覆盖操作数声明与图合同、拟合与求值、原生采样与额度、公开任务和独立验证。Python 静态检查、C++23 容器构建检查、文档证据链接检查均通过。双卡来源的两个读回工作分别使用启动加传输模型和有界经验曲线，单卡的训练留出数据选择了经验曲线。单卡自主预测产出 3 个 token，固定图中 444 项通信全部配对。单卡严格结构对照在 71 个动作后仍遇到主机提交差异，固定图的第一个缺项也是 `Scheduler.run_batch` 的主机工作。R4.4 继续追踪该差异。独立留出集和请求级精度由 V 验收。[阶段交付、五种状态和六份三路结论](../../../data/architecture-acquisition-performance/f2/handoff.json)
+
+## 2026-11-22 — R4 启动与跨层归属
+
+**范围**　以已推送的 F2 提交 `9394570` 为起点，按四条职责链收口。本轮开发案例复用已有的训练记录和独立目标。
+
+**改动**　先处理目标工作到实测来源的归属。拟合资产原先只列整份输入文件，查询端也只返回状态和数值。以页释放读回和 attention 为例，使选中的模型能够精确指回参与拟合的原生样本。然后用同一资产在规划、在线和固定图入口检查域内与域外查询。将 F2 的单卡主机提交差异带入三路诊断，保留该差异的历史结论。
+
+## 2026-11-22 — R4.1、R4.2 从预测工作追到实测样本
+
+**改动**　由拟合端记录每个模型使用的原始样本行。一次 C++ 求值同时给出时长和可选的绑定下标，在线明细、固定参考图和批量规划均可追查同一资产。合并采集需求与独立评价的重复查询，保留各自的计数与采样资格。显式声明的外部服务与查询操作数出现矛盾时在入口报告。
+
+**验证**　复用 Qwen3-8B TP2 的八份训练样本和独立开发目标，两个成本域的 915 和 911 个模型均保持原有选择及数值。rank 1 的页释放读回 19 个四字节索引，三个入口均估计 17,017 ns，可追至十个实测尺寸。第零层一次 Decode attention 使用 17 个已有 token 加 1 个新 token，设备区间在三个入口均为 1,230 ns，可追至两行原始样本。仅移除读回训练行、仅保留到 64 字节两种受控改动，三方分别报告同一工作缺少模型、76 字节超过范围。完整资产产出 3 个 token。新增原生采集为零。[工作身份、样本与三入口对照](../../../data/architecture-acquisition-performance/r4/work-bindings/handoff.json)
+
+**归属与隔离**　跨角色复用的主机工作指回实际测量方的第 212 行样本（从零编号）。同坐标的冲突载荷已排除。训练需求与独立评价的重复坐标合并求值，两个不同点只启动一次建模进程，评价中的域外点没有触发复用。[输入归属检查](../../../data/architecture-acquisition-performance/r4/work-bindings/input-checks.json)
+
+## 2026-11-22 — R4.3 整理产物发布与中断恢复
+
+默认由成本任务回收自己重建的粗图、SDK 导出和工作索引。采集记录与 rank 标识可在回收后继续追溯，成本样本和已发布模板保留。拟合完成后先暂存结果，恢复时从发布步骤继续。
+
+同一单卡 TP2 案例冷运行启动原生 3 次，共 264.73 秒。使用同一资产分别运行精简和明细输出，两次均新增零采集、零资产后处理，三个输出 token 的预测指标相同。另用已有物理双卡训练记录离线再生成两份 rank 模板，与原件逐字节相同。两种成本输出的模型和训练需求也相同，精简目录占 5.68 MB，明细目录占 68.58 MB。人为在清理后、发布前中断一次，恢复发布的资产哈希和原计费保持一致。[运行结果与恢复证据](../../../data/architecture-acquisition-performance/r4/publication/handoff.json)
+
+开发驱动首次误取旧采集镜像，额外启动原生一次，耗时 129.65 秒。该记录缺少搬运操作数，单列为失败。核对镜像 ID 后才进行上述有效冷运行。
+
+## 2026-11-22 — R4.4 首个结构差异的定位
+
+同一 TP2 物理目标使用双卡模板时，200 个动作全部对齐。使用单卡模板时，前 71 个动作已比较，第一个被拒绝的候选是 rank 1 的首批 Prefill，原生 `Scheduler.run_batch` 范围 42。现在可在候选进入时间线前保留其图，与原生图独立比较。其中一个子调用在原生图上有 11 段提交线程工作，单卡候选缺少这些工作，输出张量的写入者归属也有差异。检查器最初因变量作用域错误而未发布报告，修正后复用原始轨迹离线完成对照。该结果定位了首处分歧，变换的一般适用范围和三路评价归并仍在核查。[双卡来源](../../../data/architecture-acquisition-performance/r4/diagnosis/full/action-comparison/actions.json) · [单卡来源](../../../data/architecture-acquisition-performance/r4/diagnosis/single_device/action-comparison/actions.json)
+
+**三路交接**　每份设备、主机、读回和外接通信样本现在携带实际原生尝试的身份，模板从其生产记录追溯同一身份。正式验证在运行前识别训练来源重用，包括复制到另一目录的同一份记录。缺少来源的外接资产保留正常预测能力，独立评价报告无法核实。真实图和自主预测按请求 ID 对齐 TTFT、TPOT，分别统计有效请求、实测零值及单 token 请求。已用换序、重复、缺请求和指标适用范围改变核对。示例直接使用正式验证对本地模板及联合物理参考的资格判定。[资格与计分](../../../data/architecture-acquisition-performance/r4/diagnosis/eligibility.json)
+
+同一 TP2 训练记录离线重新提取两种模式各八份样本，原测量行与模型数值保持一致。用独立目标完成六项正式对照。固定物理图的 40,630 个端点在实测下复现，双卡来源能替换成本，单卡来源缺少第 72 项主机工作。两种来源自主预测均输出三个 token。首个结构差异定位到 embedding 内的原地 all-reduce。物理来源保留旧张量版本，单卡来源将版本推进一次，另有 11 段真实 HCCL 提交线程工作只存在于物理来源。这两项分别涉及原生写入的观测与单卡通信的适用范围。R4.4 完成。[原生调用、区间与三路结果](../../../data/architecture-acquisition-performance/r4/diagnosis/handoff.json)
+
+## 2026-11-22 — R4.5 跨角色回归与全仓收口
+
+**范围**　沿 R4 起点 `9394570` 的代码继续，追查原地归约的真实写入者，保持三种拓扑、两种来源、三条验证路径。PP3 与 PD 的修正前训练使用完整及单卡来源各一次，四次原生合计 584.27 秒。PP3 的六份 rank 观察均未进入受影响的归约，继续复用。PD 两份来源中的两个 Decode rank 各观察到 146 次归约，作为修正前证据保留。
+
+**改动**　SGLang 的归约调用核对返回张量是否复用输入存储。原生已写回但底层 PyTorch 没有报告写入时，补记这次真实写入。暂存端已经观察到的版本只推进一次。采集任务通过已选择的适配器取得 profiler 导出命令和框架域的检查规则，框架层负责核对实际专家数和已采到的语义范围。独立目标按详细取证及轻量计时分开运行，单卡、完整训练和各自的预算已列于开发矩阵。[运行范围与额度](../../../data/architecture-acquisition-performance/r4/release/scope.json)
+
+两种来源重新采集后，逐个检查 embedding 调用交回的同一块存储。TP2 每种来源各 6 次，PD 每种来源各 4 次，20 次均由对应的归约写入，版本恰好递增一次。PP3 六份记录均未执行该归约。这一结果确认了写入归属，物理 CPU 提交工作的差异仍由三路开发对照分别衡量。[逐 rank 的原始图及核对结果](../../../data/architecture-acquisition-performance/r4/release/reduction-writers.json)
+
+三个物理目标各独立执行详细取证和轻量计时一次，六次原生共计 734.94 秒。两种参考共用每个实例的输入核验。在原记录上单独改变请求内容或配置，均被对应检查识别；轻量路径也检查实际参与者是否在目标拓扑同时执行。TP2 的完整来源匹配全部 200 个动作，PP3 的完整来源匹配已测范围内的 454 个动作，单卡来源分别在比较 59 和 108 个动作后出现布局差异。[实例输入与取证资格](../../../data/architecture-acquisition-performance/r4/release/session-inputs.json)
+
+来源清单只负责已发布任务与文件，SGLang 选择器和角色装配器由预测入口提供。同一目标经过两套代码后，TP2、PP3、PD 两种模式的来源选择、模板文件及 serving 任务内容均相同。矩阵以物理采集身份复用粗图，两个来源案例实测共投影一次，新增原生启动为零。[六项装配对照](../../../data/architecture-acquisition-performance/r4/release/source-binding.json) · [两种来源共享的目标](../../../data/architecture-acquisition-performance/r4/release/mode-projection/results/shared-physical-reference/targets.json)
+
+用七种 F1 配置检查 33 份来源清单，发现 EP 目标在比较模型之前就尝试使用每一份来源的专家数，31 份无关来源因而报错。选择器现先匹配模型与拓扑，再评价其代表 workload。原本合格的两份 EP 来源保持入选，匹配域内的错误专家分区仍会报错。一份早期 TP2 采样计划缺少当前声明字段，单列为过期资产。[选择器对照](../../../data/architecture-acquisition-performance/r4/release/domain-selection.json) · [候选来源目录](../../../data/architecture-acquisition-performance/r4/release/source-candidates.json)
+
+向 PD 的完整来源模板注入目标实测时间后，展开的 5,464 个动作与原生执行匹配。自主预测也完成了该开发请求。固定图对照需要每项工作的实测服务时长，物理参考中 576 段集合通信有 296 段满足条件，余下 280 段缺少可单独归属的时长。这个案例可以核对展开结构和自主输出，固定图仍缺完整的实测基线。[结构对照](../../../data/architecture-acquisition-performance/r4/release/pd/full/structure/result.json) · [固定图测量范围](../../../data/architecture-acquisition-performance/r4/release/pd/full/fixed_graph/result.json) · [自主预测](../../../data/architecture-acquisition-performance/r4/release/pd/full/autonomous/result.json)
+
+**阶段交付**　相对 `9394570` 完成全部 4 条要求的职责链。核对 249 个业务源文件、4 个示例源文件、20 个构建和发布相关文件，业务净增 359 行，示例净减 5 行。模型选择、样本归属、应用装配和独立评价有了明确消费者；共有采集及工作流包不再直接导入框架或设备后端。CUDA 的部署、设备活动和时钟接入仅做静态审查。[源码和构建清单](../../../data/architecture-acquisition-performance/r4/release/review.json)
+
+18 项开发对照均已获得结论。6 项结构对照中，完整来源有 2 项全节点匹配、1 项在已测范围匹配；单卡来源 3 项均保留了首个结构差异。6 项固定图中，1 项取得请求级误差，1 项在实测基线通过后遇到成本缺口，4 项缺完整实测基线。6 项自主预测均用无设备的核心和控制进程运行，3 项走完请求，3 项停在具名成本缺口。六次物理参考共 734.94 秒；六份成本资产另用 21 次原生采样，共 1,719.86 秒。训练与参考的原生身份均已核对。V 将独立覆盖新 workload，并单独加入启用分块、混批和前缀缓存的配置。[完整交付、计账与逐项定位](../../../data/architecture-acquisition-performance/r4/handoff.json)
