@@ -61,7 +61,7 @@ python3 example/coarse_graph/run.py \
 | inputs/ | 已解析输入、部署、镜像 ID 和程序快照 |
 | plan/ | 本次实际需要的新训练来源 |
 | collection/ | 原生训练观察、模板、生产记录和采集日志 |
-| assets/ | 成本资产、采样来源、已知覆盖和剩余缺口 |
+| assets/0/、assets/1/ 等 | 首次拟合和后续实际发生的补采，每份成本资产记录其样本、覆盖范围和剩余缺口 |
 | targets/<序号>/ | 输入、各次预测日志及必要机器结果 |
 | summary.md、result.json | 人类摘要、逐组合状态及可比较排序 |
 
@@ -76,7 +76,7 @@ python3 example/coarse_graph/run.py \
 ```bash
 python3 -m prologue.app cost-samples --transport-only \
   --production /training/collection/assets/0 --rank 0 \
-  --work-identities /training/assets/sources/0/0-work.json --output /calibration/tp2-rank-0.json
+  --work-identities /training/assets/0/sources/0/0-work.json --output /calibration/tp2-rank-0.json
 ```
 
 将导出的文件交给 `explore` 或 `acquire-costs` 的 `--transport-samples /calibration/tp2-rank-*.json`。单卡端只需这些文件和本地训练来源。规划查询、固定图和自主预测共用同一项成本判定。外接值只支付相符的通信服务，CPU 提交、等待和后续计算仍有各自的证据要求。更换物理通信样本时新建任务，用 `--reuse` 指向上一任务，在合格的本地样本和模板上重新准备成本。
@@ -219,7 +219,7 @@ CPU 成本采样使用 `capture --host-timing`。结构观测与主机采样共�
 
 用 `fit-costs --samples` 发布离线拟合资产。指定 `--check`、`--demand <粗图> <工作身份文件>` 或 `--gap` 检查实际样本或需求时，传入 `--binary <Docker 构建的 prologue>`。检查与补采规划将工作坐标按域批量交给同一 C++23 成本查询，由其返回覆盖状态和耗时。
 
-`acquire-costs` 使用一个或多个训练来源集合，产物 `costs.json` 可直接交给 `predict --costs`。来源保留明细时直接读取粗图和事实；来源已经精简时，可从其已发布的原生观测在当前任务内重新投影，采样仍归属原训练来源。除训练来源观察到的工作，可重复传入 `--demand <粗图> <工作身份文件>` 或 `--gap <预测目录/cost-gap.json>`；它们只声明需求。用 `--samples` 提供已经资格检查的训练样本。相同执行域优先查已有样本。SGLang 可将运行环境、局部调用及特征一致的闭合批次数组操作的主机实测复用于其他角色，资产保留原样本位置。
+`acquire-costs` 使用一个或多个训练来源集合，产物 `costs.json` 可直接交给 `predict --costs`。来源保留明细时直接读取粗图和事实，已经精简时，可从已发布的原生观测重新投影。默认需求来自训练来源。传入 `--demand <粗图> <工作身份文件>` 或 `--gap <预测目录/cost-gap.json>` 时，任务以显式请求的工作为采样和验收范围，训练来源提供可复用的样本及原生入口。两个选项均可重复。用 `--samples` 提供已经资格检查的训练样本。同域已有实测优先。SGLang 可将运行环境、局部调用及特征一致的闭合批次数组操作的主机实测复用于其他角色，资产保留原样本位置。
 
 单卡 CPU 计时容器使用 `PERFMON` 并放开进程的 `memlock` 限额，使观测器能为每个原生线程映射 perf 环形缓冲区。容器仍只暴露声明的那张设备。CPU 补采根据集合声明分配设备，并在原始实测镜像中按原提交分组或逐请求分组运行 Engine。配对前核对详细观测与轻量计时的镜像、有效部署、模型和请求。配置集探索用代表请求预热。轻量观察若出现首次特化加载，按实际原生调用范围排除受影响的样本，剩余需求可触发一次按原分组预热的测量。采到的实际批次和调用匹配详细来源后才进入模型。`--timeout`、`--native-budget-seconds`、`--postprocessing-budget-seconds`、`--attempt-limit` 和 `--storage-bytes` 约束该任务。报告区分预算停止、可观察但没有合格实测和无已知配方。每份在线缺口只记录停止位置的工作，后续未展开路径的需求仍未知。
 
