@@ -197,12 +197,19 @@ class NativeCommunications:
         with tensors.metadata():
             parent_shape = tensors.declared_shape(operand.tensor)
             parameters = PipelineABI.tensor_parameters(operand.tensor)
+            storage = tensors.storage(operand.tensor)
             source = tensors.observe(operand.tensor, None)
             implementation = operand.implementation()
 
         # The collective preserves geometry even when its backend mutates the input storage.
         with self.exchange(original, group, parameters={}, arguments={}) as call:
             result = run()
+            with tensors.metadata():
+
+                # A native reduction can write its aliased result below PyTorch dispatch. Publish that change exactly once.
+                if tensors.storage(result) is storage and storage.version == source["version"]:
+                    tensors.written(result)
+
             if parent_shape is None:
                 returned = tensors.observe(result, None)
                 self.pending_reductions.append((call, parameters, source, implementation, returned["value"]))
