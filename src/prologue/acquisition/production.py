@@ -12,10 +12,15 @@ from prologue.artifacts import write_json
 from prologue.integrations.platforms.ascend.export import AscendExport
 from prologue.integrations.frameworks.sglang.acquisition.domains import SourceDomain
 from prologue.integrations.runtimes.docker import OwnedContainers
-from prologue.workflow.limits import AllowanceExhausted, OperationLimit
+from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
 
 
 class CaptureProduction:
+    @staticmethod
+    def usage(directory):
+        state = directory / "production.json"
+        return Usage(processing_ns=json.loads(state.read_text())["spent_ns"]) if state.is_file() else Usage()
+
     def __init__(self, arguments, limit=None) -> None:
         self.arguments = arguments
         self.operation_limit = limit if limit is not None else OperationLimit()

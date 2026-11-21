@@ -3,10 +3,37 @@
 import os
 import subprocess
 import time
+from dataclasses import dataclass
 
 
 class AllowanceExhausted(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class Usage:
+    native_ns: int = 0
+    attempts: int = 0
+    processing_ns: int = 0
+
+    @classmethod
+    def total(cls, records):
+        native_ns = attempts = processing_ns = 0
+        for record in records:
+            native_ns += record.native_ns
+            attempts += record.attempts
+            processing_ns += record.processing_ns
+        return cls(native_ns, attempts, processing_ns)
+
+    def available_to(self, owner, spent):
+
+        # A child resumes on its original charges plus the parent's unused allowance.
+        return Usage(owner.native_ns + max(0, self.native_ns - spent.native_ns),
+                     owner.attempts + max(0, self.attempts - spent.attempts),
+                     owner.processing_ns + max(0, self.processing_ns - spent.processing_ns))
+
+    def document(self):
+        return {"native_charged_ns": self.native_ns, "native_attempts": self.attempts, "postprocessing_ns": self.processing_ns}
 
 
 class OperationLimit:

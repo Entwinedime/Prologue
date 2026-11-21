@@ -9,16 +9,18 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.ascend.host_samples import HostCostSamples
 from prologue.acquisition.capture import CaptureProcess
+from prologue.acquisition.production import CaptureProduction
 from prologue.integrations.runtimes.docker import ModelingCommand, OwnedContainers
 from prologue.performance.requirements import CostRequirements
 from prologue.performance.samples import WorkCatalog
 from prologue.acquisition.fitting import FitCosts
-from prologue.workflow.limits import AllowanceExhausted, OperationLimit
+from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
 from prologue.acquisition.publication import SourceProductions
 
 
@@ -32,13 +34,14 @@ class CostSource:
         self.native = CaptureProcess.published(capture, job)
         self.deployment = read(capture / "execution.json")["inputs"]["deployment"]
         self.ranks = read(production / "result.json")["observed_roles"]
+        self.projection = production
         self.recipes = {recipe.name: recipe for recipe in HostCostSamples.recipes(job)}
         self.host_points = set()
         self.cold = False
 
 
 class CostAcquisition:
-    def __init__(self, args, place, reuse_samples, limit=None):
+    def __init__(self, args, place, reuse_samples, limit=None, *, prior_jobs=None, prior_costs=()):
         self.args = args
         self.place = place
         self.reuse_samples = reuse_samples
@@ -49,8 +52,8 @@ class CostAcquisition:
         if (not math.isfinite(args.native_budget_seconds) or args.native_budget_seconds < 0
                 or args.attempt_limit < 0 or args.storage_bytes <= 0):
             raise ValueError("cost acquisition needs nonnegative native allowances and positive storage")
-        self.native_ns = int(args.native_budget_seconds * 1e9)
-        self.postprocessing_ns = int(args.postprocessing_budget_seconds * 1e9)
+        self.budget = Usage(int(args.native_budget_seconds * 1e9), args.attempt_limit,
+                            int(args.postprocessing_budget_seconds * 1e9))
         self.limit = limit if limit is not None else OperationLimit(self.output, args.storage_bytes)
         self.images = {
             role: subprocess.check_output(["docker", "image", "inspect", image, "--format", "{{.Id}}"], text=True).strip()
@@ -58,21 +61,20 @@ class CostAcquisition:
         }
 
         collections = list(dict.fromkeys(path.resolve(strict=True) for path in args.production))
-        self.sources = []
-        seen = set()
-        for collection in collections:
-            bundle = SourceProductions(collection)
-            for identity, production in bundle.paths.items():
-                capture = bundle.captures[identity].resolve(strict=True)
-                production = production.resolve(strict=True)
-                if any(root == self.output or root in self.output.parents for root in (collection, production, capture)):
-                    raise ValueError("cost acquisition must own an output outside its training sources")
-                if (production, capture) not in seen:
-                    seen.add((production, capture))
-                    directory = self.output / "sources" / str(len(self.sources))
-                    self.sources.append(CostSource(production, capture, bundle.jobs[str(identity)], directory))
+        self.collections = collections
+        self.prior_jobs = prior_jobs or {}
+        self.sources = {}
+        self.demand = CostRequirements()
+        paths = list(args.samples)
+        for path in prior_costs:
+            asset = read(path)
+            paths.extend(Path(name) for name in asset["sources"])
 
-        self.samples = {path.resolve(strict=True): read(path) for path in args.samples}
+            # Preserve cross-role bindings by requalifying their coordinates against the original measured rows.
+            for sample in asset["reused"]:
+                self.demand.targets[str(path)] = "previously_qualified_role_work"
+                self.demand.samples(str(path), sample)
+        self.samples = {path: read(path) for path in dict.fromkeys(path.resolve(strict=True) for path in paths)}
         self.gaps = {path.resolve(strict=True): read(path) for path in args.gap}
         self.graphs = {graph.resolve(strict=True): identities.resolve(strict=True) for graph, identities in args.demand}
         self.inputs = {
@@ -80,7 +82,25 @@ class CostAcquisition:
             "samples": [str(path) for path in self.samples], "gaps": [str(path) for path in self.gaps],
             "demand": [[str(graph), str(identities)] for graph, identities in self.graphs.items()],
         }
-        self.demand = CostRequirements()
+        if self.prior_jobs:
+            self.inputs["prior_jobs"] = {str(path): sorted(jobs) for path, jobs in self.prior_jobs.items()}
+        if prior_costs:
+            self.inputs["prior_costs"] = [str(path) for path in prior_costs]
+
+    def load_sources(self, collection, selected=None):
+        bundle = SourceProductions(collection)
+        for identity, path in bundle.paths.items():
+            if selected is not None and identity not in selected:
+                continue
+            capture = bundle.captures[identity].resolve(strict=True)
+            production = path.resolve(strict=True)
+            if any(self.output.is_relative_to(root) for root in (collection, production, capture)):
+                raise ValueError("cost acquisition must own an output outside its training sources")
+            if production not in self.sources:
+                directory = self.output / "sources" / str(len(self.sources))
+                source = CostSource(production, capture, bundle.jobs[str(identity)], directory)
+                self.sources[production] = source
+                yield source
 
     def save(self):
         write_json(self.output / "execution.json", self.state, indent=2)
@@ -107,12 +127,12 @@ class CostAcquisition:
     @contextmanager
     def processing(self, container=None):
         spent = self.state["postprocessing_ns"]
-        remaining = self.postprocessing_ns - spent
+        remaining = self.budget.processing_ns - spent - self.projection_usage(self.output).processing_ns
         if remaining <= 0:
             raise AllowanceExhausted("cost postprocessing allowance exhausted")
 
         # Reserve before launch so interruption cannot make unfinished work free.
-        self.state.update(postprocessing_ns=self.postprocessing_ns, container=container)
+        self.state.update(postprocessing_ns=spent + remaining, container=container)
         self.save()
         started = time.monotonic_ns()
         try:
@@ -151,43 +171,57 @@ class CostAcquisition:
         self.samples[output] = sample
         return sample
 
-    def inspect(self, source):
+    def project(self, source):
+        if all((source.production / "work" / f"{rank}-{file}").is_file()
+               for rank in source.ranks for file in ("graph.json", "facts.json", "sdk/trace.json")):
+            return
+
+        # A compact parent still owns the closed observation. Recreate only derived evidence in this task.
+        source.projection = source.output / "projection"
+        allowance = self.budget.available_to(CaptureProduction.usage(source.projection), self.spending(self.output))
+        if allowance.processing_ns <= 0:
+            raise AllowanceExhausted("cost projection allowance exhausted")
+        CaptureProduction(SimpleNamespace(
+            capture=source.native, output=source.projection, binary=self.output / "prologue", product="graphs",
+            budget_seconds=allowance.processing_ns / 1e9, source_image=self.images["source"],
+            modeling_image=self.images["modeling"], keep_intermediates=True,
+        ), self.limit).run()
+
+    def inspect(self, source, requirements):
+        self.project(source)
         external = HostCostSamples.external_work(source.native)
         for rank in source.ranks:
-            work = source.production / "work"
+            work = source.projection / "work"
             graph = work / f"{rank}-graph.json"
             identities = source.output / f"{rank}-work.json"
             self.run_model("work-identities", identities, graph)
             with self.processing():
                 catalog = WorkCatalog(graph, identities)
-                for point in self.demand.graph(str(graph), catalog):
-                    definition = self.demand.definitions[point.definition]
+                for point in requirements.graph(str(graph), catalog):
+                    definition = requirements.definitions[point.definition]
                     interval = definition["work"][point.interval]
                     if HostCostSamples.supports(interval, definition["resources"][interval["resource"]]):
                         source.host_points.add(point)
                 for identity, kind, features in external[rank]:
-                    source.host_points.add(self.demand.external(str(graph), catalog.domain, identity, kind, features))
+                    source.host_points.add(requirements.external(str(graph), catalog.domain, identity, kind, features))
 
             # The same detailed observation must not contribute device durations twice.
             observation = {"production": str(source.production), "rank": rank}
             if not any(sample.get("observation") == observation for sample in self.samples.values()):
-                self.samples_from(source.output / f"{rank}-device.json", "cost-samples",
-                                  production=source.production, rank=rank, work_identities=identities)
+                projection = {"projection": source.projection} if source.projection != source.production else {}
+                self.samples_from(source.output / f"{rank}-device.json", "cost-samples", production=source.production,
+                                  rank=rank, work_identities=identities, **projection)
 
     @staticmethod
-    def attempts(path):
-        state = path / "execution.json"
-        return read(state)["attempts"] if state.exists() else []
+    def projection_usage(directory):
+        return Usage.total(CaptureProduction.usage(path.parent) for path in directory.glob("sources/*/projection/production.json"))
 
-    def usage(self):
-        attempts = [attempt for source in self.sources for recipe in source.recipes
-                    for attempt in self.attempts(source.output / recipe)]
-        return sum(attempt["charged_ns"] for attempt in attempts), len(attempts)
-
-    def spending(self):
-        spent, attempts = self.usage()
-        return {"native_charged_ns": spent, "native_attempts": attempts,
-                "postprocessing_ns": self.state["postprocessing_ns"]}
+    @classmethod
+    def spending(cls, directory):
+        state = directory / "execution.json"
+        processing = Usage(processing_ns=read(state)["postprocessing_ns"]) if state.is_file() else Usage()
+        native = (CaptureProcess.usage(path.parent) for path in directory.glob("sources/*/*/execution.json"))
+        return Usage.total((processing, cls.projection_usage(directory), *native))
 
     def measure(self, source, recipe, allowance_ns):
         output = source.output / recipe
@@ -197,7 +231,7 @@ class CostAcquisition:
             budget_seconds=allowance_ns / 1e9, attempt_limit=1, source_image=self.images["source"], resource_trace=False,
         ), launch, self.limit, host_timing=True).run()
         for rank in source.ranks:
-            work = source.production / "work"
+            work = source.projection / "work"
             sample = self.samples_from(
                 source.output / f"{recipe}-{rank}-host.json", "host-cost-samples", detailed=source.capture, host=output,
                 facts=work / f"{rank}-facts.json", trace=work / f"{rank}-sdk/trace.json",
@@ -209,8 +243,9 @@ class CostAcquisition:
         return FitCosts.qualify(self.samples, self.demand, self, self.output, self.reuse_samples, self.processing)
 
     def acquire(self):
-        for source in self.sources:
-            self.inspect(source)
+        for collection in self.collections:
+            for source in self.load_sources(collection):
+                self.inspect(source, self.demand)
         with self.processing():
             for graph, identities in self.graphs.items():
                 if str(graph) not in self.demand.targets:
@@ -218,17 +253,25 @@ class CostAcquisition:
             for path, gap in self.gaps.items():
                 self.demand.gap(str(path), gap)
 
-        candidates = {(source, recipe): self.attempts(source.output / recipe)
-                      for source in self.sources for recipe in source.recipes}
+        fitted, reused, counts, missing = self.fit()
+        if missing and self.prior_jobs:
+
+            # Prior graphs supply possible measurements. Their unrelated work is outside the requested demand.
+            for collection, jobs in self.prior_jobs.items():
+                for source in self.load_sources(collection, jobs):
+                    self.inspect(source, CostRequirements())
+            fitted, reused, counts, missing = self.fit()
+
+        candidates = {(source, recipe): CaptureProcess.attempts(source.output / recipe)
+                      for source in self.sources.values() for recipe in source.recipes}
         explicit = {str(path) for path in (*self.graphs, *self.gaps)}
         focus = {point for point, targets in self.demand.points.items() if explicit.intersection(targets)}
-        fitted, reused, counts, missing = self.fit()
         evidence = []
         deferred = set()
         while candidates and missing:
 
             # Prefer caller-supplied demand when training-only points compete for a native attempt.
-            requested = {source: source.host_points & missing.keys() for source in self.sources}
+            requested = {source: source.host_points & missing.keys() for source in self.sources.values()}
             applicable = [(source, recipe) for source, recipe in candidates if requested[source]
                           and (source.cold or not source.recipes[recipe].requires_cold)]
             if not applicable:
@@ -238,9 +281,9 @@ class CostAcquisition:
             ))
             output = source.output / recipe
             previous = candidates[source, recipe]
-            spent, attempts = self.usage()
-            allowance = max(0, self.native_ns - spent)
-            if not previous and (not allowance or attempts >= self.args.attempt_limit):
+            spent = self.spending(self.output)
+            allowance = max(0, self.budget.native_ns - spent.native_ns)
+            if not previous and (not allowance or spent.attempts >= self.budget.attempts):
                 deferred.update(*(candidate.host_points for candidate, _ in applicable))
                 break
 
@@ -253,7 +296,8 @@ class CostAcquisition:
             try:
                 self.measure(source, recipe, allowance + sum(attempt["charged_ns"] for attempt in previous))
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError):
-                if not self.attempts(output) or self.attempts(output)[-1]["status"] != "failed":
+                attempts = CaptureProcess.attempts(output)
+                if not attempts or attempts[-1]["status"] != "failed":
                     raise
                 self.limit.check()
                 row["status"] = "capture_failed"
@@ -262,7 +306,7 @@ class CostAcquisition:
             fitted, reused, counts, missing = self.fit()
             row.update(status="measured", additional_points=len(before.keys() - missing.keys()))
 
-        observed = set().union(*(source.host_points for source in self.sources))
+        observed = set().union(*(source.host_points for source in self.sources.values()))
         reasons = {
             point: ("native_budget_exhausted" if point in deferred else
                     "no_qualified_measurement" if point in observed else "no_observed_recipe")
@@ -271,7 +315,7 @@ class CostAcquisition:
         return {
             "domains": fitted.domains, "sources": [str(path) for path in self.samples], "reused": reused,
             "demand": self.demand.report(counts, missing, reasons), "recipes": evidence,
-            **self.spending(), "retained_bytes": self.limit.bytes_used(),
+            **self.spending(self.output).document(), "retained_bytes": self.limit.bytes_used(),
             "status": "covered" if not missing else "native_budget_exhausted" if deferred else "uncovered",
         }
 
@@ -285,5 +329,5 @@ class CostAcquisition:
                 if not result.is_file():
                     write_json(result, self.acquire(), replace=False)
             finally:
-                write_json(self.output / "status.json", self.spending(), indent=2)
+                write_json(self.output / "status.json", self.spending(self.output).document(), indent=2)
         print(f"Created {result}")

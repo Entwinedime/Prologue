@@ -12,13 +12,13 @@ class LocalSources:
         self.workloads = workloads
         self.configurations = configurations
 
-    def extend(self, jobs, captures):
-        if not any(len(workload["requests"]) > 1 and any(request["output_tokens"] > 1 for request in workload["requests"])
-                   for workload in self.workloads.values()):
-            return
-
+    def extend(self, jobs, captures, covered_workloads):
         groups = {}
         for target in jobs:
+            workloads = covered_workloads[target["id"]]
+            requests = [self.workloads[name]["requests"] for name in workloads]
+            if not any(len(group) > 1 and any(request["output_tokens"] > 1 for request in group) for group in requests):
+                continue
             for mode, implementation in target["structure"]["instances"].items():
                 configurations = [instance["configuration"] for name in target["configurations"]
                                   for instance in self.configurations[name]["instances"] if instance["mode"] == mode]
@@ -30,23 +30,24 @@ class LocalSources:
                 key = tuple((name, value) for name, value in sorted(implementation.items()) if name not in independent)
                 instance = next(item for item in captures[target["id"]]["instances"] if item["mode"] == mode)
                 workers = implementation["tp"] * implementation["pp"]
-                group = groups.setdefault(key, {"instance": instance, "workers": workers, "consumers": []})
+                group = groups.setdefault(key, {"instance": instance, "workers": workers, "consumers": [], "workloads": set()})
                 if workers < group["workers"]:
                     group.update(instance=instance, workers=workers)
                 group["consumers"].append({"source": target["id"], "mode": mode})
+                group["workloads"].update(workloads)
 
         for group in groups.values():
             identity = len(jobs)
             instance = group["instance"]
             effect = "mix" if instance["configuration"].get("mixed_batches", False) else "merge"
             required = [effect, "subset"]
-            capture, selected = self.probe(instance, required, identity)
+            capture, selected = self.probe(instance, required, identity, group["workloads"])
             jobs.append({"id": identity, "structure": SourceDomain.requested(ServingInput(capture)), "configurations": [],
                          "native_workers": group["workers"], "source": selected, "required_coverage": {"null": required},
                          "local_consumers": group["consumers"]})
             captures[identity] = capture
 
-    def probe(self, instance, required, identity):
+    def probe(self, instance, required, identity, workloads):
         configuration = dict(instance["configuration"])
         stages = configuration.get("pp", 1)
         configuration.update(max_running_requests=max(configuration["max_running_requests"], 3 * stages), microbatch_requests=3)
@@ -54,8 +55,8 @@ class LocalSources:
         topology = configuration.get("ep")
         topologies = [] if topology is None else [topology["id"]]
         name, request = min(
-            ((name, request) for name, workload in self.workloads.items() for request in workload["requests"]
-             if request["output_tokens"] > 1 and all(key in workload.get("ep_routes", {}) for key in topologies)),
+            ((name, request) for name in workloads for request in self.workloads[name]["requests"]
+             if request["output_tokens"] > 1 and all(key in self.workloads[name].get("ep_routes", {}) for key in topologies)),
             key=lambda item: (item[1]["prompt_tokens"], item[1]["output_tokens"], item[0], item[1]["id"]),
         )
         original = self.workloads[name]

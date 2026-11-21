@@ -11,10 +11,20 @@ from uuid import uuid4
 from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.acquisition.domains import SourceDomain
 from prologue.integrations.runtimes.docker import OwnedContainers
-from prologue.workflow.limits import AllowanceExhausted, OperationLimit
+from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
 
 
 class CaptureProcess:
+    @staticmethod
+    def attempts(directory):
+        state = directory / "execution.json"
+        return json.loads(state.read_text())["attempts"] if state.is_file() else []
+
+    @classmethod
+    def usage(cls, directory):
+        attempts = cls.attempts(directory)
+        return Usage(sum(row["charged_ns"] for row in attempts), len(attempts))
+
     @staticmethod
     def published(directory: Path, job: dict, *, conditions=None) -> Path:
         """Resolve an explicit completed observation without changing its native provenance."""
@@ -24,8 +34,8 @@ class CaptureProcess:
             raise ValueError(f"published capture differs from the planned native input: {directory}")
         if conditions is not None and any(state["inputs"].get(key) != value for key, value in conditions.items()):
             raise ValueError(f"published capture differs from the requested recording conditions: {directory}")
-        attempt = state["attempts"][-1]
-        if attempt["status"] != "exited" or attempt["exit_code"] != 0:
+        attempts = state["attempts"]
+        if not attempts or attempts[-1]["status"] != "exited" or attempts[-1]["exit_code"] != 0:
             raise ValueError(f"published capture has no successful terminal attempt: {directory}")
         publication = json.loads((directory / "result.json").read_text())
         source = (directory / publication["source"]).resolve(strict=True)
@@ -45,15 +55,12 @@ class CaptureProcess:
         self.output = arguments.output.resolve()
         if self.output == self.model or self.model in self.output.parents:
             raise ValueError("capture output must not write inside the model directory")
-        for value in (arguments.timeout, arguments.budget_seconds):
-            if not math.isfinite(value) or value <= 0:
-                raise ValueError("native timeout and cumulative budget must be positive finite seconds")
-        if arguments.attempt_limit <= 0:
-            raise ValueError("native attempt limit must be positive")
+        if not math.isfinite(arguments.timeout) or arguments.timeout < 1e-9:
+            raise ValueError("native timeout must be finite and at least one nanosecond")
+        if not math.isfinite(arguments.budget_seconds) or arguments.budget_seconds < 0 or arguments.attempt_limit < 0:
+            raise ValueError("native cumulative time and attempt allowances must be nonnegative")
         self.limit_ns = int(arguments.budget_seconds * 1_000_000_000)
         self.timeout_ns = int(arguments.timeout * 1_000_000_000)
-        if min(self.limit_ns, self.timeout_ns) < 1:
-            raise ValueError("native allowances must be at least one nanosecond")
         image = json.loads(subprocess.check_output(["docker", "image", "inspect", arguments.source_image], text=True))[0]
         self.inputs = {
             "job": launch.job, "deployment": launch.platform.source, "image": image["Id"], "framework_revision": SourceDomain.image_revision(image),

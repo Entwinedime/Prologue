@@ -1,6 +1,7 @@
 """Plan finite source jobs for implementation domains and declared input opportunities."""
 
 import json
+from itertools import product
 from pathlib import Path
 
 from prologue.integrations.frameworks.sglang.configuration import NativeConfiguration, ServingInput
@@ -62,29 +63,31 @@ class SourcePlanning:
             job["source"]["input_cost"]["prompt_tokens"] + job["source"]["input_cost"]["decode_tokens"], job["id"],
         ))["id"]
 
-    def document(self, *, service_evidence=False):
+    def document(self, *, service_evidence=False, targets=None):
+        pairs = list(product(self.configurations, self.workloads)) if targets is None else list(targets)
         domains = []
-        for identity, configuration in self.configurations.items():
-            inputs = [(identity, name, ServingInput({
-                "model": self.source["model"], "instances": configuration["instances"], "workload": workload,
-            })) for name, workload in self.workloads.items()]
-            requested = SourceDomain.requested(inputs[0][2])
+        for identity, name in pairs:
+            serving = ServingInput({"model": self.source["model"], "instances": self.configurations[identity]["instances"],
+                                    "workload": self.workloads[name]})
+            requested = SourceDomain.requested(serving)
             domain = next((item for item in domains if item["structure"] == requested), None)
             if domain is None:
                 domain = {"structure": requested, "inputs": []}
                 domains.append(domain)
-            domain["inputs"].extend(inputs)
+            domain["inputs"].append((identity, name, serving))
 
         jobs = []
+        covered_workloads = {}
         for domain in domains:
-            for selected, workload, groups, targets in self.representatives.select(domain["inputs"], service_evidence=service_evidence):
+            for selected, workload, groups, covered in self.representatives.select(domain["inputs"], service_evidence=service_evidence):
                 identity = len(jobs)
+                covered_workloads[identity] = {name for _, name in covered}
                 instances = self.configurations[selected["configuration"]]["instances"]
                 required = selected.pop("required_coverage")
                 selected["input"] = f"sources/{identity}.json"
                 jobs.append({
                     "id": identity, "structure": domain["structure"],
-                    "configurations": sorted({configuration for configuration, _ in targets}),
+                    "configurations": sorted({configuration for configuration, _ in covered}),
                     "required_coverage": required, "source": selected,
                     "native_workers": sum(instance["configuration"]["tp"] * instance["configuration"].get("pp", 1)
                                           for instance in instances),
@@ -94,7 +97,7 @@ class SourcePlanning:
                     "submission_groups": groups, "observe_all_workers": False,
                 }
 
-        LocalSources(self.source["model"], self.workloads, self.configurations).extend(jobs, self.capture_inputs)
+        LocalSources(self.source["model"], self.workloads, self.configurations).extend(jobs, self.capture_inputs, covered_workloads)
         if service_evidence:
             for job in jobs:
                 capture = self.capture_inputs[job["id"]]
@@ -102,10 +105,16 @@ class SourcePlanning:
 
                 # Collective service needs readiness and payload evidence from every actual participant.
                 capture["observe_all_workers"] = job["native_workers"] > 1
+        configurations = list(dict.fromkeys(configuration for configuration, _ in pairs))
+        workloads = list(dict.fromkeys(workload for _, workload in pairs))
+        scope = {"configurations": configurations, "workloads": workloads, "count": len(pairs)}
+
+        # Only a sparse selection needs its individual pairs recorded to reconstruct the training demand.
+        if len(pairs) != len(configurations) * len(workloads):
+            scope["pairs"] = pairs
         return {
             "framework": self.source["framework"], "sources": jobs, "expert_count": self.expert_count,
-            "targets": {"configurations": list(self.configurations), "workloads": list(self.workloads),
-                        "count": len(self.configurations) * len(self.workloads)},
+            "targets": scope,
             "qualification": "initial_representative_plan", "native_jobs": len(jobs),
             "limits": ["input conditions are opportunities, not observed native branches or support gates",
                        "complementary jobs are fixed before capture; one complete job supplies target worker templates",

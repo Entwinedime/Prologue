@@ -52,7 +52,8 @@ def main() -> None:
     observation.add_argument("--latency-only", action="store_true", help="run without the profiler and record scheduler latency")
     observation.add_argument("--host-timing", action="store_true", help="record native CPU work and queue cuts")
     samples = commands.add_parser("cost-samples", help="publish measured services from a projected source")
-    samples.add_argument("--production", type=Path, required=True, help="published production retaining its observed graphs and facts")
+    samples.add_argument("--production", type=Path, required=True, help="published training production that owns the observation")
+    samples.add_argument("--projection", type=Path, help="regenerated graph and facts for the same native observation")
     samples.add_argument("--rank", type=int, required=True)
     samples.add_argument("--work-identities", type=Path, required=True)
     samples.add_argument("--output", type=Path, required=True)
@@ -101,10 +102,12 @@ def main() -> None:
     arguments = parser.parse_args()
     if arguments.command in {"fit-costs", "acquire-costs", "explore"}:
         from prologue.integrations.frameworks.sglang.acquisition.cost_reuse import BatchHostReuse
+    if arguments.command in {"plan-sources", "explore"}:
+        from prologue.integrations.frameworks.sglang.acquisition.planning import SourcePlanning
     if arguments.command == "plan-sources":
         from prologue.acquisition.planning import PlanningProcess
 
-        PlanningProcess(arguments).run()
+        PlanningProcess(SourcePlanning(json.loads(arguments.input.read_text())), arguments.output).run()
     elif arguments.command == "produce":
         from prologue.acquisition.production import CaptureProduction
 
@@ -136,9 +139,12 @@ def main() -> None:
 
         CostAcquisition(arguments, SGLangAscendLaunch, BatchHostReuse.match).run()
     elif arguments.command == "explore":
+        from prologue.app.prediction import PredictionProcess
         from prologue.workflow.exploration import ExplorationTask
 
-        if not ExplorationTask(arguments, SGLangAscendLaunch, BatchHostReuse.match).run():
+        task = ExplorationTask(arguments, planner=SourcePlanning, place=SGLangAscendLaunch,
+                               reuse_samples=BatchHostReuse.match, predictor=PredictionProcess)
+        if not task.run():
             raise SystemExit(1)
     else:
         from prologue.app.prediction import PredictionProcess

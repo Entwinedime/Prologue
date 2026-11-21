@@ -204,8 +204,14 @@ class ObservedServices:
 class CostSamples:
     def __init__(self, arguments):
         self.output = arguments.output
-        root, rank = arguments.production, arguments.rank
-        self.observation = {"production": str(root.resolve()), "rank": rank}
+        production, rank = arguments.production, arguments.rank
+        self.observation = {"production": str(production.resolve()), "rank": rank}
+        root = arguments.projection or production
+        if arguments.projection is not None:
+            captures = [json.loads((directory / "production.json").read_text())["inputs"]["capture_path"]
+                        for directory in (root, production)]
+            if captures[0] != captures[1]:
+                raise ValueError("regenerated cost evidence belongs to a different native observation")
         ranks = json.loads((root / "result.json").read_text())["observed_roles"]
         if rank not in ranks:
             raise ValueError("cost samples require an observed production rank")

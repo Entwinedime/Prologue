@@ -12,13 +12,14 @@ from types import SimpleNamespace
 from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.acquisition.domains import SourceDomain
 from prologue.acquisition.capture import CaptureProcess
-from prologue.workflow.limits import AllowanceExhausted, OperationLimit
+from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
 from prologue.acquisition.production import CaptureProduction
 
 
 class SourceAcquisition:
     def __init__(self, arguments, place, limit=None):
         self.arguments = arguments
+        self.place = place
         self.output = arguments.output.resolve()
         plan_root = arguments.plan.resolve(strict=True)
         plan = json.loads((plan_root / "plan.json").read_text())
@@ -32,18 +33,14 @@ class SourceAcquisition:
             if not path.is_relative_to(plan_root):
                 raise ValueError("planned capture input lies outside its plan directory")
             job = json.loads(path.read_text())
-            launch = place(job, deployment)
-            serving = launch.serving
             structure = description["structure"]
-            if SourceDomain.requested(serving) != structure:
-                raise ValueError("planned capture input differs from its source domain")
             coverage = description["required_coverage"]
             if coverage.keys() - structure["instances"].keys():
                 raise ValueError("planned source coverage names an undeclared serving mode")
-            model = Path(serving.model["path"]).resolve(strict=True)
+            model = Path(job["model"]["path"]).resolve(strict=True)
             if self.output == model or model in self.output.parents:
                 raise ValueError("source collection must not write inside a model directory")
-            self.jobs[identity] = launch
+            self.jobs[identity] = job
             self.descriptions[identity] = {"structure": structure, "required_coverage": coverage}
         if not self.jobs:
             raise ValueError("source acquisition needs a nonempty plan")
@@ -55,7 +52,7 @@ class SourceAcquisition:
         for identity, directory in self.observations.items():
             if self.output == directory or directory in self.output.parents:
                 raise ValueError("source collection must not write inside a referenced native task")
-            CaptureProcess.published(directory, self.jobs[identity].job)
+            CaptureProcess.published(directory, self.jobs[identity])
         self.sources = {identity: self.observations.get(identity, self.output / "sources" / str(identity))
                         for identity in self.jobs}
 
@@ -69,39 +66,30 @@ class SourceAcquisition:
         if not self.binary.is_file():
             raise ValueError("source collection requires a compiled executable")
 
-        self.native_ns = int(arguments.native_budget_seconds * 1_000_000_000)
-        self.production_ns = int(arguments.postprocessing_budget_seconds * 1_000_000_000)
+        self.budget = Usage(int(arguments.native_budget_seconds * 1e9), arguments.attempt_limit,
+                            int(arguments.postprocessing_budget_seconds * 1e9))
         self.limit = limit if limit is not None else OperationLimit(self.output, arguments.storage_bytes)
         images = {role: subprocess.check_output(["docker", "image", "inspect", image, "--format", "{{.Id}}"], text=True).strip()
                   for role, image in (("source", arguments.source_image), ("modeling", arguments.modeling_image))}
-        self.inputs = {"plan": plan, "jobs": {str(key): launch.job for key, launch in self.jobs.items()},
+        self.inputs = {"plan": plan, "jobs": {str(key): job for key, job in self.jobs.items()},
                        "deployment": deployment, "images": images, "resource_trace": arguments.resource_trace,
                        "keep_intermediates": arguments.keep_intermediates}
         if self.observations:
             self.inputs["observations"] = {str(key): str(path) for key, path in self.observations.items()}
 
-    def usage(self):
-        native, production, attempts = {}, {}, {}
-        for identity in self.jobs:
-            path = self.sources[identity] / "execution.json"
-            records = []
+    @staticmethod
+    def spending(directory):
 
-            # Referenced observations remain charged to their original capture owner.
-            if identity not in self.observations and path.exists():
-                records = json.loads(path.read_text())["attempts"]
-            native[identity] = sum(record["charged_ns"] for record in records)
-            attempts[identity] = len(records)
-            path = self.output / "assets" / str(identity) / "production.json"
-            production[identity] = json.loads(path.read_text())["spent_ns"] if path.exists() else 0
-        return native, production, attempts
+        # External observations stay charged to their original owners. Only local attempts enter this total.
+        native = (CaptureProcess.usage(path.parent) for path in directory.glob("sources/*/execution.json"))
+        processing = (CaptureProduction.usage(path.parent) for path in directory.glob("assets/*/production.json"))
+        return Usage.total((*native, *processing))
 
     def status(self, error):
-        native, production, attempts = self.usage()
         write_json(self.output / "status.json", {
-            "native_charged_ns": sum(native.values()), "postprocessing_ns": sum(production.values()),
-            "native_attempts": sum(attempts.values()), "retained_bytes": self.limit.bytes_used(),
-            "limits": {"native_ns": self.native_ns, "postprocessing_ns": self.production_ns,
-                       "native_attempts": self.arguments.attempt_limit, "storage_bytes": self.arguments.storage_bytes},
+            **self.spending(self.output).document(), "retained_bytes": self.limit.bytes_used(),
+            "limits": {"native_ns": self.budget.native_ns, "postprocessing_ns": self.budget.processing_ns,
+                       "native_attempts": self.budget.attempts, "storage_bytes": self.arguments.storage_bytes},
             "error": error,
         }, indent=2)
 
@@ -122,30 +110,40 @@ class SourceAcquisition:
         # Every source job uses this task's program, even if the external build changes during native capture.
         self.binary = executable
 
-    def acquire(self, identity):
-        native, production, attempts = self.usage()
-        production_allowance = production[identity] + max(0, self.production_ns - sum(production.values()))
-        if production_allowance <= 0:
-            raise AllowanceExhausted("source collection postprocessing allowance exhausted")
+    def placements(self, allow_incomplete):
+        launches, unavailable = {}, {}
+        for identity, job in self.jobs.items():
+            try:
+                launch = self.place(job, self.inputs["deployment"])
+            except ValueError as failure:
+                if not allow_incomplete:
+                    raise
+                unavailable[str(identity)] = {"status": "native_unavailable", "message": str(failure)}
+                continue
+            if SourceDomain.requested(launch.serving) != self.descriptions[identity]["structure"]:
+                raise ValueError("planned capture input differs from its source domain")
+            launches[identity] = launch
+        return launches, unavailable
+
+    def acquire(self, identity, launch):
         source = self.sources[identity]
         assets = self.output / "assets" / str(identity)
+        owner = Usage.total((CaptureProcess.usage(self.output / "sources" / str(identity)), CaptureProduction.usage(assets)))
+        allowance = self.budget.available_to(owner, self.spending(self.output))
+        if allowance.processing_ns <= 0:
+            raise AllowanceExhausted("source collection postprocessing allowance exhausted")
 
         # Explicit observations stay owned by their original task; only missing observations launch an Engine.
         if identity not in self.observations:
-            native_allowance = native[identity] + max(0, self.native_ns - sum(native.values()))
-            attempt_allowance = attempts[identity] + max(0, self.arguments.attempt_limit - sum(attempts.values()))
-            if min(native_allowance, attempt_allowance) <= 0:
-                raise AllowanceExhausted("source collection native allowance exhausted")
-
             CaptureProcess(SimpleNamespace(
                 output=source, timeout=self.arguments.timeout,
-                budget_seconds=native_allowance / 1_000_000_000, attempt_limit=attempt_allowance,
+                budget_seconds=allowance.native_ns / 1e9, attempt_limit=allowance.attempts,
                 source_image=self.inputs["images"]["source"], resource_trace=self.arguments.resource_trace,
-            ), self.jobs[identity], self.limit).run()
+            ), launch, self.limit).run()
         publication = json.loads((source / "result.json").read_text())
         CaptureProduction(SimpleNamespace(
             capture=source / publication["source"], output=assets, binary=self.binary, product="templates",
-            budget_seconds=production_allowance / 1_000_000_000, source_image=self.inputs["images"]["source"],
+            budget_seconds=allowance.processing_ns / 1e9, source_image=self.inputs["images"]["source"],
             modeling_image=self.inputs["images"]["modeling"], keep_intermediates=self.arguments.keep_intermediates,
         ), self.limit).run()
         publication = json.loads((assets / "result.json").read_text())
@@ -167,10 +165,12 @@ class SourceAcquisition:
             self.prepare()
             error = None
             try:
-                available, unavailable = [], {}
-                for identity in self.jobs:
+                # Preflight every placement before starting any worker, preserving each ineligible job's reason.
+                launches, unavailable = self.placements(allow_incomplete)
+                available = []
+                for identity, launch in launches.items():
                     try:
-                        self.acquire(identity)
+                        self.acquire(identity, launch)
                     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, RuntimeError) as failure:
                         if not allow_incomplete:
                             raise

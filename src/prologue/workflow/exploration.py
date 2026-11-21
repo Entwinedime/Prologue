@@ -7,112 +7,33 @@ import math
 import shutil
 import subprocess
 import tempfile
-import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from itertools import product
 from pathlib import Path
 from types import SimpleNamespace
 
-from prologue.artifacts import write_json
-from prologue.acquisition.sources import SourceAcquisition
-from prologue.integrations.frameworks.sglang.acquisition.planning import SourcePlanning
 from prologue.acquisition.costs import CostAcquisition
-from prologue.workflow.report import ExplorationReport
-from prologue.serving.latency import RequestLatency
-from prologue.workflow.limits import AllowanceExhausted, OperationLimit
 from prologue.acquisition.planning import PlanningProcess
-from prologue.app.prediction import PredictionProcess
 from prologue.acquisition.production import CaptureProduction
 from prologue.acquisition.publication import SourceProductions
-
-
-SPENDING = ("native_charged_ns", "native_attempts", "postprocessing_ns")
+from prologue.acquisition.sources import SourceAcquisition
+from prologue.artifacts import write_json
+from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
+from prologue.workflow.report import ExplorationReport
+from prologue.workflow.targets import ExplorationAsset, ExplorationTarget
 
 
 def read(path):
     return json.loads(path.read_text())
 
 
-class ExplorationAsset:
-    def __init__(self, production, costs):
-        self.production, self.costs = production.resolve(strict=True), costs.resolve(strict=True)
-        self.sources = SourceProductions(self.production)
-
-    def document(self):
-        return {"production": str(self.production), "costs": str(self.costs)}
-
-
-class ExplorationTarget:
-    def __init__(self, root, index, model, configuration, workload):
-        self.task = root
-        self.root = root / "targets" / str(index)
-        self.input = {"model": model, "instances": configuration["instances"], "workload": workload}
-        self.identity = {"configuration": configuration["id"], "workload": workload["id"]}
-
-    def predict(self, arguments, limit, asset, stage):
-        input_path = self.root / "input.json"
-        if not input_path.is_file():
-            write_json(input_path, self.input, indent=2, replace=False)
-
-        directory = self.root / stage
-        outcome = directory / "outcome.json"
-        if outcome.is_file():
-            return read(outcome)
-        directory.mkdir(parents=True, exist_ok=True)
-        attempts = sorted((path for path in directory.iterdir() if path.is_dir()), key=lambda path: int(path.name))
-        output = attempts[-1] if attempts else directory / "0"
-
-        # A stopped coordinator can leave two named processes or a completed publication.
-        if attempts and not (output / "result.json").is_file():
-            PredictionProcess.recover(output)
-        result, evidence = self.evidence(output)
-        elapsed = None
-        if result is None:
-            if attempts:
-                output = directory / str(int(output.name) + 1)
-            start = time.monotonic_ns()
-            try:
-                PredictionProcess(SimpleNamespace(
-                    **arguments, input=input_path, output=output, production=asset.production,
-                    costs=asset.costs, execution_inputs=None,
-                ), limit).run()
-            except AllowanceExhausted:
-                raise
-            except (ValueError, RuntimeError, subprocess.SubprocessError, TimeoutError) as failure:
-                result, evidence = self.evidence(output)
-                if result is None:
-                    timed_out = isinstance(failure, (subprocess.TimeoutExpired, TimeoutError))
-                    result = {"status": "prediction_timeout" if timed_out else "prediction_failed", "message": str(failure)}
-            else:
-                result, evidence = self.evidence(output)
-            elapsed = time.monotonic_ns() - start
-
-        row = {**self.identity, **result, "asset": asset.document(), "asset_use": stage,
-               "directory": str(output.relative_to(self.task)), "elapsed_ns": elapsed}
-        if evidence is not None:
-            row["evidence"] = str(evidence.relative_to(self.task))
-        write_json(outcome, row, indent=2, replace=False)
-        return row
-
-    def evidence(self, output):
-        result = output / "result.json"
-        if result.is_file():
-            metrics = RequestLatency.predicted(read(result), self.input["workload"]["requests"]).report()
-            requests = metrics.pop("requests")
-            write_json(output / "request-latency.json", requests)
-            return {"status": "predicted", **metrics}, result
-        for status, name in (("template_gap", "template-gap.json"), ("cost_gap", "cost-gap.json")):
-            path = output / name
-            if path.is_file():
-                return {"status": status}, path
-        return None, None
-
-
 class ExplorationTask:
-    def __init__(self, args, place, reuse_samples):
+    def __init__(self, args, *, planner, place, reuse_samples, predictor):
         self.args = args
         self.place = place
         self.reuse_samples = reuse_samples
+        self.predictor = predictor
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         self.root = (args.output or Path("data") / f"{stamp}_exploration").resolve()
         self.binary = args.binary.resolve(strict=True)
@@ -124,8 +45,7 @@ class ExplorationTask:
         self.source = read(args.input)
         model = Path(self.source["model"]["path"]).resolve(strict=True)
         self.source["model"] = {**self.source["model"], "path": str(model)}
-        planner = SourcePlanning(self.source)
-        self.configurations, self.workloads = planner.configurations, planner.workloads
+        self.planner = planner(self.source)
         self.reuse = args.reuse.resolve(strict=True) if args.reuse else None
         if self.root.is_relative_to(model) or (self.reuse and self.root.is_relative_to(self.reuse)):
             raise ValueError("exploration must own an output outside the model and prior task")
@@ -135,8 +55,7 @@ class ExplorationTask:
             raise ValueError("exploration needs a positive timeout and nonnegative finite time budgets")
         if args.storage_bytes <= 0 or args.attempt_limit < 0:
             raise ValueError("exploration needs nonnegative attempts and positive storage")
-        self.budget = dict(zip(SPENDING, (int(args.native_budget_seconds * 1e9), args.attempt_limit,
-                                        int(args.postprocessing_budget_seconds * 1e9)), strict=True))
+        self.budget = Usage(int(args.native_budget_seconds * 1e9), args.attempt_limit, int(args.postprocessing_budget_seconds * 1e9))
         self.limit = OperationLimit(self.root, args.storage_bytes)
         self.environment = {
             "framework": self.source["framework"], "model": self.source["model"], "deployment": read(args.deployment),
@@ -167,20 +86,18 @@ class ExplorationTask:
         self.binary = executable
 
     def spending(self):
-        records = [read(path) for directory in (self.training, self.cost_task)
-                   if (path := directory / "status.json").is_file()]
-        return {kind: sum(record[kind] for record in records) for kind in SPENDING}
+        sources = SourceAcquisition.spending(self.training)
+        costs = CostAcquisition.spending(self.cost_task)
+        return {self.training: sources, self.cost_task: costs}
 
-    def allowance(self, own):
-        path = own / "status.json"
-        charged = read(path) if path.exists() else dict.fromkeys(SPENDING, 0)
-        used = self.spending()
-        available = {key: charged[key] + max(0, self.budget[key] - used[key]) for key in SPENDING}
+    def allowance(self, owner):
+        charges = self.spending()
+        available = self.budget.available_to(charges[owner], Usage.total(charges.values()))
         return {
-            "native_budget_seconds": available["native_charged_ns"] / 1e9,
-            "attempt_limit": available["native_attempts"], "postprocessing_budget_seconds": available["postprocessing_ns"] / 1e9,
-            "storage_bytes": self.args.storage_bytes, "timeout": self.args.timeout, "binary": self.binary,
-            "source_image": self.runtime["source_image"], "modeling_image": self.runtime["modeling_image"],
+            "native_budget_seconds": available.native_ns / 1e9, "attempt_limit": available.attempts,
+            "postprocessing_budget_seconds": available.processing_ns / 1e9, "storage_bytes": self.args.storage_bytes,
+            "timeout": self.args.timeout, "binary": self.binary, "source_image": self.runtime["source_image"],
+            "modeling_image": self.runtime["modeling_image"],
         }
 
     def previous(self):
@@ -192,95 +109,107 @@ class ExplorationTask:
             return []
         prior_result = read(self.reuse / "result.json")
         self.reuse_status = "considered"
-        return [ExplorationAsset(Path(row["production"]), Path(row["costs"])) for row in prior_result["assets"]]
+        return [ExplorationAsset(SourceProductions(Path(row["production"])), Path(row["costs"]))
+                for row in prior_result["assets"]]
 
-    def plan(self, pending):
-        selected = {field: {target.identity[singular] for target in pending}
-                    for field, singular in (("configurations", "configuration"), ("workloads", "workload"))}
-        source = {**self.source, **{field: [row for row in self.source[field] if row["id"] in names]
-                                    for field, names in selected.items()}}
+    def prepare_sources(self, pending):
         directory = self.root / "plan"
         if not (directory / "plan.json").is_file():
-            training = self.root / "inputs/training.json"
-            write_json(training, source, indent=2)
+            pairs = [(target.identity["configuration"], target.identity["workload"]) for target in pending]
             with tempfile.TemporaryDirectory(prefix=".planning-", dir=self.root) as temporary:
                 staged = Path(temporary) / "plan"
-                PlanningProcess(SimpleNamespace(input=training, output=staged), service_evidence=True).run()
+                PlanningProcess(self.planner, staged, service_evidence=True).run(targets=pairs)
                 staged.rename(directory)
-        return directory
 
-    def prepare_assets(self, pending, warm, previous):
-        plan = self.plan(pending)
-        costs = self.cost_task / "costs.json"
-        if not costs.is_file():
+        if not (self.training / "result.json").is_file():
             allowance = self.allowance(self.training)
-            if not (self.training / "result.json").is_file() or not (self.training / "status.json").is_file():
-                if min(allowance["native_budget_seconds"], allowance["postprocessing_budget_seconds"], allowance["attempt_limit"]) <= 0:
-                    raise AllowanceExhausted("no allowance to prepare missing source assets")
-                SourceAcquisition(SimpleNamespace(
-                    **allowance, output=self.training, plan=plan, deployment=self.root / "inputs/deployment.json",
-                    observations=None, keep_intermediates=True, resource_trace=self.args.details,
-                ), self.place, self.limit).run(allow_incomplete=True)
-
-            collection = SourceProductions(self.training)
-            if not any(collection.select(target.input) is not None for target in pending):
-                return None, collection
-            allowance = self.allowance(self.cost_task)
             if allowance["postprocessing_budget_seconds"] <= 0:
-                raise AllowanceExhausted("no allowance to prepare costs")
-            samples = {Path(path) for asset in previous for path in read(asset.costs)["sources"]}
-            gaps = [self.root / row["evidence"] for row in warm if row["status"] == "cost_gap"]
-            CostAcquisition(SimpleNamespace(
-                **allowance, output=self.cost_task, production=[self.training], samples=sorted(samples), demand=[], gap=gaps,
-            ), self.place, self.reuse_samples, self.limit).run()
-        asset = ExplorationAsset(self.training, costs)
+                raise AllowanceExhausted("no allowance to compile missing templates")
+            SourceAcquisition(SimpleNamespace(
+                **allowance, output=self.training, plan=directory, deployment=self.root / "inputs/deployment.json",
+                observations=None, keep_intermediates=True, resource_trace=self.args.details,
+            ), self.place, self.limit).run(allow_incomplete=True)
+        return SourceProductions(self.training)
 
-        # The original observations can regenerate source projections after the cost asset is closed.
-        if not self.args.details:
-            for production in asset.sources.paths.values():
-                ranks = read(production / "result.json")["observed_roles"]
-                CaptureProduction.trim(production, ranks, "templates")
-        return asset, asset.sources
+    def prepare_costs(self, fresh, prior_jobs, gaps, previous):
+        costs = self.cost_task / "costs.json"
+        if costs.is_file():
+            return costs
+        allowance = self.allowance(self.cost_task)
+        if allowance["postprocessing_budget_seconds"] <= 0:
+            raise AllowanceExhausted("no allowance to prepare costs")
+        arguments = SimpleNamespace(
+            **allowance, output=self.cost_task, production=[fresh.directory] if fresh else [], samples=[], demand=[], gap=gaps,
+        )
+        prior_costs = list(dict.fromkeys(asset.costs for asset in previous))
+        CostAcquisition(arguments, self.place, self.reuse_samples, self.limit, prior_jobs=prior_jobs, prior_costs=prior_costs).run()
+        return costs
 
     def explore(self):
         previous = self.previous()
         runtime = {"binary": self.binary, "control_image": self.runtime["control_image"],
                    "modeling_image": self.runtime["modeling_image"], "timeout": self.args.timeout,
                    "execution_trace": self.args.details}
-        targets = [ExplorationTarget(self.root, index, self.source["model"], configuration, workload)
+        targets = [ExplorationTarget(self.root, index, self.source["model"], configuration, workload, self.predictor)
                    for index, (configuration, workload) in enumerate(
-                       product(self.configurations.values(), self.workloads.values()))]
-        rows, pending, warm, used = {}, [], [], {}
+                       product(self.planner.configurations.values(), self.planner.workloads.values()))]
+        rows, selected, missing_templates = {}, {}, []
+        existing_jobs, gaps = defaultdict(set), []
+
         for target in targets:
-            asset = next((item for item in previous if item.sources.select(target.input) is not None), None)
-            if asset is None:
-                pending.append(target)
+            match = target.reuse(previous, runtime, self.limit)
+            if match is None:
+                missing_templates.append(target)
                 continue
-            row = target.predict(runtime, self.limit, asset, "reused")
-            used[asset.production] = asset
+            asset, row = match
             rows[target] = row
-            if row["status"] in {"cost_gap", "template_gap"}:
-                pending.append(target)
-                warm.append(row)
+            if row["status"] == "template_gap":
+                missing_templates.append(target)
+            elif row["status"] == "cost_gap":
+                selected[target] = asset.sources
+                existing_jobs[asset.production].update(asset.sources.jobs_for(target.input))
+                gaps.append(self.root / row["evidence"])
 
-        if pending:
+        fresh = None
+        if missing_templates:
             try:
-                asset, collection = self.prepare_assets(pending, warm, previous)
+                fresh = self.prepare_sources(missing_templates)
             except AllowanceExhausted as failure:
-                for target in pending:
-                    rows.setdefault(target, {**target.identity, "status": "budget_exhausted", "message": str(failure)})
+                for target in missing_templates:
+                    rows[target] = {**rows.get(target, target.identity), "status": "budget_exhausted", "message": str(failure)}
             else:
-                if asset:
-                    used[asset.production] = asset
-                for target in pending:
-                    if asset and collection.select(target.input) is not None:
-                        rows[target] = target.predict(runtime, self.limit, asset, "prepared")
+                for target in missing_templates:
+                    if fresh.select(target.input) is None:
+                        rows[target] = {**rows.get(target, target.identity), **fresh.failure(target.input)}
                     else:
-                        rows.setdefault(target, {**target.identity, **collection.failure(target.input)})
+                        selected[target] = fresh
 
-        assets = [asset.document() for asset in reversed(list(used.values()))]
-        usage = {**self.spending(), "retained_bytes": self.limit.bytes_used()}
-        return ExplorationReport([rows[target] for target in targets], assets, usage, self.reuse_status)
+        if selected:
+            try:
+                training = fresh if fresh in selected.values() else None
+                costs = self.prepare_costs(training, existing_jobs, gaps, previous)
+            except AllowanceExhausted as failure:
+                for target in selected:
+                    rows[target] = {**rows.get(target, target.identity), "status": "budget_exhausted", "message": str(failure)}
+            else:
+                for target, library in selected.items():
+                    asset = ExplorationAsset(library, costs)
+                    rows[target] = target.predict(runtime, self.limit, asset, "prepared")
+
+                # Published templates and original observations suffice for future projections.
+                if fresh and not self.args.details:
+                    for production in fresh.paths.values():
+                        ranks = read(production / "result.json")["observed_roles"]
+                        CaptureProduction.trim(production, ranks, "templates")
+
+        # Keep newly prepared assets first and publish only the bundles serving a final target outcome.
+        assets = {}
+        for row in sorted(rows.values(), key=lambda row: row.get("asset_use") != "prepared"):
+            if "asset" in row:
+                asset = row["asset"]
+                assets[asset["production"], asset["costs"]] = asset
+        usage = {**Usage.total(self.spending().values()).document(), "retained_bytes": self.limit.bytes_used()}
+        return ExplorationReport([rows[target] for target in targets], list(assets.values()), usage, self.reuse_status)
 
     def run(self):
         self.root.mkdir(parents=True, exist_ok=True)

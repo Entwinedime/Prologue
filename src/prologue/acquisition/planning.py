@@ -1,23 +1,17 @@
 """Publish a finite source plan and its concrete capture inputs."""
 
-import json
-
 from prologue.artifacts import write_json
-from prologue.integrations.frameworks.sglang.acquisition.planning import SourcePlanning
 
 
 class PlanningProcess:
-    def __init__(self, arguments, *, service_evidence=False):
-        self.arguments = arguments
-        self.service_evidence = service_evidence
+    def __init__(self, planner, output, *, service_evidence=False):
+        self.planner, self.output, self.service_evidence = planner, output, service_evidence
 
-    def run(self):
-        source = json.loads(self.arguments.input.read_text())
-        planner = SourcePlanning(source)
-        plan = planner.document(service_evidence=self.service_evidence)
-        output = self.arguments.output
+    def run(self, *, targets=None):
+        planner, output = self.planner, self.output
+        plan = planner.document(service_evidence=self.service_evidence, targets=targets)
         output.mkdir(parents=True)
-        write_json(output / "input.json", source, indent=2, replace=False)
+        write_json(output / "input.json", planner.source, indent=2, replace=False)
         (output / "sources").mkdir()
         workload_basis = (
             "Performance sources retain length endpoints and batching opportunities."

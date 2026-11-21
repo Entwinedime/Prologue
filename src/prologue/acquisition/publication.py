@@ -11,6 +11,7 @@ class SourceProductions:
 
     def __init__(self, collection):
         collection = collection.resolve(strict=True)
+        self.directory = collection
         inputs = json.loads((collection / "input.json").read_text())
         self.plan, self.jobs = inputs["plan"], inputs["jobs"]
         publication = json.loads((collection / "result.json").read_text())
