@@ -20,6 +20,7 @@ from prologue.acquisition.production import CaptureProduction
 from prologue.acquisition.publication import SourceProductions
 from prologue.acquisition.sources import SourceAcquisition
 from prologue.artifacts import write_json
+from prologue.performance.requirements import CostRequirements, WorkPoint
 from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
 from prologue.workflow.report import ExplorationReport
 from prologue.workflow.targets import ExplorationAsset, ExplorationTarget
@@ -57,7 +58,8 @@ class ExplorationTask:
             raise ValueError("exploration needs a positive timeout and nonnegative finite time budgets")
         if args.storage_bytes <= 0 or args.attempt_limit < 0:
             raise ValueError("exploration needs nonnegative attempts and positive storage")
-        self.budget = Usage(int(args.native_budget_seconds * 1e9), args.attempt_limit, int(args.postprocessing_budget_seconds * 1e9))
+        self.budget = Usage(int(args.native_budget_seconds * 1e9), args.attempt_limit,
+                            int(args.postprocessing_budget_seconds * 1e9))
         self.limit = OperationLimit(self.root, args.storage_bytes)
         self.environment = {
             "framework": self.source["framework"], "model": self.source["model"], "deployment": deployment,
@@ -78,7 +80,8 @@ class ExplorationTask:
         manifest = directory / "task.json"
         executable = directory / "prologue"
         if manifest.is_file():
-            if self.inputs != read(manifest) or hashlib.sha256(executable.read_bytes()).hexdigest() != self.environment["binary"]:
+            binary = hashlib.sha256(executable.read_bytes()).hexdigest()
+            if self.inputs != read(manifest) or binary != self.environment["binary"]:
                 raise ValueError("exploration input, runtime or executable changed; use a new task")
         else:
             if any(path.name != ".lock" for path in self.root.iterdir()):
@@ -91,13 +94,14 @@ class ExplorationTask:
         self.binary = executable
 
     def spending(self):
-        sources = SourceAcquisition.spending(self.training)
-        costs = CostAcquisition.spending(self.cost_task)
-        return {self.training: sources, self.cost_task: costs}
+        charges = {self.training: SourceAcquisition.spending(self.training)}
+        for state in self.cost_task.glob("*/execution.json"):
+            charges[state.parent] = CostAcquisition.spending(state.parent)
+        return charges
 
     def allowance(self, owner):
         charges = self.spending()
-        available = self.budget.available_to(charges[owner], Usage.total(charges.values()))
+        available = self.budget.available_to(charges.get(owner, Usage()), Usage.total(charges.values()))
         return {
             "native_budget_seconds": available.native_ns / 1e9, "attempt_limit": available.attempts,
             "postprocessing_budget_seconds": available.processing_ns / 1e9, "storage_bytes": self.args.storage_bytes,
@@ -137,20 +141,64 @@ class ExplorationTask:
             ), self.place, self.limit).run(allow_incomplete=True)
         return SourceProductions(self.training)
 
-    def prepare_costs(self, fresh, prior_jobs, gaps, previous):
-        costs = self.cost_task / "costs.json"
+    def prepare_costs(self, generation, fresh, prior_jobs, gaps, previous):
+        directory = self.cost_task / str(generation)
+        costs = directory / "costs.json"
         if costs.is_file():
             return costs
-        allowance = self.allowance(self.cost_task)
+        allowance = self.allowance(directory)
         if allowance["postprocessing_budget_seconds"] <= 0:
             raise AllowanceExhausted("no allowance to prepare costs")
         arguments = SimpleNamespace(
-            **allowance, output=self.cost_task, production=[fresh.directory] if fresh else [], samples=[], demand=[], gap=gaps,
+            **allowance, output=directory, production=[fresh.directory] if fresh else [],
+            samples=[], demand=[], gap=gaps,
         )
-        prior_costs = list(dict.fromkeys(asset.costs for asset in previous))
         CostAcquisition(arguments, self.place, self.reuse_samples, self.limit, transport_samples=self.transport_samples,
-                        prior_jobs=prior_jobs, prior_costs=prior_costs).run()
+                        prior_jobs=prior_jobs, prior_costs=previous).run()
         return costs
+
+    def predict(self, selected, runtime, first_costs, rows):
+        costs, generation = first_costs, 0
+        attempted = set()
+        reasons = CostRequirements.reported_reasons(read(costs)["demand"])
+
+        while selected:
+            pending, jobs = {}, defaultdict(set)
+            stage = f"prepared-{generation}" if generation else "prepared"
+            for target, library in selected.items():
+                row = target.predict(runtime, self.limit, ExplorationAsset(library, costs), stage)
+                rows[target] = row
+                if row["status"] != "cost_gap":
+                    continue
+                path = self.root / row["evidence"]
+                point = WorkPoint.from_gap(read(path))
+                if point in reasons or point in attempted:
+                    reason = reasons.get(point, "covered_query_failed_in_execution")
+                    row["sampling"] = {"costs": str(costs), "reason": reason}
+                    continue
+                pending[target] = point, path
+                jobs[library.directory].update(library.jobs_for(target.input))
+            if not pending:
+                return
+
+            # Only newly reached coordinates request more evidence. Updated predictions start from initial state.
+            generation += 1
+            try:
+                costs = self.prepare_costs(generation, None, jobs, [path for _, path in pending.values()], [costs])
+            except AllowanceExhausted as failure:
+                for target in pending:
+                    rows[target]["sampling"] = {"reason": "budget_exhausted", "message": str(failure)}
+                return
+            report = read(costs)["demand"]
+            reasons = CostRequirements.reported_reasons(report)
+            ready = {}
+            for target, (point, path) in pending.items():
+                attempted.add(point)
+                if report["targets"][str(path)]["counts"].get("covered"):
+                    ready[target] = selected[target]
+                else:
+                    rows[target]["sampling"] = {"costs": str(costs), "reason": reasons[point]}
+            selected = ready
 
     def explore(self):
         previous = self.previous()
@@ -185,7 +233,8 @@ class ExplorationTask:
                 fresh = self.prepare_sources(missing_templates)
             except AllowanceExhausted as failure:
                 for target in missing_templates:
-                    rows[target] = {**rows.get(target, target.identity), "status": "budget_exhausted", "message": str(failure)}
+                    rows[target] = {**rows.get(target, target.identity),
+                                    "status": "budget_exhausted", "message": str(failure)}
             else:
                 for target in missing_templates:
                     if fresh.select(target.input) is None:
@@ -196,14 +245,14 @@ class ExplorationTask:
         if selected:
             try:
                 training = fresh if fresh in selected.values() else None
-                costs = self.prepare_costs(training, existing_jobs, gaps, previous)
+                prior_costs = list(dict.fromkeys(asset.costs for asset in previous))
+                costs = self.prepare_costs(0, training, existing_jobs, gaps, prior_costs)
             except AllowanceExhausted as failure:
                 for target in selected:
-                    rows[target] = {**rows.get(target, target.identity), "status": "budget_exhausted", "message": str(failure)}
+                    rows[target] = {**rows.get(target, target.identity),
+                                    "status": "budget_exhausted", "message": str(failure)}
             else:
-                for target, library in selected.items():
-                    asset = ExplorationAsset(library, costs)
-                    rows[target] = target.predict(runtime, self.limit, asset, "prepared")
+                self.predict(selected, runtime, costs, rows)
 
                 # Published templates and original observations suffice for future projections.
                 if fresh and not self.args.details:
@@ -213,7 +262,7 @@ class ExplorationTask:
 
         # Keep newly prepared assets first and publish only the bundles serving a final target outcome.
         assets = {}
-        for row in sorted(rows.values(), key=lambda row: row.get("asset_use") != "prepared"):
+        for row in sorted(rows.values(), key=lambda row: not row.get("asset_use", "").startswith("prepared")):
             if "asset" in row:
                 asset = row["asset"]
                 assets[asset["production"], asset["costs"]] = asset
