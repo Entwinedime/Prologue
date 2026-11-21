@@ -110,16 +110,16 @@ constexpr std::string_view usage = "prologue project <native-facts.json> <coarse
                                    "[--execution-inputs <conditions.json> | --costs <costs.json>]\n";
 
 nlohmann::json work_identities(const prologue::sglang::TemplateDeclarations & source, const nlohmann::json & observation_window) {
-    auto features = nlohmann::json::array();
-    for (const auto & scope : source.graph.scopes) features.push_back(prologue::WorkFeatures(scope).document());
-    auto intervals = nlohmann::json::array();
-    for (const auto & work : source.graph.work) intervals.push_back({work.start, work.finish});
-
     std::vector<prologue::TemplateInterval> origins;
     const auto library = source.compile(&origins);
+    prologue::WorkCoordinates coordinates(source.graph);
+    auto features = nlohmann::json::array();
+    auto intervals = nlohmann::json::array();
     for (std::size_t i = 0; i < origins.size(); ++i) {
-        intervals[i].push_back(origins[i].definition);
-        intervals[i].push_back(origins[i].interval);
+        const auto & work = source.graph.work[i];
+        const auto point = coordinates.index(work);
+        if (point == features.size()) features.push_back(coordinates[point].document());
+        intervals.push_back({work.start, work.finish, origins[i].definition, origins[i].interval, point});
     }
 
     auto definitions = nlohmann::json::array();

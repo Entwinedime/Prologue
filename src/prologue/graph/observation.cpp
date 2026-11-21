@@ -68,7 +68,9 @@ NativeObservation NativeObservation::read(const nlohmann::json & source) {
                            order(span.at("begin")),
                            order(span.at("end")),
                            work_kind(span.at("kind").get<std::string>()),
-                           span.contains("protocol_operand") };
+                           span.contains("protocol_operand"), TensorCopy::read(span) };
+        if (region.copy && region.copy->bytes(result.scopes[region.scope].info.parameters) != order(span.at("operand_bytes")))
+            throw std::invalid_argument("declared copy operand geometry differs from the measured native transfer size");
         if (region.begin > region.end || (region.begin == region.end && region.kind != WorkKind::Boundary && region.kind != WorkKind::Wait))
             throw std::invalid_argument("native work span must have distinct entry and return boundaries");
         if (region.supplied_operand && (!result.scopes[region.scope].communication ||

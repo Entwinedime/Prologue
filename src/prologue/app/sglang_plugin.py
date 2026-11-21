@@ -3,6 +3,7 @@
 import ctypes
 import json
 import os
+from contextlib import nullcontext
 from pathlib import Path
 
 
@@ -25,12 +26,18 @@ def install() -> None:
 
         if description["host_timing"]:
             timing = NativeTiming(description, host_profile=AscendHostProfile)
-            if shard_transport is not None:
-                shard_transport(description["output"], timing.host.auxiliary).install(description)
+        elif "attention_sites" in description:
+            from prologue.integrations.frameworks.sglang.ascend.attention_observation import DecodeAttentionObservation
+
+            timing = NativeTiming(description, attention=DecodeAttentionObservation)
         else:
             if getattr(ctypes.CDLL(None), "prologue_set_runtime_enabled", None) is not None:
                 raise ValueError("latency measurement requires the native observer to be unloaded")
             timing = NativeTiming(description, specializations=AscendSpecializations())
+        if shard_transport is not None:
+            auxiliary = timing.host.auxiliary if timing.host is not None else nullcontext
+            record = timing.host.local_exchange if timing.host is not None else None
+            shard_transport(description["output"], auxiliary, record).install(description)
         timing.install(device_api)
         return
 

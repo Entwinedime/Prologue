@@ -2,6 +2,8 @@
 
 #include <compare>
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -60,6 +62,7 @@ struct GraphWork {
     WorkKind kind;
     std::size_t start;
     std::size_t finish;
+    std::shared_ptr<const TensorCopy> copy{};
 };
 
 struct GraphEdge {

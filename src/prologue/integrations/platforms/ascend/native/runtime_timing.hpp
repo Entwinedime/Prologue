@@ -14,7 +14,8 @@ class RuntimeSample {
 public:
     explicit RuntimeSample(const char * name, bool enabled = true);
     void enter();
-    void finish(int result, std::uint32_t tasks = 0, std::size_t bytes = 0, int direction = -1) const;
+    void finish(int result, std::uint32_t tasks = 0, std::size_t bytes = 0, int direction = -1,
+                const void * source = nullptr) const;
 
 private:
     const char * name_;

@@ -21,6 +21,28 @@ std::vector<std::size_t> indices(const nlohmann::json & source) {
 
 } // namespace
 
+bool TemplateGuard::evaluate(const Parameters & parameters) const {
+    return extents.evaluate(parameters) && std::ranges::all_of(branches, [&](const Expression & rule) { return rule.evaluate(parameters) != 0; });
+}
+
+std::set<std::string> TemplateGuard::variables() const {
+    auto result = extents.variables();
+    for (const auto & rule : branches) result.merge(rule.variables());
+    return result;
+}
+
+nlohmann::json TemplateGuard::document() const {
+    auto rules = nlohmann::json::array();
+    for (const auto & rule : branches) rules.push_back(rule.document());
+    return { { "branches", std::move(rules) }, { "extents", extents.document() } };
+}
+
+TemplateGuard TemplateGuard::read(const nlohmann::json & source) {
+    TemplateGuard result{ {}, Expression::read(source.at("extents")) };
+    for (const auto & rule : source.at("branches").get_ref<const nlohmann::json::array_t &>()) result.branches.push_back(Expression::read(rule));
+    return result;
+}
+
 StateBindings StateBindings::read(const nlohmann::json & source) {
     StateBindings result;
     for (const auto & value : source.at("kv"))
@@ -58,16 +80,6 @@ nlohmann::json StateBindings::contract() const {
     return result;
 }
 
-TensorLayout TensorRule::evaluate(const Parameters & parameters) const {
-    TensorLayout result{ dtype, {} };
-    for (const auto & expression : shape) {
-        const auto dimension = expression.evaluate(parameters);
-        if (dimension < 0) throw std::invalid_argument("template produces a negative tensor dimension");
-        result.shape.push_back(dimension);
-    }
-    return result;
-}
-
 TemplateReference TemplateReference::read(const nlohmann::json & source) {
     const auto & child = source.at("child");
     return { index(source.at("event")), child.is_null() ? std::nullopt : std::optional(index(child)), source.at("imported").get<bool>() };
@@ -82,21 +94,13 @@ nlohmann::json TemplateReference::document() const {
 }
 
 nlohmann::json TemplatePort::document() const {
-    nlohmann::json tensor_json = nullptr;
-    if (tensor) {
-        tensor_json = {
-            { "dtype",           tensor->dtype },
-            { "shape", nlohmann::json::array() }
-        };
-        for (const auto & dimension : tensor->shape) tensor_json["shape"].push_back(dimension.document());
-    }
     nlohmann::json result{
         {      "name",                      name },
         { "direction", direction_name(direction) },
         {       "use",        port_use_name(use) },
         {  "relation",   relation_name(relation) },
         {     "event",          event.document() },
-        {    "tensor",    std::move(tensor_json) }
+        {    "tensor", tensor ? tensor->document() : nlohmann::json(nullptr) }
     };
     if (rendezvous) result["rendezvous"] = rendezvous->document();
     if (wait)
@@ -176,7 +180,7 @@ TemplateDefinition TemplateDefinition::read(const nlohmann::json & source) {
         result.work.push_back({ index(piece.at("resource")),
                                 work_kind(piece.at("kind").get<std::string>()),
                                 TemplateReference::read(piece.at("start")),
-                                TemplateReference::read(piece.at("finish")) });
+                                TemplateReference::read(piece.at("finish")), TensorCopy::read(piece) });
     for (const auto & edge : source.at("edges").get_ref<const nlohmann::json::array_t &>())
         result.edges.push_back(
             { TemplateReference::read(edge.at("source")), TemplateReference::read(edge.at("target")), relation_kind(edge.at("kind").get<std::string>()) });
@@ -189,12 +193,7 @@ TemplateDefinition TemplateDefinition::read(const nlohmann::json & source) {
             const auto & wait = port.at("wait");
             boundary.wait = StreamWait<TemplateReference>{ index(wait.at("resource")), TemplateReference::read(wait.at("begin")) };
         }
-        if (!port.at("tensor").is_null()) {
-            const auto & tensor = port.at("tensor");
-            boundary.tensor = TensorRule{ tensor.at("dtype").get<std::string>(), {} };
-            for (const auto & dimension : tensor.at("shape").get_ref<const nlohmann::json::array_t &>())
-                boundary.tensor->shape.push_back(Expression::read(dimension));
-        }
+        if (!port.at("tensor").is_null()) boundary.tensor = TensorRule::read(port.at("tensor"));
         if (port.contains("rendezvous")) boundary.rendezvous = TemplateReference::read(port.at("rendezvous"));
         result.ports.push_back(std::move(boundary));
     }
@@ -249,13 +248,15 @@ nlohmann::json TemplateDefinition::document() const {
             {   "role",                resource.role },
             { "serial",              resource.serial }
         });
-    for (const auto & piece : work)
+    for (const auto & piece : work) {
         result["work"].push_back({
             { "resource",          piece.resource },
             {     "kind",   work_name(piece.kind) },
             {    "start",  piece.start.document() },
             {   "finish", piece.finish.document() }
         });
+        if (piece.copy) result["work"].back()["copy"] = piece.copy->document();
+    }
     for (const auto & edge : edges)
         result["edges"].push_back({
             { "source",   edge.source.document() },
@@ -281,7 +282,7 @@ nlohmann::json TemplateDefinition::document() const {
 TemplateFrame TemplateFrame::read(const nlohmann::json & source) {
     TemplateFrame result;
     result.definition = index(source.at("definition"));
-    result.guard = Expression::read(source.at("guard"));
+    result.guard = TemplateGuard::read(source.at("guard"));
     if (source.contains("communication")) result.communication = CommunicationGroup::read(source.at("communication"));
     result.site = source.at("site").get<std::string>();
     result.bindings = source.at("bindings");
@@ -370,7 +371,7 @@ TemplateLibrary TemplateLibrary::read(const nlohmann::json & source) {
         result.entries.push_back(std::move(value));
     }
     for (const auto & local : source.at("implementations"))
-        result.implementations.push_back({ local.at("contract"), index(local.at("definition")), Expression::read(local.at("guard")) });
+        result.implementations.push_back({ local.at("contract"), index(local.at("definition")), TemplateGuard::read(local.at("guard")) });
     result.validate();
     return result;
 }

@@ -77,7 +77,10 @@ private:
             const bool timed = region.kind != WorkKind::Wait && region.kind != WorkKind::Boundary;
             const bool payload = region.kind == WorkKind::Host || region.supplied_operand || observation_.resources[resource].has_payload(begin, end);
             if (timed && payload) {
-                graph_.work.push_back({ region.scope, resource, region.kind, start, finish });
+
+                // Only the entire native copy carries the measured operand. An internal cut cannot copy it twice.
+                const auto copy = begin == region.begin && end == region.end ? region.copy : nullptr;
+                graph_.work.push_back({ region.scope, resource, region.kind, start, finish, copy });
                 if (evidence_) evidence_->work_spans.push_back(*span);
                 return;
             }

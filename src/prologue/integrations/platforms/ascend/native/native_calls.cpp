@@ -293,7 +293,7 @@ public:
     }
 
     aclError finish(aclError result, aclrtEvent created = nullptr) const {
-        sample_.finish(static_cast<int>(result), 0, bytes_, direction_);
+        sample_.finish(static_cast<int>(result), 0, bytes_, direction_, source_);
         if (directory_ == nullptr) return result;
 
         const auto end = host_timestamp();

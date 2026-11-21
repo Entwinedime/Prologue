@@ -43,7 +43,8 @@ COPY src/prologue/app/capture_worker.py src/prologue/app/sglang_plugin.py src/pr
 COPY src/prologue/contracts/workload src/prologue/contracts/workload/
 COPY src/prologue/acquisition/observation src/prologue/acquisition/observation/
 COPY src/prologue/integrations/frameworks/sglang/*.py src/prologue/integrations/frameworks/sglang/
-COPY src/prologue/integrations/frameworks/sglang/ascend/shard_weights.py \
+COPY src/prologue/integrations/frameworks/sglang/ascend/attention_observation.py \
+    src/prologue/integrations/frameworks/sglang/ascend/shard_weights.py \
     src/prologue/integrations/frameworks/sglang/ascend/shard_transport.py src/prologue/integrations/frameworks/sglang/ascend/
 COPY src/prologue/integrations/frameworks/sglang/observation src/prologue/integrations/frameworks/sglang/observation/
 COPY src/prologue/integrations/platforms/ascend/*.py src/prologue/integrations/platforms/ascend/

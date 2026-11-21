@@ -235,7 +235,7 @@ private:
         std::set<nlohmann::json> predicates;
         for (const auto & predicate : observed.info.guards) {
             if (predicate.evaluate(observed.info.parameters) == 0) throw std::invalid_argument("native guard contradicts source at " + observed.info.site);
-            predicates.insert(predicate.document());
+            frame.guard.branches.push_back(predicate);
         }
         frame.site = observed.info.site;
         frame.communication = observed.communication;
@@ -274,7 +274,7 @@ private:
             definition.work.push_back({ resource(piece.resource, definition, frame),
                                         piece.kind,
                                         reference(scope, piece.start, definition, frame),
-                                        reference(scope, piece.finish, definition, frame) });
+                                        reference(scope, piece.finish, definition, frame), piece.copy });
         }
         for (const auto edge : compiled.edges) {
             const auto & link = source_.edges[edge];
@@ -309,7 +309,7 @@ private:
 
         nlohmann::json guard = { "and", 1 };
         for (const auto & predicate : predicates) guard.push_back(predicate);
-        frame.guard = Expression::read(guard);
+        frame.guard.extents = Expression::read(guard);
 
         for (const auto child : compiled.children) {
             auto & result = scopes_[child];

@@ -136,7 +136,7 @@ void TemplateLibrary::link_local_implementations(std::span<TemplateLibrary *> li
     struct Candidate {
         const TemplateLibrary * source;
         std::size_t definition;
-        Expression guard;
+        TemplateGuard guard;
     };
     using Key = std::pair<nlohmann::json, nlohmann::json>;
     std::map<Key, std::vector<Candidate>> candidates;

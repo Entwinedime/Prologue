@@ -97,7 +97,21 @@ class TensorBoundaries(TorchDispatchMode):
             raise ValueError("boundary needs a shape relation from its producer")
         return rule
 
-    def observe(self, tensor: torch.Tensor, shape: list[Any] | None, *, region: str | None = None) -> dict[str, Any]:
+    @staticmethod
+    def copy_source(tensor, caller):
+        if tensor.device.type != "cpu" and tensor.is_contiguous():
+            return {"address": format(tensor.data_ptr(), "x"), "element_bytes": tensor.element_size(), "caller": caller}
+        return None
+
+    def local_readback(self, tensor, shape, caller):
+        with self.metadata():
+
+            # A cost operand inside the native call introduces no external storage or readiness edge.
+            return {"dtype": str(tensor.dtype), "shape": list(tensor.shape), "shape_rule": shape,
+                    "copy_source": self.copy_source(tensor, caller)}
+
+    def observe(self, tensor: torch.Tensor, shape: list[Any] | None, *, region: str | None = None,
+                materializer: str | None = None) -> dict[str, Any]:
         with self.metadata():
             storage = self.storage(tensor, region)
             key = storage.identity, storage.version
@@ -115,6 +129,8 @@ class TensorBoundaries(TorchDispatchMode):
             if shape is not None:
                 self.declare_shape(tensor, shape)
                 result["shape_rule"] = shape
+                if materializer:
+                    result["copy_source"] = self.copy_source(tensor, materializer)
             return result
 
     def retire(self) -> None:

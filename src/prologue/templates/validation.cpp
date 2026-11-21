@@ -12,7 +12,7 @@
 namespace prologue {
 namespace {
 
-void variables(const Expression & expression, const std::set<std::string> & parameters) {
+void variables(const auto & expression, const std::set<std::string> & parameters) {
     for (const auto & name : expression.variables()) {
         if (!parameters.contains(name)) throw std::invalid_argument("template expression uses an undeclared parameter: " + name);
     }
@@ -159,6 +159,9 @@ void TemplateLibrary::validate() const {
         for (const auto & piece : definition.work) {
             definition.resources.at(piece.resource);
             if (piece.kind == WorkKind::Wait || piece.kind == WorkKind::Boundary) throw std::invalid_argument("template charges a wait or pure boundary");
+            if (piece.copy) {
+                for (const auto & extent : piece.copy->tensor.shape) variables(extent, definition.parameters);
+            }
             reference(definition, piece.start);
             reference(definition, piece.finish);
         }

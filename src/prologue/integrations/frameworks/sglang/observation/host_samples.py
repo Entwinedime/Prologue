@@ -89,6 +89,18 @@ class NativeHostSamples(ServingCuts):
     def collective_at_root(self):
         return self.parent.get() == 0
 
+    @contextmanager
+    def local_exchange(self, operation, source, _outputs):
+        owner = self.parent.get()
+        if self.enabled and owner:
+            stamp = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+            with self.auxiliary():
+                self.scopes[owner].setdefault("local_submissions", []).append({
+                    "operation": operation, "dtype": str(source.dtype), "bytes": source.numel() * source.element_size(),
+                    "thread": get_native_id(), "submitted_raw_ns": stamp,
+                })
+        yield
+
     def observe_exchange(self, original, role, group, root_rank, operand, run):
         work, parameters, bindings = None, None, None
         if operand is not None:

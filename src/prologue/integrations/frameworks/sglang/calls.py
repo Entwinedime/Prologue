@@ -20,6 +20,7 @@ class ActionCall:
     condition: dict[str, Any] = field(default_factory=dict)
     guards: tuple = ()
     input_use: str = "device"
+    materializer: str | None = None
 
 
 @dataclass
@@ -45,6 +46,7 @@ class CallFrame:
     tensor_outputs: dict = field(default_factory=dict)
     condition: dict = field(default_factory=dict)
     host_inputs: dict = field(default_factory=dict)
+    local_readbacks: dict = field(default_factory=dict)
     device_tail: bool = False
 
     @property
@@ -227,7 +229,8 @@ class CallSegments:
     @contextmanager
     def call(
         self, operation, original, *, parameters=None, work=None, inputs=None, guards=(),
-        host_only=False, device_tail=False, tensor_inputs=None, tensor_outputs=None, metadata_inputs=None, allocations=None, condition=None, host_inputs=None,
+        host_only=False, device_tail=False, tensor_inputs=None, tensor_outputs=None, metadata_inputs=None,
+        allocations=None, condition=None, host_inputs=None, local_readbacks=None,
     ):
         parent = self.current.get()
         work = dict(parent.work if work is None else work)
@@ -246,6 +249,7 @@ class CallSegments:
             tensor_allocations={} if allocations is None else allocations,
             condition={} if condition is None else condition,
             host_inputs={} if host_inputs is None else host_inputs,
+            local_readbacks={} if local_readbacks is None else local_readbacks,
             device_tail=device_tail,
         )
         previous = self.current.set(frame)

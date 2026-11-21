@@ -1,7 +1,6 @@
 """Match independently timed native CPU fragments to complete coarse work intervals."""
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
 import json
 
 from prologue.acquisition.observation.workers import CapturedWorkers
@@ -9,18 +8,10 @@ from prologue.acquisition.recording import PublishedCapture
 from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.ascend.launch import SGLangAscendLaunch
 from prologue.integrations.runtimes.pytorch.protocol_work import CpuProtocolWork
-from prologue.integrations.frameworks.sglang.configuration import CaptureInput
 from prologue.integrations.platforms.ascend.host_alignment import AscendHostAlignment
 from prologue.integrations.platforms.ascend.trace import AscendTrace
 from prologue.integrations.frameworks.sglang.acquisition.host_scopes import NativeHostCalls
 from prologue.performance.samples import ServiceSamples, WorkCatalog
-
-
-@dataclass(frozen=True, slots=True)
-class HostRecipe:
-    name: str
-    job: dict
-    requires_cold: bool = False
 
 
 class HostCostSamples:
@@ -36,16 +27,6 @@ class HostCostSamples:
     def records(path):
         with path.open() as source:
             return [json.loads(line) for line in source]
-
-    @staticmethod
-    def recipes(job):
-        capture = CaptureInput(job)
-        yield HostRecipe("observed-submission", job)
-        if capture.warmup != capture.workload:
-            yield HostRecipe("primed-submission", {**job, "warmup": job["workload"]}, requires_cold=True)
-        groups = [[request["id"]] for request in capture.workload["requests"]]
-        if not all(len(group) == 1 for group in capture.submission_groups):
-            yield HostRecipe("individual-requests", {**job, "submission_groups": groups, "warmup": job["workload"]})
 
     @staticmethod
     def supports(work, resource):
@@ -170,7 +151,7 @@ class HostCostSamples:
         profile, = (source_root / "native" / f"rank-{rank}").glob("*_ascend_pt")
         trace = AscendTrace(profile, source_root / "runtime", original, self.arguments.trace)
         alignment = AscendHostAlignment(
-            trace, probe["scopes"], queues["commands"], self.records(directory / timing["runtime"]),
+            trace, original["scopes"], probe["scopes"], queues["commands"], self.records(directory / timing["runtime"]),
             self.records(directory / timing["activity"]), probe["auxiliary_intervals"],
         )
         exact = alignment.cuts(pairs, original["state_queries"])
@@ -179,7 +160,7 @@ class HostCostSamples:
             local_pairs = {scope: local_pairs[scope] for scope in local.scopes}
 
         evidence = graph["evidence"]["events"]
-        samples = ServiceSamples(catalog)
+        samples = ServiceSamples(catalog.domain, catalog.definitions)
         measured, missing = Counter(), Counter()
         for piece, definition, interval, features in catalog:
             resource = graph["resources"][piece["resource"]]

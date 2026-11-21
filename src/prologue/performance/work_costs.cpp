@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iterator>
+#include <limits>
 #include <ranges>
 #include <utility>
 
@@ -45,7 +46,7 @@ CostGap::CostGap(nlohmann::json details)
     : std::runtime_error("no qualified service cost at " + details.at("site").get<std::string>()),
       details_(std::move(details)) {}
 
-WorkCosts::Curve::Curve(const nlohmann::json & model) {
+WorkCosts::Model::Model(const nlohmann::json & model) {
     for (const auto & [name, range] : model.at("bounds").get_ref<const nlohmann::json::object_t &>()) {
         const auto & values = range.get_ref<const nlohmann::json::array_t &>();
         if (values.size() != 2) throw std::invalid_argument("cost feature bounds require two coordinates");
@@ -55,6 +56,22 @@ WorkCosts::Curve::Curve(const nlohmann::json & model) {
             throw std::invalid_argument("cost feature bounds must be finite and ordered");
         bounds.emplace(name, Bound{ lower, upper });
     }
+    const auto & family = model.at("family");
+    if (family == "startup_transfer") {
+        axis = "transfer.bytes";
+        const auto & range = bounds.at(*axis);
+        const StartupTransfer transfer{ model.at("startup_ns").get<double>(), model.at("ns_per_byte").get<double>() };
+        if (bounds.size() != 1 || range.lower <= 0 || range.lower >= range.upper
+            || transfer.startup_ns < 0 || !std::isfinite(transfer.startup_ns)
+            || transfer.ns_per_byte <= 0 || !std::isfinite(transfer.ns_per_byte))
+            throw std::invalid_argument("a startup transfer model requires a positive byte range and a finite nonnegative service");
+        transfer.at(range.upper);
+        formula = transfer;
+        return;
+    }
+    if (family != "bounded_curve") throw std::invalid_argument("unknown service cost model family: " + family.dump());
+
+    auto & points = std::get<BoundedCurve>(formula).knots;
     if (!model.at("axis").is_null()) axis = model.at("axis").get<std::string>();
     for (const auto & row : model.at("knots").get_ref<const nlohmann::json::array_t &>()) {
         const auto & values = row.get_ref<const nlohmann::json::array_t &>();
@@ -78,22 +95,32 @@ WorkCosts::Curve::Curve(const nlohmann::json & model) {
     }
 }
 
-template<class Features>
-ServiceDuration WorkCosts::Curve::estimate(const Features & features) const {
-    double coordinate = 0;
-    for (const auto & [name, bound] : bounds) {
-        const auto value = features.value(name);
-        if (!value || !std::isfinite(*value) || *value < bound.lower || *value > bound.upper) return {};
-        if (axis && name == *axis) coordinate = *value;
-    }
-    if (!axis) return points.front().ns;
-    const auto right = std::ranges::lower_bound(points, coordinate, {}, &Point::coordinate);
+std::int64_t WorkCosts::BoundedCurve::at(double coordinate) const {
+    if (knots.size() == 1) return knots.front().ns;
+    const auto right = std::ranges::lower_bound(knots, coordinate, {}, &Point::coordinate);
     if (right->coordinate == coordinate) return right->ns;
     const auto & left = *std::prev(right);
     const long double fraction = (static_cast<long double>(coordinate) - left.coordinate)
         / (static_cast<long double>(right->coordinate) - left.coordinate);
     const long double service = left.ns + fraction * (static_cast<long double>(right->ns) - left.ns);
     return static_cast<std::int64_t>(std::nearbyint(service));
+}
+
+std::int64_t WorkCosts::StartupTransfer::at(double bytes) const {
+    const auto ns = std::nearbyint(startup_ns + static_cast<long double>(bytes) * ns_per_byte);
+    if (ns > std::numeric_limits<std::int64_t>::max()) throw std::out_of_range("transfer service exceeds signed nanoseconds");
+    return static_cast<std::int64_t>(ns);
+}
+
+template<class Features>
+ServiceDuration WorkCosts::Model::estimate(const Features & features) const {
+    double coordinate = 0;
+    for (const auto & [name, bound] : bounds) {
+        const auto value = features.value(name);
+        if (!value || !std::isfinite(*value) || *value < bound.lower || *value > bound.upper) return {};
+        if (axis && name == *axis) coordinate = *value;
+    }
+    return std::visit([coordinate](const auto & model) { return model.at(coordinate); }, formula);
 }
 
 template<class Definitions>
@@ -127,6 +154,8 @@ WorkCosts::WorkCosts(nlohmann::json domain, const nlohmann::json & asset, const 
         const auto definition = model.at("definition").get<std::size_t>();
         const auto interval = model.at("interval").get<std::size_t>();
         auto & phases = models_.at(definition).at(interval);
+        if (model.at("family") == "startup_transfer" && measured.at(definition).at("work").at(interval).at("kind") != "transfer")
+            throw std::invalid_argument("a startup transfer model must price a transfer interval");
         if (!phases.try_emplace(model.at("phase").get<std::string>(), model).second)
             throw std::invalid_argument("cost asset repeats a work interval and phase");
     }
@@ -171,6 +200,8 @@ WorkCosts::Estimate WorkCosts::estimate(std::optional<std::size_t> definition, s
 template<class Features>
 WorkCosts::Estimate WorkCosts::work_estimate(std::optional<std::size_t> definition, std::size_t interval, WorkKind kind,
                                             const Features & features) const {
+    if (kind == WorkKind::Transfer && features.transport())
+        return estimate(external_index(*features.transport(), kind), 0, features);
     const auto measured = estimate(definition, interval, features);
     if (measured.service_ns || kind != WorkKind::Collective || !features.transport()) return measured;
 
@@ -191,25 +222,24 @@ CostGap WorkCosts::gap(const Estimate & estimate, const WorkFeatures & features,
     }
     details["status"] = estimate.status();
     details["domain"] = domain_;
-    details["features"] = features.document(details.at("work") == work_name(WorkKind::Collective));
+    details["features"] = features.document();
     details["sample_bounds"] = std::move(bounds);
     return CostGap(std::move(details));
 }
 
 GraphTiming WorkCosts::timing(const CoarseGraph & graph, std::span<const TemplateInterval> origins, nlohmann::json * first_gap) const {
     if (origins.size() != graph.work.size()) throw std::logic_error("cost queries require one origin per instantiated work interval");
-    std::vector<std::optional<WorkFeatures>> features(graph.scopes.size());
+    WorkCoordinates coordinates(graph);
     GraphTiming result;
     result.work_ns.reserve(graph.work.size());
     for (std::size_t index = 0; index < graph.work.size(); ++index) {
         const auto & work = graph.work[index];
         const auto & origin = origins[index];
         const auto & scope = graph.scopes[work.scope];
-        auto & geometry = features[work.scope];
-        if (!geometry) geometry.emplace(scope);
-        const auto cost = work_estimate(model_indices_.at(origin.definition), origin.interval, work.kind, *geometry);
+        const auto & geometry = coordinates[coordinates.index(work)];
+        const auto cost = work_estimate(model_indices_.at(origin.definition), origin.interval, work.kind, geometry);
         if (!cost.service_ns && (!first_gap || first_gap->is_null())) {
-            auto missing = gap(cost, *geometry, {
+            auto missing = gap(cost, geometry, {
                 { "action_site", graph.scopes.front().info.site },
                 { "site", scope.info.site }, { "implementation", scope.info.implementation },
                 { "scope", scope.info.role }, { "work", work_name(work.kind) }, { "resource", graph.resources[work.resource].role },

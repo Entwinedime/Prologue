@@ -9,12 +9,15 @@ from pathlib import Path
 from uuid import uuid4
 
 from prologue.artifacts import write_json
-from prologue.integrations.frameworks.sglang.acquisition.domains import SourceDomain
 from prologue.integrations.runtimes.docker import OwnedContainers
 from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
 
 
-class CaptureProcess:
+class NativeAttempt:
+    @staticmethod
+    def image(name):
+        return json.loads(subprocess.check_output(["docker", "image", "inspect", name], text=True))[0]
+
     @staticmethod
     def attempts(directory):
         state = directory / "execution.json"
@@ -25,38 +28,17 @@ class CaptureProcess:
         attempts = cls.attempts(directory)
         return Usage(sum(row["charged_ns"] for row in attempts), len(attempts))
 
-    def __init__(self, arguments, launch, limit=None, *, latency_only=False, host_timing=False, service_reference=False) -> None:
-        self.arguments = arguments
-        self.host_timing = host_timing
-        self.latency_only = latency_only or host_timing
-        self.service_reference = service_reference
-        self.operation_limit = limit if limit is not None else OperationLimit()
-        self.options = launch.platform.options(detailed_timing=service_reference, host_timing=host_timing,
-                                               latency_only=latency_only and not host_timing)
-        self.worker_options = launch.worker_options(reference=service_reference or (latency_only and not host_timing))
-        self.model = Path(launch.serving.model["path"]).resolve(strict=True)
-        destination = str(Path(launch.serving.model["path"]).absolute())
+    def __init__(self, arguments, inputs, options, worker_options, mounts, limit=None):
+        self.arguments, self.inputs = arguments, inputs
+        self.options, self.worker_options, self.mounts = options, worker_options, mounts
         self.output = arguments.output.resolve()
-        if self.output == self.model or self.model in self.output.parents:
-            raise ValueError("capture output must not write inside the model directory")
+        self.operation_limit = limit if limit is not None else OperationLimit()
         if not math.isfinite(arguments.timeout) or arguments.timeout < 1e-9:
             raise ValueError("native timeout must be finite and at least one nanosecond")
         if not math.isfinite(arguments.budget_seconds) or arguments.budget_seconds < 0 or arguments.attempt_limit < 0:
             raise ValueError("native cumulative time and attempt allowances must be nonnegative")
         self.limit_ns = int(arguments.budget_seconds * 1_000_000_000)
         self.timeout_ns = int(arguments.timeout * 1_000_000_000)
-        image = json.loads(subprocess.check_output(["docker", "image", "inspect", arguments.source_image], text=True))[0]
-        self.inputs = {
-            "job": launch.job, "deployment": launch.platform.source, "image": image["Id"], "framework_revision": SourceDomain.image_revision(image),
-            "model_path": str(self.model), "model_destination": destination,
-            "resource_trace": arguments.resource_trace or service_reference,
-        }
-        if self.latency_only:
-            self.inputs["latency_only"] = True
-        if self.host_timing:
-            self.inputs["host_timing"] = True
-        if self.service_reference:
-            self.inputs["service_reference"] = True
 
     def save(self) -> None:
         write_json(self.output / "execution.json", self.state, indent=2)
@@ -65,7 +47,8 @@ class CaptureProcess:
         path = self.output / "execution.json"
         if path.exists():
             self.state = json.loads(path.read_text())
-            if self.state["inputs"] != self.inputs or json.loads((self.output / "input.json").read_text()) != self.inputs["job"]:
+            job = json.loads((self.output / "input.json").read_text())
+            if self.state["inputs"] != self.inputs or job != self.inputs["job"]:
                 raise ValueError("capture inputs, deployment or image changed; use a new task directory")
             return
         if any(path.name != ".lock" for path in self.output.iterdir()):
@@ -86,7 +69,8 @@ class CaptureProcess:
         # A retained container supplies exit evidence after client interruption; a raw manifest alone does not.
         owned.close()
         attempt["status"] = "exited" if attempt["exit_code"] == 0 else "failed"
-        attempt["error"] = None if attempt["status"] == "exited" else "interrupted native attempt; reserved time remains charged"
+        attempt["error"] = (None if attempt["status"] == "exited"
+                            else "interrupted native attempt; reserved time remains charged")
         self.save()
 
     def capture(self, allowance_ns: int) -> None:
@@ -96,16 +80,12 @@ class CaptureProcess:
         command = [
             "docker", "run", "--init", "--name", container, *self.options,
             "--workdir", str(Path.cwd()), "--entrypoint", "/usr/bin/timeout",
-            "--mount", f"type=bind,src={self.model},dst={self.inputs['model_destination']},readonly",
+            *self.mounts,
             "--mount", f"type=bind,src={self.output / 'input.json'},dst=/input.json,readonly",
             "--mount", f"type=bind,src={output},dst=/capture",
             self.inputs["image"], "--signal=KILL", f"{allowance_ns / 1_000_000_000}s", "/opt/prologue/capture.sh",
             "--input", "/input.json", "--output", "/capture/source",
             *self.worker_options,
-            *(["--resource-trace"] if self.arguments.resource_trace else []),
-            *(["--latency-only"] if self.latency_only and not self.host_timing else []),
-            *(["--host-timing"] if self.host_timing else []),
-            *(["--service-reference"] if self.service_reference else []),
         ]
         attempt = {
             "number": number, "container": container, "command": command, "timeout_ns": allowance_ns,
@@ -148,7 +128,7 @@ class CaptureProcess:
                 self.operation_limit.check()
                 self.capture(min(self.timeout_ns, self.limit_ns - spent_ns))
 
-            # A completed attempt is reused even if final publication was interrupted; no second Engine is needed.
+            # Publish from the successful attempt even if the coordinator stopped after the worker exited.
             source = self.output / "attempts" / str(attempts[-1]["number"]) / "source"
             capture = json.loads((source / "capture.json").read_text())
             write_json(self.output / "result.json", {

@@ -59,7 +59,8 @@ def main() -> None:
     costs.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
     costs.add_argument("--timeout", type=float, default=300, help="cumulative modeling allowance for cost checks in seconds")
     sampling = commands.add_parser("acquire-costs", help="fulfil known cost requirements with bounded native sampling")
-    sampling.add_argument("--production", type=Path, action="append", required=True, help="training source collection with intermediates")
+    sampling.add_argument("--production", type=Path, action="append", required=True,
+                          help="training sources for native cuts and samples; supply demand when no --demand or --gap is given")
     sampling.add_argument("--samples", type=Path, nargs="+", default=[], help="previously qualified training samples")
     sampling.add_argument("--demand", type=Path, nargs=2, action="append", default=[], metavar=("GRAPH", "WORK"))
     sampling.add_argument("--gap", type=Path, action="append", default=[], help="actual cost demand from a prior prediction")
@@ -106,10 +107,8 @@ def main() -> None:
 
         CaptureProduction(arguments, PublishedCapture(arguments.capture)).run()
     elif arguments.command == "capture":
-        from prologue.acquisition.capture import CaptureProcess
-
         launch = SGLangAscendLaunch(json.loads(arguments.input.read_text()), json.loads(arguments.deployment.read_text()))
-        CaptureProcess(arguments, launch, latency_only=arguments.latency_only, host_timing=arguments.host_timing,
+        launch.capture(arguments, latency_only=arguments.latency_only, host_timing=arguments.host_timing,
                        service_reference=arguments.service_reference).run()
     elif arguments.command == "cost-samples":
         from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples

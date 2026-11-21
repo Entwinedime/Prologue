@@ -1,0 +1,103 @@
+"""Time a synchronous PyTorch readback on one warmed, otherwise idle NPU."""
+
+import json
+from collections import defaultdict
+from threading import get_native_id
+from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
+
+from prologue.artifacts import write_json
+from prologue.integrations.platforms.ascend.host_profile import AscendRuntimeTiming
+from prologue.integrations.platforms.ascend.services import SynchronousCopy
+
+
+class TensorReadback:
+    methods = {"torch.Tensor.tolist": "tolist", "torch.Tensor.cpu": "cpu"}
+    implementation = "aclrtMemcpy"
+
+    @classmethod
+    def service(cls, caller):
+        return {"operation": "local_copy", "caller": caller, "implementation": cls.implementation,
+                "direction": "device_to_host", "resource": ["thread", "control"]}
+
+    @staticmethod
+    def now():
+        return clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+
+    def sample(self, job, directory, revision):
+        import torch
+
+        from prologue.integrations.platforms.ascend.markers import AscendMarkers
+
+        directory.mkdir(parents=True)
+        start = self.now()
+        actual = AscendMarkers.environment()
+        if torch.npu.device_count() != 1 or any(actual[key] != value for key, value in job["runtime"].items()):
+            raise ValueError("isolated readback requires the recorded runtime and exactly one visible NPU")
+
+        # All operands are contiguous views of a preallocated buffer. Allocation and first use precede timing.
+        operands = []
+        for operand in job["operands"]:
+            caller = operand["caller"]
+            read = getattr(torch.Tensor, self.methods[caller])
+            name, width = operand["dtype"], operand["element_bytes"]
+            sizes = [point["bytes"] for point in operand["points"]]
+            if width <= 0 or not sizes or any(type(size) is not int or size <= 0 or size % width for size in sizes):
+                raise ValueError("readback sizes must be positive whole numbers of tensor elements")
+            dtype = getattr(torch, name.removeprefix("torch."))
+            buffer = torch.zeros(max(sizes) // width, dtype=dtype, device="npu")
+            if buffer.element_size() != width or str(buffer.dtype) != name:
+                raise ValueError("isolated operand differs from its observed dtype or element width")
+            for size in sizes:
+                row = {"caller": caller, "dtype": name, "bytes": size, "observations_ns": [], "plain_call_ns": [],
+                       "timed_call_ns": [], "unmatched_calls": 0}
+                operands.append((read, buffer[:size // width], row))
+        AscendMarkers.synchronize()
+        prepared = self.now()
+        for read, tensor, _ in operands:
+            read(tensor)
+        warmed = self.now()
+
+        windows = []
+        path = directory / "runtime-timing.jsonl"
+        timing = AscendRuntimeTiming()
+        for enabled in (False, True):
+            if enabled:
+                timing.start()
+            try:
+                for _ in range(7):
+                    for read, tensor, row in operands:
+                        begin = self.now()
+                        read(tensor)
+                        end = self.now()
+                        row["timed_call_ns" if enabled else "plain_call_ns"].append(end - begin)
+                        if enabled:
+                            windows.append((row, format(tensor.data_ptr(), "x"), begin, end))
+            finally:
+                if enabled:
+                    timing.finish(path)
+        observed = self.now()
+
+        transfers = defaultdict(list)
+        with path.open() as stream:
+            for line in stream:
+                record = json.loads(line)
+                if (record["api"] == self.implementation and record["result"] == 0
+                        and record["thread"] == get_native_id()):
+                    transfers[record["source"], record["bytes"]].append(record)
+        for row, address, begin, end in windows:
+            matches = [call for call in transfers[address, row["bytes"]]
+                       if begin <= call["begin_raw_ns"] <= call["end_raw_ns"] <= end
+                       and SynchronousCopy.matches(call, address, row["bytes"])]
+            if len(matches) == 1:
+                row["observations_ns"].append(matches[0]["end_raw_ns"] - matches[0]["begin_raw_ns"])
+            else:
+                row["unmatched_calls"] += 1
+
+        rows = [row for _, _, row in operands]
+        write_json(directory / "services.json", rows, replace=False)
+        write_json(directory / "capture.json", {
+            "framework_revision": revision, "runtime": actual,
+            "services": {row["caller"]: self.service(row["caller"]) for row in rows},
+            "preparation_ns": prepared - start, "warmup_ns": warmed - prepared, "observation_ns": observed - warmed,
+            "measurements": "services.json",
+        }, replace=False)

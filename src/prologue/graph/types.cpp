@@ -63,6 +63,56 @@ nlohmann::json Resource::document() const {
     };
 }
 
+TensorRule TensorRule::read(const nlohmann::json & source) {
+    TensorRule result{ source.at("dtype").get<std::string>(), {} };
+    for (const auto & dimension : source.at("shape").get_ref<const nlohmann::json::array_t &>())
+        result.shape.push_back(Expression::read(dimension));
+    if (result.dtype.empty()) throw std::invalid_argument("tensor geometry requires a dtype");
+    return result;
+}
+
+nlohmann::json TensorRule::document() const {
+    auto dimensions = nlohmann::json::array();
+    for (const auto & expression : shape) dimensions.push_back(expression.document());
+    return {{ "dtype", dtype }, { "shape", std::move(dimensions) }};
+}
+
+TensorLayout TensorRule::evaluate(const Parameters & parameters) const {
+    TensorLayout result{ dtype, {} };
+    for (const auto & expression : shape) {
+        const auto dimension = expression.evaluate(parameters);
+        if (dimension < 0) throw std::invalid_argument("tensor rule produces a negative dimension");
+        result.shape.push_back(dimension);
+    }
+    return result;
+}
+
+std::shared_ptr<const TensorCopy> TensorCopy::read(const nlohmann::json & work) {
+    const auto found = work.find("copy");
+    if (found == work.end()) return {};
+    const auto & copy = *found;
+    TensorCopy result{ copy.at("operand").get<std::string>(), TensorRule::read(copy.at("tensor")),
+                       integer(copy.at("element_bytes")), copy.at("caller").get<std::string>(),
+                       copy.at("implementation").get<std::string>(), copy.at("direction").get<std::string>() };
+    if (work.at("kind") != "transfer" || result.operand.empty() || result.element_bytes <= 0 || result.caller.empty()
+        || result.implementation.empty() || result.direction.empty())
+        throw std::invalid_argument("a tensor copy requires a transfer interval, operand, element width and native service");
+    return std::make_shared<const TensorCopy>(std::move(result));
+}
+
+nlohmann::json TensorCopy::document() const {
+    return {{ "operand", operand }, { "tensor", tensor.document() }, { "element_bytes", element_bytes },
+            { "caller", caller }, { "implementation", implementation }, { "direction", direction }};
+}
+
+std::int64_t TensorCopy::bytes(const Parameters & parameters) const {
+    auto size = element_bytes;
+    for (const auto extent : tensor.evaluate(parameters).shape) {
+        if (__builtin_mul_overflow(size, extent, &size)) throw std::overflow_error("copy operand byte extent exceeds the supported range");
+    }
+    return size;
+}
+
 TensorObservation TensorObservation::read(const nlohmann::json & source) {
     TensorObservation result{ source.at("value").get<std::string>(),
                               source.at("storage").get<std::string>(),

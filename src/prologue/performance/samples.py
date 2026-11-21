@@ -10,13 +10,11 @@ class RendezvousService:
     upper_ns: int
 
     @classmethod
-    def after_peers(cls, local_duration, completion, peer_readiness):
-        lower, upper = local_duration
+    def after_peers(cls, spans):
 
-        # Service ends at this endpoint and starts when both it and its required peers are ready.
-        for first, last in peer_readiness:
-            lower = min(lower, completion[0] - last)
-            upper = min(upper, completion[1] - first)
+        # Starting at the last ready endpoint gives the shortest of the measured finish-minus-ready spans.
+        lower = min(first for first, _ in spans)
+        upper = min(last for _, last in spans)
         if lower > 0 or lower == upper == 0:
             return cls(lower, upper)
         return None
@@ -36,7 +34,8 @@ class WorkCatalog:
         if self.window != identities["window_ns"]:
             raise ValueError("work identities and coarse graph come from different native observations")
         self.positions = {
-            (start, finish): (definition, interval) for start, finish, definition, interval in identities["intervals"]
+            (start, finish): (definition, interval, point)
+            for start, finish, definition, interval, point in identities["intervals"]
         }
         expected = {(piece["start"], piece["finish"]) for piece in self.graph["work"]}
         if (len(expected) != len(self.graph["work"]) or expected != self.positions.keys()
@@ -45,19 +44,16 @@ class WorkCatalog:
 
     def __iter__(self):
         for piece in self.graph["work"]:
-            definition, interval = self.positions[piece["start"], piece["finish"]]
+            definition, interval, point = self.positions[piece["start"], piece["finish"]]
             if self.definitions[definition]["work"][interval]["kind"] != piece["kind"]:
                 raise ValueError("normalized work identity changes the measured interval kind")
-            features = self.features[piece["scope"]]
-            if "transport" in features and piece["kind"] != "collective":
-                features = {"phase": features["phase"], "axes": features["axes"]}
-            yield piece, definition, interval, features
+            yield piece, definition, interval, self.features[point]
 
 
 class ServiceSamples:
-    def __init__(self, catalog, *, external_only=False):
-        self.catalog = catalog
-        self.definitions = [] if external_only else list(catalog.definitions)
+    def __init__(self, domain, definitions=()):
+        self.domain = domain
+        self.definitions = list(definitions)
         self.rows = {}
         self.external = {}
 
@@ -85,6 +81,6 @@ class ServiceSamples:
 
     def document(self, unmeasured):
         return {
-            "domain": self.catalog.domain, "definitions": self.definitions,
+            "domain": self.domain, "definitions": self.definitions,
             "samples": list(self.rows.values()), "unmeasured": dict(unmeasured),
         }

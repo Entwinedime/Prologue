@@ -1,0 +1,193 @@
+"""Choose native measurements from work actually observed in an SGLang deployment."""
+
+import json
+from collections import defaultdict
+from pathlib import Path
+
+from prologue.acquisition.capture import NativeAttempt
+from prologue.acquisition.recording import PublishedCapture
+from prologue.artifacts import write_json
+from prologue.integrations.frameworks.sglang.ascend.attention_window import DecodeWindow
+from prologue.integrations.frameworks.sglang.ascend.host_samples import HostCostSamples
+from prologue.integrations.platforms.ascend.copy_sampling import TensorReadback
+from prologue.integrations.platforms.ascend.deployment import AscendDeployment
+from prologue.performance.requirements import cost_identity
+from prologue.performance.samples import ServiceSamples
+
+
+class HostWindow:
+    def __init__(self, owner, name, job, *, primed=False):
+        self.owner, self.name, self.job = owner, name, job
+        self.points, self.primed = owner.host_points, primed
+        self.measured = cost_identity(job) in owner.measured_host
+
+    @property
+    def ready(self):
+        return not self.measured and (self.owner.cold or not self.primed)
+
+    def collect(self, arguments, requested, limit):
+        source = self.owner.source
+        launch = type(self.owner.launch)(self.job, source.deployment)
+        launch.require_recorded_placement(source.recording.inputs["deployment"])
+        arguments.source_image = source.recording.inputs["image"]
+        launch.capture(arguments, limit, host_timing=True).run()
+
+    def samples(self, output, acquisition):
+        source, work = self.owner.source, self.owner.source.projection / "work"
+        for rank in source.ranks:
+            path = source.output / f"{self.name}-{rank}-host.json"
+            sample = acquisition.samples_from(path, "host-cost-samples", detailed=source.recording.directory, host=output,
+                                             facts=work / f"{rank}-facts.json", trace=work / f"{rank}-sdk/trace.json",
+                                             graph=work / f"{rank}-graph.json", work_identities=source.output / f"{rank}-work.json")
+            self.owner.cold |= bool(sample["qualification"]["excluded_cold_scopes"])
+            yield path, sample
+
+
+class LocalCopyWindow:
+    ready = True
+    services = {cost_identity(TensorReadback.service(caller)): caller for caller in TensorReadback.methods}
+
+    def __init__(self, owner, card, domain):
+        self.owner, self.card = owner, card
+        self.name = f"local-copy-card-{card}"
+        self.domains, self.roles, self.points = {}, {}, {}
+        self.runtime = {key: domain[key] for key in ("device", "torch", "torch_npu")}
+
+    @staticmethod
+    def operand(point, definition):
+        declared = definition["work"][point.interval].get("copy")
+        if not declared or LocalCopyWindow.services.get(point.transport) != declared["caller"]:
+            return None
+        return declared["caller"], declared["tensor"]["dtype"], declared["element_bytes"]
+
+    def observe(self, rank, domain, point, operand):
+        if any(domain[key] != value for key, value in self.runtime.items()):
+            raise ValueError("roles observed on the same physical card disagree about its native runtime")
+        self.domains[rank] = domain
+        self.roles[point.domain, operand] = rank
+
+    def select(self, demand):
+        for point in demand.points:
+            if point.transport not in self.services:
+                continue
+            operand = self.operand(point, demand.definitions[point.definition])
+            rank = self.roles.get((point.domain, operand))
+            if rank is None:
+                continue
+            size = dict(point.axes)["transfer.bytes"]
+            if type(size) is int and size > 0 and size % operand[2] == 0:
+                self.points[point] = rank, operand, size
+
+    def collect(self, arguments, requested, limit):
+        launch, recording = self.owner.launch, self.owner.source.recording
+        launch.require_recorded_placement(recording.inputs["deployment"])
+        platform = AscendDeployment({"acquisition_mode": "single_device", "physical_devices": [self.card]}, 1, False)
+        image = NativeAttempt.image(arguments.source_image)
+        revision = launch.image_revision(image)
+        if revision != recording.inputs["framework_revision"]:
+            raise ValueError("isolated sampler and originating templates use different framework revisions")
+
+        operands = defaultdict(lambda: defaultdict(set))
+        for point in requested:
+            rank, operand, size = self.points[point]
+            operands[operand][size].add(rank)
+        job = {
+            "runtime": self.runtime,
+            "operands": [{"caller": caller, "dtype": dtype, "element_bytes": width,
+                          "points": [{"bytes": size, "ranks": sorted(ranks)} for size, ranks in sorted(sizes.items())]}
+                         for (caller, dtype, width), sizes in sorted(operands.items())],
+        }
+        if (arguments.output / "execution.json").is_file():
+
+            # A completed or interrupted session owns its original selection even if another recipe now covers a point.
+            job = json.loads((arguments.output / "input.json").read_text())
+        inputs = {
+            "job": job, "deployment": platform.source, "image": image["Id"], "framework_revision": revision,
+            "training_capture": str(recording.directory),
+        }
+        NativeAttempt(arguments, inputs, platform.options(), ["--local-copy"], [], limit).run()
+
+    def samples(self, output, acquisition):
+        recording = PublishedCapture(output)
+        manifest = recording.manifest
+        operands = recording.inputs["job"]["operands"]
+        if manifest["services"] != {op["caller"]: TensorReadback.service(op["caller"]) for op in operands}:
+            raise ValueError("isolated sampler measured different native services")
+        measured = json.loads((recording.source / manifest["measurements"]).read_text())
+        rows = {(row["caller"], row["dtype"], row["bytes"]): row for row in measured}
+        results, missing = {}, defaultdict(int)
+        for operand in operands:
+            service = manifest["services"][operand["caller"]]
+            for point in operand["points"]:
+                row = rows[operand["caller"], operand["dtype"], point["bytes"]]
+                features = {"phase": "", "axes": {"transfer.bytes": row["bytes"]}}
+                for rank in point["ranks"]:
+                    if rank not in results:
+                        results[rank] = ServiceSamples(self.domains[rank])
+                    for duration in row["observations_ns"]:
+                        results[rank].add_external(service, "transfer", features, duration)
+                    missing[rank] += row["unmatched_calls"]
+        for rank, samples in results.items():
+            path = self.owner.source.output / f"{self.name}-{rank}.json"
+            report = samples.document({"unmatched_calls": missing[rank]})
+            report["observation"] = {
+                "sampling": str(output), "training_capture": recording.inputs["training_capture"], "rank": rank,
+                "physical_device": self.card, "sampling_image": recording.inputs["image"],
+            }
+            write_json(path, report)
+            yield path, report
+
+
+class SGLangSampling:
+    def __init__(self, launch, source):
+        self.launch, self.source = launch, source
+        self.host_points, self.copies = set(), {}
+        self.attention = DecodeWindow(self)
+        self.cold = False
+        self.measured_host = set()
+        self.external = HostCostSamples.external_work(source.recording.source)
+
+    def observe(self, rank, target, catalog, demand):
+        self.attention.observe(rank, catalog)
+        platform = self.launch.platform
+        card = platform.devices[0 if platform.single_device else rank]
+        for point in demand.graph(target, catalog):
+            definition = demand.definitions[point.definition]
+            interval = definition["work"][point.interval]
+            if HostCostSamples.supports(interval, definition["resources"][interval["resource"]]):
+                self.host_points.add(point)
+            elif operand := LocalCopyWindow.operand(point, definition):
+                if card not in self.copies:
+                    self.copies[card] = LocalCopyWindow(self, card, catalog.domain)
+                self.copies[card].observe(rank, catalog.domain, point, operand)
+        for identity, kind, features in self.external[rank]:
+            self.host_points.add(demand.external(target, catalog.domain, identity, kind, features))
+
+    def windows(self, demand, samples):
+        receipts = set()
+        for sample in samples:
+            observation = sample.get("observation", {})
+            if observation.get("detailed") == str(self.source.recording.directory) and "host" in observation:
+                self.cold |= bool(sample["qualification"]["excluded_cold_scopes"])
+                receipts.add(Path(observation["host"]))
+        for path in receipts:
+
+            # Imported standalone samples remain usable even when their native session is not available for replay.
+            if (path / "result.json").is_file():
+                self.measured_host.add(cost_identity(PublishedCapture(path).inputs["job"]))
+
+        for window in self.copies.values():
+            window.select(demand)
+            if window.points:
+                yield window
+        self.attention.select(demand)
+        if self.attention.points:
+            yield self.attention
+        job, serving = self.launch.job, self.launch.serving
+        yield HostWindow(self, "observed-submission", job)
+        if serving.warmup != serving.workload:
+            yield HostWindow(self, "primed-submission", {**job, "warmup": job["workload"]}, primed=True)
+        if any(len(group) != 1 for group in serving.submission_groups):
+            groups = [[request["id"]] for request in serving.workload["requests"]]
+            separate = {**job, "submission_groups": groups, "warmup": job["workload"]}
+            yield HostWindow(self, "individual-requests", separate)

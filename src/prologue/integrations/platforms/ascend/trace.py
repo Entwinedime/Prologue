@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from prologue.integrations.platforms.ascend.clock import AscendClock, HostCounter
+from prologue.integrations.platforms.ascend.notifications import HcclNotifications
 from prologue.integrations.platforms.ascend.queues import NativeQueues, ServiceExecutions, queue_marker
 
 
@@ -108,7 +109,7 @@ class AscendTrace:
     })
     stream_waits = frozenset({"aclrtStreamWaitEvent", "aclrtStreamWaitEventWithTimeout"})
 
-    def __init__(self, profile: Path, runtime: Path, raw: dict, trace: Path) -> None:
+    def __init__(self, profile: Path, runtime: Path, raw: dict, trace: Path, *, evidence=False) -> None:
         native_points = {index for index, point in enumerate(raw["points"]) if point["side"] == "signal"}
         services = [scope for scope in raw["scopes"] if "service" in scope]
         self.closed_scopes = set()
@@ -123,6 +124,7 @@ class AscendTrace:
         device, = self.cann.glob("device_*")
         self.clock = AscendClock(device, raw["device_clock"])
         rows = json.loads(trace.read_text(), parse_float=Decimal)
+        self.notifications = HcclNotifications(rows) if evidence else None
         flips = self.task_flips(profile)
         intervals = [self.device_interval(row) if "Task Type" in row.get("args", {}) else Interval.read(row, counter)
                      for row in rows if row.get("ph") == "X"

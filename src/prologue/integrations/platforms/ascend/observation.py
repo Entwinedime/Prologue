@@ -10,14 +10,16 @@ from typing import Any
 
 from prologue.integrations.platforms.ascend.commands import NativeStreamCall, StreamCommand, StreamCommands
 from prologue.integrations.platforms.ascend.host_alignment import ThreadService
+from prologue.integrations.platforms.ascend.services import SynchronousCopy
 from prologue.integrations.platforms.ascend.trace import AscendTrace, Interval, ThreadIntervals
 from prologue.acquisition.observation.observation import ObservationReferences
 
 
 class AscendObservation:
-    def __init__(self, directory: Path, rank: int, raw: dict, trace: Path) -> None:
+    def __init__(self, directory: Path, rank: int, raw: dict, trace: Path, *, evidence: bool) -> None:
         self.raw = raw
         self.rank = rank
+        self.evidence = evidence
         if raw["environment"]["parallel"]["rank"] != rank:
             raise ValueError("worker recording differs from the requested rank")
         activity = raw["host_observation"].get("activity")
@@ -25,7 +27,7 @@ class AscendObservation:
             raise ValueError("CPU activity file differs from the observed rank")
         self.activity_path = None if activity is None else directory / activity
         profile, = (directory / "native" / f"rank-{rank}").glob("*_ascend_pt")
-        self.trace = AscendTrace(profile, directory / "runtime", raw, trace)
+        self.trace = AscendTrace(profile, directory / "runtime", raw, trace, evidence=evidence)
         self.streams = StreamCommands(self.trace)
         self.control_threads = {interval.thread for scope, interval in self.trace.scopes.items() if "service" not in raw["scopes"][scope]}
         self.resources = []
@@ -39,6 +41,7 @@ class AscendObservation:
         self.services = {}
         self.payload = []
         self.collectives = {}
+        self.collective_notifications = {}
         self.host_copies = []
         self.signal_inputs = {}
         self.work_completions = {}
@@ -207,14 +210,18 @@ class AscendObservation:
             origin = self.trace.origin(self.trace.native_api(native))
             owner = self.trace.owner(origin)
             if owner is not None and owner not in self.trace.closed_scopes and self.trace.excluded_ranges.enclosing(origin) is None:
-                self.host_transfer(owner, native, native.record["direction"])
+                operand = SynchronousCopy.operand(native.record, self.raw["scopes"][owner])
+                self.host_transfer(owner, native, native.record["direction"], operand)
         self.host_index = self.span_index("thread")
 
-    def host_transfer(self, scope: int, interval: Interval, direction: int) -> None:
+    def host_transfer(self, scope: int, interval: Interval, direction: int, operand: dict | None = None) -> None:
         resource = self.resource("thread", interval.thread, "native")
         span = self.span(scope, resource, interval.begin, interval.end, "transfer")
         self.resources[resource]["payload"].append([interval.begin, interval.end])
         self.host_copies.append((scope, span, interval, direction))
+        if operand is not None:
+            self.spans[span]["copy"] = operand
+            self.spans[span]["operand_bytes"] = interval.record["bytes"]
 
     def service_spans(self) -> None:
         for scope, raw in enumerate(self.raw["scopes"]):
@@ -400,6 +407,8 @@ class AscendObservation:
             else:
                 self.span(scope, resource, begin, end, "collective")
             self.collectives[scope] = (resource, begin, end, self.trace.dequeue[correlation])
+            if self.evidence and (signals := self.trace.notifications.observed(tasks, self.trace.clock)):
+                self.collective_notifications[scope] = signals
         self.device_index = self.span_index("stream")
 
     def auxiliary_stream_spans(self) -> None:
@@ -871,7 +880,7 @@ class AscendObservation:
                 before = timestamp
         return result
 
-    def document(self, measurements: bool = False) -> dict[str, Any]:
+    def document(self) -> dict[str, Any]:
         self.host_spans()
         self.service_spans()
         self.device_spans()
@@ -904,7 +913,7 @@ class AscendObservation:
             "spans": self.spans, "dependencies": self.dependencies,
         }
         self.normalize_device_spans(result)
-        if measurements:
+        if self.evidence:
             result["measurements"] = self.streams.measurements(result)
             if self.activity_path is not None:
                 result["measurements"]["host_service_positions"] = self.host_service_positions(result["measurements"]["coordinates"])
@@ -917,6 +926,8 @@ class AscendObservation:
                 scope: self.raw["scopes"][scope]["peer_rows"] for scope in self.collectives
                 if "peer_rows" in self.raw["scopes"][scope]
             }
+            if self.collective_notifications:
+                result["measurements"]["collective_notifications"] = self.collective_notifications
             result["measurements"]["synchronous_transfers"] = self.transfer_times()
             result["native_effects"] = self.streams.evidence(self.resource_ids)
         return result

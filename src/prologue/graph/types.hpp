@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -79,6 +80,29 @@ struct TensorLayout {
     std::vector<std::int64_t> shape;
 
     bool operator==(const TensorLayout &) const = default;
+};
+
+struct TensorRule {
+    std::string dtype;
+    std::vector<Expression> shape;
+
+    static TensorRule read(const nlohmann::json & source);
+    nlohmann::json document() const;
+    TensorLayout evaluate(const Parameters & parameters) const;
+};
+
+// The observed operand belongs to the service. It need not cross the scheduling boundary.
+struct TensorCopy {
+    std::string operand;
+    TensorRule tensor;
+    std::int64_t element_bytes;
+    std::string caller;
+    std::string implementation;
+    std::string direction;
+
+    static std::shared_ptr<const TensorCopy> read(const nlohmann::json & work);
+    nlohmann::json document() const;
+    std::int64_t bytes(const Parameters & parameters) const;
 };
 
 struct StorageBinding {

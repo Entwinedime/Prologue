@@ -143,11 +143,13 @@ class ResourceCalls:
 
         # The native splice has a different body when there are no existing entries to join.
         condition = {}
+        readbacks = {}
         if width and native:
             destination = owner.release_pages if owner.need_sort else owner.free_pages
             condition["release_target_empty"] = destination.numel() == 0
+            readbacks["free_index"] = indices, ["release_tokens"], "torch.Tensor.cpu"
         with self.calls.call("pages.free", original, parameters=parameters, work=parent.work, guards=tuple(guards),
-                             condition=condition) as frame:
+                             condition=condition, local_readbacks=readbacks) as frame:
             destination_empty = original(*args, **kwargs)
             if width and not native:
                 frame.condition["release_target_empty"] = destination_empty

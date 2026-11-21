@@ -60,7 +60,7 @@ CoarseGraph CoarseGraph::read(const nlohmann::json & source) {
                                 identity(piece.at("resource")),
                                 work_kind(piece.at("kind").get<std::string>()),
                                 identity(piece.at("start")),
-                                identity(piece.at("finish")) });
+                                identity(piece.at("finish")), TensorCopy::read(piece) });
     for (const auto & edge : source.at("edges").get_ref<const nlohmann::json::array_t &>())
         result.edges.push_back({ identity(edge.at("source")), identity(edge.at("target")), relation_kind(edge.at("kind").get<std::string>()) });
 
@@ -121,7 +121,7 @@ nlohmann::json CoarseGraph::document(bool include_environment) const {
             {    "scope",    event.scope },
             { "resource", event.resource }
         });
-    for (const auto & piece : work)
+    for (const auto & piece : work) {
         result["work"].push_back({
             {    "scope",           piece.scope },
             { "resource",        piece.resource },
@@ -129,6 +129,8 @@ nlohmann::json CoarseGraph::document(bool include_environment) const {
             {    "start",           piece.start },
             {   "finish",          piece.finish }
         });
+        if (piece.copy) result["work"].back()["copy"] = piece.copy->document();
+    }
     for (const auto & edge : edges)
         result["edges"].push_back({
             { "source",              edge.source },
@@ -233,8 +235,10 @@ ActionLayout CoarseGraph::action_layout() const {
     std::sort(interfaces.begin(), interfaces.end());
 
     auto intervals = nlohmann::json::array();
-    for (const auto & piece : work)
+    for (const auto & piece : work) {
         intervals.push_back({scope_ids[piece.scope], work_name(piece.kind), event_ids[piece.start], event_ids[piece.finish]});
+        if (piece.copy) intervals.back().push_back(piece.copy->document());
+    }
     std::sort(intervals.begin(), intervals.end());
     result.identity = {std::move(logical_resources), std::move(declarations), std::move(interfaces), std::move(intervals)};
     return result;
@@ -356,6 +360,7 @@ void CoarseGraph::validate() const {
             throw std::invalid_argument("work interval changes resource between entry and completion");
         if (!contains(events[piece.start].scope, piece.scope) || !contains(events[piece.finish].scope, piece.scope))
             throw std::invalid_argument("work interval is owned by an unrelated semantic scope");
+        if (piece.copy) piece.copy->bytes(scopes[piece.scope].info.parameters);
         if (piece.kind == WorkKind::Collective) {
             const auto & group = scopes[piece.scope].communication;
             if (!group || std::ranges::find(group->required, group->rank) == group->required.end()

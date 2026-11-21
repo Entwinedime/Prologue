@@ -69,7 +69,10 @@ class NativeInputs:
             if layouts is not None:
                 layout = layouts[str(index)]
                 record["layout"] = self.layout_values.intern(layout["identity"])
-                record["services"] = [[start, finish] for _, _, start, finish in layout["identity"][-1]
+
+                # The full work signature selects the graph. Timing consumes only its two event coordinates.
+                work_endpoints = (interval[2:4] for interval in layout["identity"][-1])
+                record["services"] = [[start, finish] for start, finish in work_endpoints
                                       if (layout["events"][start], layout["events"][finish]) in services]
                 record["endpoints"] = []
                 for event in layout["events"]:

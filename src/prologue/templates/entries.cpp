@@ -122,7 +122,7 @@ public:
         }
         for (const auto identity : work_ids_) {
             const auto & piece = source_.work[identity];
-            graph_.work.push_back({ scope_ids_.at(piece.scope), piece.resource, piece.kind, event_ids_.at(piece.start), event_ids_.at(piece.finish) });
+            graph_.work.push_back({ scope_ids_.at(piece.scope), piece.resource, piece.kind, event_ids_.at(piece.start), event_ids_.at(piece.finish), piece.copy });
         }
         for (const auto & [target, _] : event_ids_) {
             for (const auto identity : extraction_.incoming_[target]) connect(source_.edges[identity]);

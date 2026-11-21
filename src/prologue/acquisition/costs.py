@@ -1,4 +1,4 @@
-"""Publish one bounded set of costs using observed graphs and native host recipes."""
+"""Acquire missing work coordinates from existing evidence or a bounded native measurement."""
 
 import fcntl
 import filecmp
@@ -12,17 +12,16 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
-from prologue.artifacts import write_json
-from prologue.integrations.frameworks.sglang.ascend.host_samples import HostCostSamples
-from prologue.acquisition.capture import CaptureProcess
+from prologue.acquisition.capture import NativeAttempt
+from prologue.acquisition.fitting import FitCosts
 from prologue.acquisition.production import CaptureProduction
+from prologue.acquisition.publication import SourceProductions
 from prologue.acquisition.recording import PublishedCapture
+from prologue.artifacts import write_json
 from prologue.integrations.runtimes.docker import ModelingCommand, OwnedContainers
 from prologue.performance.requirements import CostRequirements
 from prologue.performance.samples import WorkCatalog
-from prologue.acquisition.fitting import FitCosts
 from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
-from prologue.acquisition.publication import SourceProductions
 
 
 def read(path):
@@ -38,9 +37,6 @@ class CostSource:
             raise ValueError("training production belongs to a different native observation")
         self.ranks = read(production / "result.json")["observed_roles"]
         self.projection = production
-        self.recipes = {recipe.name: recipe for recipe in HostCostSamples.recipes(job)}
-        self.host_points = set()
-        self.cold = False
 
 
 class CostAcquisition:
@@ -50,7 +46,8 @@ class CostAcquisition:
         self.reuse_samples = reuse_samples
         self.output = args.output.resolve()
         self.binary = args.binary.resolve(strict=True)
-        if any(not math.isfinite(value) or value < 1e-9 for value in (args.timeout, args.postprocessing_budget_seconds)):
+        durations = args.timeout, args.postprocessing_budget_seconds
+        if any(not math.isfinite(value) or value < 1e-9 for value in durations):
             raise ValueError("cost acquisition needs positive finite time allowances")
         if (not math.isfinite(args.native_budget_seconds) or args.native_budget_seconds < 0
                 or args.attempt_limit < 0 or args.storage_bytes <= 0):
@@ -59,7 +56,7 @@ class CostAcquisition:
                             int(args.postprocessing_budget_seconds * 1e9))
         self.limit = limit if limit is not None else OperationLimit(self.output, args.storage_bytes)
         self.images = {
-            role: subprocess.check_output(["docker", "image", "inspect", image, "--format", "{{.Id}}"], text=True).strip()
+            role: NativeAttempt.image(image)["Id"]
             for role, image in (("source", args.source_image), ("modeling", args.modeling_image))
         }
 
@@ -107,7 +104,9 @@ class CostAcquisition:
                 raise ValueError("cost acquisition must own an output outside its training sources")
             if production not in self.sources:
                 directory = self.output / "sources" / str(len(self.sources))
-                source = CostSource(production, capture, bundle.jobs[str(identity)], bundle.deployment, directory)
+                job = bundle.jobs[str(identity)]
+                source = CostSource(production, capture, job, bundle.deployment, directory)
+                source.sampling = self.place(job, bundle.deployment).sampling(source)
                 self.sources[production] = source
                 yield source
 
@@ -176,9 +175,7 @@ class CostAcquisition:
         for name, value in {**inputs, "output": output}.items():
             command.extend(("--" + name.replace("_", "-"), str(value)))
         self.command(output, command)
-        sample = read(output)
-        self.samples[output] = sample
-        return sample
+        return read(output)
 
     def project(self, source):
         if all((source.production / "work" / f"{rank}-{file}").is_file()
@@ -198,7 +195,6 @@ class CostAcquisition:
 
     def inspect(self, source, requirements):
         self.project(source)
-        external = HostCostSamples.external_work(source.recording.source)
         for rank in source.ranks:
             work = source.projection / "work"
             graph = work / f"{rank}-graph.json"
@@ -206,57 +202,46 @@ class CostAcquisition:
             self.run_model("work-identities", identities, graph)
             with self.processing():
                 catalog = WorkCatalog(graph, identities)
-                for point in requirements.graph(str(graph), catalog):
-                    definition = requirements.definitions[point.definition]
-                    interval = definition["work"][point.interval]
-                    if HostCostSamples.supports(interval, definition["resources"][interval["resource"]]):
-                        source.host_points.add(point)
-                for identity, kind, features in external[rank]:
-                    source.host_points.add(requirements.external(str(graph), catalog.domain, identity, kind, features))
+                source.sampling.observe(rank, str(graph), catalog, requirements)
 
             # The same detailed observation must not contribute device durations twice.
             observation = {"production": str(source.production), "rank": rank}
             if not any(sample.get("observation") == observation for sample in self.samples.values()):
                 projection = {"projection": source.projection} if source.projection != source.production else {}
-                self.samples_from(source.output / f"{rank}-device.json", "cost-samples", production=source.production,
-                                  rank=rank, work_identities=identities, **projection)
+                path = source.output / f"{rank}-device.json"
+                self.samples[path] = self.samples_from(path, "cost-samples", production=source.production, rank=rank,
+                                                       work_identities=identities, **projection)
 
     @staticmethod
     def projection_usage(directory):
-        return Usage.total(CaptureProduction.usage(path.parent) for path in directory.glob("sources/*/projection/production.json"))
+        states = directory.glob("sources/*/projection/production.json")
+        return Usage.total(CaptureProduction.usage(path.parent) for path in states)
 
     @classmethod
     def spending(cls, directory):
         state = directory / "execution.json"
         processing = Usage(processing_ns=read(state)["postprocessing_ns"]) if state.is_file() else Usage()
-        native = (CaptureProcess.usage(path.parent) for path in directory.glob("sources/*/*/execution.json"))
+        native = (NativeAttempt.usage(path.parent) for path in directory.glob("sources/*/*/execution.json"))
         return Usage.total((processing, cls.projection_usage(directory), *native))
 
-    def measure(self, source, recipe, allowance_ns):
-        output = source.output / recipe
-        origin = source.recording.inputs
-        launch = self.place(source.recipes[recipe].job, source.deployment)
-        launch.require_recorded_placement(origin["deployment"])
-        CaptureProcess(SimpleNamespace(
-            output=output, timeout=self.args.timeout,
-            budget_seconds=allowance_ns / 1e9, attempt_limit=1, source_image=origin["image"], resource_trace=False,
-        ), launch, self.limit, host_timing=True).run()
-        for rank in source.ranks:
-            work = source.projection / "work"
-            sample = self.samples_from(
-                source.output / f"{recipe}-{rank}-host.json", "host-cost-samples", detailed=source.recording.directory, host=output,
-                facts=work / f"{rank}-facts.json", trace=work / f"{rank}-sdk/trace.json",
-                graph=work / f"{rank}-graph.json", work_identities=source.output / f"{rank}-work.json",
-            )
-            source.cold |= bool(sample["qualification"]["excluded_cold_scopes"])
+    def measure(self, recipe, output, requested, allowance_ns):
+        arguments = SimpleNamespace(
+            output=output, timeout=self.args.timeout, budget_seconds=allowance_ns / 1e9,
+            attempt_limit=1, source_image=self.images["source"], resource_trace=False,
+        )
+        recipe.collect(arguments, requested, self.limit)
+        self.samples.update(recipe.samples(output, self))
 
     def fit(self):
         return FitCosts.qualify(self.samples, self.demand, self, self.output, self.reuse_samples, self.processing)
 
     def acquire(self):
+        explicit = bool(self.graphs or self.gaps)
         for collection in self.collections:
             for source in self.load_sources(collection):
-                self.inspect(source, self.demand)
+
+                # A training graph locates native cuts. It supplies demand only for a cold, unscoped acquisition.
+                self.inspect(source, CostRequirements() if explicit else self.demand)
         with self.processing():
             for graph, identities in self.graphs.items():
                 if str(graph) not in self.demand.targets:
@@ -273,51 +258,44 @@ class CostAcquisition:
                     self.inspect(source, CostRequirements())
             fitted, reused, counts, missing = self.fit()
 
-        candidates = {(source, recipe): CaptureProcess.attempts(source.output / recipe)
-                      for source in self.sources.values() for recipe in source.recipes}
-        explicit = {str(path) for path in (*self.graphs, *self.gaps)}
-        focus = {point for point, targets in self.demand.points.items() if explicit.intersection(targets)}
+        candidates = {recipe: source.output / recipe.name for source in self.sources.values()
+                      for recipe in source.sampling.windows(self.demand, self.samples.values())}
+        observed = set().union(*(recipe.points for recipe in candidates))
         evidence = []
         deferred = set()
         while candidates and missing:
-
-            # Prefer caller-supplied demand when training-only points compete for a native attempt.
-            requested = {source: source.host_points & missing.keys() for source in self.sources.values()}
-            applicable = [(source, recipe) for source, recipe in candidates if requested[source]
-                          and (source.cold or not source.recipes[recipe].requires_cold)]
+            applicable = {recipe: missing.keys() & recipe.points for recipe in candidates if recipe.ready}
+            applicable = {recipe: points for recipe, points in applicable.items() if points}
             if not applicable:
                 break
-            source, recipe = max(applicable, key=lambda key: (
-                bool(candidates[key]), len(requested[key[0]] & focus), len(requested[key[0]]),
-            ))
-            output = source.output / recipe
-            previous = candidates[source, recipe]
+            attempts = {recipe: NativeAttempt.attempts(candidates[recipe]) for recipe in applicable}
+            recipe = max(applicable, key=lambda candidate: (bool(attempts[candidate]), len(applicable[candidate])))
+            output, requested, previous = candidates.pop(recipe), applicable[recipe], attempts[recipe]
             spent = self.spending(self.output)
             allowance = max(0, self.budget.native_ns - spent.native_ns)
             if not previous and (not allowance or spent.attempts >= self.budget.attempts):
-                deferred.update(*(candidate.host_points for candidate, _ in applicable))
+                deferred.update(*applicable.values())
                 break
 
-            del candidates[source, recipe]
-            row = {"capture": str(output.relative_to(self.output)), "candidate_points": len(requested[source])}
+            row = {"capture": str(output.relative_to(self.output)), "candidate_points": len(requested)}
             evidence.append(row)
             if previous and previous[-1]["status"] == "failed":
                 row["status"] = "capture_failed"
                 continue
             try:
-                self.measure(source, recipe, allowance + sum(attempt["charged_ns"] for attempt in previous))
+                self.measure(recipe, output, requested, allowance + sum(attempt["charged_ns"] for attempt in previous))
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError):
-                attempts = CaptureProcess.attempts(output)
-                if not attempts or attempts[-1]["status"] != "failed":
+                failed = NativeAttempt.attempts(output)
+                if not failed or failed[-1]["status"] != "failed":
                     raise
                 self.limit.check()
                 row["status"] = "capture_failed"
                 continue
             before = missing
             fitted, reused, counts, missing = self.fit()
-            row.update(status="measured", additional_points=len(before.keys() - missing.keys()))
+            gained = len(before.keys() - missing.keys())
+            row.update(status="measured" if gained else "no_new_coverage", additional_points=gained)
 
-        observed = set().union(*(source.host_points for source in self.sources.values()))
         reasons = {
             point: ("native_budget_exhausted" if point in deferred else
                     "no_qualified_measurement" if point in observed else "no_observed_recipe")

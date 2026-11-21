@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -18,13 +19,14 @@ namespace prologue {
 
 class WorkFeatures {
 public:
-    explicit WorkFeatures(const GraphScope & scope);
+    WorkFeatures(const GraphScope & scope, WorkKind kind);
+    WorkFeatures(const TensorCopy & copy, const GraphScope & scope, const Resource & resource);
     explicit WorkFeatures(Parameters parameters);
 
     std::string_view phase() const { return phase_; }
     std::optional<double> value(std::string_view axis) const;
     const nlohmann::json * transport() const { return transport_.is_null() ? nullptr : &transport_; }
-    nlohmann::json document(bool include_transport = true) const;
+    nlohmann::json document() const;
 
 private:
     enum BatchAxis { Members, QueryTokens, ContextTokens, MaxContextTokens, MaxQueryTokens, AttentionPairs, BatchAxisCount };
@@ -39,8 +41,21 @@ private:
     std::map<std::string, std::int64_t, std::less<>> parameters_;
     std::string_view phase_;
     nlohmann::json transport_;
+    std::optional<std::int64_t> copy_bytes_;
     std::array<double, BatchAxisCount> batch_{};
     std::size_t batch_axis_count_{};
+};
+
+class WorkCoordinates {
+public:
+    explicit WorkCoordinates(const CoarseGraph & graph) : graph_(graph), by_scope_(graph.scopes.size()) {}
+    std::size_t index(const GraphWork & work);
+    const WorkFeatures & operator[](std::size_t point) const { return points_[point]; }
+
+private:
+    const CoarseGraph & graph_;
+    std::vector<std::array<std::optional<std::size_t>, 2>> by_scope_;
+    std::vector<WorkFeatures> points_;
 };
 
 } // namespace prologue

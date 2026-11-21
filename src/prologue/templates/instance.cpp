@@ -107,7 +107,9 @@ private:
                       frame.bindings },
             {}
         });
-        graph_.scopes.back().info.guards = { frame.guard };
+
+        // Empty-extent checks select a template. Only native branch predicates describe the work being timed.
+        graph_.scopes.back().info.guards = frame.guard.branches;
         graph_.scopes.back().communication = frame.communication;
         InstanceScope node{ &frame, parent, call, {}, {} };
         for (std::size_t slot = 0; slot < definition.resources.size(); ++slot) {
@@ -171,7 +173,7 @@ private:
         }
         for (std::size_t interval = 0; interval < definition.work.size(); ++interval) {
             const auto & piece = definition.work[interval];
-            graph_.work.push_back({ scope, frame.resources[piece.resource], piece.kind, event(scope, piece.start), event(scope, piece.finish) });
+            graph_.work.push_back({ scope, frame.resources[piece.resource], piece.kind, event(scope, piece.start), event(scope, piece.finish), piece.copy });
             if (origins_) origins_->push_back({ frame.definition, interval });
         }
         for (const auto & edge : definition.edges) graph_.edges.push_back({ event(scope, edge.source), event(scope, edge.target), edge.kind });

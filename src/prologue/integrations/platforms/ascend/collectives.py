@@ -5,6 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from prologue.integrations.platforms.ascend.clock import DeviceCalibration
+from prologue.integrations.platforms.ascend.notifications import NotifyProgress
 from prologue.performance.samples import RendezvousService
 
 
@@ -17,6 +18,7 @@ class CollectivePost:
     ready: tuple[int, int] | None
     finish: tuple[int, int] | None
     elapsed: tuple[int, int] | None
+    notifications: dict
 
     def operands(self, operation):
         dtype, algorithm, elements = self.payload
@@ -41,18 +43,22 @@ class CollectivePost:
     def service(self, peers, rank):
         if self.elapsed is None:
             return None
-        readiness = []
+        spans = [self.elapsed]
         for actor in self.required:
             if actor == rank:
                 continue
-            peer = peers[actor].ready
-            if peer is None:
+            peer = peers[actor]
+            if peer.ready is None:
                 return None
 
             # A peer known to precede our own start contributes no cross-device clock uncertainty.
-            if peer[1] > self.ready[0]:
-                readiness.append(peer)
-        return RendezvousService.after_peers(self.elapsed, self.finish, readiness)
+            if peer.ready[1] > self.ready[0]:
+                bounds = NotifyProgress.peer_bounds(self.notifications, peer.notifications,
+                                                    self.finish[0] - peer.ready[1], self.finish[1] - peer.ready[0])
+                if bounds[0] > bounds[1]:
+                    raise ValueError("HCCL notification order contradicts the calibrated worker clocks")
+                spans.append(bounds)
+        return RendezvousService.after_peers(spans)
 
 
 class CollectiveServices:
@@ -93,6 +99,7 @@ class CollectiveServices:
         measurement = document["measurements"]
         points = {(row["resource"], row["order"]): row["time_ns"] for row in measurement["coordinates"]}
         peer_rows = measurement.get("collective_peer_rows", {})
+        notifications = measurement.get("collective_notifications", {})
         intervals = {}
         for scope, resource, begin, end, payload in measurement["collectives"]:
             if payload is None:
@@ -102,6 +109,8 @@ class CollectiveServices:
                 (resource, begin, end), payload, document["scopes"][scope]["communication"]["required"], peer_rows.get(str(scope)),
                 clock.bounds(start) if start is not None else None, clock.bounds(finish) if finish is not None else None,
                 clock.elapsed_bounds(start, finish) if start is not None and finish is not None else None,
+                NotifyProgress.within(notifications.get(str(scope), ()), start, finish, clock)
+                if start is not None and finish is not None else {},
             )
         return intervals
 

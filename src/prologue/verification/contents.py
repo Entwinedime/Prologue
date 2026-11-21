@@ -262,8 +262,12 @@ class GraphContents(ActionScopes):
                 channels.setdefault(channel, len(channels))
                 communication = {**communication, "channel": channels[channel], "order": communication["order"] - channel_origins[channel]}
             contents["communication"] = communication
-            work = Counter(json.dumps({"kind": item["kind"], "resource": self.resource(item["resource"])}, sort_keys=True)
-                           for item in self.work[index])
+            work = Counter()
+            for item in self.work[index]:
+                service = {"kind": item["kind"], "resource": self.resource(item["resource"])}
+                if "copy" in item:
+                    service["copy"] = item["copy"]
+                work[json.dumps(service, sort_keys=True)] += 1
             contents["work"] = dict(work)
             result[paths[index]] = contents
         return result

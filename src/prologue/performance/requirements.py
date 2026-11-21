@@ -8,6 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from prologue.artifacts import write_json
+from prologue.performance.models import ModelBindings
 
 
 def cost_identity(value):
@@ -33,6 +34,10 @@ class WorkPoint:
         if self.transport is not None:
             result["transport"] = json.loads(self.transport)
         return result
+
+    @classmethod
+    def from_gap(cls, gap):
+        return cls.at(cost_identity(gap["domain"]), cost_identity(gap["definition"]), gap["interval"], gap["features"])
 
 
 class CostRequirements:
@@ -134,6 +139,7 @@ class CostRequirements:
             row = domain["work"].setdefault(key, {
                 "definition": index, "interval": point.interval, "phase": point.phase, "status": status,
                 "kind": definition["work"][point.interval]["kind"], "points": [],
+                "candidate_models": [family.family for family in ModelBindings.for_interval(definition, point.interval)],
             })
             value = point.features()
             del value["phase"]
@@ -150,3 +156,16 @@ class CostRequirements:
             ],
             "scope": "Recorded graph and protocol work and each supplied first cost gap. Work on unreached control paths is unknown.",
         }
+
+    @staticmethod
+    def reported_reasons(report):
+        reasons = {}
+        for group in report["uncovered"]:
+            domain = cost_identity(group["domain"])
+            definitions = [cost_identity(definition) for definition in group["definitions"]]
+            for work in group["work"]:
+                identity = definitions[work["definition"]]
+                for row in work["points"]:
+                    point = WorkPoint.at(domain, identity, work["interval"], {**row, "phase": work["phase"]})
+                    reasons[point] = row["reason"]
+        return reasons

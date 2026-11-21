@@ -4,6 +4,8 @@ from prologue.integrations.frameworks.sglang.calls import ActionCall
 
 
 class HostReads:
+    method = "torch.Tensor.tolist"
+
     def __init__(self, calls) -> None:
         self.calls = calls
 
@@ -22,7 +24,7 @@ class HostReads:
                 continue
             work = {**frame.work, "context": {**frame.work["context"], "host_input": name}}
             boundary = ActionCall("host_read", dict(frame.parameters), work, inputs={name: (tensor, shape)},
-                                  condition={"input": name, "method": "tolist"}, input_use="host")
+                                  condition={"input": name, "method": "tolist"}, input_use="host", materializer=self.method)
 
             # Only this actual read owns readiness and waiting; unrelated tolist calls remain native.
             with calls.separate(boundary.operation, work), calls.boundary(self.invoke, boundary):
@@ -32,4 +34,4 @@ class HostReads:
     def install(self):
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
-        HookRegistry.register("torch.Tensor.tolist", self.invoke, HookType.AROUND)
+        HookRegistry.register(self.method, self.invoke, HookType.AROUND)

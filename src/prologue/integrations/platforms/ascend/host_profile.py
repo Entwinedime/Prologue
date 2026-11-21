@@ -2,6 +2,7 @@
 
 import ctypes
 import os
+from contextlib import ExitStack
 from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 
@@ -36,20 +37,29 @@ class AscendSpecializations:
         return self.loads
 
 
+class AscendRuntimeTiming:
+    def __init__(self):
+        bridge = ctypes.PyDLL(None)
+        self.start = bridge.prologue_runtime_timing_start
+        self.start.argtypes = []
+        self.start.restype = None
+        self.stop = bridge.prologue_runtime_timing_stop
+        self.stop.argtypes = [ctypes.c_char_p]
+        self.stop.restype = ctypes.c_int
+
+    def finish(self, path):
+        if self.stop(os.fsencode(path)):
+            raise RuntimeError("cannot publish native runtime timing evidence")
+
+
 class AscendHostProfile:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
         self.started = False
         self.specializations = AscendSpecializations()
         self.activity = AscendThreadActivity()
-        bridge = ctypes.PyDLL(None)
-        self.start_runtime = bridge.prologue_runtime_timing_start
-        self.start_runtime.argtypes = []
-        self.start_runtime.restype = None
-        self.stop_runtime = bridge.prologue_runtime_timing_stop
-        self.stop_runtime.argtypes = [ctypes.c_char_p]
-        self.stop_runtime.restype = ctypes.c_int
-        self.host_clock = bridge.prologue_sample_host_clock
+        self.runtime = AscendRuntimeTiming()
+        self.host_clock = ctypes.PyDLL(None).prologue_sample_host_clock
         self.host_clock.argtypes = [ctypes.POINTER(ctypes.c_uint64)]
         self.host_clock.restype = None
 
@@ -73,7 +83,7 @@ class AscendHostProfile:
         _enable_record_function(False)
         self.activity.start()
         self.specializations.start()
-        self.start_runtime()
+        self.runtime.start()
         self.started = True
 
     def finish(self) -> dict:
@@ -82,16 +92,11 @@ class AscendHostProfile:
         specializations = self.specializations.finish()
         runtime = self.directory / "runtime-timing.jsonl"
         activity = self.directory / "thread-activity.jsonl"
-        runtime_status = self.stop_runtime(os.fsencode(runtime))
-        try:
-            self.activity.finish(activity)
-        finally:
-            try:
-                self.profiler.stop()
-            finally:
-                _enable_record_function(True)
-        if runtime_status:
-            raise RuntimeError("cannot publish native CPU timing evidence")
+        with ExitStack() as cleanup:
+            cleanup.callback(_enable_record_function, True)
+            cleanup.callback(self.profiler.stop)
+            cleanup.callback(self.activity.finish, activity)
+            self.runtime.finish(runtime)
         profile, = (self.directory / "host-profile").glob("*_ascend_pt")
         queues = self.directory / "host-queues.json"
         write_json(queues, self.queue_intervals(profile, (self.begin_clock, self.clock_sample())), replace=False)

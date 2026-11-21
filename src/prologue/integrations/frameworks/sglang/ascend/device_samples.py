@@ -58,11 +58,18 @@ class CostSamples:
         if self.profile is not None:
             write_json(self.output, self.profile.samples(self.catalog, self.services), replace=False)
             return
-        samples, absent = ServiceSamples(self.catalog), Counter()
+        samples, absent = ServiceSamples(self.catalog.domain, self.catalog.definitions), Counter()
         for piece, definition, interval, features in self.catalog:
             duration_ns, copy, collective = self.services.service(piece)
             if duration_ns is None:
                 absent[piece["kind"]] += 1
+                continue
+            if "copy" in piece:
+                if copy != [features["axes"]["transfer.bytes"], piece["copy"]["direction"]]:
+                    raise ValueError("native copy size or direction differs from its bound tensor operand")
+
+                # The structural SDK times the serving call. The ready-operand model trains on its own timing window.
+                absent["requires_ready_operand_timing"] += 1
                 continue
 
             # Source request and physical resource IDs locate the observation only.

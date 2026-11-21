@@ -37,7 +37,7 @@ class AscendTransportProfile:
         self.qualification["observed_links"] = sorted(links)
 
     def samples(self, catalog, services):
-        source = ServiceSamples(catalog, external_only=True)
+        source = ServiceSamples(catalog.domain)
         absent = Counter()
         receipts = defaultdict(lambda: defaultdict(list))
         identities = {}

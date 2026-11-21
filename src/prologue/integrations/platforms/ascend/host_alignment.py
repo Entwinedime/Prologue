@@ -122,8 +122,9 @@ class HostCuts:
 
 
 class AscendHostAlignment:
-    def __init__(self, trace, scopes, commands, runtime, activity, auxiliary):
+    def __init__(self, trace, source_scopes, scopes, commands, runtime, activity, auxiliary):
         self.trace = trace
+        self.posts = {scope["id"]: scope["local_exchanges"] for scope in source_scopes if scope.get("local_exchanges")}
         self.observed = {scope["id"]: Interval(*scope["raw_interval"], scope["thread"], scope) for scope in scopes[1:]}
 
         # Unmatched children still own their records; they cannot transfer queue work to a matched parent.
@@ -165,6 +166,22 @@ class AscendHostAlignment:
 
     def calls(self, values):
         return [row for row in values if row.record["api"] in self.apis]
+
+    def submission_cuts(self, cuts, declared, measured):
+        timed = measured.record.get("local_submissions", ())
+        operands = [(row["operation"], row["dtype"], row["bytes"]) for row in declared]
+        if (operands != [(row["operation"], row["dtype"], row["bytes"]) for row in timed]
+                or len(set(operands)) != len(operands)):
+            cuts.misses["unpaired_local_submissions"] += len(declared)
+            return
+
+        # Both clocks locate the caller handing off the same operand. Peer staging itself stays excluded.
+        for source, actual in zip(declared, timed, strict=True):
+            origin = self.trace.device_points[source["begin"]].host
+            stamp = actual["submitted_raw_ns"]
+            if actual["thread"] != measured.thread or not measured.begin <= stamp <= measured.end:
+                raise ValueError("local submission lies outside its timed native caller")
+            cuts.point(origin.thread, origin.begin, measured.thread, stamp)
 
     def runtime_matches(self, cuts, old, new, strict):
         original = [self.signature(row) for row in old]
@@ -224,6 +241,8 @@ class AscendHostAlignment:
 
             result.scopes.add(scope)
             result.anchors(old_scope, measured)
+            if scope in self.posts:
+                self.submission_cuts(result, self.posts[scope], measured)
             for source, target in enqueues:
                 result.anchors(source, target)
             for matches in runtime:

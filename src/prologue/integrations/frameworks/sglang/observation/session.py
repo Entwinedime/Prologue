@@ -72,11 +72,12 @@ class NativeRendezvous:
 
 class NativeServingSession:
     def __init__(self, source, output: Path, *, resource_trace: bool = False, latency_only: bool = False,
-                 host_timing: bool = False, service_reference: bool = False, local_shards: bool = False) -> None:
+                 host_timing: bool = False, service_reference: bool = False, local_shards: bool = False,
+                 attention_sites=None) -> None:
         self.framework_revision = NativeConfiguration.upstream_revision(os.environ.get("PROLOGUE_SGLANG_REVISION"))
         serving = CaptureInput(source)
         self.output = output.resolve()
-        latency_only = latency_only or host_timing
+        latency_only = latency_only or host_timing or bool(attention_sites)
         self.instances = []
         offset = 0
         for index, description in enumerate(serving.instances):
@@ -84,12 +85,13 @@ class NativeServingSession:
                 serving, description, self.output, index, offset,
                 resource_trace=resource_trace or service_reference, latency_only=latency_only,
                 host_timing=host_timing, service_reference=service_reference, local_shards=local_shards,
+                attention_sites=attention_sites,
             )
             self.instances.append(instance)
             offset += len(instance.roles)
         if latency_only and resource_trace:
             raise ValueError("light observation cannot include resource tracing")
-        if latency_only and not host_timing and len(serving.submission_groups) != 1:
+        if latency_only and not host_timing and not attention_sites and len(serving.submission_groups) != 1:
             raise ValueError("latency-only measurement requires one submission group")
 
     @staticmethod

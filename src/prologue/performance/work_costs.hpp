@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -50,24 +51,35 @@ private:
         std::int64_t ns;
     };
 
-    struct Curve {
-        explicit Curve(const nlohmann::json & model);
+    struct BoundedCurve {
+        std::vector<Point> knots;
+        std::int64_t at(double coordinate) const;
+    };
+
+    struct StartupTransfer {
+        double startup_ns;
+        double ns_per_byte;
+        std::int64_t at(double bytes) const;
+    };
+
+    struct Model {
+        explicit Model(const nlohmann::json & model);
         template<class Features>
         ServiceDuration estimate(const Features & features) const;
 
         std::map<std::string, Bound, std::less<>> bounds;
         std::optional<std::string> axis;
-        std::vector<Point> points;
+        std::variant<BoundedCurve, StartupTransfer> formula;
     };
 
     struct Estimate {
-        const Curve * model;
+        const Model * model;
         ServiceDuration service_ns;
 
         std::string_view status() const;
     };
 
-    using PhaseCurves = std::map<std::string, Curve, std::less<>>;
+    using PhaseModels = std::map<std::string, Model, std::less<>>;
 
     template<class Definitions>
     WorkCosts(nlohmann::json domain, const nlohmann::json & asset, const Definitions & definitions);
@@ -83,7 +95,7 @@ private:
     std::span<const TemplateDefinition> definitions_;
     std::vector<std::optional<std::size_t>> model_indices_;
     std::map<nlohmann::json, std::pair<std::size_t, WorkKind>> external_;
-    std::vector<std::vector<PhaseCurves>> models_;
+    std::vector<std::vector<PhaseModels>> models_;
 };
 
 } // namespace prologue

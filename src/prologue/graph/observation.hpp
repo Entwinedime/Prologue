@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -39,6 +40,7 @@ struct NativeSpan {
     NativeOrder end;
     WorkKind kind;
     bool supplied_operand;
+    std::shared_ptr<const TensorCopy> copy{};
 };
 
 struct NativeAnchor {

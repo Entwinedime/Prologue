@@ -14,19 +14,20 @@ from prologue.integrations.frameworks.sglang.observation.window import Observati
 
 
 class NativeTiming:
-    def __init__(self, description, *, host_profile=None, specializations=None):
+    def __init__(self, description, *, host_profile=None, specializations=None, attention=None):
         self.directory = Path(description["instance_directory"]) / "timing"
         self.rank_offset = description["rank_offset"]
         self.pipeline_stages = description["pp_size"]
         self.window = ObservationWindow(Path(description["output"]), description)
         self.content = NativeContent(description)
         self.host = None
+        self.attention = attention(self.window, description) if attention else None
         self.routing = None
         if host_profile is not None:
             self.host = NativeHostSamples(self.content.aliases, description, host_profile)
         if self.host is not None:
             self.content.auxiliary = self.host.auxiliary
-        else:
+        elif self.attention is None:
             self.specializations = specializations
             self.requests = {native: {"id": identity} for native, identity in self.content.aliases.items()}
         if "ep" in description["serving_input"]["configuration"]:
@@ -111,11 +112,13 @@ class NativeTiming:
             directory.mkdir(parents=True)
             if self.host is not None:
                 self.host.start(scheduler, rank, directory)
-            else:
+            elif self.attention is None:
                 self.specializations.start()
         else:
             if self.host is not None:
                 record = self.host.document()
+            elif self.attention is not None:
+                record = self.attention.document()
             else:
                 requests = [row for row in self.requests.values() if len(row) > 1]
                 record = {"requests": requests, "specialization_loads": self.specializations.finish()}
@@ -141,6 +144,8 @@ class NativeTiming:
 
         if self.host is not None:
             self.host.install(device_api)
+        elif self.attention is not None:
+            self.attention.install()
         else:
             HookRegistry.register(
                 "sglang.srt.managers.scheduler_components.request_receiver.SchedulerRequestReceiver._pull_raw_reqs",

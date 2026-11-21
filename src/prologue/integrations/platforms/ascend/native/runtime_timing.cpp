@@ -22,6 +22,7 @@ struct Interval {
     std::uint32_t tasks;
     std::size_t bytes;
     int direction;
+    std::uintptr_t source;
     std::int64_t before_ns;
     std::int64_t begin_ns;
     std::int64_t end_ns;
@@ -46,14 +47,15 @@ void RuntimeSample::enter() {
     if (before_) begin_ = now_ns();
 }
 
-void RuntimeSample::finish(int result, std::uint32_t tasks, std::size_t bytes, int direction) const {
+void RuntimeSample::finish(int result, std::uint32_t tasks, std::size_t bytes, int direction, const void * source) const {
     if (!begin_) return;
     const auto end = now_ns();
     thread_local const auto thread = syscall(SYS_gettid);
 
     // Keep observer work outside the actual API interval and defer all formatting until collection ends.
     std::lock_guard lock(samples_mutex);
-    samples.push_back({ name_, thread, result, tasks, bytes, direction, before_, begin_, end, 0 });
+    samples.push_back({ name_, thread, result, tasks, bytes, direction, reinterpret_cast<std::uintptr_t>(source),
+                        before_, begin_, end, 0 });
     samples.back().after_ns = now_ns();
 }
 
@@ -70,8 +72,9 @@ extern "C" int prologue_runtime_timing_stop(const char * path) {
         for (const auto & sample : samples) {
             output << "{\"api\":\"" << sample.api << "\",\"thread\":" << sample.thread
                    << ",\"result\":" << sample.result << ",\"tasks\":" << sample.tasks
-                   << ",\"bytes\":" << sample.bytes << ",\"direction\":" << sample.direction
-                   << ",\"before_raw_ns\":" << sample.before_ns << ",\"begin_raw_ns\":" << sample.begin_ns
+                   << ",\"bytes\":" << sample.bytes << ",\"direction\":" << sample.direction;
+            if (sample.source) output << ",\"source\":\"" << std::hex << sample.source << std::dec << "\"";
+            output << ",\"before_raw_ns\":" << sample.before_ns << ",\"begin_raw_ns\":" << sample.begin_ns
                    << ",\"end_raw_ns\":" << sample.end_ns << ",\"after_raw_ns\":" << sample.after_ns << "}\n";
         }
         output.close();

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.acquisition.domains import SourceDomain
-from prologue.acquisition.capture import CaptureProcess
+from prologue.acquisition.capture import NativeAttempt
 from prologue.acquisition.recording import PublishedCapture
 from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
 from prologue.acquisition.production import CaptureProduction
@@ -85,7 +85,7 @@ class SourceAcquisition:
     def spending(directory):
 
         # External observations stay charged to their original owners. Only local attempts enter this total.
-        native = (CaptureProcess.usage(path.parent) for path in directory.glob("sources/*/execution.json"))
+        native = (NativeAttempt.usage(path.parent) for path in directory.glob("sources/*/execution.json"))
         processing = (CaptureProduction.usage(path.parent) for path in directory.glob("assets/*/production.json"))
         return Usage.total((*native, *processing))
 
@@ -134,7 +134,7 @@ class SourceAcquisition:
     def acquire(self, identity, launch):
         source = self.sources[identity]
         assets = self.output / "assets" / str(identity)
-        owner = Usage.total((CaptureProcess.usage(self.output / "sources" / str(identity)), CaptureProduction.usage(assets)))
+        owner = Usage.total((NativeAttempt.usage(self.output / "sources" / str(identity)), CaptureProduction.usage(assets)))
         allowance = self.budget.available_to(owner, self.spending(self.output))
         if allowance.processing_ns <= 0:
             raise AllowanceExhausted("source collection postprocessing allowance exhausted")
@@ -142,11 +142,11 @@ class SourceAcquisition:
         # Explicit observations stay owned by their original task; only missing observations launch an Engine.
         recording = self.observations.get(identity)
         if recording is None:
-            CaptureProcess(SimpleNamespace(
+            launch.capture(SimpleNamespace(
                 output=source, timeout=self.arguments.timeout,
                 budget_seconds=allowance.native_ns / 1e9, attempt_limit=allowance.attempts,
                 source_image=self.inputs["images"]["source"], resource_trace=self.arguments.resource_trace,
-            ), launch, self.limit).run()
+            ), self.limit).run()
             recording = PublishedCapture(source, self.jobs[identity])
         CaptureProduction(SimpleNamespace(
             output=assets, binary=self.binary, product="templates",

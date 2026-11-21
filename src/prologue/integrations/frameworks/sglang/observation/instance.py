@@ -19,12 +19,14 @@ class NativeServingInstance:
     def __init__(
         self, source: CaptureInput, instance: InstanceConfiguration, output: Path, index: int, rank_offset: int,
         *, resource_trace: bool, latency_only: bool, host_timing: bool, service_reference: bool, local_shards: bool,
+        attention_sites=None,
     ) -> None:
         self.model = source.model
         self.observe_all_workers = source.observe_all_workers or service_reference
         self.resource_trace = resource_trace
         self.latency_only = latency_only
         self.host_timing = host_timing
+        self.attention_sites = attention_sites
         self.service_reference = service_reference
         self.local_shards = local_shards
         self.output = output.resolve()
@@ -78,6 +80,8 @@ class NativeServingInstance:
         records = {str(rank): self.directory / "timing" / f"rank-{rank}" / "record.json" for rank in self.roles}
         if self.host_timing:
             return {"host_samples": {rank: str(path.relative_to(self.output)) for rank, path in records.items()}}
+        if self.attention_sites:
+            return {"attention_samples": {rank: str(path.relative_to(self.output)) for rank, path in records.items()}}
 
         measurements = [json.loads(path.read_text()) for path in records.values()]
         requests = {request["id"]: {"id": request["id"]} for request in self.workload["requests"]}
@@ -150,6 +154,8 @@ class NativeServingInstance:
             "request_groups": {"warmup": warm.request_groups(), "source": capture.request_groups()},
             "serving_input": {"configuration": self.configuration, **self.workload},
         }
+        if self.attention_sites:
+            session["attention_sites"] = self.attention_sites
         write_json(description, session)
         os.environ.update(rendezvous)
         os.environ["PROLOGUE_GRAPH_SESSION"] = str(description)

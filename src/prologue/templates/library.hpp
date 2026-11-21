@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <span>
@@ -41,6 +42,7 @@ struct TemplateWork {
     WorkKind kind;
     TemplateReference start;
     TemplateReference finish;
+    std::shared_ptr<const TensorCopy> copy{};
 };
 
 struct TemplateInterval {
@@ -52,13 +54,6 @@ struct TemplateEdge {
     TemplateReference source;
     TemplateReference target;
     Relation kind;
-};
-
-struct TensorRule {
-    std::string dtype;
-    std::vector<Expression> shape;
-
-    TensorLayout evaluate(const Parameters & parameters) const;
 };
 
 struct TemplatePort {
@@ -168,11 +163,21 @@ struct StateBindings {
     bool operator==(const StateBindings &) const = default;
 };
 
+struct TemplateGuard {
+    std::vector<Expression> branches;
+    Expression extents;
+
+    bool evaluate(const Parameters & parameters) const;
+    std::set<std::string> variables() const;
+    nlohmann::json document() const;
+    static TemplateGuard read(const nlohmann::json & source);
+};
+
 struct TemplateFrame {
 
     // Implementation selection belongs to this call; the shared caller only specifies its interface.
     std::size_t definition = 0;
-    Expression guard;
+    TemplateGuard guard;
     std::string site;
     nlohmann::json bindings;
     Parameters constants;
@@ -217,7 +222,7 @@ struct TemplateEntry {
 struct LocalImplementation {
     nlohmann::json contract;
     std::size_t definition;
-    Expression guard;
+    TemplateGuard guard;
 };
 
 class TemplateLibrary {

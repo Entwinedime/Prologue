@@ -176,7 +176,8 @@ class FlowScopes(ServingCuts):
                         device=boundary.input_use == "device") as call:
 
             # Snapshot mutation epochs before native work; an early return may later discard unused ports.
-            inputs = {name: owner.tensors.observe(tensor, shape) for name, (tensor, shape) in boundary.inputs.items()}
+            inputs = {name: owner.tensors.observe(tensor, shape, materializer=boundary.materializer)
+                      for name, (tensor, shape) in boundary.inputs.items()}
             yield
             call.record["parameters"].update(boundary.parameters)
             call.record["work"]["context"] = boundary.work["context"]
@@ -210,6 +211,9 @@ class FlowScopes(ServingCuts):
                 call.port(name, "input", owner.tensors.observe(tensor, shape), use="device")
             for name, (tensor, shape) in frame.metadata_inputs.items():
                 call.port(name, "input", owner.tensors.observe(tensor, shape), use="metadata")
+            if frame.local_readbacks:
+                call.record["local_readbacks"] = {name: owner.tensors.local_readback(*operand)
+                                                  for name, operand in frame.local_readbacks.items()}
             yield
             call.record["work"]["continuation"] = frame.continuation
             call.record["bindings"]["segment"] = {

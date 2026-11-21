@@ -38,7 +38,13 @@ nlohmann::json transport_operand(const GraphScope & scope) {
 WorkFeatures::WorkFeatures(Parameters parameters)
     : parameters_(std::make_move_iterator(parameters.begin()), std::make_move_iterator(parameters.end())) {}
 
-WorkFeatures::WorkFeatures(const GraphScope & scope) : transport_(transport_operand(scope)) {
+WorkFeatures::WorkFeatures(const TensorCopy & copy, const GraphScope & scope, const Resource & resource)
+    : transport_({{ "operation", "local_copy" }, { "caller", copy.caller }, { "implementation", copy.implementation },
+                  { "direction", copy.direction }, { "resource", { resource_name(resource.kind), resource.role }} }),
+      copy_bytes_(copy.bytes(scope.info.parameters)) {}
+
+WorkFeatures::WorkFeatures(const GraphScope & scope, WorkKind kind) {
+    if (kind == WorkKind::Collective) transport_ = transport_operand(scope);
     const auto & info = scope.info;
     if (!info.parameters.contains("members")) {
 
@@ -85,6 +91,7 @@ WorkFeatures::WorkFeatures(const GraphScope & scope) : transport_(transport_oper
 }
 
 std::optional<double> WorkFeatures::value(std::string_view axis) const {
+    if (axis == "transfer.bytes") return copy_bytes_;
     if (axis.starts_with(parameter_prefix_)) {
         const auto parameter = parameters_.find(axis.substr(parameter_prefix_.size()));
         if (parameter == parameters_.end()) return {};
@@ -96,14 +103,31 @@ std::optional<double> WorkFeatures::value(std::string_view axis) const {
     return batch_[static_cast<std::size_t>(batch - axes.begin())];
 }
 
-nlohmann::json WorkFeatures::document(bool include_transport) const {
+nlohmann::json WorkFeatures::document() const {
     auto axes = nlohmann::json::object();
     const auto names = batch_axes();
     for (std::size_t index = 0; index < names.size(); ++index) axes[names[index]] = batch_[index];
     for (const auto & [name, value] : parameters_) axes[std::string(parameter_prefix_) + name] = value;
+    if (copy_bytes_) axes["transfer.bytes"] = *copy_bytes_;
     nlohmann::json result{{ "phase", phase_ }, { "axes", std::move(axes) }};
-    if (include_transport && transport()) result["transport"] = transport_;
+    if (transport()) result["transport"] = transport_;
     return result;
+}
+
+std::size_t WorkCoordinates::index(const GraphWork & work) {
+    const auto & scope = graph_.scopes[work.scope];
+    if (work.copy) {
+        points_.emplace_back(*work.copy, scope, graph_.resources[work.resource]);
+        return points_.size() - 1;
+    }
+
+    // Only a peer service inherits the rendezvous operand. All other ordinary intervals share local geometry.
+    auto & index = by_scope_[work.scope][work.kind == WorkKind::Collective];
+    if (!index) {
+        index = points_.size();
+        points_.emplace_back(scope, work.kind);
+    }
+    return *index;
 }
 
 } // namespace prologue
