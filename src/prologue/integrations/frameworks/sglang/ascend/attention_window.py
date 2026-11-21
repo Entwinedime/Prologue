@@ -159,7 +159,7 @@ class DecodeWindow:
                     continue
                 with acquisition.processing():
                     work = source.projection / "work"
-                    catalog = WorkCatalog(work / f"{rank}-graph.json", source.output / f"{rank}-work.json")
+                    catalog = WorkCatalog(work / f"{rank}-graph.json", source.identities(rank))
                     record = json.loads((recording.source / relative).read_text())
                     runtime = record["runtime"]
                     same_runtime = all(runtime[k] == catalog.domain[k] for k in ("device", "torch", "torch_npu"))
@@ -188,6 +188,7 @@ class DecodeWindow:
                             results.add(definitions[point.definition], point.interval, point.features(), duration)
                     qualification = {"unmatched_cuts": sum(value is None for value in matched.values())}
                     report = results.document(qualification)
+                    report["native_recordings"] = [source.recording.attempt_id, recording.attempt_id]
                     report["observation"] = {
                         "sampling": str(output), "training_capture": str(source.recording.directory), "rank": rank,
                         "native_evidence": relative,

@@ -6,10 +6,12 @@ from prologue.acquisition.capture import NativeAttempt
 from prologue.integrations.frameworks.sglang.acquisition.domains import SourceDomain
 from prologue.integrations.frameworks.sglang.configuration import CaptureInput
 from prologue.integrations.platforms.ascend.deployment import AscendDeployment
+from prologue.integrations.platforms.ascend.export import AscendExport
 
 
 class SGLangAscendLaunch:
-    image_revision = staticmethod(SourceDomain.image_revision)
+    domain = SourceDomain
+    export_profile = staticmethod(AscendExport.command)
 
     def sampling(self, source):
         from prologue.integrations.frameworks.sglang.ascend.sampling import SGLangSampling
@@ -51,7 +53,7 @@ class SGLangAscendLaunch:
         image = NativeAttempt.image(arguments.source_image)
         inputs = {
             "job": self.job, "deployment": self.platform.source, "image": image["Id"],
-            "framework_revision": self.image_revision(image), "model_path": str(model),
+            "framework_revision": self.domain.image_revision(image), "model_path": str(model),
             "model_destination": destination, "resource_trace": arguments.resource_trace or service_reference,
         }
         if latency_only or host_timing or attention_sites:

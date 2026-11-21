@@ -52,8 +52,26 @@ class SourceDomain:
                 raise ValueError("source representatives disagree about their instance structure")
         return result
 
-    @staticmethod
-    def require_coverage(libraries, coverage):
+    @classmethod
+    def require_capture(cls, serving, description):
+        structure = cls.requested(serving)
+        if structure != description["structure"]:
+            raise ValueError("planned capture input differs from its source domain")
+        if description["required_coverage"].keys() - structure["instances"].keys():
+            raise ValueError("planned source coverage names an undeclared serving mode")
+
+    @classmethod
+    def require_planned(cls, libraries, description, plan):
+        identity = description["id"]
+        if cls.observed(libraries) != description["structure"]:
+            raise ValueError(f"source {identity} compiled a different native implementation")
+
+        # The planned model geometry must agree with the expert modules actually initialized by the framework.
+        experts = plan["expert_count"]
+        if experts is not None and any(layer["experts"] != experts for library in libraries for layer in library["domain"]["expert_layers"]):
+            raise ValueError(f"source {identity} initialized a different expert count from its plan")
+
+        coverage = description["required_coverage"]
         for library in libraries:
             mode = library["domain"]["implementation"]["disaggregation_mode"]
             required = coverage.get(mode)

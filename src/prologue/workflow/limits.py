@@ -36,24 +36,25 @@ class Usage:
         return {"native_charged_ns": self.native_ns, "native_attempts": self.attempts, "postprocessing_ns": self.processing_ns}
 
 
+def retained_bytes(root):
+    total = 0
+    for directory, _, files in os.walk(root):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(directory, name)).st_size
+            except FileNotFoundError:
+
+                # Atomic publication and SDK cleanup can remove a listed file before stat.
+                continue
+    return total
+
+
 class OperationLimit:
     def __init__(self, root=None, storage_bytes=None):
         self.root, self.storage_bytes = root, storage_bytes
 
-    def bytes_used(self):
-        total = 0
-        for directory, _, files in os.walk(self.root):
-            for name in files:
-                try:
-                    total += os.lstat(os.path.join(directory, name)).st_size
-                except FileNotFoundError:
-
-                    # Atomic publication and SDK cleanup can remove a listed file before stat.
-                    continue
-        return total
-
     def check(self):
-        if self.root is not None and self.bytes_used() > self.storage_bytes:
+        if self.root is not None and retained_bytes(self.root) > self.storage_bytes:
             raise AllowanceExhausted("storage allowance exhausted")
 
     def wait(self, process, deadline):

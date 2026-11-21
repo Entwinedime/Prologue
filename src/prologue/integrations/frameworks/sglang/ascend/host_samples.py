@@ -194,6 +194,7 @@ class HostCostSamples:
                         samples.add_external(row["identity"], "transfer", row["features"], duration)
         report = samples.document({"host": sum(missing.values())})
         report["observation"] = {"detailed": str(detailed.resolve()), "host": str(lightweight.resolve()), "rank": rank}
+        report["native_recordings"] = [source_recording.attempt_id, host_recording.attempt_id]
         batches = {"detailed": 0, "host": 0, "matched": 0}
         for scope in original["scopes"]:
             if scope["role"] == "run_batch":

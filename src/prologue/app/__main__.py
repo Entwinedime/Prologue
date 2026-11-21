@@ -62,6 +62,7 @@ def main() -> None:
     sampling.add_argument("--production", type=Path, action="append", required=True,
                           help="training sources for native cuts and samples; supply demand when no --demand or --gap is given")
     sampling.add_argument("--samples", type=Path, nargs="+", default=[], help="previously qualified training samples")
+    sampling.add_argument("--keep-intermediates", action="store_true", help="retain reconstructed projections and work identities after fitting")
     sampling.add_argument("--demand", type=Path, nargs=2, action="append", default=[], metavar=("GRAPH", "WORK"))
     sampling.add_argument("--gap", type=Path, action="append", default=[], help="actual cost demand from a prior prediction")
     acquisition = commands.add_parser("acquire-sources", help="capture and compile a finite plan under shared cumulative allowances")
@@ -75,7 +76,7 @@ def main() -> None:
     exploration.add_argument("--deployment", type=Path, required=True)
     exploration.add_argument("--output", type=Path, help="task directory, defaults to a new UTC-stamped data directory")
     exploration.add_argument("--reuse", type=Path, help="published prior exploration task")
-    exploration.add_argument("--details", action="store_true", help="retain source intermediates and emit target execution traces")
+    exploration.add_argument("--details", action="store_true", help="retain source and cost intermediates and emit target execution traces")
     exploration.add_argument("--control-image", default="prologue-control:ubuntu22.04")
     for command in (sampling, exploration):
         command.add_argument("--transport-samples", type=Path, nargs="+", default=[], help="external peer service profiles for the target placement")
@@ -92,7 +93,7 @@ def main() -> None:
         command.add_argument("--binary", type=Path, required=True)
         command.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
     arguments = parser.parse_args()
-    if arguments.command in {"capture", "acquire-sources", "acquire-costs", "explore"}:
+    if arguments.command in {"capture", "produce", "acquire-sources", "acquire-costs", "explore"}:
         from prologue.integrations.frameworks.sglang.ascend.launch import SGLangAscendLaunch
     if arguments.command in {"fit-costs", "acquire-costs", "explore"}:
         from prologue.integrations.frameworks.sglang.acquisition.cost_reuse import BatchHostReuse
@@ -105,7 +106,7 @@ def main() -> None:
         from prologue.acquisition.production import CaptureProduction
         from prologue.acquisition.recording import PublishedCapture
 
-        CaptureProduction(arguments, PublishedCapture(arguments.capture)).run()
+        CaptureProduction(arguments, PublishedCapture(arguments.capture), SGLangAscendLaunch).run()
     elif arguments.command == "capture":
         launch = SGLangAscendLaunch(json.loads(arguments.input.read_text()), json.loads(arguments.deployment.read_text()))
         launch.capture(arguments, latency_only=arguments.latency_only, host_timing=arguments.host_timing,

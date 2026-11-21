@@ -21,7 +21,7 @@ from prologue.artifacts import write_json
 from prologue.integrations.runtimes.docker import ModelingCommand, OwnedContainers
 from prologue.performance.requirements import CostRequirements
 from prologue.performance.samples import WorkCatalog
-from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
+from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage, retained_bytes
 
 
 def read(path):
@@ -37,6 +37,14 @@ class CostSource:
             raise ValueError("training production belongs to a different native observation")
         self.ranks = read(production / "result.json")["observed_roles"]
         self.projection = production
+
+    def identities(self, rank):
+        return self.output / "work" / f"{rank}-work.json"
+
+    @staticmethod
+    def release_intermediates(output):
+        CaptureProduction.discard(output / "work")
+        CaptureProduction.retire_projection(output / "projection")
 
 
 class CostAcquisition:
@@ -72,8 +80,7 @@ class CostAcquisition:
 
             # Preserve cross-role bindings by requalifying their coordinates against the original measured rows.
             for sample in asset["reused"]:
-                self.demand.targets[str(path)] = "previously_qualified_role_work"
-                self.demand.samples(str(path), sample)
+                self.demand.samples(str(path), sample, basis="previously_qualified_role_work")
         self.samples = {path: read(path) for path in dict.fromkeys(path.resolve(strict=True) for path in paths)}
         if any("transport_profile" in source for source in self.samples.values()):
             raise ValueError("select physical peer service profiles with --transport-samples")
@@ -85,6 +92,7 @@ class CostAcquisition:
             "collections": [str(path) for path in collections], "images": self.images,
             "samples": [str(path) for path in self.samples], "gaps": [str(path) for path in self.gaps],
             "demand": [[str(graph), str(identities)] for graph, identities in self.graphs.items()],
+            "keep_intermediates": args.keep_intermediates,
         }
         if self.prior_jobs:
             self.inputs["prior_jobs"] = {str(path): sorted(jobs) for path, jobs in self.prior_jobs.items()}
@@ -191,18 +199,19 @@ class CostAcquisition:
             output=source.projection, binary=self.output / "prologue", product="graphs",
             budget_seconds=allowance.processing_ns / 1e9, source_image=self.images["source"],
             modeling_image=self.images["modeling"], keep_intermediates=True,
-        ), source.recording, self.limit).run()
+        ), source.recording, self.place, self.limit).run()
 
     def inspect(self, source, requirements):
         self.project(source)
         for rank in source.ranks:
             work = source.projection / "work"
             graph = work / f"{rank}-graph.json"
-            identities = source.output / f"{rank}-work.json"
+            identities = source.identities(rank)
             self.run_model("work-identities", identities, graph)
             with self.processing():
                 catalog = WorkCatalog(graph, identities)
-                source.sampling.observe(rank, str(graph), catalog, requirements)
+                owner = f"{source.recording.source / 'capture.json'}#rank={rank}"
+                source.sampling.observe(rank, owner, catalog, requirements)
 
             # The same detailed observation must not contribute device durations twice.
             observation = {"production": str(source.production), "rank": rank}
@@ -249,14 +258,14 @@ class CostAcquisition:
             for path, gap in self.gaps.items():
                 self.demand.gap(str(path), gap)
 
-        fitted, reused, counts, missing = self.fit()
+        fitted, counts, missing, _ = self.fit()
         if missing and self.prior_jobs:
 
             # Prior graphs supply possible measurements. Their unrelated work is outside the requested demand.
             for collection, jobs in self.prior_jobs.items():
                 for source in self.load_sources(collection, jobs):
                     self.inspect(source, CostRequirements())
-            fitted, reused, counts, missing = self.fit()
+            fitted, counts, missing, _ = self.fit()
 
         candidates = {recipe: source.output / recipe.name for source in self.sources.values()
                       for recipe in source.sampling.windows(self.demand, self.samples.values())}
@@ -292,7 +301,7 @@ class CostAcquisition:
                 row["status"] = "capture_failed"
                 continue
             before = missing
-            fitted, reused, counts, missing = self.fit()
+            fitted, counts, missing, _ = self.fit()
             gained = len(before.keys() - missing.keys())
             row.update(status="measured" if gained else "no_new_coverage", additional_points=gained)
 
@@ -302,10 +311,10 @@ class CostAcquisition:
             for point in missing
         }
         return {
-            "domains": fitted.domains, "sources": [str(path) for path in self.samples], "reused": reused,
+            **fitted.document(),
             "transport_samples": self.transport_samples,
             "demand": self.demand.report(counts, missing, reasons), "recipes": evidence,
-            **self.spending(self.output).document(), "retained_bytes": self.limit.bytes_used(),
+            **self.spending(self.output).document(),
             "status": "covered" if not missing else "native_budget_exhausted" if deferred else "uncovered",
         }
 
@@ -317,7 +326,18 @@ class CostAcquisition:
             result = self.output / "costs.json"
             try:
                 if not result.is_file():
-                    write_json(result, self.acquire(), replace=False)
+                    staged = self.output / ".fitted.json"
+                    if not staged.is_file():
+                        write_json(staged, self.acquire(), replace=False)
+
+                    # A restart during cleanup needs only the durable fit and the immutable original samples.
+                    if not self.args.keep_intermediates:
+                        for directory in (self.output / "sources").glob("*"):
+                            CostSource.release_intermediates(directory)
+                    self.limit.check()
+                    staged.rename(result)
             finally:
-                write_json(self.output / "status.json", self.spending(self.output).document(), indent=2)
+                write_json(self.output / "status.json", {
+                    **self.spending(self.output).document(), "retained_bytes": retained_bytes(self.output),
+                }, indent=2)
         print(f"Created {result}")

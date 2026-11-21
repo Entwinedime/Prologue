@@ -10,8 +10,6 @@ from uuid import uuid4
 
 from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.artifacts import write_json
-from prologue.integrations.platforms.ascend.export import AscendExport
-from prologue.integrations.frameworks.sglang.acquisition.domains import SourceDomain
 from prologue.integrations.runtimes.docker import OwnedContainers
 from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
 
@@ -22,8 +20,8 @@ class CaptureProduction:
         state = directory / "production.json"
         return Usage(processing_ns=json.loads(state.read_text())["spent_ns"]) if state.is_file() else Usage()
 
-    def __init__(self, arguments, recording, limit=None) -> None:
-        self.arguments = arguments
+    def __init__(self, arguments, recording, adapter, limit=None) -> None:
+        self.arguments, self.adapter = arguments, adapter
         self.operation_limit = limit if limit is not None else OperationLimit()
         self.output = arguments.output.resolve()
         self.capture = recording.source
@@ -43,8 +41,8 @@ class CaptureProduction:
         images = {}
         for role, image in (("source", arguments.source_image), ("modeling", arguments.modeling_image)):
             images[role] = json.loads(subprocess.check_output(["docker", "image", "inspect", image], text=True))[0]
-        if SourceDomain.image_revision(images["source"]) != capture["framework_revision"]:
-            raise ValueError("source postprocessing image differs from the captured upstream SGLang revision")
+        if adapter.domain.image_revision(images["source"]) != capture["framework_revision"]:
+            raise ValueError("source postprocessing image differs from the captured framework revision")
         self.inputs = {"capture_path": str(self.capture), "capture": capture, "native_image": recording.inputs["image"],
                        "images": {role: image["Id"] for role, image in images.items()},
                        "product": arguments.product, "keep_intermediates": arguments.keep_intermediates}
@@ -54,17 +52,31 @@ class CaptureProduction:
 
     @staticmethod
     def discard(path) -> None:
-        if path.is_dir():
+        if not path.is_symlink() and path.is_dir():
             shutil.rmtree(path)
         else:
             path.unlink(missing_ok=True)
 
     @classmethod
-    def trim(cls, output, ranks, product):
-        discarded = ("sdk", "facts.json", "graph.json", "templates.json") if product == "templates" else ("sdk", "facts.json")
-        for rank in ranks:
-            for suffix in discarded:
-                cls.discard(output / "work" / f"{rank}-{suffix}")
+    def release_work(cls, output, graph_ranks=()):
+        work = output / "work"
+        if not graph_ranks:
+            cls.discard(work)
+            return
+
+        published = {f"{rank}-graph.json" for rank in graph_ranks}
+        for path in work.iterdir():
+            if path.name not in published:
+                cls.discard(path)
+
+    @classmethod
+    def retire_projection(cls, output):
+
+        # The cost task has consumed its private projection. Its original processing charge stays auditable.
+        if output.is_dir():
+            for path in output.iterdir():
+                if path.name not in {"production.json", ".lock"}:
+                    cls.discard(path)
 
     def prepare(self) -> None:
         state = self.output / "production.json"
@@ -153,6 +165,9 @@ class CaptureProduction:
         with (self.output / ".lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.prepare()
+            if (self.output / "result.json").is_file():
+                return
+
             templates = self.arguments.product == "templates"
             pending = [] if "link-templates" in self.state["completed"] else self.ranks
             for rank in pending:
@@ -160,7 +175,7 @@ class CaptureProduction:
                 exported = f"work/{rank}-sdk"
                 terminal = f"{rank}-templates" if templates else f"{rank}-project"
                 if terminal not in self.state["completed"]:
-                    self.step(f"{rank}-export", exported, "source", AscendExport.command(rank, f"/production/{exported}"))
+                    self.step(f"{rank}-export", exported, "source", self.adapter.export_profile(rank, f"/production/{exported}"))
                     self.step(f"{rank}-interpret", facts, "source", [
                         "python3", "-m", "prologue.app.capture_worker", "interpret", "--input", "/source", "--rank", str(rank),
                         "--trace", f"/production/{exported}/trace.json", "--output", f"/production/{facts}",
@@ -181,7 +196,7 @@ class CaptureProduction:
                     "/production/inputs/prologue", "link-templates", "/production/inputs/templates.json", "/production/assets",
                 ])
             if not self.arguments.keep_intermediates:
-                self.trim(self.output, self.ranks, self.arguments.product)
+                self.release_work(self.output, () if templates else self.ranks)
 
             # Publish only when every observed worker has its requested product; graphs cannot be consumed as templates.
             write_json(self.output / "result.json", {

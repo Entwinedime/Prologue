@@ -16,12 +16,11 @@ from types import SimpleNamespace
 from prologue.acquisition.costs import CostAcquisition
 from prologue.acquisition.fitting import TransportSamples
 from prologue.acquisition.planning import PlanningProcess
-from prologue.acquisition.production import CaptureProduction
 from prologue.acquisition.publication import SourceProductions
 from prologue.acquisition.sources import SourceAcquisition
 from prologue.artifacts import write_json
 from prologue.performance.requirements import CostRequirements, WorkPoint
-from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
+from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage, retained_bytes
 from prologue.workflow.report import ExplorationReport
 from prologue.workflow.targets import ExplorationAsset, ExplorationTarget
 
@@ -151,7 +150,7 @@ class ExplorationTask:
             raise AllowanceExhausted("no allowance to prepare costs")
         arguments = SimpleNamespace(
             **allowance, output=directory, production=[fresh.directory] if fresh else [],
-            samples=[], demand=[], gap=gaps,
+            samples=[], demand=[], gap=gaps, keep_intermediates=self.args.details,
         )
         CostAcquisition(arguments, self.place, self.reuse_samples, self.limit, transport_samples=self.transport_samples,
                         prior_jobs=prior_jobs, prior_costs=previous).run()
@@ -254,11 +253,8 @@ class ExplorationTask:
             else:
                 self.predict(selected, runtime, costs, rows)
 
-                # Published templates and original observations suffice for future projections.
-                if fresh and not self.args.details:
-                    for production in fresh.paths.values():
-                        ranks = read(production / "result.json")["observed_roles"]
-                        CaptureProduction.trim(production, ranks, "templates")
+        if fresh and not self.args.details:
+            SourceAcquisition.release_intermediates(self.training)
 
         # Keep newly prepared assets first and publish only the bundles serving a final target outcome.
         assets = {}
@@ -266,7 +262,7 @@ class ExplorationTask:
             if "asset" in row:
                 asset = row["asset"]
                 assets[asset["production"], asset["costs"]] = asset
-        usage = {**Usage.total(self.spending().values()).document(), "retained_bytes": self.limit.bytes_used()}
+        usage = {**Usage.total(self.spending().values()).document(), "retained_bytes": retained_bytes(self.root)}
         return ExplorationReport([rows[target] for target in targets], list(assets.values()), usage, self.reuse_status)
 
     def run(self):

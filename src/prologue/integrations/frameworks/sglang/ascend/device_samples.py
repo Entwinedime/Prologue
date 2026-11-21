@@ -5,6 +5,7 @@ from collections import Counter
 from pathlib import Path
 
 from prologue.acquisition.observation.workers import CapturedWorkers
+from prologue.acquisition.recording import PublishedCapture
 from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.acquisition.pd_samples import PdNotificationSamples
 from prologue.integrations.platforms.ascend.collectives import CollectiveServices
@@ -20,6 +21,8 @@ class CostSamples:
         self.observation = {"production": str(production.resolve()), "rank": rank}
         root = arguments.projection or production
         inputs = json.loads((root / "production.json").read_text())["inputs"]
+        recording = PublishedCapture.from_source(Path(inputs["capture_path"]))
+        self.attempt_id = recording.attempt_id
         if arguments.projection is not None:
             original = json.loads((production / "production.json").read_text())["inputs"]
             if inputs["capture_path"] != original["capture_path"]:
@@ -48,7 +51,7 @@ class CostSamples:
             if not joint or not peers:
                 raise ValueError("a transport profile requires a joint physical observation of the peer group")
             self.profile = AscendTransportProfile(Path(inputs["capture_path"]), peers, work / f"{rank}-sdk/trace.json",
-                                                  self.observation, inputs["native_image"])
+                                                  self.observation, recording.inputs["image"])
         self.notifications = []
         if peers and "pd_protocol" in measurement:
             protocol = {actor: body["measurements"]["pd_protocol"] for actor, body in peers.items()}
@@ -56,7 +59,8 @@ class CostSamples:
 
     def run(self):
         if self.profile is not None:
-            write_json(self.output, self.profile.samples(self.catalog, self.services), replace=False)
+            profile = self.profile.samples(self.catalog, self.services)
+            write_json(self.output, {**profile, "native_recordings": [self.attempt_id]}, replace=False)
             return
         samples, absent = ServiceSamples(self.catalog.domain, self.catalog.definitions), Counter()
         for piece, definition, interval, features in self.catalog:
@@ -84,6 +88,7 @@ class CostSamples:
 
         report = samples.document(absent)
         report["observation"] = self.observation
+        report["native_recordings"] = [self.attempt_id]
         if self.notifications:
             report["notification_measurements"] = self.notifications
         write_json(self.output, report, replace=False)

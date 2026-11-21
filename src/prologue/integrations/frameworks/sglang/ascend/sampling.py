@@ -38,7 +38,7 @@ class HostWindow:
             path = source.output / f"{self.name}-{rank}-host.json"
             sample = acquisition.samples_from(path, "host-cost-samples", detailed=source.recording.directory, host=output,
                                              facts=work / f"{rank}-facts.json", trace=work / f"{rank}-sdk/trace.json",
-                                             graph=work / f"{rank}-graph.json", work_identities=source.output / f"{rank}-work.json")
+                                             graph=work / f"{rank}-graph.json", work_identities=source.identities(rank))
             self.owner.cold |= bool(sample["qualification"]["excluded_cold_scopes"])
             yield path, sample
 
@@ -83,7 +83,7 @@ class LocalCopyWindow:
         launch.require_recorded_placement(recording.inputs["deployment"])
         platform = AscendDeployment({"acquisition_mode": "single_device", "physical_devices": [self.card]}, 1, False)
         image = NativeAttempt.image(arguments.source_image)
-        revision = launch.image_revision(image)
+        revision = launch.domain.image_revision(image)
         if revision != recording.inputs["framework_revision"]:
             raise ValueError("isolated sampler and originating templates use different framework revisions")
 
@@ -130,6 +130,7 @@ class LocalCopyWindow:
         for rank, samples in results.items():
             path = self.owner.source.output / f"{self.name}-{rank}.json"
             report = samples.document({"unmatched_calls": missing[rank]})
+            report["native_recordings"] = [self.owner.source.recording.attempt_id, recording.attempt_id]
             report["observation"] = {
                 "sampling": str(output), "training_capture": recording.inputs["training_capture"], "rank": rank,
                 "physical_device": self.card, "sampling_image": recording.inputs["image"],

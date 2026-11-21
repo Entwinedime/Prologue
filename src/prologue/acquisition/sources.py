@@ -10,10 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from prologue.artifacts import write_json
-from prologue.integrations.frameworks.sglang.acquisition.domains import SourceDomain
 from prologue.acquisition.capture import NativeAttempt
 from prologue.acquisition.recording import PublishedCapture
-from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
+from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage, retained_bytes
 from prologue.acquisition.production import CaptureProduction
 
 
@@ -34,15 +33,11 @@ class SourceAcquisition:
             if not path.is_relative_to(plan_root):
                 raise ValueError("planned capture input lies outside its plan directory")
             job = json.loads(path.read_text())
-            structure = description["structure"]
-            coverage = description["required_coverage"]
-            if coverage.keys() - structure["instances"].keys():
-                raise ValueError("planned source coverage names an undeclared serving mode")
             model = Path(job["model"]["path"]).resolve(strict=True)
             if self.output == model or model in self.output.parents:
                 raise ValueError("source collection must not write inside a model directory")
             self.jobs[identity] = job
-            self.descriptions[identity] = {"structure": structure, "required_coverage": coverage}
+            self.descriptions[identity] = description
         if not self.jobs:
             raise ValueError("source acquisition needs a nonempty plan")
 
@@ -91,11 +86,24 @@ class SourceAcquisition:
 
     def status(self, error):
         write_json(self.output / "status.json", {
-            **self.spending(self.output).document(), "retained_bytes": self.limit.bytes_used(),
+            **self.spending(self.output).document(), "retained_bytes": retained_bytes(self.output),
             "limits": {"native_ns": self.budget.native_ns, "postprocessing_ns": self.budget.processing_ns,
                        "native_attempts": self.budget.attempts, "storage_bytes": self.arguments.storage_bytes},
             "error": error,
         }, indent=2)
+
+    @staticmethod
+    def release_intermediates(directory):
+
+        # Only published productions owned by this collection may release their template workspace.
+        for publication in (directory / "assets").glob("*/result.json"):
+            CaptureProduction.release_work(publication.parent)
+
+        status = directory / "status.json"
+        if status.is_file():
+            report = json.loads(status.read_text())
+            report["retained_bytes"] = retained_bytes(directory)
+            write_json(status, report, indent=2)
 
     def prepare(self):
         path = self.output / "input.json"
@@ -124,8 +132,7 @@ class SourceAcquisition:
                     raise
                 unavailable[str(identity)] = {"status": "native_unavailable", "message": str(failure)}
                 continue
-            if SourceDomain.requested(launch.serving) != self.descriptions[identity]["structure"]:
-                raise ValueError("planned capture input differs from its source domain")
+            launch.domain.require_capture(launch.serving, self.descriptions[identity])
             if identity in self.observations:
                 launch.require_recorded_placement(self.observations[identity].inputs["deployment"])
             launches[identity] = launch
@@ -152,18 +159,10 @@ class SourceAcquisition:
             output=assets, binary=self.binary, product="templates",
             budget_seconds=allowance.processing_ns / 1e9, source_image=self.inputs["images"]["source"],
             modeling_image=self.inputs["images"]["modeling"], keep_intermediates=self.arguments.keep_intermediates,
-        ), recording, self.limit).run()
+        ), recording, self.place, self.limit).run()
         publication = json.loads((assets / "result.json").read_text())
         libraries = [json.loads((assets / path).read_text()) for path in publication["templates"]]
-        if SourceDomain.observed(libraries) != self.descriptions[identity]["structure"]:
-            raise ValueError(f"source {identity} compiled a different native implementation")
-
-        # Input opportunities use metadata; initialized native expert modules must confirm that partition.
-        expert_count = self.inputs["plan"]["expert_count"]
-        if expert_count is not None and any(layer["experts"] != expert_count
-                                            for library in libraries for layer in library["domain"]["expert_layers"]):
-            raise ValueError(f"source {identity} initialized a different expert count from its plan")
-        SourceDomain.require_coverage(libraries, self.descriptions[identity]["required_coverage"])
+        launch.domain.require_planned(libraries, self.descriptions[identity], self.inputs["plan"])
 
     def run(self, *, allow_incomplete=False):
         self.output.mkdir(parents=True, exist_ok=True)

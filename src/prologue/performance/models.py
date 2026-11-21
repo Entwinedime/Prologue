@@ -9,12 +9,14 @@ from statistics import mean, median
 class ServiceMeasurements:
     def __init__(self, rows):
         durations, payloads, radii = defaultdict(list), defaultdict(set), {}
-        for row in rows:
+        origins = defaultdict(list)
+        for location, row in rows:
             point = tuple(sorted(row["features"]["axes"].items()))
             observations = row["observations_ns"]
             if not observations or any(type(ns) is not int or ns < 0 for ns in observations):
                 raise ValueError("service samples require nonnegative integer nanoseconds")
             durations[point].extend(observations)
+            origins[point].append(location)
             if "copy" in row:
                 payloads[point].add(("copy", row["copy"]["bytes"], row["copy"]["direction"]))
             if "collective" in row:
@@ -24,8 +26,9 @@ class ServiceMeasurements:
 
         # Equal apparent coordinates can conceal different payloads in an opaque native operation.
         self.ambiguous = sum(len(values) > 1 for values in payloads.values())
-        self.points = [(dict(point), median(values)) for point, values in durations.items()
-                       if len(payloads[point]) <= 1]
+        accepted = [point for point in durations if len(payloads[point]) <= 1]
+        self.points = [(dict(point), median(durations[point])) for point in accepted]
+        self.training_rows = sorted({location for point in accepted for location in origins[point]})
         self.radius = max((radius for point, radius in radii.items() if len(payloads[point]) == 1), default=None)
 
 
@@ -115,7 +118,7 @@ class ModelBindings:
     def fit(cls, definition, interval, rows):
         data = ServiceMeasurements(rows)
         points = data.points
-        result = {"points": len(points), "ambiguous_payload_points": data.ambiguous}
+        result = {"points": len(points), "ambiguous_payload_points": data.ambiguous, "training_rows": data.training_rows}
         if not points:
             return result
         if data.radius is not None:

@@ -1,7 +1,7 @@
 """Collect the same work coordinates from projected graphs and prediction gaps."""
 
 import json
-from collections import Counter, defaultdict
+from collections import ChainMap, Counter, defaultdict
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,22 +80,27 @@ class CostRequirements:
             raise ValueError("prediction gap changes the kind of its declared work interval")
         self.add(target, domain, definition, gap["interval"], gap["features"])
 
-    def samples(self, target, source):
+    def samples(self, target, source, *, basis):
+        self.targets[target] = basis
         domain = self.intern(self.domains, source["domain"])
         definitions = [self.intern(self.definitions, value) for value in source["definitions"]]
         return [self.add(target, domain, definitions[row["definition"]], row["interval"], row["features"])
                 for row in source["samples"]]
 
-    def query(self, model, domains, directory, accounting=nullcontext):
-        if not self.points:
+    def query(self, model, domains, directory, accounting, held_out):
+        requests = (self, held_out) if held_out is not None else (self,)
+        if not any(request.points for request in requests):
             return {}
         with TemporaryDirectory(prefix=".cost-points-", dir=directory) as scratch:
             scratch = Path(scratch)
             points_path, asset_path, result_path = (scratch / name for name in ("points.json", "costs.json", "estimates.json"))
             with accounting():
-                groups = defaultdict(list)
-                for point in self.points:
-                    groups[point.domain].append(point)
+                groups = defaultdict(dict)
+                for request in requests:
+                    for point in request.points:
+                        groups[point.domain][point] = None
+                source_domains = ChainMap(*(request.domains for request in requests))
+                declared = ChainMap(*(request.definitions for request in requests))
 
                 queries = []
                 for domain, points in groups.items():
@@ -103,7 +108,7 @@ class CostRequirements:
                     rows = [[definitions.setdefault(point.definition, len(definitions)), point.interval, point.features()]
                             for point in points]
                     queries.append({
-                        "domain": self.domains[domain], "definitions": [self.definitions[key] for key in definitions],
+                        "domain": source_domains[domain], "definitions": [declared[key] for key in definitions],
                         "points": rows,
                     })
                 write_json(points_path, queries)
@@ -115,9 +120,11 @@ class CostRequirements:
                 return {point: estimate for points, results in zip(groups.values(), estimates, strict=True)
                         for point, estimate in zip(points, results, strict=True)}
 
-    def check(self, model, domains, directory, accounting):
-        estimates = self.query(model, domains, directory, accounting)
+    def check(self, model, domains, directory, accounting=nullcontext, *, held_out=None):
+        estimates = self.query(model, domains, directory, accounting, held_out)
         with accounting():
+
+            # Held-out points share the evaluator. Only training demand can trigger reuse or a native measurement.
             counts = {target: Counter() for target in self.targets}
             missing = {}
             for point, targets in self.points.items():
@@ -126,7 +133,7 @@ class CostRequirements:
                     counts[target][status] += number
                 if status != "covered":
                     missing[point] = status
-            return counts, missing
+            return counts, missing, estimates if held_out is not None and held_out.points else {}
 
     def report(self, counts, missing, reasons=None):
         domains = {}
