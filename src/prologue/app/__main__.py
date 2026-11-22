@@ -49,7 +49,7 @@ def main() -> None:
     hosts = commands.add_parser("host-cost-samples", help="qualify independently measured native host services")
     for name in ("detailed", "host", "facts", "trace", "graph", "work-identities", "output"):
         hosts.add_argument("--" + name, type=Path, required=True)
-    costs = commands.add_parser("fit-costs", help="fit bounded curves from qualified service samples")
+    costs = commands.add_parser("fit-costs", help="fit registered cost models from qualified service samples")
     costs.add_argument("--samples", type=Path, nargs="+", required=True)
     costs.add_argument("--check", type=Path, action="append", default=[])
     costs.add_argument("--demand", type=Path, nargs=2, action="append", default=[], metavar=("GRAPH", "WORK"))

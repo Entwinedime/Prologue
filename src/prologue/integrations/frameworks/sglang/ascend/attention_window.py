@@ -94,7 +94,8 @@ class DecodeWindow:
                     group.append(identity)
                 groups.append(group)
         workload = {"id": self.name, "requests": requests, "prefixes": []}
-        job = {**launch.job, "workload": workload, "warmup": workload, "submission_groups": groups}
+        job = {key: value for key, value in launch.job.items() if key != "warmup"}
+        job.update(workload=workload, submission_groups=groups)
         if (arguments.output / "execution.json").is_file():
             job = json.loads((arguments.output / "input.json").read_text())
             sites = job.pop("attention_sites")

@@ -3,17 +3,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
-#include <variant>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "prologue/performance/service_model.hpp"
 #include "prologue/serving/execution/timing.hpp"
 
 namespace prologue {
@@ -42,46 +43,14 @@ public:
     static nlohmann::json evaluate(const nlohmann::json & groups, const nlohmann::json & asset, bool bindings);
 
 private:
-    struct Bound {
-        double lower;
-        double upper;
-    };
-
-    struct Point {
-        double coordinate;
-        std::int64_t ns;
-    };
-
-    struct BoundedCurve {
-        std::vector<Point> knots;
-        std::int64_t at(double coordinate) const;
-    };
-
-    struct StartupTransfer {
-        double startup_ns;
-        double ns_per_byte;
-        std::int64_t at(double bytes) const;
-    };
-
-    struct Model {
-        Model(const nlohmann::json & model, std::size_t binding);
-        template<class Features>
-        ServiceDuration estimate(const Features & features) const;
-
-        std::size_t binding;
-        std::map<std::string, Bound, std::less<>> bounds;
-        std::optional<std::string> axis;
-        std::variant<BoundedCurve, StartupTransfer> formula;
-    };
-
     struct Estimate {
-        const Model * model;
+        const ServiceModel * model;
         ServiceDuration service_ns;
 
         std::string_view status() const;
     };
 
-    using PhaseModels = std::map<std::string, Model, std::less<>>;
+    using PhaseModels = std::map<std::string, std::unique_ptr<const ServiceModel>, std::less<>>;
 
     template<class Definitions>
     WorkCosts(nlohmann::json domain, const nlohmann::json & asset, const Definitions & definitions);

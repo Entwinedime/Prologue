@@ -1,9 +1,5 @@
 #include "prologue/performance/work_costs.hpp"
 
-#include <algorithm>
-#include <cmath>
-#include <iterator>
-#include <limits>
 #include <ranges>
 #include <utility>
 
@@ -15,7 +11,7 @@ namespace prologue {
 
 namespace {
 
-class RecordedFeatures {
+class RecordedFeatures final : public FeatureValues {
 public:
     explicit RecordedFeatures(const nlohmann::json & document)
         : document_(document), phase_(document.at("phase").get_ref<const std::string &>()),
@@ -28,7 +24,7 @@ public:
         return found == document_.end() ? nullptr : &*found;
     }
 
-    std::optional<double> value(const std::string & axis) const {
+    std::optional<double> value(std::string_view axis) const override {
         const auto found = axes_.find(axis);
         if (found == axes_.end()) return {};
         return found->second.get<double>();
@@ -45,83 +41,6 @@ private:
 CostGap::CostGap(nlohmann::json details)
     : std::runtime_error("no qualified service cost at " + details.at("site").get<std::string>()),
       details_(std::move(details)) {}
-
-WorkCosts::Model::Model(const nlohmann::json & model, std::size_t ordinal) : binding(ordinal) {
-    for (const auto & [name, range] : model.at("bounds").get_ref<const nlohmann::json::object_t &>()) {
-        const auto & values = range.get_ref<const nlohmann::json::array_t &>();
-        if (values.size() != 2) throw std::invalid_argument("cost feature bounds require two coordinates");
-        const auto lower = values[0].get<double>();
-        const auto upper = values[1].get<double>();
-        if (!std::isfinite(lower) || !std::isfinite(upper) || lower > upper)
-            throw std::invalid_argument("cost feature bounds must be finite and ordered");
-        bounds.emplace(name, Bound{ lower, upper });
-    }
-    const auto & family = model.at("family");
-    if (family == "startup_transfer") {
-        axis = "transfer.bytes";
-        const auto & range = bounds.at(*axis);
-        const StartupTransfer transfer{ model.at("startup_ns").get<double>(), model.at("ns_per_byte").get<double>() };
-        if (bounds.size() != 1 || range.lower <= 0 || range.lower >= range.upper
-            || transfer.startup_ns < 0 || !std::isfinite(transfer.startup_ns)
-            || transfer.ns_per_byte <= 0 || !std::isfinite(transfer.ns_per_byte))
-            throw std::invalid_argument("a startup transfer model requires a positive byte range and a finite nonnegative service");
-        transfer.at(range.upper);
-        formula = transfer;
-        return;
-    }
-    if (family != "bounded_curve") throw std::invalid_argument("unknown service cost model family: " + family.dump());
-
-    auto & points = std::get<BoundedCurve>(formula).knots;
-    if (!model.at("axis").is_null()) axis = model.at("axis").get<std::string>();
-    for (const auto & row : model.at("knots").get_ref<const nlohmann::json::array_t &>()) {
-        const auto & values = row.get_ref<const nlohmann::json::array_t &>();
-        if (values.size() != 2 || !values[1].is_number_integer())
-            throw std::invalid_argument("cost knot requires a coordinate and integer service nanoseconds");
-        const auto coordinate = values[0].get<double>();
-        const auto ns = values[1].get<std::int64_t>();
-        if (!std::isfinite(coordinate) || ns < 0 || (!points.empty() && coordinate <= points.back().coordinate))
-            throw std::invalid_argument("cost knots require increasing coordinates and nonnegative costs");
-        points.push_back({ coordinate, ns });
-    }
-
-    // Interpolation must cover exactly the declared axis range. Constant models also retain feature bounds.
-    if (axis) {
-        const auto bound = bounds.find(*axis);
-        if (points.size() < 2 || bound == bounds.end() || points.front().coordinate != bound->second.lower
-            || points.back().coordinate != bound->second.upper)
-            throw std::invalid_argument("cost knots do not span their declared feature axis");
-    } else if (points.size() != 1) {
-        throw std::invalid_argument("a constant cost model requires one knot");
-    }
-}
-
-std::int64_t WorkCosts::BoundedCurve::at(double coordinate) const {
-    if (knots.size() == 1) return knots.front().ns;
-    const auto right = std::ranges::lower_bound(knots, coordinate, {}, &Point::coordinate);
-    if (right->coordinate == coordinate) return right->ns;
-    const auto & left = *std::prev(right);
-    const long double fraction = (static_cast<long double>(coordinate) - left.coordinate)
-        / (static_cast<long double>(right->coordinate) - left.coordinate);
-    const long double service = left.ns + fraction * (static_cast<long double>(right->ns) - left.ns);
-    return static_cast<std::int64_t>(std::nearbyint(service));
-}
-
-std::int64_t WorkCosts::StartupTransfer::at(double bytes) const {
-    const auto ns = std::nearbyint(startup_ns + static_cast<long double>(bytes) * ns_per_byte);
-    if (ns > std::numeric_limits<std::int64_t>::max()) throw std::out_of_range("transfer service exceeds signed nanoseconds");
-    return static_cast<std::int64_t>(ns);
-}
-
-template<class Features>
-ServiceDuration WorkCosts::Model::estimate(const Features & features) const {
-    double coordinate = 0;
-    for (const auto & [name, bound] : bounds) {
-        const auto value = features.value(name);
-        if (!value || !std::isfinite(*value) || *value < bound.lower || *value > bound.upper) return {};
-        if (axis && name == *axis) coordinate = *value;
-    }
-    return std::visit([coordinate](const auto & model) { return model.at(coordinate); }, formula);
-}
 
 template<class Definitions>
 WorkCosts::WorkCosts(nlohmann::json domain, const nlohmann::json & asset, const Definitions & definitions)
@@ -156,9 +75,8 @@ WorkCosts::WorkCosts(nlohmann::json domain, const nlohmann::json & asset, const 
         const auto definition = model.at("definition").get<std::size_t>();
         const auto interval = model.at("interval").get<std::size_t>();
         auto & phases = models_.at(definition).at(interval);
-        if (model.at("family") == "startup_transfer" && measured.at(definition).at("work").at(interval).at("kind") != "transfer")
-            throw std::invalid_argument("a startup transfer model must price a transfer interval");
-        if (!phases.try_emplace(model.at("phase").get<std::string>(), model, ordinal).second)
+        auto service = ServiceModel::decode(model, ordinal, measured.at(definition), interval);
+        if (!phases.try_emplace(model.at("phase").get<std::string>(), std::move(service)).second)
             throw std::invalid_argument("cost asset repeats a work interval and phase");
     }
 
@@ -196,7 +114,7 @@ WorkCosts::Estimate WorkCosts::estimate(std::optional<std::size_t> definition, s
     const auto & phases = models_[*definition].at(interval);
     const auto match = phases.find(features.phase());
     if (match == phases.end()) return {};
-    return { &match->second, match->second.estimate(features) };
+    return { match->second.get(), match->second->estimate(features) };
 }
 
 template<class Features>

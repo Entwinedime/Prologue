@@ -146,7 +146,7 @@ class CostRequirements:
             row = domain["work"].setdefault(key, {
                 "definition": index, "interval": point.interval, "phase": point.phase, "status": status,
                 "kind": definition["work"][point.interval]["kind"], "points": [],
-                "candidate_models": [family.family for family in ModelBindings.for_interval(definition, point.interval)],
+                "candidate_models": [family.family for family in ModelBindings.for_interval(definition, point.interval).candidates],
             })
             value = point.features()
             del value["phase"]

@@ -16,14 +16,10 @@ from prologue.performance.samples import ServiceSamples
 
 
 class HostWindow:
-    def __init__(self, owner, name, job, *, primed=False):
+    def __init__(self, owner, name, job):
         self.owner, self.name, self.job = owner, name, job
-        self.points, self.primed = owner.host_points, primed
-        self.measured = cost_identity(job) in owner.measured_host
-
-    @property
-    def ready(self):
-        return not self.measured and (self.owner.cold or not self.primed)
+        self.points = owner.host_points
+        self.ready = cost_identity(job) not in owner.measured_host
 
     def collect(self, arguments, requested, limit):
         source = self.owner.source
@@ -39,7 +35,6 @@ class HostWindow:
             sample = acquisition.samples_from(path, "host-cost-samples", detailed=source.recording.directory, host=output,
                                              facts=work / f"{rank}-facts.json", trace=work / f"{rank}-sdk/trace.json",
                                              graph=work / f"{rank}-graph.json", work_identities=source.identities(rank))
-            self.owner.cold |= bool(sample["qualification"]["excluded_cold_scopes"])
             yield path, sample
 
 
@@ -144,7 +139,6 @@ class SGLangSampling:
         self.launch, self.source = launch, source
         self.host_points, self.copies = set(), {}
         self.attention = DecodeWindow(self)
-        self.cold = False
         self.measured_host = set()
         self.external = HostCostSamples.external_work(source.recording.source)
 
@@ -169,7 +163,6 @@ class SGLangSampling:
         for sample in samples:
             observation = sample.get("observation", {})
             if observation.get("detailed") == str(self.source.recording.directory) and "host" in observation:
-                self.cold |= bool(sample["qualification"]["excluded_cold_scopes"])
                 receipts.add(Path(observation["host"]))
         for path in receipts:
 
@@ -186,9 +179,7 @@ class SGLangSampling:
             yield self.attention
         job, serving = self.launch.job, self.launch.serving
         yield HostWindow(self, "observed-submission", job)
-        if serving.warmup != serving.workload:
-            yield HostWindow(self, "primed-submission", {**job, "warmup": job["workload"]}, primed=True)
         if any(len(group) != 1 for group in serving.submission_groups):
             groups = [[request["id"]] for request in serving.workload["requests"]]
-            separate = {**job, "submission_groups": groups, "warmup": job["workload"]}
+            separate = {**job, "submission_groups": groups}
             yield HostWindow(self, "individual-requests", separate)

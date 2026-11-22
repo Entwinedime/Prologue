@@ -29,6 +29,7 @@ add_library(prologue_core
     src/prologue/serving/session.cpp
     src/prologue/serving/service_times.cpp
     src/prologue/serving/execution_inputs.cpp
+    src/prologue/performance/service_model.cpp
     src/prologue/performance/work_costs.cpp
     src/prologue/performance/work_features.cpp
     src/prologue/graph/projection.cpp

@@ -17,14 +17,22 @@
 
 namespace prologue {
 
-class WorkFeatures {
+class FeatureValues {
+public:
+    virtual std::optional<double> value(std::string_view axis) const = 0;
+
+protected:
+    ~FeatureValues() = default;
+};
+
+class WorkFeatures final : public FeatureValues {
 public:
     WorkFeatures(const GraphScope & scope, WorkKind kind);
     WorkFeatures(const TensorCopy & copy, const GraphScope & scope, const Resource & resource);
     explicit WorkFeatures(Parameters parameters);
 
     std::string_view phase() const { return phase_; }
-    std::optional<double> value(std::string_view axis) const;
+    std::optional<double> value(std::string_view axis) const override;
     const nlohmann::json * transport() const { return transport_.is_null() ? nullptr : &transport_; }
     nlohmann::json document() const;
 
