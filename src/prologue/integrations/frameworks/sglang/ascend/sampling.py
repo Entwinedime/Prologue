@@ -7,9 +7,10 @@ from pathlib import Path
 from prologue.acquisition.capture import NativeAttempt
 from prologue.acquisition.recording import PublishedCapture
 from prologue.artifacts import write_json
-from prologue.integrations.frameworks.sglang.ascend.attention_window import DecodeWindow
+from prologue.integrations.frameworks.sglang.ascend.attention_window import DecodeSampling
+from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples
 from prologue.integrations.frameworks.sglang.ascend.host_samples import HostCostSamples
-from prologue.integrations.platforms.ascend.copy_sampling import TensorReadback
+from prologue.integrations.platforms.ascend.copy_sampling import TensorCopySamples
 from prologue.integrations.platforms.ascend.deployment import AscendDeployment
 from prologue.performance.requirements import cost_identity
 from prologue.performance.samples import ServiceSamples
@@ -40,7 +41,7 @@ class HostWindow:
 
 class LocalCopyWindow:
     ready = True
-    services = {cost_identity(TensorReadback.service(caller)): caller for caller in TensorReadback.methods}
+    services = {cost_identity(TensorCopySamples.service(caller)): caller for caller in TensorCopySamples.directions}
 
     def __init__(self, owner, card, domain):
         self.owner, self.card = owner, card
@@ -106,7 +107,7 @@ class LocalCopyWindow:
         recording = PublishedCapture(output)
         manifest = recording.manifest
         operands = recording.inputs["job"]["operands"]
-        if manifest["services"] != {op["caller"]: TensorReadback.service(op["caller"]) for op in operands}:
+        if manifest["services"] != {op["caller"]: TensorCopySamples.service(op["caller"]) for op in operands}:
             raise ValueError("isolated sampler measured different native services")
         measured = json.loads((recording.source / manifest["measurements"]).read_text())
         rows = {(row["caller"], row["dtype"], row["bytes"]): row for row in measured}
@@ -138,9 +139,12 @@ class SGLangSampling:
     def __init__(self, launch, source):
         self.launch, self.source = launch, source
         self.host_points, self.copies = set(), {}
-        self.attention = DecodeWindow(self)
+        self.attention = DecodeSampling(self)
         self.measured_host = set()
         self.external = HostCostSamples.external_work(source.recording.source)
+
+    def device_samples(self, ranks):
+        return CostSamples(self.source.production, self.source.projection, ranks)
 
     def observe(self, rank, target, catalog, demand):
         self.attention.observe(rank, catalog)
@@ -174,9 +178,7 @@ class SGLangSampling:
             window.select(demand)
             if window.points:
                 yield window
-        self.attention.select(demand)
-        if self.attention.points:
-            yield self.attention
+        yield from self.attention.windows(demand)
         job, serving = self.launch.job, self.launch.serving
         yield HostWindow(self, "observed-submission", job)
         if any(len(group) != 1 for group in serving.submission_groups):

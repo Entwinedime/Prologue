@@ -1,28 +1,35 @@
 #include "prologue/performance/work_features.hpp"
 
 #include <algorithm>
-#include <iterator>
 #include <set>
 #include <stdexcept>
 #include <utility>
 
 namespace prologue {
 
-namespace {
-
-nlohmann::json transport_operand(const GraphScope & scope) {
-    if (!scope.communication) return nullptr;
+nlohmann::json WorkFeatures::transport_operand(const GraphScope & scope) {
+    if (!scope.communication || std::ranges::any_of(scope.ports, [](const auto & port) {
+        return port.tensor && !port.tensor->shape_rule;
+    })) return nullptr;
     auto ports = nlohmann::json::object();
     for (const auto & port : scope.ports) {
         if (!port.tensor) continue;
-        if (!port.tensor->shape_rule) return nullptr;
-        ports[std::string(direction_name(port.direction))][port.name] = {
-            { "dtype", port.tensor->dtype }, { "shape", port.tensor->shape },
+
+        const auto direction = std::string(direction_name(port.direction));
+        const auto axis = "collective." + direction + "." + port.name + ".elements";
+        std::int64_t elements = 1;
+        for (const auto extent : port.tensor->shape) {
+            if (__builtin_mul_overflow(elements, extent, &elements))
+                throw std::overflow_error("collective operand element count exceeds the supported range");
+        }
+        axes_.emplace(axis, elements);
+        ports[direction][port.name] = {
+            { "dtype", port.tensor->dtype }, { "dimensions", port.tensor->shape.size() }, { "elements_axis", axis },
         };
     }
     if (ports.empty()) return nullptr;
 
-    // A target binds its own ranks and tensor geometry. Stream IDs and posting ordinals belong to the observation.
+    // Layout and placement identify the service. Concrete payload sizes are model coordinates.
     const auto & group = *scope.communication;
     nlohmann::json identity{
         { "operation", group.operation }, { "members", group.members }, { "required", group.required },
@@ -33,10 +40,9 @@ nlohmann::json transport_operand(const GraphScope & scope) {
     return identity;
 }
 
-} // namespace
-
-WorkFeatures::WorkFeatures(Parameters parameters)
-    : parameters_(std::make_move_iterator(parameters.begin()), std::make_move_iterator(parameters.end())) {}
+WorkFeatures::WorkFeatures(Parameters parameters) {
+    for (const auto & [name, value] : parameters) axes_.emplace(std::string(parameter_prefix_) + name, value);
+}
 
 WorkFeatures::WorkFeatures(const TensorCopy & copy, const GraphScope & scope, const Resource & resource)
     : transport_({{ "operation", "local_copy" }, { "caller", copy.caller }, { "implementation", copy.implementation },
@@ -50,7 +56,7 @@ WorkFeatures::WorkFeatures(const GraphScope & scope, WorkKind kind) {
 
         // Local calls declare their own inputs. The enclosing batch can identify the call without driving its cost.
         for (const auto & [name, value] : info.parameters) {
-            if (!info.constants.contains(name)) parameters_.emplace(name, value);
+            if (!info.constants.contains(name)) axes_.emplace(std::string(parameter_prefix_) + name, value);
         }
         return;
     }
@@ -65,7 +71,7 @@ WorkFeatures::WorkFeatures(const GraphScope & scope, WorkKind kind) {
     for (const auto & guard : info.guards) geometry.merge(guard.variables());
 
     // Inherited values enter the cost coordinate only when the work's own ports or guards use them.
-    for (const auto & name : geometry) parameters_.emplace(name, info.parameters.at(name));
+    for (const auto & name : geometry) axes_.emplace(std::string(parameter_prefix_) + name, info.parameters.at(name));
     const auto batch = info.work.find("members");
     if (batch == info.work.end()) return;
     if (const auto phase = info.work.find("phase"); phase != info.work.end()) phase_ = phase->get_ref<const std::string &>();
@@ -92,11 +98,7 @@ WorkFeatures::WorkFeatures(const GraphScope & scope, WorkKind kind) {
 
 std::optional<double> WorkFeatures::value(std::string_view axis) const {
     if (axis == "transfer.bytes") return copy_bytes_;
-    if (axis.starts_with(parameter_prefix_)) {
-        const auto parameter = parameters_.find(axis.substr(parameter_prefix_.size()));
-        if (parameter == parameters_.end()) return {};
-        return static_cast<double>(parameter->second);
-    }
+    if (const auto point = axes_.find(axis); point != axes_.end()) return static_cast<double>(point->second);
     const auto axes = batch_axes();
     const auto batch = std::ranges::find(axes, axis);
     if (batch == axes.end()) return {};
@@ -107,7 +109,7 @@ nlohmann::json WorkFeatures::document() const {
     auto axes = nlohmann::json::object();
     const auto names = batch_axes();
     for (std::size_t index = 0; index < names.size(); ++index) axes[names[index]] = batch_[index];
-    for (const auto & [name, value] : parameters_) axes[std::string(parameter_prefix_) + name] = value;
+    for (const auto & [name, value] : axes_) axes[name] = value;
     if (copy_bytes_) axes["transfer.bytes"] = *copy_bytes_;
     nlohmann::json result{{ "phase", phase_ }, { "axes", std::move(axes) }};
     if (transport()) result["transport"] = transport_;

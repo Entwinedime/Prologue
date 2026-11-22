@@ -15,56 +15,70 @@ from prologue.performance.samples import ServiceSamples, WorkCatalog
 
 
 class CostSamples:
-    def __init__(self, arguments):
-        self.output = arguments.output
-        production, rank = arguments.production, arguments.rank
-        self.observation = {"production": str(production.resolve()), "rank": rank}
-        root = arguments.projection or production
+    def __init__(self, production, projection, ranks):
+        self.production = production.resolve()
+        root = projection or production
         inputs = json.loads((root / "production.json").read_text())["inputs"]
-        recording = PublishedCapture.from_source(Path(inputs["capture_path"]))
-        self.attempt_id = recording.attempt_id
-        if arguments.projection is not None:
+        self.recording = PublishedCapture.from_source(Path(inputs["capture_path"]))
+        if root != production:
             original = json.loads((production / "production.json").read_text())["inputs"]
             if inputs["capture_path"] != original["capture_path"]:
                 raise ValueError("regenerated cost evidence belongs to a different native observation")
-        ranks = json.loads((root / "result.json").read_text())["observed_roles"]
+        observed = json.loads((root / "result.json").read_text())["observed_roles"]
         workers = CapturedWorkers(inputs["capture"]["instances"])
-        if ranks != workers.observed or rank not in ranks:
+        if observed != workers.observed or set(ranks) - set(observed):
             raise ValueError("cost samples require an observed production rank")
-        work = root / "work"
-        self.catalog = WorkCatalog(work / f"{rank}-graph.json", arguments.work_identities)
-        facts = json.loads((work / f"{rank}-facts.json").read_text())
-        measurement = facts["measurements"]
-        peers = {}
-        joint = workers.joint_execution
+
+        self.work = root / "work"
+        self.joint = workers.joint_execution
+        self.facts = {}
+        self.collectives = {}
+        self.notifications = None
+        self.peer_measurements = False
+        if not self.joint:
+            return
+
+        self.facts = {rank: self.read_facts(rank) for rank in ranks}
+        measured = [body["measurements"] for body in self.facts.values()]
+        collective = any(row["collectives"] for row in measured)
+        pd_protocol = any("pd_protocol" in row for row in measured)
 
         # A PD notification or a collective needs its peers from the same physical execution.
-        if joint and (measurement["collectives"] or "pd_protocol" in measurement):
-            peers = {actor: facts if actor == rank else json.loads((work / f"{actor}-facts.json").read_text())
-                     for actor in ranks}
-        collectives = {}
-        if peers and measurement["collectives"]:
-            collectives = CollectiveServices(peers, Path(inputs["capture_path"]), rank).samples
-        self.services = ObservedServices(self.catalog.graph, facts, collectives, physical_peers=joint)
-        self.profile = None
-        if arguments.transport_only:
-            if not joint or not peers:
-                raise ValueError("a transport profile requires a joint physical observation of the peer group")
-            self.profile = AscendTransportProfile(Path(inputs["capture_path"]), peers, work / f"{rank}-sdk/trace.json",
-                                                  self.observation, recording.inputs["image"])
-        self.notifications = []
-        if peers and "pd_protocol" in measurement:
-            protocol = {actor: body["measurements"]["pd_protocol"] for actor, body in peers.items()}
-            self.notifications = list(PdNotificationSamples(protocol).intervals(rank))
+        self.peer_measurements = collective or pd_protocol
+        if self.peer_measurements:
+            self.facts.update((rank, self.read_facts(rank)) for rank in observed if rank not in self.facts)
+        if collective:
+            self.collectives = CollectiveServices(self.facts, self.recording.source, ranks).samples
+        if pd_protocol:
+            protocol = {rank: body["measurements"]["pd_protocol"] for rank, body in self.facts.items()}
+            self.notifications = PdNotificationSamples(protocol)
 
-    def run(self):
-        if self.profile is not None:
-            profile = self.profile.samples(self.catalog, self.services)
-            write_json(self.output, {**profile, "native_recordings": [self.attempt_id]}, replace=False)
-            return
-        samples, absent = ServiceSamples(self.catalog.domain, self.catalog.definitions), Counter()
-        for piece, definition, interval, features in self.catalog:
-            duration_ns, copy, collective = self.services.service(piece)
+    def read_facts(self, rank):
+        return json.loads((self.work / f"{rank}-facts.json").read_text())
+
+    @classmethod
+    def export(cls, arguments):
+        rank = arguments.rank
+        source = cls(arguments.production, arguments.projection, [rank])
+        catalog = WorkCatalog(source.work / f"{rank}-graph.json", arguments.work_identities)
+        report = source.measure(rank, catalog, transport_only=arguments.transport_only)
+        write_json(arguments.output, report, replace=False)
+
+    def measure(self, rank, catalog, *, transport_only=False):
+        observation = {"production": str(self.production), "rank": rank}
+        facts = self.facts[rank] if self.joint else self.read_facts(rank)
+        services = ObservedServices(catalog.graph, facts, self.collectives.get(rank, {}), physical_peers=self.joint)
+        recordings = [self.recording.attempt_id]
+        if transport_only:
+            if not self.peer_measurements:
+                raise ValueError("a transport profile requires a joint physical observation of the peer group")
+            profile = AscendTransportProfile(self.recording.source, self.facts, self.work / f"{rank}-sdk/trace.json",
+                                             observation, self.recording.inputs["image"])
+            return {**profile.samples(catalog, services), "native_recordings": recordings}
+
+        samples, absent = ServiceSamples(catalog.domain, catalog.definitions), Counter()
+        for piece, definition, interval, features in catalog:
+            duration_ns, copy, collective = services.service(piece)
             if duration_ns is None:
                 absent[piece["kind"]] += 1
                 continue
@@ -78,7 +92,8 @@ class CostSamples:
 
             # Source request and physical resource IDs locate the observation only.
             samples.add(definition, interval, features, duration_ns, copy, collective)
-        for measured in self.notifications:
+        notifications = list(self.notifications.intervals(rank)) if self.notifications is not None else []
+        for measured in notifications:
             span = measured["duration_bounds_ns"]
             if span is None:
                 absent["notification"] += 1
@@ -87,8 +102,8 @@ class CostSamples:
             samples.add_external({"operation": measured["operation"]}, "transfer", features, sum(span) // 2)
 
         report = samples.document(absent)
-        report["observation"] = self.observation
-        report["native_recordings"] = [self.attempt_id]
-        if self.notifications:
-            report["notification_measurements"] = self.notifications
-        write_json(self.output, report, replace=False)
+        report["observation"] = observation
+        report["native_recordings"] = recordings
+        if notifications:
+            report["notification_measurements"] = notifications
+        return report

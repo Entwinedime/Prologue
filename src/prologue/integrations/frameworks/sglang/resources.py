@@ -41,7 +41,7 @@ class ResourceInputs:
         "cache.finished": (),
         "cache.unfinished": (),
         "slots.free": (),
-        "pages.free": ("page_size", "release_tokens", "release_grouped", "release_index_bytes"),
+        "pages.free": ("page_size", "release_tokens", "release_grouped", "release_index_bytes", "released_pages"),
         "pages.flush": ("page_size", "release_calls", "release_tokens"),
         "pages.sort": ("page_size", "ready_pages", "released_pages"),
     }
@@ -149,19 +149,25 @@ class ResourceCalls:
                   ["eq", "release_grouped", grouped]]
         if width:
             guards.append(["eq", "release_index_bytes", width])
+        else:
+            parameters["released_pages"] = 0
 
         # The native splice has a different body when there are no existing entries to join.
         condition = {}
-        readbacks = {}
+        copies = {}
+        upload = None
         if width and native:
             destination = owner.release_pages if owner.need_sort else owner.free_pages
             condition["release_target_empty"] = destination.numel() == 0
-            readbacks["free_index"] = indices, ["release_tokens"], "torch.Tensor.cpu"
+            copies["free_index"] = indices, ["release_tokens"], "torch.Tensor.cpu"
+            upload = "released_pages"
         with self.calls.call("pages.free", original, parameters=parameters, work=parent.work, guards=tuple(guards),
-                             condition=condition, local_readbacks=readbacks) as frame:
-            destination_empty = original(*args, **kwargs)
+                             condition=condition, local_copies=copies, local_upload=upload) as frame:
+            released = original(*args, **kwargs)
             if width and not native:
+                destination_empty, pages = released
                 frame.condition["release_target_empty"] = destination_empty
+                frame.parameters["released_pages"] = pages
 
     def invoke(self, operation, owner, original, signature, *args, **kwargs):
         parent = self.calls.current.get()

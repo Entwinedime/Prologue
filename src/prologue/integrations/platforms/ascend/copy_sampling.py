@@ -1,4 +1,4 @@
-"""Time a synchronous PyTorch readback on one warmed, otherwise idle NPU."""
+"""Time synchronous PyTorch tensor copies on one warmed, otherwise idle NPU."""
 
 import json
 from collections import defaultdict
@@ -10,14 +10,15 @@ from prologue.integrations.platforms.ascend.host_profile import AscendRuntimeTim
 from prologue.integrations.platforms.ascend.services import SynchronousCopy
 
 
-class TensorReadback:
-    methods = {"torch.Tensor.tolist": "tolist", "torch.Tensor.cpu": "cpu"}
+class TensorCopySamples:
+    directions = {"torch.Tensor.tolist": "device_to_host", "torch.Tensor.cpu": "device_to_host",
+                  "torch.Tensor.to": "host_to_device"}
     implementation = "aclrtMemcpy"
 
     @classmethod
     def service(cls, caller):
         return {"operation": "local_copy", "caller": caller, "implementation": cls.implementation,
-                "direction": "device_to_host", "resource": ["thread", "control"]}
+                "direction": cls.directions[caller], "resource": ["thread", "control"]}
 
     @staticmethod
     def now():
@@ -32,29 +33,34 @@ class TensorReadback:
         start = self.now()
         actual = AscendMarkers.environment()
         if torch.npu.device_count() != 1 or any(actual[key] != value for key, value in job["runtime"].items()):
-            raise ValueError("isolated readback requires the recorded runtime and exactly one visible NPU")
+            raise ValueError("isolated copy requires the recorded runtime and exactly one visible NPU")
 
         # All operands are contiguous views of a preallocated buffer. Allocation and first use precede timing.
         operands = []
         for operand in job["operands"]:
             caller = operand["caller"]
-            read = getattr(torch.Tensor, self.methods[caller])
+            direction = self.directions[caller]
+            copy = getattr(torch.Tensor, caller.rsplit(".", 1)[1])
             name, width = operand["dtype"], operand["element_bytes"]
             sizes = [point["bytes"] for point in operand["points"]]
             if width <= 0 or not sizes or any(type(size) is not int or size <= 0 or size % width for size in sizes):
-                raise ValueError("readback sizes must be positive whole numbers of tensor elements")
+                raise ValueError("copy sizes must be positive whole numbers of tensor elements")
             dtype = getattr(torch, name.removeprefix("torch."))
-            buffer = torch.zeros(max(sizes) // width, dtype=dtype, device="npu")
+            upload = direction == "host_to_device"
+            buffer = torch.zeros(max(sizes) // width, dtype=dtype, device="cpu" if upload else "npu")
             if buffer.element_size() != width or str(buffer.dtype) != name:
                 raise ValueError("isolated operand differs from its observed dtype or element width")
             for size in sizes:
                 row = {"caller": caller, "dtype": name, "bytes": size, "observations_ns": [], "plain_call_ns": [],
                        "timed_call_ns": [], "unmatched_calls": 0}
-                operands.append((read, buffer[:size // width], row))
+                tensor = buffer[:size // width]
+                args = (tensor, "npu") if upload else (tensor,)
+                operands.append((copy, args, row))
         AscendMarkers.synchronize()
         prepared = self.now()
-        for read, tensor, _ in operands:
-            read(tensor)
+        for copy, args, _ in operands:
+            copy(*args)
+        AscendMarkers.synchronize()
         warmed = self.now()
 
         windows = []
@@ -65,13 +71,13 @@ class TensorReadback:
                 timing.start()
             try:
                 for _ in range(7):
-                    for read, tensor, row in operands:
+                    for copy, args, row in operands:
                         begin = self.now()
-                        read(tensor)
+                        copy(*args)
                         end = self.now()
                         row["timed_call_ns" if enabled else "plain_call_ns"].append(end - begin)
                         if enabled:
-                            windows.append((row, format(tensor.data_ptr(), "x"), begin, end))
+                            windows.append((row, format(args[0].data_ptr(), "x"), begin, end))
             finally:
                 if enabled:
                     timing.finish(path)
@@ -87,7 +93,7 @@ class TensorReadback:
         for row, address, begin, end in windows:
             matches = [call for call in transfers[address, row["bytes"]]
                        if begin <= call["begin_raw_ns"] <= call["end_raw_ns"] <= end
-                       and SynchronousCopy.matches(call, address, row["bytes"])]
+                       and SynchronousCopy.matches(call, address, row["bytes"], self.directions[row["caller"]])]
             if len(matches) == 1:
                 row["observations_ns"].append(matches[0]["end_raw_ns"] - matches[0]["begin_raw_ns"])
             else:

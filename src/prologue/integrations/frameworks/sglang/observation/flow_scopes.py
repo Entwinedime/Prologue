@@ -1,6 +1,6 @@
 """Capture native lifecycle calls interleaved with their caller segments."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 from prologue.integrations.frameworks.sglang.allocation import AllocationABI
 from prologue.integrations.frameworks.sglang.batches import BatchTensors
@@ -12,6 +12,7 @@ from prologue.integrations.frameworks.sglang.kv_layout import MhaKvLayout
 from prologue.integrations.frameworks.sglang.metadata_collectives import MetadataCollectives
 from prologue.integrations.frameworks.sglang.resources import ResourceCalls
 from prologue.integrations.frameworks.sglang.selection import BatchSelection
+from prologue.integrations.runtimes.pytorch.boundaries import TensorUpload
 
 
 class ServingCuts(CallSegments):
@@ -197,6 +198,8 @@ class FlowScopes(ServingCuts):
         ) as call:
             call.record["envelope"] = True
             yield
+            if frame.local_upload is not None:
+                call.record["parameters"][frame.local_upload] = frame.parameters[frame.local_upload]
         if frame.values:
             self.observation.action_values.append({
                 "scope": frame.observations[-1], "values": {**frame.values, "segments": frame.observations},
@@ -211,10 +214,23 @@ class FlowScopes(ServingCuts):
                 call.port(name, "input", owner.tensors.observe(tensor, shape), use="device")
             for name, (tensor, shape) in frame.metadata_inputs.items():
                 call.port(name, "input", owner.tensors.observe(tensor, shape), use="metadata")
-            if frame.local_readbacks:
-                call.record["local_readbacks"] = {name: owner.tensors.local_readback(*operand)
-                                                  for name, operand in frame.local_readbacks.items()}
-            yield
+            copies = {name: owner.tensors.local_copy(*operand) for name, operand in frame.local_copies.items()}
+            upload = TensorUpload(owner.tensors, frame.local_upload) if frame.local_upload is not None else None
+            with upload if upload is not None else nullcontext():
+                yield
+            if upload is not None:
+                if upload.operand is None:
+                    raise ValueError("native KV release did not upload its deduplicated page indices")
+
+                # The page count is only known after native deduplication. Bind it where the copy runs.
+                parameter = frame.local_upload
+                extent, = upload.operand["shape"]
+                frame.parameters[parameter] = extent
+                call.record["parameters"][parameter] = extent
+                call.record["arguments"][parameter] = parameter
+                copies[parameter] = upload.operand
+            if copies:
+                call.record["local_copies"] = copies
             call.record["work"]["continuation"] = frame.continuation
             call.record["bindings"]["segment"] = {
                 "owner": frame.operation,

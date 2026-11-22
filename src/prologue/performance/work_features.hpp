@@ -45,8 +45,9 @@ private:
     static constexpr std::string_view parameter_prefix_ = "parameter.";
 
     std::span<const std::string_view> batch_axes() const { return std::span(batch_names_).first(batch_axis_count_); }
+    nlohmann::json transport_operand(const GraphScope & scope);
 
-    std::map<std::string, std::int64_t, std::less<>> parameters_;
+    std::map<std::string, std::int64_t, std::less<>> axes_;
     std::string_view phase_;
     nlohmann::json transport_;
     std::optional<std::int64_t> copy_bytes_;

@@ -9,6 +9,7 @@ from typing import Any
 
 import torch
 from torch.multiprocessing.reductions import StorageWeakRef
+from torch.overrides import TorchFunctionMode
 from torch.utils import _pytree
 from torch.utils._python_dispatch import TorchDispatchMode, _disable_current_modes
 from torch.utils.weak import WeakIdKeyDictionary
@@ -98,17 +99,19 @@ class TensorBoundaries(TorchDispatchMode):
         return rule
 
     @staticmethod
-    def copy_source(tensor, caller):
-        if tensor.device.type != "cpu" and tensor.is_contiguous():
-            return {"address": format(tensor.data_ptr(), "x"), "element_bytes": tensor.element_size(), "caller": caller}
+    def copy_source(tensor, caller, direction="device_to_host"):
+        from_host = direction == "host_to_device"
+        if (tensor.device.type == "cpu") == from_host and tensor.is_contiguous():
+            return {"address": format(tensor.data_ptr(), "x"), "element_bytes": tensor.element_size(),
+                    "caller": caller, "direction": direction}
         return None
 
-    def local_readback(self, tensor, shape, caller):
+    def local_copy(self, tensor, shape, caller, direction="device_to_host"):
         with self.metadata():
 
             # A cost operand inside the native call introduces no external storage or readiness edge.
             return {"dtype": str(tensor.dtype), "shape": list(tensor.shape), "shape_rule": shape,
-                    "copy_source": self.copy_source(tensor, caller)}
+                    "copy_source": self.copy_source(tensor, caller, direction)}
 
     def observe(self, tensor: torch.Tensor, shape: list[Any] | None, *, region: str | None = None,
                 materializer: str | None = None) -> dict[str, Any]:
@@ -173,4 +176,21 @@ class TensorBoundaries(TorchDispatchMode):
                         state.writer = self.capture.current.get()
                         state.allocation = state.writer
                         state.exposed = False
+        return result
+
+
+class TensorUpload(TorchFunctionMode):
+    """Read the actual CPU operand of one declared upload without moving its data."""
+
+    def __init__(self, boundaries, parameter):
+        self.boundaries = boundaries
+        self.parameter = parameter
+        self.operand = None
+
+    def __torch_function__(self, operation, types, args=(), kwargs=None):
+        result = operation(*args, **({} if kwargs is None else kwargs))
+        if operation is torch.Tensor.to and args[0].device.type == "cpu" and result.device.type != "cpu":
+            if self.operand is not None:
+                raise ValueError("a declared tensor upload has multiple native operands")
+            self.operand = self.boundaries.local_copy(args[0], [self.parameter], "torch.Tensor.to", "host_to_device")
         return result

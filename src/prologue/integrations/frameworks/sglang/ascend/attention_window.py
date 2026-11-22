@@ -2,28 +2,47 @@
 
 import json
 from collections import defaultdict
+from dataclasses import dataclass
 from math import prod
 
 from prologue.acquisition.recording import PublishedCapture
 from prologue.artifacts import write_json
+from prologue.integrations.frameworks.sglang.acquisition.domains import SGLangTask
 from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
 from prologue.performance.requirements import cost_identity
 from prologue.performance.samples import ServiceSamples, WorkCatalog
 
 
-class DecodeWindow:
-    ready = True
-    name = "decode-attention"
+@dataclass(frozen=True, slots=True)
+class AttentionProbe:
+    rank: int
+    source_rank: int
+    scope: int
+    site: str
+    contexts: tuple[int, ...]
 
+
+class DecodeSampling:
     def __init__(self, owner):
         self.owner = owner
-        self.cuts, self.points, self.definitions = {}, {}, {}
+        self.cuts, self.workers = {}, {}
 
     def observe(self, rank, catalog):
         domain = catalog.domain
         if domain["expert_layers"] or domain["implementation"]["disaggregation_mode"] != "null":
             return
         identity = cost_identity(domain)
+        self.workers[identity] = rank, identity
+        if self.owner.launch.local_shards:
+            for role in domain["worker_roles"].values():
+                actor = role["parallel"]["rank"]
+                if actor == rank or role["representative"] != rank:
+                    continue
+                bound = SGLangTask.bind_worker(domain, role)
+
+                # Compiled cost domains keep the worker layout while omitting the global rank field.
+                bound["parallel"] = {key: value for key, value in role["parallel"].items() if key != "rank"}
+                self.workers.setdefault(cost_identity(bound), (actor, identity))
         definitions = {}
         for work, index, _, features in catalog:
             scope = catalog.graph["scopes"][work["scope"]]
@@ -56,24 +75,41 @@ class DecodeWindow:
                  "batch.attention_pairs": total + members, "parameter.model_tokens": members}
         return lengths if axes == known else ()
 
-    def select(self, demand):
+    def windows(self, demand):
         if not self.cuts:
             return
         configuration = self.owner.launch.serving.instances[0].configuration
         capacity = configuration.batch_capacity(configuration.values)
         page = configuration.values["page_size"]
+        selections = defaultdict(dict)
         for point in demand.points:
-            if point.phase != "decode" or (point.domain, point.definition) not in self.cuts:
+            worker = self.workers.get(point.domain)
+            if point.phase != "decode" or worker is None:
                 continue
+            rank, source_domain = worker
+            cut = self.cuts.get((source_domain, point.definition))
             definition = demand.definitions[point.definition]
-            members = dict(point.axes).get("batch.members", 0)
-            if definition["work"][point.interval]["kind"] != "device" or members > capacity:
+            if cut is None or definition["work"][point.interval]["kind"] != "device":
                 continue
             lengths = self.contexts(point)
             allocated = sum(((n + page) // page) * page for n in lengths)
-            if lengths and allocated <= configuration.values["max_total_tokens"]:
-                self.points[point] = lengths
-                self.definitions[point.definition] = definition
+            if lengths and len(lengths) <= capacity and allocated <= configuration.values["max_total_tokens"]:
+
+                # Each physical card has one scoped profiler owner. Batch all requested points for that worker.
+                slot = rank if self.owner.launch.local_shards else None
+                selections[slot][point] = AttentionProbe(rank, *cut, lengths)
+
+        for slot, points in selections.items():
+            name = "decode-attention" if slot is None else f"decode-attention-rank-{slot}"
+            yield DecodeWindow(self.owner, name, points, demand)
+
+
+class DecodeWindow:
+    ready = True
+
+    def __init__(self, owner, name, points, demand):
+        self.owner, self.name, self.points = owner, name, points
+        self.domains, self.definitions = demand.domains, demand.definitions
 
     def collect(self, arguments, requested, limit):
         launch, source = self.owner.launch, self.owner.source
@@ -81,11 +117,11 @@ class DecodeWindow:
         self.requested = requested
         sites = defaultdict(set)
         for point in requested:
-            rank, _, site = self.cuts[point.domain, point.definition]
-            sites[str(rank)].add(site)
+            probe = self.points[point]
+            sites[str(probe.rank)].add(probe.site)
         sites = {rank: sorted(names) for rank, names in sites.items()}
         groups, requests = [], []
-        for lengths in sorted({self.points[point] for point in requested}):
+        for lengths in sorted({self.points[point].contexts for point in requested}):
             for _ in range(2):
                 group = []
                 for length in lengths:
@@ -151,8 +187,7 @@ class DecodeWindow:
         recording = PublishedCapture(output)
         by_rank = defaultdict(list)
         for point in sorted(self.requested, key=lambda p: (p.domain, p.definition, p.interval, p.axes)):
-            rank, scope, site = self.cuts[point.domain, point.definition]
-            by_rank[rank].append((point, scope, site))
+            by_rank[self.points[point].rank].append(point)
         for instance in recording.manifest["instances"]:
             for actor, relative in instance["attention_samples"].items():
                 rank = int(actor)
@@ -160,26 +195,28 @@ class DecodeWindow:
                     continue
                 with acquisition.processing():
                     work = source.projection / "work"
-                    catalog = WorkCatalog(work / f"{rank}-graph.json", source.identities(rank))
+                    selections = by_rank[rank]
+                    source_rank = self.points[selections[0]].source_rank
+                    catalog = WorkCatalog(work / f"{source_rank}-graph.json", source.identities(source_rank))
+                    domain = self.domains[selections[0].domain]
                     record = json.loads((recording.source / relative).read_text())
-                    runtime = record["runtime"]
-                    same_runtime = all(runtime[k] == catalog.domain[k] for k in ("device", "torch", "torch_npu"))
+                    same_runtime = all(record["runtime"][k] == domain[k] for k in ("device", "torch", "torch_npu"))
                     if record["rank"] != rank or not same_runtime:
                         raise ValueError("Decode recording uses a different worker or device runtime from its source")
-                    selections = by_rank[rank]
-                    scopes = {scope for _, scope, _ in selections}
-                    partitions = ScopedTasks.source(source.recording.source, work, rank, catalog, scopes)
-                    results = ServiceSamples(catalog.domain)
+                    scopes = {self.points[point].scope for point in selections}
+                    partitions = ScopedTasks.source(source.recording.source, work, source_rank, catalog, scopes)
+                    results = ServiceSamples(domain)
                     definitions, matched, receipts = {}, {}, []
-                    for point, scope, site in selections:
-                        key = scope, self.points[point]
+                    for point in selections:
+                        probe = self.points[point]
+                        key = probe.scope, probe.contexts
                         if key not in matched:
                             definition = self.definitions[point.definition]
-                            calls = [c for c in record["calls"] if c["site"] == site]
-                            parts = partitions.get(scope)
-                            costs, detail = self.measured(catalog.domain, definition, parts, calls, key[1])
+                            calls = [c for c in record["calls"] if c["site"] == probe.site]
+                            parts = partitions.get(probe.scope)
+                            costs, detail = self.measured(domain, definition, parts, calls, probe.contexts)
                             matched[key] = costs
-                            receipts.append({"site": site, "context": key[1], "measurement": detail})
+                            receipts.append({"site": probe.site, "context": probe.contexts, "measurement": detail})
                         costs = matched[key]
                         if costs is not None:
                             if point.definition not in definitions:
@@ -192,7 +229,7 @@ class DecodeWindow:
                     report["native_recordings"] = [source.recording.attempt_id, recording.attempt_id]
                     report["observation"] = {
                         "sampling": str(output), "training_capture": str(source.recording.directory), "rank": rank,
-                        "native_evidence": relative,
+                        "source_rank": source_rank, "native_evidence": relative,
                     }
                     report["qualification"] = receipts
                     path = source.output / f"{self.name}-{rank}.json"

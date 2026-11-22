@@ -19,7 +19,7 @@ def main() -> None:
     observation.add_argument("--service-reference", action="store_true", help="observe structure, resources and same-run CPU activity")
     observation.add_argument("--latency-only", action="store_true", help="record scheduler ingress and token publication only")
     observation.add_argument("--host-timing", action="store_true", help="sample native call cuts and CPU-only queue activity")
-    observation.add_argument("--local-copy", action="store_true", help="time isolated native tensor readbacks on one device")
+    observation.add_argument("--local-copy", action="store_true", help="time isolated native tensor copies on one device")
     observation.add_argument("--attention", action="store_true", help="measure selected native Decode attention calls")
     interpret = commands.add_parser("interpret", help="interpret an SDK-exported worker recording")
     interpret.add_argument("--trace", type=Path, required=True)
@@ -33,9 +33,9 @@ def main() -> None:
     if arguments.command == "capture" and arguments.local_copy:
         import os
 
-        from prologue.integrations.platforms.ascend.copy_sampling import TensorReadback
+        from prologue.integrations.platforms.ascend.copy_sampling import TensorCopySamples
 
-        TensorReadback().sample(json.loads(arguments.input.read_text()), arguments.output, os.environ["PROLOGUE_SGLANG_REVISION"])
+        TensorCopySamples().sample(json.loads(arguments.input.read_text()), arguments.output, os.environ["PROLOGUE_SGLANG_REVISION"])
     elif arguments.command == "capture":
         from prologue.integrations.frameworks.sglang.observation.session import NativeServingSession
 

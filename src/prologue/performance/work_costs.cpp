@@ -109,10 +109,11 @@ std::optional<std::size_t> WorkCosts::external_index(const nlohmann::json & iden
 }
 
 template<class Features>
-WorkCosts::Estimate WorkCosts::estimate(std::optional<std::size_t> definition, std::size_t interval, const Features & features) const {
+WorkCosts::Estimate WorkCosts::estimate(std::optional<std::size_t> definition, std::size_t interval,
+                                        std::string_view phase, const Features & features) const {
     if (!definition) return {};
     const auto & phases = models_[*definition].at(interval);
-    const auto match = phases.find(features.phase());
+    const auto match = phases.find(phase);
     if (match == phases.end()) return {};
     return { match->second.get(), match->second->estimate(features) };
 }
@@ -124,16 +125,16 @@ WorkCosts::Estimate WorkCosts::work_estimate(std::optional<std::size_t> definiti
     if (explicit_service) {
         if (operand && *operand != *explicit_service)
             throw std::invalid_argument("cost query operand differs from its declared external service");
-        return estimate(definition, interval, features);
+        return estimate(definition, interval, features.phase(), features);
     }
     if (kind == WorkKind::Transfer && operand)
-        return estimate(external_index(*operand, kind), 0, features);
-    const auto measured = estimate(definition, interval, features);
+        return estimate(external_index(*operand, kind), 0, features.phase(), features);
+    const auto measured = estimate(definition, interval, features.phase(), features);
     if (measured.service_ns || kind != WorkKind::Collective || !operand) return measured;
 
-    // The profile point already binds the actual payload and participants. It supplies only the peer service.
+    // A physical profile binds the group and layout. It estimates the instantiated payload at its own phase.
     const auto point = external_index(*operand, kind);
-    return point ? estimate(point, 0, WorkFeatures(Parameters{})) : measured;
+    return point ? estimate(point, 0, "", features) : measured;
 }
 
 std::string_view WorkCosts::Estimate::status() const {

@@ -203,8 +203,23 @@ class CostAcquisition:
 
     def inspect(self, source, requirements):
         self.project(source)
+        with self.processing():
+            pending = {}
+            for rank in source.ranks:
+                observation = {"production": str(source.production), "rank": rank}
+                if any(sample.get("observation") == observation for sample in self.samples.values()):
+                    continue
+                path = source.output / f"{rank}-device.json"
+                if path.is_file():
+                    self.samples[path] = read(path)
+                else:
+                    pending[rank] = path
+
+            # Read the peer observations and calibrate a joint capture once for all missing workers.
+            sampler = source.sampling.device_samples(tuple(pending)) if pending else None
+
+        work = source.projection / "work"
         for rank in source.ranks:
-            work = source.projection / "work"
             graph = work / f"{rank}-graph.json"
             identities = source.identities(rank)
             self.run_model("work-identities", identities, graph)
@@ -212,14 +227,11 @@ class CostAcquisition:
                 catalog = WorkCatalog(graph, identities)
                 owner = f"{source.recording.source / 'capture.json'}#rank={rank}"
                 source.sampling.observe(rank, owner, catalog, requirements)
-
-            # The same detailed observation must not contribute device durations twice.
-            observation = {"production": str(source.production), "rank": rank}
-            if not any(sample.get("observation") == observation for sample in self.samples.values()):
-                projection = {"projection": source.projection} if source.projection != source.production else {}
-                path = source.output / f"{rank}-device.json"
-                self.samples[path] = self.samples_from(path, "cost-samples", production=source.production, rank=rank,
-                                                       work_identities=identities, **projection)
+                if rank in pending:
+                    path = pending[rank]
+                    report = sampler.measure(rank, catalog)
+                    write_json(path, report, replace=False)
+                    self.samples[path] = report
 
     @staticmethod
     def projection_usage(directory):

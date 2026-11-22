@@ -114,7 +114,7 @@ def main() -> None:
     elif arguments.command == "cost-samples":
         from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples
 
-        CostSamples(arguments).run()
+        CostSamples.export(arguments)
     elif arguments.command == "host-cost-samples":
         from prologue.integrations.frameworks.sglang.ascend.host_samples import HostCostSamples
 

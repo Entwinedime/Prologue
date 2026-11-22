@@ -6,27 +6,27 @@ from math import prod
 
 
 class SynchronousCopy:
-    device_to_host = 2  # ACL_MEMCPY_DEVICE_TO_HOST
+    directions = {"host_to_device": 1, "device_to_host": 2}  # aclrtMemcpyKind
 
     @classmethod
-    def matches(cls, native, address, size):
-        return (native["direction"] == cls.device_to_host and native.get("source") == address
+    def matches(cls, native, address, size, direction):
+        return (native["direction"] == cls.directions[direction] and native.get("source") == address
                 and native["bytes"] == size)
 
     @classmethod
     def operand(cls, native, scope):
-        if native["direction"] != cls.device_to_host or native["result"] != 0:
+        if native["direction"] not in cls.directions.values() or native["result"] != 0:
             return None
         inputs = ((port["name"], port["tensor"]) for port in scope["ports"]
                   if port["direction"] == "input" and port["tensor"] is not None)
         operands = []
-        for name, tensor in chain(inputs, scope.get("local_readbacks", {}).items()):
+        for name, tensor in chain(inputs, scope.get("local_copies", {}).items()):
             source = tensor.get("copy_source")
-            if source and cls.matches(native, source["address"], source["element_bytes"] * prod(tensor["shape"])):
+            if source and cls.matches(native, source["address"], source["element_bytes"] * prod(tensor["shape"]), source["direction"]):
                 operands.append({
                     "operand": name, "tensor": {"dtype": tensor["dtype"], "shape": tensor["shape_rule"]},
                     "element_bytes": source["element_bytes"],
-                    "caller": source["caller"], "implementation": native["api"], "direction": "device_to_host",
+                    "caller": source["caller"], "implementation": native["api"], "direction": source["direction"],
                 })
 
         # A coincident size, a slice or ambiguous aliases cannot bind the service to a target port.
@@ -96,8 +96,10 @@ class ObservedServices:
             if copy is None:
                 return None, None, None
             duration, size, direction = copy
-            if "copy" in piece and direction == SynchronousCopy.device_to_host:
-                direction = "device_to_host"
+            if "copy" in piece:
+                label = piece["copy"]["direction"]
+                if direction == SynchronousCopy.directions[label]:
+                    direction = label
             return duration, [size, direction], None
 
         positions, payload = self.positions[lane], self.payload[lane]

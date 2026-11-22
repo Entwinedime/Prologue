@@ -2,7 +2,6 @@
 
 import json
 from collections import Counter, defaultdict
-from math import prod
 
 from prologue.performance.samples import ServiceSamples
 
@@ -40,7 +39,7 @@ class AscendTransportProfile:
         source = ServiceSamples(catalog.domain)
         absent = Counter()
         receipts = defaultdict(lambda: defaultdict(list))
-        identities = {}
+        coordinates = {}
         for piece, _, _, features in catalog:
             if piece["kind"] != "collective":
                 continue
@@ -63,12 +62,15 @@ class AscendTransportProfile:
                 operation == "transfer" and identity["rank"] != identity["members"][0])
             ports = identity["ports"].get("output" if receives else "input", {}).values()
             dtype, _, elements = payload
-            operands = {(port["dtype"], prod(port["shape"])) for port in ports}
+            axes = features["axes"]
+            operands = {(port["dtype"], axes[port["elements_axis"]]) for port in ports}
             if not (0 <= dtype < len(self.dtypes) and operands == {(f"torch.{self.dtypes[dtype]}", elements)}):
                 absent["sdk_operand_mismatch"] += 1
                 continue
-            key = json.dumps(identity, sort_keys=True)
-            identities[key] = identity
+            payload_axes = {port["elements_axis"]: axes[port["elements_axis"]]
+                            for ports in identity["ports"].values() for port in ports.values()}
+            key = json.dumps((identity, payload_axes), sort_keys=True)
+            coordinates[key] = identity, {"phase": "", "axes": payload_axes}
             receipts[key][tuple(payload)].append(duration)
 
         for key, variants in receipts.items():
@@ -76,7 +78,8 @@ class AscendTransportProfile:
                 absent["ambiguous_native_implementation"] += sum(map(len, variants.values()))
                 continue
             (payload, durations), = variants.items()
+            identity, features = coordinates[key]
             for duration in durations:
-                source.add_external(identities[key], "collective", {"phase": "", "axes": {}}, duration, collective=payload)
+                source.add_external(identity, "collective", features, duration, collective=payload)
 
         return {**source.document(absent), "transport_profile": self.qualification}

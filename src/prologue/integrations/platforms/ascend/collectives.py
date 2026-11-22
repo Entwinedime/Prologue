@@ -3,6 +3,7 @@
 import json
 from collections import defaultdict
 from dataclasses import dataclass
+from itertools import permutations
 
 from prologue.integrations.platforms.ascend.clock import DeviceCalibration
 from prologue.integrations.platforms.ascend.notifications import NotifyProgress
@@ -40,29 +41,60 @@ class CollectivePost:
                 return False
         return True
 
-    def service(self, peers, rank):
-        if self.elapsed is None:
-            return None
-        spans = [self.elapsed]
-        for actor in self.required:
-            if actor == rank:
-                continue
-            peer = peers[actor]
-            if peer.ready is None:
-                return None
 
-            # A peer known to precede our own start contributes no cross-device clock uncertainty.
-            if peer.ready[1] > self.ready[0]:
-                bounds = NotifyProgress.peer_bounds(self.notifications, peer.notifications,
-                                                    self.finish[0] - peer.ready[1], self.finish[1] - peer.ready[0])
-                if bounds[0] > bounds[1]:
-                    raise ValueError("HCCL notification order contradicts the calibrated worker clocks")
-                spans.append(bounds)
-        return RendezvousService.after_peers(spans)
+class CollectiveClock:
+    """Bound the measured endpoints of one rendezvous across its participants."""
+
+    def __init__(self, peers):
+        windows = {(rank, name): interval for rank, post in peers.items()
+                   for name, interval in (("ready", post.ready), ("finish", post.finish)) if interval is not None}
+        self.positions = {point: index for index, point in enumerate(windows)}
+
+        # Each cell bounds time(later) - time(earlier); the two endpoints may be on different devices.
+        self.upper = [[0 if i == j else end[1] - begin[0] for j, end in enumerate(windows.values())]
+                      for i, begin in enumerate(windows.values())]
+        for rank, post in peers.items():
+            if post.elapsed is not None:
+                self.constrain((rank, "ready"), (rank, "finish"), post.elapsed[1])
+                self.constrain((rank, "finish"), (rank, "ready"), -post.elapsed[0])
+
+        for sender, receiver in permutations(peers, 2):
+            for record, wait in NotifyProgress.pairs(peers[sender].notifications, peers[receiver].notifications):
+                self.notification(sender, receiver, record, wait)
+
+        # Compose calibrated and causal bounds through every observed post in this collective.
+        for via, relay in enumerate(self.upper):
+            for row in self.upper:
+                to_relay = row[via]
+                for target, current in enumerate(row):
+                    bound = to_relay + relay[target]
+                    if bound < current:
+                        row[target] = bound
+        if any(row[index] < 0 for index, row in enumerate(self.upper)):
+            raise ValueError("HCCL notification order contradicts the calibrated worker clocks")
+
+    def constrain(self, before, after, bound):
+        row, index = self.upper[self.positions[before]], self.positions[after]
+        row[index] = min(row[index], bound)
+
+    def notification(self, sender, receiver, record, wait):
+        send_ready, send_finish = (sender, "ready"), (sender, "finish")
+        receive_ready, receive_finish = (receiver, "ready"), (receiver, "finish")
+
+        # The send can signal after its start; the wait can finish only after that signal.
+        self.constrain(receive_ready, send_ready, wait.prefix[1] - record.prefix[0])
+        self.constrain(receive_ready, send_finish, wait.prefix[1] + record.suffix[1])
+        self.constrain(receive_finish, send_ready, -wait.suffix[0] - record.prefix[0])
+        self.constrain(receive_finish, send_finish, record.suffix[1] - wait.suffix[0])
+
+    def service(self, rank, required):
+        finish = self.positions[rank, "finish"]
+        starts = [self.positions[actor, "ready"] for actor in {rank, *required}]
+        return RendezvousService.after_peers([(-self.upper[finish][start], self.upper[start][finish]) for start in starts])
 
 
 class CollectiveServices:
-    def __init__(self, facts, capture, rank):
+    def __init__(self, facts, capture, ranks):
         channels = defaultdict(dict)
         measurements = {}
         for actor, document in facts.items():
@@ -74,11 +106,12 @@ class CollectiveServices:
                 raise ValueError("collective calibration and worker facts come from different environments")
             measurements[actor] = self.intervals(document, DeviceCalibration(native["device_clock"]))
 
-        self.samples = {}
+        self.samples = {rank: {} for rank in ranks}
         for actors in channels.values():
-            if rank not in actors:
+            selected = [rank for rank in ranks if rank in actors]
+            if not selected:
                 continue
-            operations = [(operation, members) for _, operation, members in actors[rank]]
+            operations = [(operation, members) for _, operation, members in actors[selected[0]]]
             members = operations[0][1]
             if actors.keys() != set(members) or any(
                 [(operation, group) for _, operation, group in posts] != operations for posts in actors.values()
@@ -90,9 +123,17 @@ class CollectiveServices:
                 peers = {actor: measurements[actor].get(actors[actor][ordinal][0]) for actor in members}
                 if None in peers.values():
                     continue
-                own = peers[rank]
-                if own.compatible(peers, members, operation, rank):
-                    self.samples[own.position] = own.service(peers, rank), own.payload
+                clock = None
+                for rank in selected:
+                    own = peers[rank]
+                    if not own.compatible(peers, members, operation, rank):
+                        continue
+                    service = None
+                    if own.elapsed is not None and all(peers[actor].ready is not None for actor in own.required):
+                        if clock is None:
+                            clock = CollectiveClock(peers)
+                        service = clock.service(rank, own.required)
+                    self.samples[rank][own.position] = service, own.payload
 
     @staticmethod
     def intervals(document, clock):

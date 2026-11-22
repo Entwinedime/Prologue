@@ -225,24 +225,52 @@ class NativeCommunications:
             call.record["bindings"]["local_implementation"] = implementation
         call.port("input.layout", "input", {**source, "shape_rule": list(parameters)}, use="metadata")
 
+    def row_projection(self, original, layer, input_, *args, **kwargs):
+        if not self.enabled or layer.tp_size == 1:
+            return original(layer, input_, *args, **kwargs)
+        first = len(self.pending_reductions)
+        result = original(layer, input_, *args, **kwargs)
+        if first == len(self.pending_reductions):
+            return result
+
+        tensors = self.observation.tensors
+        output, _ = result
+        with tensors.metadata():
+            input_rule = tensors.declared_shape(input_)
+            if input_rule is None or tuple(output.shape) != (*input_.shape[:-1], layer.output_size):
+                return result
+
+        # The native projection preserves leading axes and owns the output feature width.
+        returned = tensors.observe(output, [*input_rule[:-1], layer.output_size])
+        for index in reversed(range(first, len(self.pending_reductions))):
+            if self.bind_returned_reduction(self.pending_reductions[index], (returned,)):
+                del self.pending_reductions[index]
+        return result
+
+    def bind_returned_reduction(self, pending, outputs):
+        call, parameters, source, implementation, value = pending
+        rule = None
+
+        # Only a declaration for the exact tensor version can identify the operand's layout.
+        for tensor in outputs:
+            if not tensor or tensor["value"] != value or "shape_rule" not in tensor:
+                continue
+            if (tensor["dtype"], tensor["shape"]) != (source["dtype"], source["shape"]):
+                raise ValueError("native all-reduce changed the dtype or shape of its operand")
+            if rule is not None and rule != tensor["shape_rule"]:
+                raise ValueError("the same returned reduction has conflicting shape declarations")
+            rule = tensor["shape_rule"]
+        if rule is None:
+            return False
+        self.bind_reduction(call, parameters, source, implementation, rule)
+        return True
+
     def bind_returned_operands(self):
         scopes = self.observation.capture.scopes
-        for call, parameters, source, implementation, value in self.pending_reductions:
+        for pending in self.pending_reductions:
+            call, *_ = pending
             parent = scopes[call.record["parent"]]
-            rule = None
-
-            # A parent returning this exact tensor version declares its shape in the caller's namespace.
-            for port in parent["ports"]:
-                tensor = port.get("tensor")
-                if port["direction"] != "output" or not tensor or tensor["value"] != value or "shape_rule" not in tensor:
-                    continue
-                if (tensor["dtype"], tensor["shape"]) != (source["dtype"], source["shape"]):
-                    raise ValueError("native all-reduce changed the dtype or shape of its operand")
-                if rule is not None and rule != tensor["shape_rule"]:
-                    raise ValueError("the same returned reduction has conflicting parent shape declarations")
-                rule = tensor["shape_rule"]
-            if rule is not None:
-                self.bind_reduction(call, parameters, source, implementation, rule)
+            self.bind_returned_reduction(pending, (port.get("tensor") for port in parent["ports"] if port["direction"] == "output"))
         self.pending_reductions.clear()
 
     @contextmanager
@@ -316,4 +344,7 @@ class NativeCommunications:
             return result
 
     def install(self) -> None:
+        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
+
         self.cuts.install(self.experts)
+        HookRegistry.register("sglang.srt.layers.linear.RowParallelLinear.forward", self.row_projection, HookType.AROUND)

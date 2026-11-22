@@ -54,17 +54,12 @@ class NotifyProgress:
         return endpoints
 
     @staticmethod
-    def peer_bounds(own, peer, lower, upper):
-        for (side, local, remote, handle), steps in own.items():
-            opposite = "record" if side == "wait" else "wait"
-            matches = peer.get((opposite, remote, local, handle), ())
-            if local == remote or len(steps) != len(matches):
+    def pairs(recorded, waited):
+        for (side, local, remote, handle), steps in recorded.items():
+            if side != "record" or local == remote:
                 continue
+            matches = waited.get(("wait", remote, local, handle), ())
 
-            # One stream on each endpoint consumes each register in order within this matching native post.
-            for step, match in zip(steps, matches):
-                if side == "wait":
-                    lower = max(lower, step.suffix[0] + match.prefix[0])
-                else:
-                    upper = min(upper, step.suffix[1] + match.prefix[1])
-        return lower, upper
+            # Equal sequences pair each use of a register within the same native post.
+            if len(steps) == len(matches):
+                yield from zip(steps, matches, strict=True)

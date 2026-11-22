@@ -57,7 +57,7 @@ private:
     std::optional<std::size_t> external_index(const nlohmann::json & identity, WorkKind kind) const;
 
     template<class Features>
-    Estimate estimate(std::optional<std::size_t> definition, std::size_t interval, const Features & features) const;
+    Estimate estimate(std::optional<std::size_t> definition, std::size_t interval, std::string_view phase, const Features & features) const;
     template<class Features>
     Estimate work_estimate(std::optional<std::size_t> definition, std::size_t interval, WorkKind kind, const Features & features,
                            const nlohmann::json * explicit_service = nullptr) const;
