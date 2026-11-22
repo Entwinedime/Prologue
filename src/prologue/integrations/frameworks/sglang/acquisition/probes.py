@@ -1,10 +1,12 @@
 """Construct finite request-lifecycle probes without inventing expert choices."""
 
 import json
+from collections import Counter
 from math import lcm
 
 from prologue.contracts.workload import WorkloadContent
 from prologue.contracts.workload.expert_routes import ExpertRoutes
+from prologue.integrations.frameworks.sglang.configuration import NativeConfiguration
 
 
 class LifecycleProbes:
@@ -14,6 +16,7 @@ class LifecycleProbes:
         self.prefix_cache = any(instance.configuration.values["prefix_cache"] for instance in instances)
         self.topologies = topologies
         self.prompt_period = lcm(self.page_size, *(chunk for chunk in self.chunks if chunk))
+        self.ordinary_configuration = next((instance.configuration.values for instance in instances if instance.mode == "null"), None)
 
     def outputs_to_new_page(self, prompt):
 
@@ -119,8 +122,8 @@ class LifecycleProbes:
         # A producer can cache its entire prompt; a consumer must leave its last token for model execution.
         return [request for identity, request in content.requests.items() if identity in shared and request["prompt_tokens"] > page_size]
 
-    def extend(self, workload, groups, *, model_phases, allocation_capacity):
-        coverage = self.decode_probes(workload, groups, "decode" in model_phases, allocation_capacity)
+    def extend(self, workload, groups, *, model_phases, service_evidence):
+        coverage = self.decode_probes(workload, groups, "decode" in model_phases, service_evidence)
         if self.prefix_cache:
             content = WorkloadContent(workload["requests"], workload["prefixes"])
             candidates = self.shared_prefix_requests(content, self.page_size)
@@ -145,42 +148,92 @@ class LifecycleProbes:
             self.append(workload, groups, source, "isolated")
         return coverage
 
-    def decode_probes(self, workload, groups, joint, capacity):
-        decodable = [request for request in workload["requests"] if request["output_tokens"] > 1]
-        pool_pages = capacity // self.page_size
-        pair_crosses = False
+    def decode_probes(self, workload, groups, joint, service_evidence):
+        decodable = {request["id"]: request for request in workload["requests"] if request["output_tokens"] > 1}
+        requested_width, unit_output = 1, 0
         if joint:
-            source = min(decodable, key=lambda r: (r["output_tokens"] == 2, r["prompt_tokens"] + r["output_tokens"], r["id"]))
+            requested_width = 2
+            if service_evidence:
+                for group in groups:
+                    cohorts = Counter(decodable[identity]["arrival_ns"] for identity in group if identity in decodable)
+                    requested_width = max(requested_width, max(cohorts.values(), default=0))
+            source = min(decodable.values(), key=lambda r: (r["output_tokens"] == 2, r["prompt_tokens"] + r["output_tokens"], r["id"]))
 
             # Unit prompts exercise the compact multi-request model input even when paging needs a longer peer.
-            self.append(workload, groups, source, "decode_pair", prompts=(1, 1))
-            pair_crosses = pool_pages >= 4 and source["output_tokens"] >= self.outputs_to_new_page(1)
+            unit_output = min(3, source["output_tokens"])
+            self.append(workload, groups, source, "decode_pair", prompts=(1, 1), output_tokens=unit_output)
+
+        # PD reserves transferred KV through a different lifecycle.
+        if self.ordinary_configuration is None or self.page_size == 1:
+            return []
+        pool_pages = self.ordinary_configuration["max_total_tokens"] // self.page_size
+        if pool_pages < 2:
+            return []
 
         page_cases = []
-        if self.page_size > 1 and pool_pages >= 2:
-            for request in decodable:
-                prompt = min(request["prompt_tokens"], self.page_size)
-                crossing = self.outputs_to_new_page(prompt)
-                if crossing <= request["output_tokens"]:
-                    page_cases.append((crossing, request["output_tokens"] == crossing, prompt, request["id"], request))
+        for identity, request in decodable.items():
+            prompt = min(request["prompt_tokens"], self.page_size)
+            crossing = self.outputs_to_new_page(prompt)
+            if crossing <= request["output_tokens"]:
+                page_cases.append((crossing, request["output_tokens"] == crossing, prompt, identity))
+        if not page_cases:
+            return []
 
-        coverage = []
-        if page_cases:
-            crossing, _, prompt, _, source = min(page_cases)
-            output = min(crossing + 1, source["output_tokens"])
-            single = {group[0] for group in groups if len(group) == 1}
-            if not any(request["id"] in single and request["prompt_tokens"] <= (pool_pages - 1) * self.page_size
-                       and self.outputs_to_new_page(request["prompt_tokens"]) <= request["output_tokens"] for request in decodable):
-                self.append(workload, groups, source, "decode_page", prompts=(prompt,), output_tokens=output)
-            coverage.append("allocation/decode_pages/single")
+        crossing, _, prompt, identity = min(page_cases)
+        source = decodable[identity]
+        widest = min(requested_width, self.page_probe_capacity(pool_pages, crossing))
+        if widest < 1:
+            return []
 
-            # The short peer stays in Decode until the other crosses a page. Both borrow the source's real token ranges.
-            peer_pages = (output + self.page_size - 1) // self.page_size
-            if joint and 2 + peer_pages <= pool_pages:
-                if not pair_crosses:
-                    self.append(workload, groups, source, "decode_page_pair", prompts=(1, prompt), output_tokens=output)
-                coverage.extend(("allocation/decode_pages/multiple", "prefill/multiple/unit_queries"))
+        # Keep a further Decode step when it fits the same width.
+        output = crossing
+        if source["output_tokens"] > crossing and self.page_probe_capacity(pool_pages, crossing + 1) >= widest:
+            output += 1
+        widths = {1, widest}
+        if widest > 1:
+            widths.add(2)
+
+        existing = set()
+        for group in groups:
+            if len(group) == 1 and (request := decodable.get(group[0])) is not None:
+                length = request["prompt_tokens"]
+                if length <= (pool_pages - 1) * self.page_size and self.outputs_to_new_page(length) <= request["output_tokens"]:
+                    existing.add(1)
+                    break
+        unit_pair = widest > 1 and self.page_probe_capacity(pool_pages, unit_output) >= 2
+        if unit_pair and unit_output >= self.outputs_to_new_page(1):
+            existing.add(2)
+
+        # All short peers remain in Decode when the final member needs its next page.
+        for width in sorted(widths - existing):
+            prompts = (1,) * (width - 1) + (prompt,)
+            self.append(workload, groups, source, f"decode_pages_{width}", prompts=prompts, output_tokens=output)
+        coverage = [f"allocation/decode_pages/members/{width}" for width in sorted(widths)]
+        if unit_pair:
+            coverage.append("prefill/multiple/unit_queries")
         return coverage
+
+    def page_probe_capacity(self, pool_pages, output):
+        configuration, page = self.ordinary_configuration, self.page_size
+        slots = NativeConfiguration.batch_capacity(configuration)
+        input_tokens = configuration["max_prefill_tokens"]
+        chunk = configuration["prefill_chunk_tokens"]
+        pool_tokens = pool_pages * page
+
+        # PrefillAdder reserves another page for each cold one-page input.
+        reservation = 2 * page + output
+        if configuration["prefix_cache"]:
+            input_slots = max(1, (input_tokens - 1) // page)
+            pool_slots = (pool_tokens - 1) // reservation
+        else:
+
+            # Ignore-EOS admission deducts the last page reserve after admitting the request.
+            input_slots = (input_tokens + page - 1) // page
+            pool_slots = (pool_tokens + page - 1) // (reservation + 1)
+        if chunk:
+            input_slots = min(input_slots, max(1, chunk // page))
+        peer_pages = (output + page - 1) // page
+        return min(slots, input_slots, pool_slots, 1 + (pool_pages - 2) // peer_pages)
 
     def append(self, workload, groups, source, purpose, *, prompts=(None,), output_tokens=None):
         identities = []

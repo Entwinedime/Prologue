@@ -1,6 +1,7 @@
 """Choose a finite SGLang source workload from declared input opportunities."""
 
 import json
+from collections import Counter
 
 from prologue.integrations.frameworks.sglang.allocation import AllocationABI
 from prologue.integrations.frameworks.sglang.configuration import NativeConfiguration, ServingInput
@@ -122,20 +123,30 @@ class RepresentativeSources:
         return pages
 
     @staticmethod
-    def lengths(workload):
+    def service_inputs(instances, workload):
         requests = workload["requests"]
-        return {
+        inputs = {
             "prompt": {request["prompt_tokens"] for request in requests},
             "decode_context": {request["prompt_tokens"] + request["output_tokens"] - 2
                                for request in requests if request["output_tokens"] > 1},
         }
+        arrivals = {"prefill": Counter(request["arrival_ns"] for request in requests),
+                    "decode": Counter(request["arrival_ns"] for request in requests if request["output_tokens"] > 1)}
+        for instance in instances:
+            capacity = NativeConfiguration.batch_capacity(instance.configuration.values)
+            for phase, groups in arrivals.items():
+                if instance.mode in ("null", phase):
+
+                    # Preserve possible concurrent inputs. Native admission can still split the cohort.
+                    inputs[f"{instance.mode}/{phase}_members"] = {min(capacity, size) for size in groups.values()}
+        return inputs
 
     @classmethod
-    def length_evidence(cls, workload, bounds):
+    def service_input_evidence(cls, instances, workload, bounds):
         if not bounds:
             return set()
-        observed = cls.lengths(workload)
-        return {f"length/{axis}/{point}" for axis, points in bounds.items() for point in observed[axis] & points}
+        inputs = cls.service_inputs(instances, workload)
+        return {f"service_input/{axis}/{point}" for axis, points in bounds.items() for point in inputs[axis] & points}
 
     def reduce_requests(self, instances, workload, required, bounds):
         reduced = workload
@@ -158,8 +169,8 @@ class RepresentativeSources:
                     entry for entry in route["assignments"] if entry["request"] != request["id"]
                 ]} for name, route in reduced["ep_routes"].items()}
 
-            # A request can be structurally redundant and still establish a necessary measured length.
-            if required <= self.conditions(instances, candidate) | self.length_evidence(candidate, bounds):
+            # Keep endpoints of the workload geometry needed by the cost sampler.
+            if required <= self.conditions(instances, candidate) | self.service_input_evidence(instances, candidate, bounds):
                 reduced = candidate
         return reduced
 
@@ -280,15 +291,15 @@ class RepresentativeSources:
         geometry = {}
         if service_evidence:
             for (configuration, padding), remaining in groups.items():
-                lengths = [self.lengths(self.workloads[item["name"]]) for item in remaining]
+                inputs = [self.service_inputs(instances[configuration], self.workloads[item["name"]]) for item in remaining]
                 bounds = {}
-                for axis in lengths[0]:
-                    points = set().union(*(row[axis] for row in lengths))
+                for axis in inputs[0]:
+                    points = set().union(*(row[axis] for row in inputs))
                     if points:
                         bounds[axis] = {min(points), max(points)}
                 geometry[configuration, padding] = bounds
                 for item in remaining:
-                    item["conditions"].update(self.length_evidence(self.workloads[item["name"]], bounds))
+                    item["conditions"].update(self.service_input_evidence(instances[configuration], self.workloads[item["name"]], bounds))
 
         targets = {(configuration, item["name"]): item["conditions"]
                    for (configuration, _), remaining in groups.items() for item in remaining}
@@ -336,22 +347,22 @@ class RepresentativeSources:
                     # Fixed arrival gaps cannot be rescaled without knowing native execution time.
                     if "later_arrival" not in conditions:
                         shortened = probes.normalize(representative)
-                        shortened_conditions = self.conditions(instances[configuration], shortened) | self.length_evidence(shortened, bounds)
+                        shortened_conditions = self.conditions(instances[configuration], shortened) | self.service_input_evidence(
+                            instances[configuration], shortened, bounds,
+                        )
                         if conditions <= shortened_conditions:
                             representative = shortened
 
                 # Repeated requests can coexist with later chunks even when their individual lengths are redundant.
                 normalized[name] = representative
-                covered.update(self.conditions(instances[configuration], representative) | self.length_evidence(representative, bounds))
+                covered.update(self.conditions(instances[configuration], representative)
+                               | self.service_input_evidence(instances[configuration], representative, bounds))
             workload, submissions = self.combine(names, topologies, normalized)
             phases = {instance.mode: self.model_phases(instance, covered) for instance in instances[configuration]}
             requirements = {mode: sorted(f"{phase}/{size}" for phase in values for size in ("single", "multiple"))
                             for mode, values in phases.items() if values}
 
-            # Ordinary serving grows KV in Decode. PD reserves transferred KV through a different native lifecycle.
-            capacity = next((instance.configuration.values["max_total_tokens"] for instance in instances[configuration]
-                             if instance.mode == "null"), 0)
-            witnesses = probes.extend(workload, submissions, model_phases=set().union(*phases.values()), allocation_capacity=capacity)
+            witnesses = probes.extend(workload, submissions, model_phases=set().union(*phases.values()), service_evidence=service_evidence)
             if witnesses:
                 requirements.setdefault("null", []).extend(witnesses)
             cost = self.cost(workload, instances[configuration])

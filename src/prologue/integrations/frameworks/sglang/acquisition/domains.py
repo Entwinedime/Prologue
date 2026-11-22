@@ -90,11 +90,13 @@ class SourceDomain:
                 else:
                     continue
                 for parameters in entry["observations"]:
-                    if parameters["members"] > 1:
+                    members = parameters["members"]
+                    observed.add(f"{family}/members/{members}")
+                    if members > 1:
                         observed.add(f"{family}/multiple")
-                        if family == "prefill" and parameters["input_tokens"] == parameters["members"]:
+                        if family == "prefill" and parameters["input_tokens"] == members:
                             observed.add("prefill/multiple/unit_queries")
-                    elif parameters["members"] == 1:
+                    elif members == 1:
                         observed.add(f"{family}/single")
             missing = set(required) - observed
             if missing:
@@ -104,6 +106,10 @@ class SourceDomain:
 
 class SGLangTask:
     role_fields = ("parallel", "kv_layout", "expert_layers", "kv_peers")
+
+    @classmethod
+    def bind_worker(cls, domain, role):
+        return domain | {name: role[name] for name in cls.role_fields if name in role}
 
     def __init__(self, production: list[dict], local_productions: list[list[dict]]) -> None:
         self.production = production
@@ -135,7 +141,7 @@ class SGLangTask:
             index = representatives[representative]
 
             # Assembly only reads these facts; each worker replaces top-level bindings without cloning shared trees.
-            environment = self.libraries[index]["domain"] | {name: role[name] for name in self.role_fields if name in role}
+            environment = self.bind_worker(self.libraries[index]["domain"], role)
             participants.append({
                 "id": f"{description.identity}/{rank}", "rank": rank, "template": index, "environment": environment,
             })
