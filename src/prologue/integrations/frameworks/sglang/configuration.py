@@ -174,7 +174,8 @@ class CaptureInput(ServingInput):
             raise TypeError("observation role policy must be a boolean")
         super().__init__(source)
         self.observe_all_workers = source["observe_all_workers"]
-        self.warmup = self.workload_input(source["warmup"]) if "warmup" in source else None
+        if "warmup" in source and self.workload_input(source["warmup"]) != self.workload:
+            raise ValueError("native warmup must use the observed workload and submission groups")
         identities = [request["id"] for request in self.workload["requests"]]
         self.submission_groups = source.get("submission_groups", [identities])
         if not isinstance(self.submission_groups, list) or not self.submission_groups or any(

@@ -14,10 +14,15 @@ struct EntrySpecification {
     nlohmann::json condition;
 };
 
-// When requested, return one template origin per work interval in observed graph order.
+struct ObservedTemplateWork {
+    nlohmann::json domain;
+    std::vector<TemplateDefinition> definitions;
+    std::vector<TemplateInterval> origins;
+};
+
 class TemplateCompiler {
 public:
-    static TemplateLibrary compile(const CoarseGraph & source, std::span<const EntrySpecification> entries, nlohmann::json domain,
+    static TemplateLibrary extract(const CoarseGraph & source, std::span<const EntrySpecification> entries, nlohmann::json domain,
                                    std::vector<TemplateInterval> * origins = nullptr);
 };
 

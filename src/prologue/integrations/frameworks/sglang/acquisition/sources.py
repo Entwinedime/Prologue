@@ -345,9 +345,15 @@ class RepresentativeSources:
                 covered.update(self.conditions(instances[configuration], representative) | self.length_evidence(representative, bounds))
             workload, submissions = self.combine(names, topologies, normalized)
             phases = {instance.mode: self.model_phases(instance, covered) for instance in instances[configuration]}
-            probes.extend(workload, submissions, model_phases=set().union(*phases.values()))
             requirements = {mode: sorted(f"{phase}/{size}" for phase in values for size in ("single", "multiple"))
                             for mode, values in phases.items() if values}
+
+            # Ordinary serving grows KV in Decode. PD reserves transferred KV through a different native lifecycle.
+            capacity = next((instance.configuration.values["max_total_tokens"] for instance in instances[configuration]
+                             if instance.mode == "null"), 0)
+            witnesses = probes.extend(workload, submissions, model_phases=set().union(*phases.values()), allocation_capacity=capacity)
+            if witnesses:
+                requirements.setdefault("null", []).extend(witnesses)
             cost = self.cost(workload, instances[configuration])
             cost.pop("last_arrival_ns")
             requests = {request["id"]: request for request in workload["requests"]}

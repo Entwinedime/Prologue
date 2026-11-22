@@ -110,7 +110,7 @@ void observed_frame(const TemplateLibrary & library, const TemplateFrame & bindi
 
 } // namespace
 
-void TemplateLibrary::validate() const {
+void TemplateLibrary::validate_observations() const {
     if (!domain.is_object() || domain.empty() || entries.empty())
         throw std::invalid_argument("template library requires an implementation domain and action entries");
 
@@ -224,6 +224,10 @@ void TemplateLibrary::validate() const {
         frame(*this, entry.frame, entry.frame, buffers);
         for (const auto & parameters : entry.observations) observed_frame(*this, entry.frame, parameters);
     }
+}
+
+void TemplateLibrary::validate() const {
+    validate_observations();
 
     // A published library must select one implementation for its own observations, before any serving run needs it.
     const TemplateSelection selection(*this);

@@ -110,31 +110,29 @@ constexpr std::string_view usage = "prologue project <native-facts.json> <coarse
                                    "[--execution-inputs <conditions.json> | --costs <costs.json>]\n";
 
 nlohmann::json work_identities(const prologue::sglang::TemplateDeclarations & source, const nlohmann::json & observation_window) {
-    std::vector<prologue::TemplateInterval> origins;
-    const auto library = source.compile(&origins);
+    const auto observed = source.observed_work();
     prologue::WorkCoordinates coordinates(source.graph);
     auto features = nlohmann::json::array();
     auto intervals = nlohmann::json::array();
-    for (std::size_t i = 0; i < origins.size(); ++i) {
+    for (std::size_t i = 0; i < observed.origins.size(); ++i) {
         const auto & work = source.graph.work[i];
+        const auto & origin = observed.origins[i];
         const auto point = coordinates.index(work);
         if (point == features.size()) features.push_back(coordinates[point].document());
-        intervals.push_back({work.start, work.finish, origins[i].definition, origins[i].interval, point});
+        intervals.push_back({work.start, work.finish, origin.definition, origin.interval, point});
     }
 
     auto definitions = nlohmann::json::array();
-    for (const auto & definition : library.definitions) definitions.push_back(definition.document());
-    return {{"domain", library.domain}, {"window_ns", observation_window},
+    for (const auto & definition : observed.definitions) definitions.push_back(definition.document());
+    return {{"domain", observed.domain}, {"window_ns", observation_window},
             {"definitions", std::move(definitions)}, {"features", std::move(features)}, {"intervals", std::move(intervals)}};
 }
 
 nlohmann::json work_costs(const prologue::sglang::TemplateDeclarations & source, const nlohmann::json & costs, bool bindings) {
-    std::vector<prologue::TemplateInterval> origins;
-    const auto library = source.compile(&origins);
-
+    const auto observed = source.observed_work();
     nlohmann::json missing;
-    const prologue::WorkCosts service(library.domain, library.definitions, costs);
-    auto result = prologue::service_estimates(service.timing(source.graph, origins, &missing, bindings));
+    const prologue::WorkCosts service(observed.domain, observed.definitions, costs);
+    auto result = prologue::service_estimates(service.timing(source.graph, observed.origins, &missing, bindings));
     result["first_cost_gap"] = std::move(missing);
     return result;
 }

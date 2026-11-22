@@ -280,9 +280,18 @@ TemplateDeclarations NativeTemplates::describe(CoarseGraph graph) {
     return { std::move(graph), std::move(entries) };
 }
 
-TemplateLibrary TemplateDeclarations::compile(std::vector<TemplateInterval> * origins) const {
+ObservedTemplateWork TemplateDeclarations::observed_work() const {
+    std::vector<TemplateInterval> origins;
+    auto observed = TemplateCompiler::extract(graph, entries, NativeTemplates::domain(graph.environment), &origins);
+
+    // Each cost belongs to the implementation that actually ran at this position in the graph.
+    observed.validate_observations();
+    return {std::move(observed.domain), std::move(observed.definitions), std::move(origins)};
+}
+
+TemplateLibrary TemplateDeclarations::compile() const {
     const auto & environment = graph.environment;
-    auto library = TemplateCompiler::compile(graph, entries, NativeTemplates::domain(environment), origins);
+    auto library = TemplateCompiler::extract(graph, entries, NativeTemplates::domain(environment));
 
     // All candidate libraries belong to one initialized model/layout; PD mode and capacity remain caller-owned.
     library.local_domain = nlohmann::json::object();
@@ -312,10 +321,6 @@ nlohmann::json NativeTemplates::condition(std::string_view action, nlohmann::jso
             facts.erase("entry");
             facts.erase("exit");
         }
-
-        // Between prefix expressions only the Python comprehension advances; backend dispatch follows the loop.
-        if (owner == "allocation" && facts.at("entry") == "allocation_prefix" && facts.at("exit") == "allocation_prefix")
-            facts.erase("allocation");
 
         // These resource ABIs consume request/pool inputs, not the caller batch's forward mode.
         if (std::ranges::find(resource_calls, owner) != resource_calls.end()) facts.erase("phase");

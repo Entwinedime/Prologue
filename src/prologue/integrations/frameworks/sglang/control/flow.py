@@ -168,7 +168,7 @@ class FlowExecution(CallSegments):
         # Submission facts belong to this segment, not to the caller context inherited by later children.
         work = {**frame.work, "continuation": frame.continuation}
         self.scheduler.bind_state(work, accesses)
-        condition = {**frame.condition, "owner": frame.operation}
+        condition = {**frame.observed_condition, "owner": frame.operation}
         if not frame.host_fragment:
             condition.update(entry=frame.entry, exit=frame.exit)
         outputs = frame.outputs if frame.terminal else ()

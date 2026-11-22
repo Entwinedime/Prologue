@@ -229,6 +229,7 @@ class TemplateLibrary {
 public:
     static TemplateLibrary read(const nlohmann::json & source);
     nlohmann::json document() const;
+    void validate_observations() const;
     void validate() const;
     TemplateInterface call_interface(const TemplateFrame & frame) const;
     nlohmann::json local_contract(const TemplateFrame & frame, const std::vector<std::size_t> & position) const;

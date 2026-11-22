@@ -17,7 +17,8 @@ struct TemplateDeclarations {
     CoarseGraph graph;
     std::vector<EntrySpecification> entries;
 
-    TemplateLibrary compile(std::vector<TemplateInterval> * origins = nullptr) const;
+    TemplateLibrary compile() const;
+    ObservedTemplateWork observed_work() const;
 };
 
 // Native facts select execution classes; capture and control share the same template contract.

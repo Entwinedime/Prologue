@@ -45,6 +45,7 @@ class CallFrame:
     tensor_allocations: dict = field(default_factory=dict)
     tensor_outputs: dict = field(default_factory=dict)
     condition: dict = field(default_factory=dict)
+    segment_facts: dict = field(default_factory=dict)
     host_inputs: dict = field(default_factory=dict)
     local_readbacks: dict = field(default_factory=dict)
     device_tail: bool = False
@@ -56,6 +57,10 @@ class CallFrame:
     @property
     def host_fragment(self):
         return self.host_only or self.device_tail and not self.terminal
+
+    @property
+    def observed_condition(self):
+        return self.condition | self.segment_facts
 
     @property
     def continuation(self):
@@ -193,6 +198,7 @@ class CallSegments:
         frame.entry_context = {} if context is None else context
         frame.exit = ""
         frame.exit_context = {}
+        frame.segment_facts.clear()
         if entry != "call.enter" and tensor_inputs is not None:
 
             # A resource-only child leaves borrowed inputs live; explicit returns replace the continuation contract.

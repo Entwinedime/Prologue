@@ -111,6 +111,15 @@ class ResourceCalls:
             original = getattr(owner, method)
             setattr(owner, method, update_wrapper(partial(self.internal, original), original))
 
+    def allocate(self, allocator, original, decode, *args, **kwargs):
+        result = self.internal(original, *args, **kwargs)
+        frame = self.calls.current.get()
+        if frame is not None and frame.operation == "allocation":
+
+            # The allocator has executed on this continuation. Prefix construction and eviction return independently.
+            frame.segment_facts["allocation"] = allocator._prologue_allocation.branch(frame.work["members"], allocator.page_size, decode)
+        return result
+
     def bind_field(self, field, allocator):
         self.bind_reader(allocator, "available_size", {"kind": "state_slots", "field": field, "operation": "available"})
         self.bind_internal(allocator, ("alloc", "free"))
@@ -255,10 +264,13 @@ class ResourceCalls:
         # The core owns these resource implementations; their internal checks are not native scheduling reads.
         for owner, methods in (
             (slots, ("alloc",)),
-            (allocator, ("alloc", "alloc_extend", "alloc_decode")),
             (cache, ("inc_lock_ref", "dec_lock_ref", "evict")),
         ):
             self.bind_internal(owner, methods)
+        for method in ("alloc", "alloc_extend", "alloc_decode"):
+            original = getattr(allocator, method)
+            wrapper = partial(self.allocate, allocator, original, method == "alloc_decode")
+            setattr(allocator, method, update_wrapper(wrapper, original))
 
         # Select the actual objects through their shared ABI, rather than enumerating concrete cache classes.
         free = allocator.free

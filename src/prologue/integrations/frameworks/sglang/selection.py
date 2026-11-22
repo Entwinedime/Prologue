@@ -91,10 +91,6 @@ class BatchAllocation(ActionCall):
     def __init__(self, calls, batch, decode) -> None:
         parent = calls.current.get()
         super().__init__("allocation", dict(parent.parameters), dict(parent.work))
-        allocator = batch.token_to_kv_pool_allocator
-        self.condition = {
-            "allocation": allocator._prologue_allocation.branch(self.work["members"], allocator.page_size, decode),
-        }
         self.inputs = {"sequence_lengths": (batch.seq_lens, ["members"])}
         if decode:
             self.inputs["request_slots"] = batch.req_pool_indices, ["members"]
@@ -148,7 +144,7 @@ class BatchSelection:
         boundary = BatchAllocation(self.calls, batch, decode)
         with self.calls.call(
             boundary.operation, original, parameters=boundary.parameters, work=boundary.work,
-            tensor_inputs=boundary.inputs, tensor_outputs=boundary.outputs, condition=boundary.condition,
+            tensor_inputs=boundary.inputs, tensor_outputs=boundary.outputs,
         ) as frame:
 
             # Eviction remains an independent resource action inside the allocation lifecycle.

@@ -219,7 +219,7 @@ class FlowScopes(ServingCuts):
             call.record["bindings"]["segment"] = {
                 "owner": frame.operation,
             }
-            call.record["bindings"]["condition"] = frame.condition
+            call.record["bindings"]["condition"] = frame.observed_condition
             if frame.host_fragment:
                 call.record["bindings"]["segment"]["host_only"] = True
             for name, (tensor, shape) in frame.tensor_outputs.items():

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <deque>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -34,9 +33,16 @@ public:
                          const std::map<std::string, StateBindings> & state_inputs = {}) const;
 
 private:
-    using Family = std::vector<const TemplateFrame *>;
+    struct Candidate {
+        const TemplateFrame * bindings;
+        std::size_t definition;
+        const TemplateGuard * guard;
+    };
+    using Family = std::vector<Candidate>;
+    class FamilyIndex;
+    class FrameSelection;
+
     const TemplateLibrary & library_;
-    std::deque<TemplateFrame> alternatives_;
     std::vector<Family> families_;
     std::map<const TemplateFrame *, std::size_t> membership_;
     std::map<std::pair<std::string, nlohmann::json>, std::set<std::size_t>> roots_;

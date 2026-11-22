@@ -104,7 +104,6 @@ class SourcePlanning:
         if service_evidence:
             for job in jobs:
                 capture = self.capture_inputs[job["id"]]
-                capture["warmup"] = capture["workload"]
 
                 # Only a simultaneous physical capture can measure service across the target group.
                 capture["observe_all_workers"] = self.joint_observation and job["native_workers"] > 1

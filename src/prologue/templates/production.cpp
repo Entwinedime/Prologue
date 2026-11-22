@@ -349,7 +349,7 @@ private:
 
 } // namespace
 
-TemplateLibrary TemplateCompiler::compile(const CoarseGraph & source, std::span<const EntrySpecification> entries, nlohmann::json domain,
+TemplateLibrary TemplateCompiler::extract(const CoarseGraph & source, std::span<const EntrySpecification> entries, nlohmann::json domain,
                                           std::vector<TemplateInterval> * origins) {
     source.validate();
     TemplateLibrary library;
@@ -368,6 +368,7 @@ TemplateLibrary TemplateCompiler::compile(const CoarseGraph & source, std::span<
         if (inserted) library.entries.push_back(std::move(entry));
         else library.entries[found->second].observations.merge(entry.observations);
     }
+
     // Definitions may be shared across calls. Consumers index costs by the original graph's work order.
     if (origins) {
         origins->clear();
@@ -379,7 +380,6 @@ TemplateLibrary TemplateCompiler::compile(const CoarseGraph & source, std::span<
         }
         if (!evidence.empty()) throw std::invalid_argument("template contains work outside the observed intervals");
     }
-    library.validate();
     return library;
 }
 

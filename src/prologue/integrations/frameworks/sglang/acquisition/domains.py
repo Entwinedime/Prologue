@@ -80,16 +80,22 @@ class SourceDomain:
             observed = {entry["condition"]["transformation"]["effect"] for entry in library["entries"]
                         if entry["action"] == "batch_transform" and entry["observations"]}
 
-            # PP launch exposes model geometry; padding alone cannot establish concurrent requests.
+            # A branch and its batch geometry must be witnessed by the same invocation. Padding is local model geometry.
             for entry in library["entries"]:
-                if entry["action"] not in {"run_batch", "launch"}:
+                condition = entry["condition"]
+                if entry["action"] in {"run_batch", "launch"}:
+                    family = condition["phase"]
+                elif entry["action"] == "segment" and condition.get("owner") == "allocation" and "allocation" in condition:
+                    family = "allocation/" + condition["allocation"]
+                else:
                     continue
-                phase = entry["condition"]["phase"]
                 for parameters in entry["observations"]:
                     if parameters["members"] > 1:
-                        observed.add(f"{phase}/multiple")
-                    elif parameters["members"] == parameters["model_members"] == 1:
-                        observed.add(f"{phase}/single")
+                        observed.add(f"{family}/multiple")
+                        if family == "prefill" and parameters["input_tokens"] == parameters["members"]:
+                            observed.add("prefill/multiple/unit_queries")
+                    elif parameters["members"] == 1:
+                        observed.add(f"{family}/single")
             missing = set(required) - observed
             if missing:
                 rank = library["resources"][0]["rank"]
