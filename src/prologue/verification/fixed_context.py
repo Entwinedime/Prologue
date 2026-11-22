@@ -49,19 +49,9 @@ class KernelWake:
 @dataclass(frozen=True, slots=True)
 class HostWait:
     stopped: HostProgress
-    source: HostProgress | ExternalWake | int
+    source: HostProgress | ExternalWake | int | None
     delay_ns: int
     take_entry: HostProgress | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class IdleWait:
-    source: int
-    target: int
-    stopped_raw_ns: int
-    resumed_raw_ns: int
-    head_ns: int
-    tail_ns: int
 
 
 class FixedThreadActivity(ThreadService):
@@ -236,7 +226,7 @@ class FixedHostContext:
             if received["message_count"] and not received["requests"]:
                 continue
 
-            # The receiver was idle across the same serial step, outside any accounted work.
+            # The idle receiver's wait belongs to an unmodeled serial step. The rest of the step may contain other waits.
             slot = bisect_right(events, read_begin, key=lambda event: event[1])
             if not 0 < slot < len(events):
                 continue
@@ -258,18 +248,14 @@ class FixedHostContext:
             if (stopped, resumed) in completions or self.active.within(excluded, stopped, resumed):
                 continue
 
-            head = self.unmodeled_host_time(thread, begin, stopped)
-            tail = self.unmodeled_host_time(thread, resumed, end)
-            if head == stopped - begin and tail == end - resumed:
-                cuts[read_end] = IdleWait(source, target, stopped, resumed, head, tail), bool(received["requests"])
+            cuts[source, target, stopped, resumed] = read_end, bool(received["requests"])
 
         if not cuts:
             return cuts
-        edges = {(cut.source, cut.target) for cut, _ in cuts.values()}
+        edges = {cut[:2] for cut in cuts}
         ordered = {(edge["source"], edge["target"]) for edge in graph["edges"]
                    if edge["kind"] == "order" and (edge["source"], edge["target"]) in edges}
-        return {read_end: (cut, delivered) for read_end, (cut, delivered) in cuts.items()
-                if (cut.source, cut.target) in ordered}
+        return {cut: read for cut, read in cuts.items() if cut[:2] in ordered}
 
     def host_time(self, thread, begin, end, *, modeled, submission):
         if begin == end:
@@ -285,10 +271,6 @@ class FixedHostContext:
         outside = None if occupied is None or service is None else occupied - service
         conditions = {"observer_ns": overhead, "runnable_pause_ns": paused, "outside_work_ns": outside}
         return None if occupied is None else service, {name: value for name, value in conditions.items() if value}
-
-    def unmodeled_host_time(self, thread, begin, end):
-        service, conditions = self.host_time(thread, begin, end, modeled=False, submission=False)
-        return None if service is None else sum(conditions.values())
 
     def progress(self, thread, step, stamp, submissions):
         if step.service_ns is None or (step.modeled and not step.service_ns):
@@ -375,19 +357,13 @@ class FixedHostContext:
             notifications[row["consumer"]].append(row)
         submissions = {thread for lane, thread in threads.items() if graph["resources"][lane]["role"] == "submission"}
         delays, counts = self.queues.handoffs(graph, positions, arrivals)
-        waits, idle_inputs = [], {}
+        waits, idle_inputs, idle = [], {}, {}
         steps = {thread: [] for thread in threads.values()}
         for lane, events in lanes.items():
             events.sort()
             thread = threads[lane]
-            idle_steps = set()
             if thread == self.control_thread:
-                for read_end, (cut, delivered) in self.idle_waits(graph, events, work, notifications.get(thread, ())).items():
-                    idle_steps.add((cut.source, cut.target))
-                    if delivered:
-                        idle_inputs[read_end] = cut
-                    else:
-                        delays[cut.source, cut.target] = {"idle_wait_ns": cut.resumed_raw_ns - cut.stopped_raw_ns}
+                idle = self.idle_waits(graph, events, work, notifications.get(thread, ()))
             for (_, begin, source), (_, end, target) in pairwise(events):
                 kind = work.get((source, target))
                 if begin is None or end is None or begin >= end or kind not in {None, "host"}:
@@ -400,8 +376,7 @@ class FixedHostContext:
                                                      submission=thread in submissions)
                 if conditions:
                     delays.setdefault((source, target), {}).update(conditions)
-                if (source, target) not in idle_steps:
-                    steps[thread].append(HostStep(source, target, begin, end, modeled, service))
+                steps[thread].append(HostStep(source, target, begin, end, modeled, service))
 
         bound, kernel, external = 0, 0, 0
         for tid, host in steps.items():
@@ -413,6 +388,15 @@ class FixedHostContext:
                         continue
                     stopped = self.progress(tid, step, asleep, submissions)
                     if stopped is None:
+                        continue
+                    if read := idle.get((step.start, step.finish, asleep, resumed)):
+                        read_end, delivered = read
+
+                        # A delivered input binds an external release. An empty poll retains its measured wait duration.
+                        if delivered:
+                            idle_inputs[read_end] = HostWait(stopped, ExternalWake(resumed), 0)
+                        else:
+                            waits.append(HostWait(stopped, None, resumed - asleep))
                         continue
                     notification = queue_waits.get((asleep, resumed))
                     if notification is not None:

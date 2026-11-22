@@ -46,8 +46,10 @@ class FixedTimeline:
 
     def resume(self, rank, at, wait):
         resumed = self.event()
-        self.dependencies.append((at, resumed, 0))
         waker = wait.source
+        self.dependencies.append((at, resumed, wait.delay_ns if waker is None else 0))
+        if waker is None:
+            return resumed
         if isinstance(waker, ExternalWake):
             ready = waker.raw_ns - self.reference.origin_ns + wait.delay_ns
             self.releases[resumed] = max(self.releases[resumed], ready)
@@ -133,7 +135,7 @@ class FixedReference:
 
     def qualified_host_waits(self):
         owners = {thread: rank for rank, record in self.case.measurements.items() for thread in record["kernel_threads"]}
-        waits = {}
+        waits = dict(self.input_releases)
         for rank, record in self.case.measurements.items():
             for wait in record["fixed_host_waits"]:
                 if isinstance(wait.source, ExternalWake) and wait.source.kernel_thread in owners:
@@ -354,8 +356,8 @@ class FixedReference:
                 cut = wakes.get(received)
 
                 # Use the idle receiver's actual CPU release only for requests submitted during that wait.
-                if cut and all(cut.stopped_raw_ns <= stamp <= cut.resumed_raw_ns for stamp in stamps):
-                    self.input_releases[(rank, cut.source), (rank, cut.target)] = cut
+                if cut and all(cut.stopped.observed_ns <= stamp <= cut.source.raw_ns for stamp in stamps):
+                    self.input_releases[rank, cut.stopped] = cut
                 else:
                     self.gaps.setdefault("unqualified_input_readiness", []).append({
                         "rank": rank, "requests": read["requests"], "submission_raw_ns": max(stamps), "received_raw_ns": received,
@@ -479,13 +481,8 @@ class FixedReference:
             for target in targets:
                 pair = indices[source], indices[target]
                 delay = fixed.pop(pair, 0)
-                origin = pair[0]
-                if observed := self.input_releases.get((source, target)):
-                    gate = timeline.event(observed.resumed_raw_ns - self.origin_ns)
-                    timeline.dependencies.append((origin, gate, observed.head_ns))
-                    origin, delay = gate, observed.tail_ns
                 cuts = order_cuts.pop((source[0], source[1], target[1]), ()) if source[0] == target[0] else ()
-                timeline.path(source[0], origin, gates.get(target, pair[1]), delay, cuts, modeled=False)
+                timeline.path(source[0], pair[0], gates.get(target, pair[1]), delay, cuts, modeled=False)
         if fixed or order_cuts:
             raise ValueError("fixed timing condition does not belong to a verified dependency")
         return timeline.document()

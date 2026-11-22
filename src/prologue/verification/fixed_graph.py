@@ -211,9 +211,9 @@ class FixedPerformance:
         self.report["external_releases"] = [{"rank": rank, "event": event, "time_ns": stamp}
                                             for (rank, event), stamp in reference.entries.items()]
         self.report["idle_ingress_releases"] = [
-            {"rank": rank, "predecessor": source, "successor": target,
-             "time_ns": cut.resumed_raw_ns - reference.origin_ns, "head_ns": cut.head_ns, "tail_ns": cut.tail_ns}
-            for ((rank, source), (_, target)), cut in reference.input_releases.items()
+            {"rank": rank, "predecessor": stopped.start, "successor": stopped.finish,
+             "time_ns": wait.source.raw_ns - reference.origin_ns, "wait_enter_ns": stopped.observed_ns - reference.origin_ns}
+            for (rank, stopped), wait in reference.input_releases.items()
         ]
         conditions = Counter()
         for row in reference.host_conditions.values():
