@@ -29,42 +29,33 @@ class AutonomousVerification:
         write_json(self.output / "result.json", {"status": status, **self.report}, indent=2, replace=False)
         return status == "compared"
 
-    def run(self):
-        args = self.arguments
-        self.output.mkdir(parents=True)
-        recording = ReferenceRecording(args.capture)
+    def qualify_reference(self, recording, source):
         recorded = recording.inputs
-        source = json.loads(args.input.read_text())
         if (not recorded.get("latency_only") or recorded.get("host_timing") or "attention_sites" in recorded["job"]
                 or not all("latency" in instance for instance in recording.manifest["instances"])):
-            return self.finish("reference_requires_latency_capture")
+            return "reference_requires_latency_capture"
         if difference := recording.input_difference(recorded["job"], source):
             self.report["input_difference"] = difference
-            return self.finish("input_mismatch")
+            return "input_mismatch"
 
         instances = recording.manifest["instances"]
         if not CapturedWorkers(instances).joint_execution:
-            return self.finish("reference_requires_joint_execution")
+            return "reference_requires_joint_execution"
         sessions = recording.sessions(recording.source, instances)
         if difference := recording.session_difference(source, instances, sessions):
             self.report["input_difference"] = difference
-            return self.finish("input_mismatch")
-
-        sources = PredictionProcess.sources(args.production)
-        training = self.report["training"] = recording.training(production=sources, target=source, costs=args.costs)
-        if training["status"] != "separate":
-            return self.finish(training["status"])
+            return "input_mismatch"
 
         native = NativeLatencyMetrics(recording.source, instances, sessions).report()
         self.report["native"] = native
         if native["specialization_loads"] is None:
-            return self.finish("reference_missing_specialization_evidence")
+            return "reference_missing_specialization_evidence"
         if native["specialization_loads"]:
-            return self.finish("reference_loaded_specializations")
+            return "reference_loaded_specializations"
         rows = native["requests"]
         if any(actual["declared_ns"] != expected["arrival_ns"]
                for actual, expected in zip(rows, source["workload"]["requests"], strict=True)):
-            return self.finish("reference_changed_arrivals")
+            return "reference_changed_arrivals"
 
         submissions = ["submitted_ns"]
         if "decode_submitted_ns" in rows[0]:
@@ -72,9 +63,11 @@ class AutonomousVerification:
         order = sorted(rows, key=lambda row: row["declared_ns"])
         self.report["max_submission_delay_ns"] = max(row[field] - row["declared_ns"] for field in submissions for row in rows)
         if any(order != sorted(rows, key=lambda row: row[field]) for field in submissions):
-            return self.finish("reference_reordered_submissions")
+            return "reference_reordered_submissions"
+        return "qualified"
 
-        # Prediction receives the shared user input and independent cost asset.
+    def predict(self, source, sources):
+        args = self.arguments
         output = self.output / "prediction"
         command = SimpleNamespace(input=args.input, production=args.production, output=output, timeout=args.timeout,
                                   binary=args.binary, modeling_image=args.modeling_image, control_image=args.control_image,
@@ -86,10 +79,30 @@ class AutonomousVerification:
             if gap := PredictionProcess.gap(output):
                 status, path = gap
                 self.report["evidence"] = str(path)
-                return self.finish(status)
-            return self.finish("prediction_failed")
+                return status
+            return "prediction_failed"
+        self.report["prediction_result"] = str(output / "result.json")
+        return "completed"
 
-        self.report["prediction"] = LatencyComparison(native, output / "result.json").report()
+    def run(self):
+        args = self.arguments
+        self.output.mkdir(parents=True)
+        source = json.loads(args.input.read_text())
+        sources = PredictionProcess.sources(args.production)
+        recording = ReferenceRecording(args.capture)
+        training = self.report["training"] = recording.training(production=sources, target=source, costs=args.costs)
+        if training["status"] != "separate":
+            return self.finish(training["status"])
+
+        # Only the scoring step consumes native timing. A cold reference still leaves a real prediction outcome.
+        prediction = self.report["prediction_status"] = self.predict(source, sources)
+        reference = self.report["reference_status"] = self.qualify_reference(recording, source)
+        if prediction != "completed":
+            return self.finish(prediction)
+        if reference != "qualified":
+            return self.finish(reference)
+
+        self.report["prediction"] = LatencyComparison(self.report["native"], self.output / "prediction/result.json").report()
         return self.finish("compared")
 
 

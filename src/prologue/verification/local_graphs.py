@@ -52,10 +52,6 @@ class LocalActionComparison:
     def compare(self, case, rank, scope, predicted):
         source = case.sources[rank][0]
         group = case.groups[rank]
-        actual = source.graph["scopes"][scope]
-        if ActionIdentity.record(actual, group) != ActionIdentity.record(predicted["scopes"][0], group):
-            self.finding("action_input", rank, scope, {"reason": "generated root changes the given action metadata"})
-            return
         target = GraphContents(predicted)
         target.pools = source.pools
         differences = list(GraphContents.differences(source.snapshot(scope, group), target.snapshot(0, group)))
@@ -104,7 +100,13 @@ class LocalComparison(LocalActionComparison):
                     self.finding("generation", rank, scope, {"reason": record["error"]})
                     continue
                 built += 1
-                self.compare(case, rank, scope, record["graph"])
+                graph = record["graph"]
+                supplied = case.sources[rank][0].graph["scopes"][scope]
+                group = case.groups[rank]
+                if ActionIdentity.record(supplied, group) != ActionIdentity.record(graph["scopes"][0], group):
+                    self.finding("action_input", rank, scope, {"reason": "generated root changes the given action metadata"})
+                    continue
+                self.compare(case, rank, scope, graph)
         if summary is None or summary["attempted"] != len(seen) or summary["built"] != built or seen != expected.keys():
             raise ValueError("local output is incomplete or omits actual actions")
         self.counts["given_actions"] += len(seen)

@@ -15,7 +15,7 @@ from .cpu_protocol import CpuProtocolEvidence
 from .dependencies import CausalGraph
 from .pd_payload import PdPayloadEvidence
 from .protocol_reads import PdStateEvidence
-from .reference import ReferenceRecording
+from .reference import RecordedSubmissions, ReferenceRecording
 from .resource_effects import ResourceEffectComparison
 from .source_clock import ClockConstraints
 
@@ -57,6 +57,10 @@ class NativeCase:
     @cached_property
     def sessions(self):
         return ReferenceRecording.sessions(self.capture, self.manifest["instances"])
+
+    @cached_property
+    def submissions(self):
+        return RecordedSubmissions.read(self.capture, self.sessions)
 
     def input_difference(self, source):
         for _, raw, _ in self.sources.values():

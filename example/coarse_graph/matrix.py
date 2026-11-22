@@ -194,6 +194,8 @@ class MatrixRun:
         prediction = json.loads((self.root / case["prediction_input"]).read_text())
         if difference := ReferenceRecording.input_difference(native, prediction):
             raise ValueError(f"native and prediction inputs differ in {difference}")
+        if phase in {"detailed", "light"}:
+            return self.physical_reference(phase, domain, case, native)
         if phase == "targets":
             return self.target(domain, case, native)
 
@@ -208,6 +210,26 @@ class MatrixRun:
         if phase == "autonomous" and "latency_observation" in case:
             self.reference(domain, self.root / case["latency_observation"], native, "latency-only")
         return self.performance(phase, domain, case, prediction, source, target)
+
+    def physical_reference(self, phase, domain, case, native):
+        if phase == "detailed":
+            destination, mode = case["observation"], case["detailed_capture"]
+            if mode not in {"resource-trace", "service-reference"}:
+                raise ValueError("a detailed reference requires a native graph observation")
+        else:
+            destination, mode = case["latency_observation"], "latency-only"
+        owner = (self.root / destination).resolve()
+
+        # Both source modes name the same physical target. Only an explicit collection phase creates it.
+        if not owner.exists():
+            step = f"references/{owner.relative_to(self.root)}"
+            timeout = case.get(f"{phase}_timeout_seconds", self.budget["task_seconds"])
+            code = self.observe(step, domain, self.root / case["capture_input"], owner, mode, timeout)
+            if code:
+                return {"status": "native-capture-failed", "capture_exit": code, "native": str(owner)}
+
+        recording = self.reference(domain, owner, native, mode)
+        return {"status": "recorded", "native": str(recording.directory), "attempt": recording.attempt_id}
 
     def reference(self, domain, owner, native, mode):
         deployment = json.loads((self.root / domain["deployment"]).read_text())
@@ -297,6 +319,8 @@ class MatrixRun:
                 return result | {"status": "target-prerequisite-unqualified"}
             module = "fixed_graph"
             evidence = ("--capture", target["native"], "--reference", target["production"])
+            if groups := case.get("fixed_work_groups"):
+                evidence += ("--work-groups", self.root / groups)
         else:
             module = "autonomous"
             latency = self.root / case.get("latency_observation", f"targets/{self.name}/{name}/latency")
@@ -313,6 +337,8 @@ class MatrixRun:
                 return result | {"status": "source-prerequisite-unqualified"}
             evidence = ("--capture", latency, "--production", source["collection"],
                         "--input", self.root / case["prediction_input"], "--control-image", self.images["control"])
+            if case.get("retain_execution_trace"):
+                evidence += ("--details",)
 
         output = self.results / phase / name
         timeout = self.budget["operation_seconds"]
@@ -345,7 +371,8 @@ class MatrixRun:
                 results[name] = json.loads(path.read_text()) if path.exists() else {}
             sources, targets, records = (results[name] for name in ("sources", "targets", report))
             needs_native = (
-                phase == "autonomous" and any("latency_observation" not in case for domain in domains for case in domain["targets"])
+                phase in {"detailed", "light"}
+                or phase == "autonomous" and any("latency_observation" not in case for domain in domains for case in domain["targets"])
                 or phase == "sources" and any("source" not in domain for domain in domains)
                 or phase == "targets" and any("observation" not in case for domain in domains for case in domain["targets"])
             )
@@ -375,7 +402,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True, help="existing investigation directory")
     parser.add_argument("--matrix", type=Path, required=True, help="frozen matrix beside environment.json and prologue")
-    parser.add_argument("--phase", choices=("sources", "targets", "compare", "fixed", "autonomous"), required=True)
+    parser.add_argument("--phase", choices=("sources", "detailed", "light", "targets", "compare", "fixed", "autonomous"),
+                        required=True)
     parser.add_argument("--domain", help="one named domain; omit for the whole stage")
     arguments = parser.parse_args()
     MatrixRun(arguments.root, arguments.matrix).run(arguments.phase, arguments.domain)

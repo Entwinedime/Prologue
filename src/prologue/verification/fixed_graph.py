@@ -1,8 +1,8 @@
 """Verify service costs without changing the observed serving execution."""
 
 import argparse
-from collections import Counter, defaultdict
 import json
+from collections import Counter, defaultdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -62,7 +62,6 @@ class FixedPerformance:
         self.report["service_coverage"] = dict(coverage)
         self.report["observation_basis"] = dict(Counter(interval.basis for interval in reference.intervals))
         self.report["first_unmeasured_work"] = first_missing
-        return first_missing is None
 
     @staticmethod
     def first_drift(reference, plan, services, baseline, replayed):
@@ -94,8 +93,11 @@ class FixedPerformance:
                     visited.add(source)
         return {**first, "baseline_ns": baseline[target], "tight_predecessor": predecessor}
 
-    def replay(self, reference, model, scratch, estimates):
-        measured = [interval.service_ns for interval in reference.intervals]
+    def measured_baseline(self, reference, model, scratch, measured):
+        if None in measured or "unqualified_host_service_partitions" in reference.gaps:
+            self.report["baseline"] = {"status": "incomplete_measured_services", "missing_services": measured.count(None)}
+            return None
+
         plan = reference.timeline()
         path = scratch / "replay.json"
         write_json(path, plan, replace=False)
@@ -106,32 +108,83 @@ class FixedPerformance:
         model.run_model("replay", output, path, services)
         times = json.loads(output.read_text())["event_times_ns"]["measured"]
         baseline = self.report["baseline"] = reference.check_baseline(times)
-        baseline["request_metrics"] = reference.metrics(times)
+        publications = baseline["publications"] = reference.publications.compare(times)
         if baseline["first_difference"] is not None:
+            baseline["status"] = "baseline_difference"
             baseline["local_unexplained_waits"] = reference.local_unexplained_waits(plan, measured_steps)
-            return self.finish("baseline_difference")
-        if None in reference.specialization_loads.values():
-            return self.finish("reference_specializations_unobserved")
-        if None in estimates:
-            return self.finish("cost_gap")
+        elif publications["different_tokens"]:
+            baseline["status"] = "baseline_difference"
+        elif "incomplete_publication_boundaries" in reference.gaps:
+            baseline["status"] = "incomplete_publication_boundaries"
+        else:
+            baseline["status"] = "measured_boundaries_matched"
+            baseline["request_metrics"] = reference.publications.metrics(times)
+        return plan, times
 
-        scenarios = {"modeled": estimates}
-        for kind in sorted(self.report["service_coverage"]):
-            scenarios[f"restore_{kind}"] = [observed if interval.piece["kind"] == kind else estimate
-                                             for interval, estimate, observed in zip(reference.intervals, estimates, measured, strict=True)]
+    def work_groups(self, reference, estimates, measured):
+        if self.arguments.work_groups is None:
+            return {}
+        groups = json.loads(self.arguments.work_groups.read_text())
+        allowed = {"kind", "scope", "site", "phase", "direction", "caller"}
+        if not isinstance(groups, dict) or not groups:
+            raise ValueError("work groups require one or more named selectors")
+        for name, selector in groups.items():
+            if (not isinstance(selector, dict) or "kind" not in selector or selector.keys() - allowed
+                    or not all(isinstance(value, str) and value for value in selector.values())):
+                raise ValueError(f"invalid work group selector: {name}")
+
+        # Membership comes from the native graph even when a cost estimate is missing.
+        members = {name: [] for name in groups}
+        for index, interval in enumerate(reference.intervals):
+            piece = interval.piece
+            scope = reference.case.sources[interval.rank][0].graph["scopes"][piece["scope"]]
+            copy = piece.get("copy", {})
+            fields = {"kind": piece["kind"], "scope": scope["role"], "site": scope["site"], "phase": scope["work"].get("phase"),
+                      "direction": copy.get("direction"), "caller": copy.get("caller")}
+            for name, selector in groups.items():
+                if all(fields[key] == value for key, value in selector.items()):
+                    members[name].append(index)
+
+        reports = self.report["work_groups"] = {}
+        scenarios = {}
+        for name, indices in members.items():
+            paired = [i for i in indices if estimates[i] is not None and measured[i] is not None]
+            errors = [estimates[i] - measured[i] for i in paired]
+            row = reports[name] = {"selector": groups[name], "observed_work": len(indices), "paired_work": len(paired),
+                                   "signed_service_error_ns": sum(errors), "absolute_service_error_ns": sum(map(abs, errors))}
+            if not indices:
+                row["status"] = "not_observed"
+            elif len(paired) < len(indices):
+                missing = next(i for i in indices if estimates[i] is None or measured[i] is None)
+                row.update(status="incomplete_services", first_unpaired=reference.detail(reference.intervals[missing]))
+            else:
+                row["status"] = "services_paired"
+                durations = measured.copy()
+                for i in indices:
+                    durations[i] = estimates[i]
+                scenarios[f"only_{name}"] = durations
+        return scenarios
+
+    def scenarios(self, reference, model, scratch, estimates, measured, plan, times, scenarios):
+        if None not in estimates:
+            scenarios["modeled"] = estimates
+            for kind in sorted(self.report["service_coverage"]):
+                scenarios[f"restore_{kind}"] = [observed if interval.piece["kind"] == kind else estimate
+                                                 for interval, estimate, observed in zip(reference.intervals, estimates, measured, strict=True)]
+        if not scenarios:
+            return
         scenarios = {name: reference.replay_services(durations) for name, durations in scenarios.items()}
         services = scratch / "scenarios.json"
         write_json(services, scenarios, replace=False)
         output = scratch / "scenario-times.json"
-        model.run_model("replay", output, path, services)
+        model.run_model("replay", output, scratch / "replay.json", services)
         replayed = json.loads(output.read_text())["event_times_ns"]
         outcomes = {}
         for name, stamps in replayed.items():
-            metrics = reference.metrics(stamps)
-            outcomes[name] = {"request_metrics": metrics, **compare_request_metrics(baseline["request_metrics"], metrics),
+            metrics = reference.publications.metrics(stamps)
+            outcomes[name] = {"request_metrics": metrics, **compare_request_metrics(self.report["baseline"]["request_metrics"], metrics),
                               "first_timing_difference": self.first_drift(reference, plan, scenarios[name], times, stamps)}
         self.report["scenarios"] = outcomes
-        return self.finish("compared")
 
     def run(self):
         args = self.arguments
@@ -172,13 +225,25 @@ class FixedPerformance:
         self.report["modeling_image"] = model.image
         with TemporaryDirectory(prefix=".fixed-", dir=self.output) as scratch:
             scratch = Path(scratch)
+            measured = [interval.service_ns for interval in reference.intervals]
+            replay = self.measured_baseline(reference, model, scratch, measured)
+
+            # A same-run replay can match all measured endpoints even when changing service costs needs more evidence.
             estimated = self.estimate(reference, model, scratch)
-            measured = self.assess(reference, estimated)
-            if not measured or reference.gaps:
+            self.assess(reference, estimated)
+            scoped = self.work_groups(reference, estimated, measured)
+            if replay is None:
                 return self.finish("reference_timing_incomplete")
+            if self.report["baseline"]["status"] == "baseline_difference":
+                return self.finish("baseline_difference")
+            if reference.gaps:
+                return self.finish("reference_timing_incomplete")
+            if None in reference.specialization_loads.values():
+                return self.finish("reference_specializations_unobserved")
             if any(reference.specialization_loads.values()):
                 return self.finish("reference_loaded_specializations")
-            return self.replay(reference, model, scratch, estimated)
+            self.scenarios(reference, model, scratch, estimated, measured, *replay, scoped)
+            return self.finish("cost_gap" if None in estimated else "compared")
 
 
 def main():
@@ -189,6 +254,7 @@ def main():
     parser.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
     parser.add_argument("--timeout", type=float, required=True, help="cumulative modeling allowance in seconds")
     parser.add_argument("--details", action="store_true", help="retain all reference evidence findings")
+    parser.add_argument("--work-groups", type=Path, help="replace only native work matching each named group and hold other services measured")
     raise SystemExit(0 if FixedPerformance(parser.parse_args()).run() else 1)
 
 

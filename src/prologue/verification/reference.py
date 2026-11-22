@@ -7,6 +7,51 @@ from prologue.acquisition.recording import PublishedCapture
 from prologue.integrations.frameworks.sglang.configuration import CaptureInput, ServingInput
 
 
+class RecordedSubmissions:
+    clock = "monotonic_raw_ns"
+
+    @classmethod
+    def read(cls, capture, sessions):
+        records = []
+        for index, session in enumerate(sessions):
+            path = capture / "instances" / str(index) / "request-delivery.json"
+            delivery, = json.loads(path.read_text())["capture"]
+            records.append(cls(session, delivery))
+        return records
+
+    def __init__(self, session, delivery):
+        if delivery["clock"] != self.clock:
+            raise ValueError("native request submissions require the shared RAW clock")
+        self.origin_ns = delivery["origin_ns"]
+        requests = session["content"]["requests"]
+        self.requests = {request["id"]: request for request in requests}
+        self.aliases = dict(zip(session["source_requests"], self.requests, strict=True))
+        if len(self.aliases) != len(requests):
+            raise ValueError("each submitted request needs a unique native and workload identity")
+
+        # The driver records a single submission time for all requests in one message.
+        pairs = [(index, row) for row in delivery["submissions"] for index in row["requests"]]
+        if sorted(index for index, _ in pairs) != list(range(len(requests))):
+            raise ValueError("native submissions must cover every request exactly once")
+        self.by_request = {requests[index]["id"]: row for index, row in pairs}
+
+    def receives(self, records):
+        rounds, received = [], set()
+        for record in records:
+            time_ns = record["received_raw_ns"] - self.origin_ns
+            members = [self.aliases[name] for name in record["requests"]]
+            if not members or time_ns < 0 or (rounds and time_ns < rounds[-1]["time_ns"]):
+                raise ValueError("receive rounds require nonempty members and nondecreasing times")
+            for member in members:
+                if member in received or time_ns < max(self.requests[member]["arrival_ns"], self.by_request[member]["submitted_ns"]):
+                    raise ValueError(f"receive repeats {member} or precedes its submission")
+                received.add(member)
+            rounds.append({"time_ns": time_ns, "requests": members})
+        if received != self.requests.keys():
+            raise ValueError("receive rounds do not cover every request exactly once")
+        return rounds
+
+
 class ReferenceRecording(PublishedCapture):
     target_fields = ("model", "instances", "workload")
 

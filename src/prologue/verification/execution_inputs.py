@@ -109,16 +109,17 @@ class NativeInputs:
             record.update(bindings=bindings, service_ns=None, boundaries=boundaries)
             self.steps[group].append((begin, record, None))
 
-    def input_reads(self, instance, rank, raw, aliases, requests, origin):
+    def input_reads(self, instance, rank, raw, submitted):
         if not raw["request_ingress"]:
             return
         name, group = instance["id"], f"{instance['id']}/{rank}"
         if name in self.ingress:
             raise ValueError("native input has more than one external ingress per instance")
-        self.ingress[name] = IngressEvidence.rounds(raw["request_ingress"], aliases, requests, origin)
+        self.ingress[name] = submitted.receives(raw["request_ingress"])
         if IngressEvidence.attempts(raw)["status"] != "observed":
             raise ValueError("native input reads lack their complete entering contexts")
-        reads = IngressEvidence.reads(name, raw, aliases, origin)
+        origin = submitted.origin_ns
+        reads = IngressEvidence.reads(name, raw, submitted.aliases, origin)
         for number, (interval, read) in enumerate(zip(raw["request_input_attempts"], reads, strict=True)):
             self.steps[group].append((interval["begin_raw_ns"], {
                 "operation": "input", "identity": self.contexts.encode(read["identity"]), "source": {"input": number},
@@ -175,19 +176,15 @@ class NativeInputs:
         report = {"capture": str(self.capture.resolve()), "graphs": str(self.graphs.resolve()), "status": "unverified"}
         try:
             evidence = NativeCase.read(self.capture, self.graphs) if reference is None else reference
-            for number, (instance, session) in enumerate(zip(evidence.manifest["instances"], evidence.sessions, strict=True)):
-                directory = self.capture / "instances" / str(number)
-                delivery, = self.read(directory / "request-delivery.json")["capture"]
-                if delivery["clock"] != "monotonic_raw_ns" or set(instance["observed_roles"]) != set(session["native_participants"]):
-                    raise ValueError("native input needs the common clock and every actual participant")
-                origin = delivery["origin_ns"]
-                requests = {request["id"]: request for request in session["content"]["requests"]}
-                aliases = dict(zip(session["source_requests"], requests, strict=True))
+            for instance, session, submitted in zip(evidence.manifest["instances"], evidence.sessions, evidence.submissions, strict=True):
+                if set(instance["observed_roles"]) != set(session["native_participants"]):
+                    raise ValueError("native input needs every actual participant")
+                origin = submitted.origin_ns
                 for rank in session["native_participants"]:
                     group = f"{instance['id']}/{rank}"
                     self.origins[group] = origin
                     _, raw, _ = evidence.sources[rank]
-                    self.input_reads(instance, rank, raw, aliases, requests, origin)
+                    self.input_reads(instance, rank, raw, submitted)
                     self.cpu(instance, rank, origin)
                 if instance["id"] not in self.ingress:
                     raise ValueError("native case omits external ingress")

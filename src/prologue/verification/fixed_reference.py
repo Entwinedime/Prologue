@@ -3,13 +3,11 @@
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from itertools import chain
-import json
 
 from prologue.integrations.platforms.ascend.services import ObservedServices
-from prologue.serving.latency import RequestLatency
 
 from .fixed_context import ExternalWake, HostProgress
-from .ingress import IngressEvidence
+from .publications import FixedPublications
 from .source_clock import ClockRealization, CounterPoint
 
 
@@ -106,7 +104,9 @@ class FixedReference:
         joins = self.observer_joins | self.elided_waits
         predecessors = self.predecessors(joins | dispatches.keys() | completions)
         self.event_windows = self.completion_windows(predecessors)
-        self.outputs = self.publications()
+        self.publications = FixedPublications(case, self.requests, self.origin_ns)
+        if missing := self.publications.coverage_gaps():
+            self.gaps["incomplete_publication_boundaries"] = missing
         self.host_conditions = {((rank, source), (rank, target)): conditions for rank, record in case.measurements.items()
                                 for (source, target), conditions in record["fixed_host_delays"].items()}
         self.host_fences, self.fence_evidence = self.bind_completions(
@@ -289,7 +289,7 @@ class FixedReference:
                 basis = "first_observed_command"
             elif preceding is not None and preceding[1] <= driver_entry:
                 frontier = {source}
-                basis = "preceding_task_already_complete"
+                basis = "preceding_task_before_calibration" if preceding[0] is None else "preceding_task_already_complete"
             elif records := self.bind_omitted_records(rank, dispatch, parents):
                 frontier = {source, previous}
                 basis = "observed_unpublished_record"
@@ -329,45 +329,26 @@ class FixedReference:
 
     def align_requests(self):
         case = self.case
-        deliveries = []
-        instances = case.manifest["instances"]
-        for index, _ in enumerate(instances):
-            directory = case.capture / "instances" / str(index)
-            delivery, = json.loads((directory / "request-delivery.json").read_text())["capture"]
-            if delivery["clock"] != "monotonic_raw_ns":
-                raise ValueError("fixed comparison requires the common RAW workload clock")
-            deliveries.append(delivery)
-        self.origin_ns, = {row["origin_ns"] for row in deliveries}
-
+        self.origin_ns, = {entry.origin_ns for entry in case.submissions}
         intake = []
-        for instance, session, delivery in zip(instances, case.sessions, deliveries, strict=True):
-            requests = session["content"]["requests"]
-            submissions = [(index, row["submitted_ns"]) for row in delivery["submissions"] for index in row["requests"]]
-            if sorted(index for index, _ in submissions) != list(range(len(requests))):
-                raise ValueError("native submission records must cover every request exactly once")
-            submitted = dict(submissions)
+        for instance, submitted in zip(case.manifest["instances"], case.submissions, strict=True):
             if instance["mode"] != "decode":
-                intake.append([{**row, "arrival_ns": submitted[index]} for index, row in enumerate(requests)])
-            self.bind_ingress(instance, session, submitted)
+                intake.append([{**row, "arrival_ns": submitted.by_request[name]["submitted_ns"]}
+                               for name, row in submitted.requests.items()])
+            self.bind_ingress(instance, submitted)
         workload, = intake
         return workload
 
-    def bind_ingress(self, instance, session, submitted):
-        requests = {request["id"]: request for request in session["content"]["requests"]}
-        aliases = dict(zip(session["source_requests"], requests, strict=True))
-        send_ns = {identity: self.origin_ns + submitted[index] for index, identity in enumerate(aliases)}
+    def bind_ingress(self, instance, submitted):
         for rank in instance["native_participants"]:
             contents, raw, _ = self.case.sources[rank]
             if not raw["request_ingress"]:
                 continue
-            IngressEvidence.rounds(raw["request_ingress"], aliases, requests, self.origin_ns)
             start, _ = contents.graph["evidence"]["window_ns"]
             wakes = self.case.measurements[rank]["fixed_idle_inputs"]
-            for record in raw["request_ingress"]:
-                received = record["received_raw_ns"]
-                stamps = [send_ns[request] for request in record["requests"]]
-                if any(stamp > received for stamp in stamps):
-                    raise ValueError("request receipt precedes its actual submission")
+            for read in submitted.receives(raw["request_ingress"]):
+                received = self.origin_ns + read["time_ns"]
+                stamps = [self.origin_ns + submitted.by_request[name]["submitted_ns"] for name in read["requests"]]
                 if received <= start:
                     continue
                 cut = wakes.get(received)
@@ -376,7 +357,9 @@ class FixedReference:
                 if cut and all(cut.stopped_raw_ns <= stamp <= cut.resumed_raw_ns for stamp in stamps):
                     self.input_releases[(rank, cut.source), (rank, cut.target)] = cut
                 else:
-                    self.gaps.setdefault("unqualified_input_readiness", []).append({"rank": rank, **record})
+                    self.gaps.setdefault("unqualified_input_readiness", []).append({
+                        "rank": rank, "requests": read["requests"], "submission_raw_ns": max(stamps), "received_raw_ns": received,
+                    })
 
     def services(self):
         case = self.case
@@ -422,31 +405,6 @@ class FixedReference:
         readiness = [self.clock.timestamp(*event) for event in self.peers[rank, finish] | {(rank, start)}]
         completion = self.clock.timestamp(rank, finish)
         return None if completion is None or None in readiness else completion - max(readiness)
-
-    def publications(self):
-        outputs = {}
-        expected = {row["id"]: row["output_tokens"] for row in self.requests}
-        for rank, (contents, raw, _) in self.case.sources.items():
-            if raw["environment"]["implementation"]["disaggregation_mode"] == "prefill":
-                continue
-            intervals = {row["name"]: row for row in raw["host_observation"]["intervals"]}
-            for scope in raw["scopes"]:
-                published = scope.get("publication")
-                if not published:
-                    continue
-                node = contents.graph["scopes"][contents.source_ids[scope["id"]]]
-                finish, = (p["event"] for p in node["ports"] if p["name"] == "call.return" and p["direction"] == "output")
-                timestamp = intervals[f"prologue.scope/{scope['id']}"]["end_raw_ns"]
-                if self.case.clocks[rank].window(finish) != (timestamp, timestamp):
-                    raise ValueError("publication does not match its observed scheduler return")
-                for item in published:
-                    key = item["id"], item["generated_tokens"]
-                    event = (rank, finish)
-                    if outputs.setdefault(key, event) != event:
-                        raise ValueError("token has more than one native publication boundary")
-        if outputs.keys() != {(request, token) for request, count in expected.items() for token in range(1, count + 1)}:
-            self.gaps["incomplete_publication_boundaries"] = len(outputs)
-        return outputs
 
     def detail(self, interval):
         piece = interval.piece
@@ -570,21 +528,33 @@ class FixedReference:
         return list(windows.values())
 
     def check_baseline(self, replayed):
-        checked, differences = 0, Counter()
+        checked, max_clock_width = 0, 0
+        evidence, differences = Counter(), Counter()
         first = None
-        for ((rank, event), position), bounds in zip(self.case.graph.positions.items(), self.event_windows, strict=True):
+        for (rank, event), position in self.case.graph.positions.items():
+            bounds = self.event_windows[position]
             if bounds is None:
+                evidence["unmeasured"] += 1
                 continue
             checked += 1
             time = replayed[position]
             begin, end = (stamp - self.origin_ns for stamp in bounds)
+            if (rank, event) in self.observer_joins:
+                evidence["derived_join"] += 1
+            elif self.case.clocks[rank].device[event]:
+                evidence["calibrated_device"] += 1
+                max_clock_width = max(max_clock_width, end - begin)
+            else:
+                evidence["host_raw"] += 1
             if begin <= time <= end:
                 continue
             differences["early" if time < begin else "late"] += 1
             if first is None or begin < first["measured_window_ns"][0]:
                 scope = self.case.sources[rank][0].graph["events"][event]["scope"]
-                first = {"rank": rank, "event": event, "scope": scope, "measured_window_ns": [begin, end], "replayed_ns": time}
+                first = {"rank": rank, "event": event, "scope": scope,
+                         "measured_window_ns": [begin, end], "replayed_ns": time}
         return {"checked_boundaries": checked, "observer_joins": len(self.observer_joins),
+                "boundary_evidence": dict(evidence), "max_device_clock_window_ns": max_clock_width,
                 "differences": dict(differences), "first_difference": first}
 
     def local_unexplained_waits(self, plan, services):
@@ -637,9 +607,3 @@ class FixedReference:
             if gap > group["max_lower_ns"]:
                 group.update(max_lower_ns=gap, rank=rank, event=event)
         return {"checked_boundaries": checked, "by_role": groups}
-
-    def metrics(self, times):
-        count = {row["id"]: row["output_tokens"] for row in self.requests}
-        result = [{"request": request, "generated_tokens": token, "finished": token == count[request],
-                   "time_ns": times[self.case.graph.positions[event]]} for (request, token), event in sorted(self.outputs.items())]
-        return RequestLatency(result, self.requests).report()

@@ -8,7 +8,8 @@ from statistics import mean
 from prologue.artifacts import write_json
 from prologue.serving.latency import RequestLatency, percentile95
 
-from .reference import ReferenceRecording
+from .publications import publication_marks
+from .reference import RecordedSubmissions, ReferenceRecording
 
 
 class NativeLatencyMetrics:
@@ -19,93 +20,88 @@ class NativeLatencyMetrics:
 
     def __init__(self, source, instances, sessions):
         self.source = source
-        roles = {instance["mode"]: self.read_instance(index, instance, sessions[index])
-                 for index, instance in enumerate(instances)}
+        records = RecordedSubmissions.read(source, sessions)
+        roles = {instance["mode"]: self.read_instance(instance, record)
+                 for instance, record in zip(instances, records, strict=True)}
         if len(instances) == 1 and roles.keys() == {"null"}:
             self.ingress = self.emitter = roles["null"]
         elif len(instances) == 2 and roles.keys() == {"prefill", "decode"}:
             self.ingress, self.emitter = roles["prefill"], roles["decode"]
         else:
             raise ValueError("native latency requires ordinary serving or one Prefill/Decode pair")
-        self.origin_ns = self.ingress["origin_ns"]
-        self.requests = self.ingress["workload"]
-        if self.origin_ns != self.emitter["origin_ns"] or self.requests != self.emitter["workload"]:
+        intake, output = self.ingress["delivery"], self.emitter["delivery"]
+        self.origin_ns = intake.origin_ns
+        self.requests = list(intake.requests.values())
+        if self.origin_ns != output.origin_ns or self.requests != list(output.requests.values()):
             raise ValueError("native latency roles have different clocks or workloads")
         self.specializations = None
         if all(role["specializations"] is not None for role in roles.values()):
             self.specializations = [event for role in roles.values() for event in role["specializations"]]
 
-    def read_instance(self, index, instance, session):
-        directory = self.source / "instances" / str(index)
-        requests = session["content"]["requests"]
-        delivery, = self.read(directory / "request-delivery.json")["capture"]
-        if delivery["clock"] != "monotonic_raw_ns":
-            raise ValueError("native latency requires the RAW workload clock")
-        submissions = {index: row for row in delivery["submissions"] for index in row["requests"]}
-        specializations = None
+    def read_instance(self, instance, delivery):
         if "latency" in instance:
             measurements = self.read(self.source / instance["latency"])
-            if measurements["clock"] != delivery["clock"]:
+            if measurements["clock"] != delivery.clock:
                 raise ValueError("native latency and delivery clocks differ")
             rows = {row["id"]: row for row in measurements["requests"]}
+            if len(rows) != len(measurements["requests"]) or rows.keys() != delivery.requests.keys():
+                raise ValueError("native latency records must cover each submitted request exactly once")
             specializations = measurements.get("specialization_loads")
             basis = "scheduler_send_return"
         else:
-            if instance["mode"] != "null":
-                raise ValueError("PD latency reporting requires a latency-only capture for both instances")
-            aliases = dict(zip(session["source_requests"], (request["id"] for request in requests), strict=True))
-            rows = self.detailed_publications(instance["observed_roles"], aliases)
+            rows, specializations = self.detailed_boundaries(instance, delivery)
             basis = "detailed_scheduler_send_bracket_end"
-        return {
-            "workload": requests, "origin_ns": delivery["origin_ns"], "submissions": submissions,
-            "rows": rows, "specializations": specializations, "basis": basis,
-        }
+        return {"delivery": delivery, "rows": rows, "specializations": specializations, "basis": basis}
 
     @staticmethod
     def read(path):
         return json.loads(path.read_text())
 
-    def detailed_publications(self, ranks, aliases):
-        rows = None
-        for rank in ranks:
+    def detailed_boundaries(self, instance, delivery):
+        rows = {name: {} for name in delivery.requests}
+        receiver = publisher = None
+        loads = [] if set(instance["observed_roles"]) == set(instance["native_participants"]) else None
+        for rank in instance["observed_roles"]:
             raw = self.read(self.source / f"rank-{rank}.json")
-            if not any(scope.get("publication") for scope in raw["scopes"]):
-                continue
-            if rows is not None:
-                raise ValueError("detailed serving records have more than one observed output publisher")
-            rows = self.observed_publications(raw, aliases)
-        if rows is None:
-            raise ValueError("detailed serving records do not include an output publisher")
-        return rows
+            if loads is not None:
+                if raw.get("specialization_loads") is None:
+                    loads = None
+                else:
+                    loads.extend({"rank": rank, **event} for event in raw["specialization_loads"])
+            if raw["request_ingress"]:
+                if receiver is not None:
+                    raise ValueError("multiple workers claim the same external request ingress")
+                receiver = rank
+                for read in delivery.receives(raw["request_ingress"]):
+                    for name in read["requests"]:
+                        rows[name]["ingress_raw_ns"] = delivery.origin_ns + read["time_ns"]
 
-    @staticmethod
-    def observed_publications(raw, aliases):
-        host = {row["name"]: row for row in raw["host_observation"]["intervals"]}
-        rows = {aliases[identity]: {"ingress_raw_ns": pull["received_raw_ns"]}
-                for pull in raw["request_ingress"] for identity in pull["requests"]}
-        for scope in raw["scopes"]:
-            if not scope.get("publication"):
+            # A Prefill worker hands the request to Decode. Only the final serving role publishes client tokens.
+            if instance["mode"] == "prefill":
                 continue
-            marker = host[f"prologue.scope/{scope['id']}"]
-            finish = marker["end_raw_ns"]
-            bracket = finish - marker["begin_raw_ns"]
-            for item in scope["publication"]:
-                row = rows[item["id"]]
-                count = item["generated_tokens"]
+            for identity, count, begin, finish in publication_marks(raw):
+                if publisher is not None and publisher != rank:
+                    raise ValueError("multiple workers claim the same token publication")
+                publisher = rank
+                row = rows[identity]
                 if count > row.get("output_tokens", 0):
                     row.setdefault("first_publication_raw_ns", finish)
-                    row.setdefault("first_publication_bracket_ns", bracket)
-                    row.update(last_publication_raw_ns=finish, last_publication_bracket_ns=bracket, output_tokens=count)
-        return rows
+                    row.setdefault("first_publication_bracket_ns", finish - begin)
+                    row.update(last_publication_raw_ns=finish, last_publication_bracket_ns=finish - begin,
+                               output_tokens=count)
+
+        if receiver is None or (publisher is None and instance["mode"] != "prefill"):
+            raise ValueError("detailed serving records omit the required ingress or publication owner")
+        return rows, loads
 
     def report(self):
         requests = []
         disaggregated = self.ingress is not self.emitter
-        for index, expected in enumerate(self.requests):
+        for expected in self.requests:
             identity = expected["id"]
             published = self.emitter["rows"][identity]
             count = published["output_tokens"]
-            delivery = self.ingress["submissions"][index]
+            delivery = self.ingress["delivery"].by_request[identity]
             declared, submitted = delivery["scheduled_ns"], delivery["submitted_ns"]
             received_ns = self.ingress["rows"][identity]["ingress_raw_ns"]
             arrival = received_ns - self.origin_ns
@@ -121,7 +117,7 @@ class NativeLatencyMetrics:
                 "tpot_ns": (last - first) / (count - 1) if count > 1 else None,
             }
             if disaggregated:
-                decode = self.emitter["submissions"][index]
+                decode = self.emitter["delivery"].by_request[identity]
                 decode_ingress_ns = published["ingress_raw_ns"] - self.origin_ns
                 if decode["scheduled_ns"] != declared or not declared <= decode["submitted_ns"] <= decode_ingress_ns <= first:
                     raise ValueError(f"native request {identity} has inconsistent Decode delivery")

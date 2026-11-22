@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+from itertools import pairwise
 from pathlib import Path
 
 from prologue.artifacts import write_json
@@ -32,7 +33,10 @@ class MatrixInputs:
         write_json(path, document, indent=2, replace=False)
 
     def choose(self, case, request, field, choices):
-        key = "\n".join((self.seed, case["id"], str(request), field)).encode()
+
+        # Paired cases draw the same position from corresponding alternatives declared before the freeze.
+        draw = case.get("draw_group", case["id"])
+        key = "\n".join((self.seed, draw, str(request), field)).encode()
         return choices[int.from_bytes(hashlib.sha256(key).digest(), "big") % len(choices)]
 
     @staticmethod
@@ -49,7 +53,7 @@ class MatrixInputs:
             if mode == "alternating":
                 cuts.add(max(prefix, length // 2))
             cuts = sorted(cuts)
-            for begin, end in zip(cuts, cuts[1:]):
+            for begin, end in pairwise(cuts):
 
                 # Prefix conditions are explicit too: a remote layer's different experts must prevent a false cache hit.
                 balanced = begin < prefix or mode == "balanced" or (mode == "alternating" and begin < length // 2)
@@ -139,7 +143,7 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--specification", type=Path, required=True)
     parser.add_argument("--stage", required=True)
-    parser.add_argument("--seed", required=True, help="final freeze delivery commit, retained verbatim in draw.json")
+    parser.add_argument("--seed", required=True, help="frozen commit or manifest digest, recorded in draw.json")
     parser.add_argument("--phase", choices=("sources", "targets"), required=True)
     arguments = parser.parse_args()
     MatrixInputs(arguments.root, arguments.specification, arguments.stage, arguments.seed).run(arguments.phase)

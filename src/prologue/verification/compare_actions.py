@@ -149,7 +149,7 @@ class ActionComparison:
         native_polling = PdPollingEvidence(protocol_source.admission_members)
         state_values = StateValueComparison(groups)
         action_results = ActionResults(groups)
-        ingress = IngressEvidence(self.capture, capture["instances"])
+        ingress = IngressEvidence(capture["instances"], native_case.submissions)
         for instance in capture["instances"]:
             for rank in instance["observed_roles"]:
                 source, raw, identities = sources[rank]

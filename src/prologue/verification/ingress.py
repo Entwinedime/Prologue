@@ -7,51 +7,25 @@ from .actions import ActionIdentity
 
 
 class IngressEvidence:
-    def __init__(self, capture, instances):
-        origins, self.sources, self.expected = set(), {}, {}
+    def __init__(self, instances, submissions):
+        self.sources = {instance["id"]: entry for instance, entry in zip(instances, submissions, strict=True)}
+        self.origin_ns, = {entry.origin_ns for entry in submissions}
+        self.expected = {}
         self.actual = defaultdict(list)
         self.input_attempts = {}
         self.native_reads = {}
         self.actual_reads = defaultdict(list)
         self.received = defaultdict(set)
         self.findings = []
-        for index, instance in enumerate(instances):
-            directory = capture / "instances" / str(index)
-            session = json.loads((directory / "session.json").read_text())
-            delivery, = json.loads((directory / "request-delivery.json").read_text())["capture"]
-            if delivery["clock"] != "monotonic_raw_ns":
-                raise ValueError("ingress comparison requires the shared RAW clock")
-            requests = {request["id"]: request for request in session["content"]["requests"]}
-            aliases = dict(zip(session["source_requests"], requests, strict=True))
-            self.sources[instance["id"]] = aliases, requests, delivery["origin_ns"]
-            origins.add(delivery["origin_ns"])
-        self.origin_ns, = origins
-
-    @staticmethod
-    def rounds(records, aliases, requests, origin_ns):
-        result, received = [], set()
-        for record in records:
-            time_ns = record["received_raw_ns"] - origin_ns
-            members = [aliases[name] for name in record["requests"]]
-            if not members or time_ns < 0 or (result and time_ns < result[-1]["time_ns"]):
-                raise ValueError("receive rounds require nonempty members and nondecreasing times")
-            for member in members:
-                if member in received or time_ns < requests[member]["arrival_ns"]:
-                    raise ValueError(f"receive repeats {member} or precedes its declared arrival")
-                received.add(member)
-            result.append({"time_ns": time_ns, "requests": members})
-        if received != requests.keys():
-            raise ValueError("receive rounds do not cover every request exactly once")
-        return result
 
     def native(self, instance, raw):
         if raw["request_ingress"]:
             if instance in self.expected:
                 raise ValueError("instance has more than one observed external ingress")
-            self.expected[instance] = self.rounds(raw["request_ingress"], *self.sources[instance])
+            entry = self.sources[instance]
+            self.expected[instance] = entry.receives(raw["request_ingress"])
             self.input_attempts[instance] = self.attempts(raw)
-            aliases, _, origin_ns = self.sources[instance]
-            self.native_reads[instance] = self.reads(instance, raw, aliases, origin_ns)
+            self.native_reads[instance] = self.reads(instance, raw, entry.aliases, entry.origin_ns)
 
     @staticmethod
     def attempts(raw):
@@ -96,9 +70,15 @@ class IngressEvidence:
             identity = None if record["context"] is None else {
                 "instance": instance, "context": record["context"], "received": sorted(received),
             }
-            result.append({"identity": identity, "time_ns": time_ns, "requests": members})
+            result.append({"identity": identity, "begin_ns": record["begin_raw_ns"] - origin_ns,
+                           "time_ns": time_ns, "requests": members})
             received.update(members)
         return result
+
+    def readiness(self, instance):
+        submitted = self.sources[instance].by_request
+        return {request: {"submitted_ns": submitted[request]["submitted_ns"], "received_ns": read["time_ns"]}
+                for read in self.expected[instance] for request in read["requests"]}
 
     @staticmethod
     def groups(reads):
@@ -129,7 +109,7 @@ class IngressEvidence:
                     or (previous and row["time_ns"] < previous[-1]["time_ns"])):
                 raise ValueError("input read disagrees with its entering delivery history or clock")
             observed = {"requests": members, "time_ns": row["time_ns"]}
-            previous.append({"identity": identity, "in_flow": in_flow, **observed})
+            previous.append({"identity": identity, "in_flow": in_flow, "poll_deadline_ns": row.get("poll_deadline_ns"), **observed})
             self.received[instance].update(members)
             if members:
                 self.actual[instance].append(observed)

@@ -19,7 +19,7 @@ class OmittedRecord:
 class DeviceRelease:
     submitted: int
     previous: int | None
-    preceding_window_ns: tuple[int, int] | None
+    preceding_window_ns: tuple[int | None, int] | None
     first_command: bool
     stream_wait: bool
     wait_finish: int | None
@@ -124,7 +124,11 @@ class SdkStreams:
             if prior is not None:
                 previous = coordinates.get((f"stream/{stream}", self.span(preceding)[1]))
                 completed = self.clock.interval(prior)[1]
-                if self.clock.begin_ns <= completed <= self.clock.end_ns:
+                if completed < self.clock.begin_ns:
+
+                    # An earlier device tick finished by the first snapshot's RAW return.
+                    seen = None, self.clock.samples[0]["end_raw_ns"]
+                elif completed <= self.clock.end_ns:
                     seen = self.clock.bounds(completed)
                     entered = post.record["begin_raw_ns"]
                     if seen[1] > entered:
