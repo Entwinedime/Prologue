@@ -407,3 +407,261 @@
 **阶段交付**　相对 `9394570` 完成全部 4 条要求的职责链。核对 249 个业务源文件、4 个示例源文件、20 个构建和发布相关文件，业务净增 359 行，示例净减 5 行。模型选择、样本归属、应用装配和独立评价有了明确消费者；共有采集及工作流包不再直接导入框架或设备后端。CUDA 的部署、设备活动和时钟接入仅做静态审查。[源码和构建清单](../../../data/architecture-acquisition-performance/r4/release/review.json)
 
 18 项开发对照均已获得结论。6 项结构对照中，完整来源有 2 项全节点匹配、1 项在已测范围匹配；单卡来源 3 项均保留了首个结构差异。6 项固定图中，1 项取得请求级误差，1 项在实测基线通过后遇到成本缺口，4 项缺完整实测基线。6 项自主预测均用无设备的核心和控制进程运行，3 项走完请求，3 项停在具名成本缺口。六次物理参考共 734.94 秒；六份成本资产另用 21 次原生采样，共 1,719.86 秒。训练与参考的原生身份均已核对。V 将独立覆盖新 workload，并单独加入启用分块、混批和前缀缓存的配置。[完整交付、计账与逐项定位](../../../data/architecture-acquisition-performance/r4/handoff.json)
+
+## 2026-11-22 — V.1 登记独立矩阵
+
+**范围**　以 R4 的远端提交 `4f9a470` 和三个固定镜像为起点。8 个配置各取短请求和错峰序列，两种来源分别走三条验证路径，共 16 个目标、96 项检查。[配置、部署与范围](../../../data/architecture-acquisition-performance/v/scope.json)
+
+**改动**　训练侧安排 28 个模板作业，合格的相同输入、部署、镜像和传感器可复用。模板采集累计上限 33,600 秒；定向成本采样上限 171 次、109,650 秒。每个目标预留一次详细物理取证和一次独立轻量计时，共 32 次。[采集额度](../../../data/architecture-acquisition-performance/v/limits.json)
+
+**验证**　按到达时间、输入长度、生成长度核对，16 组目标均与已采到的 10 种开发序列和预定的 7 种训练序列不同。页边界取 15、16、17 个输入 token。新增的 TP1 配置启用分块、混批和一级前缀缓存，包含两组共享前缀和后续独立请求。[请求清单](../../../data/architecture-acquisition-performance/v/inputs/draw-summary.json)
+
+**结论与限制**　每种来源的 TTFT 分母为 59，TPOT 分母为 49。实测零值另列。机制是否触发取决于实际物理目标，冻结完成还需逐目标核对正式来源选择及各份训练资产。
+
+## 2026-11-22 — V.1 双模式训练采集
+
+**范围**　为独立矩阵准备训练模板和成本。完整模式按配置开放多张卡，单卡模式只开放物理卡 4。冻结清单核对每份训练作业的启动参数和观测角色，外接通信单独追溯到供数方的物理卡、主机及驱动。
+
+**改动**　使用正式建库、成本缺口识别及按需采样入口。外接通信从同配置的完整模式训练记录导出，无须再启动原生框架。
+
+**验证**　下表每项给出原生次数及计费秒数。前四个配置的两套成本库均覆盖本配置训练中出现的工作。
+
+| 配置 | 完整模式模板 / 性能 | 单卡模式模板 / 性能 | 供单卡使用的物理通信 |
+|---|---|---|---|
+| Qwen3-8B TP1 | 2 次 255.4 秒 / 3 次 255.1 秒 | 2 次 258.0 秒 / 3 次 262.4 秒 | 同一张卡上完成。[单卡模板](../../../data/architecture-acquisition-performance/v/training/qwen8-tp1/single_device/collection/status.json) · [单卡性能](../../../data/architecture-acquisition-performance/v/training/qwen8-tp1/single_device/costs/status.json) |
+| Qwen3-8B TP2 | 2 次 265.9 秒 / 4 次 283.4 秒 | 2 次 311.2 秒 / 3 次 282.8 秒 | 两次完整模式训练供应 4 份文件、24 行样本、2,368 个逐 rank 服务时长。单卡依次观察 rank 0、1。[成本资产](../../../data/architecture-acquisition-performance/v/training/qwen8-tp2/single_device/costs/costs.json) · [跨卡来源](../../../data/architecture-acquisition-performance/v/training/qwen8-tp2/profiles/selection.json) |
+| Qwen3-8B TP8 | 2 次 286.1 秒 / 10 次 399.0 秒 | 2 次 467.5 秒 / 3 次 393.4 秒 | 两次八卡训练供应 16 份文件。单卡只详细观察 rank 0、1，rank 2–7 共用 rank 1 的模板。[角色与模板](../../../data/architecture-acquisition-performance/v/training/qwen8-tp8/single_device/collection/result.json) · [跨卡来源](../../../data/architecture-acquisition-performance/v/training/qwen8-tp8/profiles/selection.json) |
+| Mistral-7B PP3 | 1 次 144.5 秒 / 4 次 191.5 秒 | 1 次 159.6 秒 / 2 次 161.2 秒 | 一次三卡训练供应 3 份文件、26 行样本、224 个逐 rank 服务时长。[完整模式账目](../../../data/architecture-acquisition-performance/v/training/mistral7-pp3/full/costs/status.json) · [单卡模式账目](../../../data/architecture-acquisition-performance/v/training/mistral7-pp3/single_device/costs/status.json) · [跨卡来源](../../../data/architecture-acquisition-performance/v/training/mistral7-pp3/profiles/selection.json) |
+
+**结论与限制**　前四个配置累计 14 次模板采集和 32 次定向性能采样。TP8 和 PP3 的正式选择器已为各自两个目标指认训练作业；此处仅核对输入和训练来源。
+
+## 2026-11-22 — V.1 复核开发案例的结构与成本差异
+
+**范围**　复用 R4 的物理记录、模板和成本，确认应在独立评价中保留哪些证据。此批诊断与留出目标隔离。
+
+**改动**　登记三种可分别核对的观测，包括 PP 发送的实际载荷、详细与轻量采集的 token 发布时刻，以及结构预测实际使用的时间输入。对 PP 消息按通道、端点、操作、tag、dtype 及调度上下文唯一配对。详细图未产出时仍可读原生行为，固定图重算受限时单列原因。
+
+**验证**
+
+- **PP 的 CPU 协议端点。** PP3 和 TP2 × PP3 的 676、916 个端点均有唯一的主机 RAW 时间。158、218 条跨 rank 依赖的实测顺序均成立。窗口内 216、336 次调用均在已有 host 工作段之外。每例另有 122 次窗口外调用，244 个端点中有 116 个能通过依赖影响本轮。`FixedReference` 按负编号遗漏了协议端点，修复须从原线程的固定开销中切出这些调用，保留必要的跨窗条件。[协议区间与因果核对](../../../data/architecture-acquisition-performance/v/diagnosis/development-pp-endpoints.json)
+- **PD 的 CPU 与设备归约。** 576 段集合通信中，296 段有设备 SDK 记录，其余 280 段由 Decode 的两个 rank 在 CPU 上进行。从最后一个参与者进入到本 rank 返回，均可测得 0.563–1.571 毫秒。验证器对两类都要求 SDK，单卡采样器也对主机归约要求实际多卡。两份单卡训练记录已配对 368、377 轮 CPU 归约，均与辅助工作分离；预热后的记录覆盖训练模板的 165 段。[目标工作](../../../data/architecture-acquisition-performance/v/diagnosis/development-pd-collectives.json) · [训练覆盖](../../../data/architecture-acquisition-performance/v/diagnosis/development-host-collective-training.json)
+- **设备通信的执行顺序。** 两种来源在 TP2 上都产生 444 段通信，PD 的 Decode 都有 296 段。完整模式使用专属串行通信流；单卡来源把它们放在调用方的流上。PP3 的 21 次发送和 21 次接收逐对一致，完整模式每个 rank 的两条串行流在单卡图中合为一个可并发服务。按收发方向或对端分流在此例会产生相同的观测。[通信数量与资源顺序](../../../data/architecture-acquisition-performance/v/diagnosis/development-transport-lanes.json)
+- **PP 请求转发的字节数。** PP3 与 TP2 × PP3 各有两次原生请求转发 1,968 字节，控制器生成 1,696 字节。两套成本库各已有两次对应首条原生发送的实测。另有 7、14 条能唯一对应的张量元数据消息，尺寸一致。在固定镜像内调用原生请求构造入口，时序元数据贡献 +182 字节，请求 ID 贡献 +8 字节，文本字段贡献 −2 字节，批请求封装贡献 +84 字节，合计复现 272 字节。责任在 SGLang 请求桥接。[逐消息证据](../../../data/architecture-acquisition-performance/v/diagnosis/development-pp-message-bytes.json) · [无设备的序列化复现](../../../data/architecture-acquisition-performance/v/diagnosis/development-pp-ingress-serialization.json)
+- **TP2 的时延误差。** 在同一张真实图上一次只恢复一组主机工作。实测 TTFT / TPOT 为 1,589.50 / 599.16 毫秒，全部用模型为 1,336.02 / 690.26 毫秒。单独恢复 rank 0 或 1 的控制线程，分别得到 1,576.06 / 602.90 和 1,576.27 / 602.07 毫秒。恢复全部 CPU 工作得到 1,587.46 / 600.02 毫秒。同一开发请求的独立轻量实测为 701.41 / 89.59 毫秒。PP3 也能分别读取两种发布计时，PD 的正式读取器仅支持轻量计时。[固定图重算与两种原生记录](../../../data/architecture-acquisition-performance/v/diagnosis/development-host-service-attribution.json)
+- **主机样本是否缺点。** 用正式 C++ 查询返回的模型绑定反查训练原始行。21,506 个 CPU 工作区间都找到阶段与全部特征相同的采样点，21,502 个预测值落在各自训练实测范围内。详细目标的 9,848 个控制线程区间里，8,326 个比相应训练样本的最大值还长。各计数按工作出现次数计，两个 rank 各有 747、745 个不同的绑定与特征组合。后续应先核对详细观测与轻量采样的计费口径。[观测区间与逐点训练范围](../../../data/architecture-acquisition-performance/v/diagnosis/development-host-sample-support.json)
+
+**结论与限制**　固定图上两个 rank 的同步使两次局部恢复的效应重叠。检查 PyTorch 观察器可见，dispatch 在原生算子前后维护输入、输出的存储生命周期，这段 CPU 工作落在外层业务 scope 中。用两个 CPU 加法调用复核，三次存储记账均落在该 scope 中，缺少独立的观察者区间。旧 NPU 记录无法单列这部分时长，两次原生的差额还含发布标记及运行间波动。相关交接问题由 V.6 集中修复，保留首次独立结果。
+
+## 2026-11-22 — V.1 六角色组合的训练资产
+
+**范围**　Mistral-7B TP2 × PP3。正式选择器在两种模式下均能为预定目标选出覆盖六个逻辑角色的训练来源。
+
+**改动**　完整模式一次模板采集使用六张卡，耗时 150.4 秒。单卡模式在物理卡 4 上依次观察六个角色，一次模板采集耗时 241.1 秒。单卡使用的 6 份物理通信文件来自前述六卡运行，共 104 行样本、1,664 个逐 rank 服务时长。[通信来源](../../../data/architecture-acquisition-performance/v/training/mistral7-tp2-pp3/profiles/selection.json)
+
+**验证**　完整模式用 8 次定向采样、393.1 秒，仍缺 240 个主机工作特征点及 6 个集合通信特征点。单卡模式用 3 次、347.0 秒，分别缺 144 个和 6 个。两套资产均按实际覆盖发布。前五个配置累计 16 次模板采集、43 次定向性能采样。[完整模式](../../../data/architecture-acquisition-performance/v/training/mistral7-tp2-pp3/full/costs/costs.json) · [单卡模式](../../../data/architecture-acquisition-performance/v/training/mistral7-tp2-pp3/single_device/costs/costs.json)
+
+**结论与限制**　每个模型层依次执行 attention 输出归约与 MLP 输出归约。两种模式各有 1,024 次层调用，详细采集都漏掉前者的形状，配对器都把第二次归约对应到第一次的轻量计时。六卡设备已测得前者的通信时长，导出时因缺少操作数形状而未采用。[两种模式的逐角色配对](../../../data/architecture-acquisition-performance/v/diagnosis/training-combined-host-pair-origins.json) · [设备计时与操作数](../../../data/architecture-acquisition-performance/v/diagnosis/training-combined-reduction-geometry.json)
+
+用完整模式旧记录重建 rank 0 的采样报告，内容与原报告完全一致。对六个 rank 各只移除上述错误配对再重算，19,456 个原始主机时长观测随之消失，落在拟合实际引用的 584 行训练数据中。这证明错误配对已影响拟合输入。对具体目标时延的影响仍须单独评价。[原样复现与受影响的拟合行](../../../data/architecture-acquisition-performance/v/diagnosis/training-combined-host-pair-influence.json)
+
+## 2026-11-22 — V.1 通信流、专家路由及主库发布
+
+**范围**　复核五个拓扑的已有通信记录，并使用 Qwen3-30B-A3B TP4 × EP4 的两次四卡训练。两次共计 362.8 秒，主作业四个 rank 均已编译，补充局部作业已发布。同一配置在物理卡 4 顺序完成两次采集，共 912.5 秒。完整部署和单卡均只发布补充作业。前五种配置的 16 个已发布训练作业均通过正式本地模板核对，冻结时复用相同记录。
+
+**改动**　冻结清单按采集作业保留所有实际启动、计费和未发布原因。主库选择失败的目标仍占原分母。三条路径各自检查所需资产，固定图成本评价可使用具备资格的成本与物理参考。
+
+**验证**
+
+- **通信流。** 镜像中 torch_npu 2.10.0 的头文件与上游提交一致。对 TP2、PP3、PD、TP8、TP2 × PP3 完整来源的 10,892 段 TP 归约和 PP 张量收发，后端的进程组及对端规则均能解释观测到的流共用关系。TP2 × PP3 的单卡图里，每个 rank 的两个 PP 对端共用一个可并发服务；真实运行给两个对端分配了不同的串行通信流。后端允许共享缓冲区、流池复用及合并提交，这些条件会影响推广范围。[五种拓扑与来源版本](../../../data/architecture-acquisition-performance/v/diagnosis/development-hccl-stream-contract.json) · [后端选择点对点通信流的实现](https://github.com/Ascend/pytorch/blob/94f8a8e6b523d7ba553e1b80d5b5248478391526/torch_npu/csrc/distributed/ProcessGroupHCCL.cpp#L4249-L4269)
+- **专家路由。** 在两次四卡训练中，用原生批次和输入路由重算 6,144 个 rank 端的 dispatch / combine，逐个与实际发送、接收行数一致。1,536 轮共核对 24,576 项发送与对端接收。另构造两个合法四 token 输入，分别均匀分配，或在前两个 rank 间调换两行；两者逐对端流量不同，现有控制器交给核心的参数却完全相同。该反例检查信息传递，未测两种路由的性能差。[原生记录与合同反例](../../../data/architecture-acquisition-performance/v/diagnosis/training-expert-peer-geometry.json)
+- **通信成本。** 已发布的四卡补充作业中，每个 rank 各有 144 段 dispatch 和 144 段 combine，共 1,152 段。每段均能与对端核对行数并取得有校准边界的服务时长。现有跨部署成本导出器只接收均匀载荷操作，这 1,152 段均未进入单卡可复用的通信标定。[逐操作核对](../../../data/architecture-acquisition-performance/v/diagnosis/training-expert-transport-measurements.json)
+- **来源资格。** 主作业每个 rank 各执行两次单请求 Decode。实际模型入口与模板都记录了四行，符合本次 TP 对齐。发布器要求请求数和模型行数都等于一。用原四份库复现发布错误，内存对照只移除这一项要求，其他原检查全部通过。两个留出输入仍按冻结实现返回无可选主库。[原始发布](../../../data/architecture-acquisition-performance/v/training/qwen30-tp4-ep4/full/collection/result.json) · [逐 rank 调度、实参和发布对照](../../../data/architecture-acquisition-performance/v/diagnosis/training-expert-batch-qualification.json)
+- **单卡主库。** 对同一 Decode，编译器报告专家回传有两个候选。两者有相同端口、依赖、形状条件和 11 个工作区间，唯一区别是其中一个区间被标为集合通信或普通通信。单卡投影按本次有载荷的对端数改变了工作种类。四卡真实图里，同样的 144 段分发和 144 段回传在部分对端有流量时仍是集合通信。在单卡原图的诊断副本上仅统一这 288 个标记，原编译器即生成 48 个入口、69 个共享定义。本次只检验 rank 0 编译，未将诊断库发布给留出目标。[候选差异、真实对照和离线复现](../../../data/architecture-acquisition-performance/v/diagnosis/training-expert-staged-service-kind.json)
+- **成本缺口。** 完整模式新增 5 次采样、226.8 秒，缺的 3 个成本点对应 4 次普通 TP 归约。SDK 均记录了本地起止时间，扣除最后一个对端就绪前的等待后，四个时长区间都包含零。单卡新增 2 次采样、264.9 秒，缺的 23 个成本点对应两个代表上的 1,449 段工作。按原生调用和请求身份逐段匹配，872 段 gather/scatter 已有可核对的载荷和物理时长，576 段专家通信的逐对端行数和时长齐全，余下 1 次归约受上述校时限制。正式覆盖判定保留原值。[完整模式的原生区间](../../../data/architecture-acquisition-performance/v/diagnosis/training-expert-transport-measurements.json) · [单卡逐项对照](../../../data/architecture-acquisition-performance/v/diagnosis/training-expert-staged-cost-coverage.json)
+- **跨卡校时。** 以同一轮集合通信内实际配对的通知为依据，同时约束所有参与者。MoE 四个原先缺时长的工作区间均取得正的上下界。例如 rank 1 的归约，rank 2 发给 rank 0、rank 0 再发给 rank 1 的通知均已记录，计算范围由 −25.73～58.10 微秒收紧为 15.29～21.17 微秒。对 MoE TP4、Qwen8 TP2 和 TP8、Mistral PP3 已有训练共 5,364 个端点检查，原有 4,210 个有效时长的范围均保持或收紧，新增 1,154 个可定界端点。TP8 贡献其中 1,148 个。这是离线方法检查，正式资产继续使用原算法。[四种拓扑的原始区间和通知](../../../data/architecture-acquisition-performance/v/diagnosis/development-joint-notify-bounds.json)
+
+**结论与限制**　通信流规则可从固定后端推导，物理链路服务时间仍需相应标定。MoE 的原生观测保留了行数和路由，问题分别发生在发布判定与向核心交接的两个位置。正式修复及跨配置回归在原独立批次收齐后进行。
+
+## 2026-11-22 — V.1 核对 PD 角色、用卡与批次准备
+
+**范围**　Qwen3-8B 的 Prefill TP1、Decode TP2 训练。完整部署和单卡各做两次模板采集，分别计费 295.0 秒和 335.8 秒。到第七种配置累计 24 次模板采集、4,445.8 秒。
+
+**改动**　冻结清单按原生作业实际需要的 worker 数核对可见设备。完整 PD 作业使用卡 4、5、6，同一部署内的局部探针只使用卡 4。孤立的拷贝采样也核对其原始 rank 分配到的物理卡。最终报告按模型、配置和实际角色保留首个差异，TTFT、TPOT 各按请求计算一次。
+
+**验证**　核对 74 次当时已结束的模板和成本采集，将三种正确设备列表分别替换为错误列表，三种均被拒绝。完整 PD 的两份库和单卡的局部库通过正式来源核对。单卡主库在 Decode 准备批次时遇到两份同时适用于单请求的模板。原生代码每个请求拷贝一段缓存索引，SDK 记录和模板都保留了这些工作。单请求有 1 次设备拷贝、37 段总工作，三请求有 3 次设备拷贝、45 段总工作。编译器将两份模板的条件都写成请求数和 token 数大于零。[原生循环](../../../third_party/sglang/python/sglang/srt/disaggregation/decode_schedule_batch_mixin.py#L45) · [两份候选及逐次设备操作](../../../data/architecture-acquisition-performance/v/diagnosis/training-pd-preparation-cardinality.json)
+
+成本采集在完整部署启动 7 次、计费 505.3 秒，单卡启动 2 次、计费 130.1 秒。完整部署仍缺 456 个特征点，涉及 8,022 段主机工作。对其中 5,256 段归约，原配对因外层请求情况变化失效。按真实调用位置和相同的张量形状匹配，逐段用原队列、运行时切点和 CPU 活跃区间核对，每段都有两个合格的轻量计时样本。另有 2,160 段 attention 的目标上下文长度组合在轻量采集中确实没有出现。单卡的已发布局部库覆盖 10,800 段工作。[原归约切点与 attention 上下文](../../../data/architecture-acquisition-performance/v/diagnosis/training-pd-host-operands.json)
+
+**结论与限制**　完整来源可供两个登记目标选择。用正式局部展开入口和已发布的完整库，向其交付训练记录里的批次参数。其两个 Decode rank 共 14 个单请求批次，以及单卡训练里的另外 4 个单请求批次，展开的各类工作数均与原生一致。对实际含 3 个请求的批次，三个输出张量的长度均正确，设备拷贝却只展开 1 次，控制与提交线程合计只展开 28 段工作，原生为 34 段。完整库也受同一循环边界影响。留出报告按 Decode rank 登记实际准备过的批次大小，保留这项证据的适用范围。
+
+## 2026-11-22 — V.1 核对分块、混批和前缀复用
+
+**范围**　Qwen3-8B TP1，12 个 KV 页，每页 16 个 token。完整部署和单卡分别两次原生启动，计费 291.6 秒和 298.7 秒。两种模式均发布主库和局部库。至此八种配置的模板来源均已采集，共 28 次启动、5,036.0 秒。
+
+**取证与结果**　两份主训练均有 6 个请求连续执行分块预填充、6 个混合批次、4 次实际驱逐，共回收 176 个 token，最低只剩 1 个空闲页。3 次跨请求首次命中均复用同一段 32 个 token 的前缀。按原生页释放和实际写入的后缀追踪，前后两页分别来自序号 588 和 741 的写入。在序号 3825 查到这两页之前，序号 3788 也曾插入同一前缀，但其 64 个 token 全部已存在。若按最近一次插入归属，会把两页都算错。两份局部探针各有 1 个混批，共享命中和驱逐均为零。独立目标将从各自的物理记录取证。[四份训练记录及对应原生作用域](../../../data/architecture-acquisition-performance/v/diagnosis/training-cache-behavior.json)
+
+**冻结交接**　2026-11-22 10:55 完成 V.1。两套缓存配置的成本各覆盖主库 96,688 段、局部库 13,567 段训练工作。本轮 8 种配置共有 16 套资产。模板采集按完整部署和单卡各启动 14 次，成本采集分别启动 44 次和 21 次，共计费 4,671.1 秒成本采样。25 个已发布作业全部通过来源对应检查，26/32 个目标与来源组合能选到所需模板。登记 765 个冻结文件及摘要后，V.2 开始第一个详细物理参考。详细参考按 SDK 记录核对各 worker 用卡，轻量计时核对原生启动的可见卡。旧开发记录的 TP2、PP3 和 PD 两类采集均已核对这项交接。[冻结资产与逐项分母](../../../data/architecture-acquisition-performance/v/freeze.json)
+
+## 2026-11-22 — V.2 物理参考与稳态资格
+
+**范围**　8 种配置各有两个留出负载，共 59 个请求、204 个输出 token，49 个请求可计算 TPOT。每个负载分别取得详细结构和轻量计时，两种模板来源共用这对参考。
+
+**改动**　逐角色核对原生部署、行为、服务计时和 token 发布位置。三条路径继续使用冻结的产品、来源与评分器。下列额外分析只读取已有记录。
+
+**验证**　32 次原生启动均成功，计费 4,475.56 秒，与 93 个训练采集身份无交集。16 个真实图的联合结构均可用，共 56 个 worker 实例、33,030 个动作。1,901,002 段服务中有 1,900,624 段通过现有逐段计时检查。尚有 282 段 PD 主机集合通信及 96 段专家通信未计入。[逐目标参考](../../../data/architecture-acquisition-performance/v/physical)
+
+- **预热**　16 组目标均先运行相同的四请求预热。详细和轻量两种传感器都只在 Mistral TP2 × PP3 短请求与 Qwen8 PD 短请求上确认窗口内没有内核特化首次加载。TP1 的 27-token 请求首次加载了长度上取到 32 的 KV 分配特化，包含它的 CPU 区间为 2.682 秒，回调只能定位加载发生的时刻。另检查按本次 workload 和分组预热的 28 次主机采样及 6 次开发参考，33 次窗口内无加载，一次 PD 的实际组批仍触发新特化。[逐参考加载](../../../data/architecture-acquisition-performance/v/results/native-warmup-evidence.json) · [同负载预热对照](../../../data/architecture-acquisition-performance/v/diagnosis/development-workload-warmup.json)
+- **实测图回放**　TP1、TP2 的四个真实图填回 165,181 段实测服务后，冻结版 C++ 回放的 251,961 个端点均落在实测范围，14 个请求的 TTFT 和适用 TPOT 均复现。错峰请求在 7.1、14.0 毫秒提交，忙于上一批的调度器在 4.189 秒的一次非阻塞读取中取到两条消息。此前何时可读仍只有范围。另在 TP8 短请求中，Linux 记录能定位到 rank 3、7 的第 10 层 CPU 工作分别唤醒 rank 0、3 的提交线程。[实测回放](../../../data/architecture-acquisition-performance/v/diagnosis/heldout-measured-reference-replay.json) · [忙碌读取](../../../data/architecture-acquisition-performance/v/diagnosis/heldout-busy-receive-boundary.json) · [跨 worker 唤醒](../../../data/architecture-acquisition-performance/v/diagnosis/heldout-cross-worker-wakes.json)
+- **专家路由**　短请求的 288 次逐层调用接收量均衡。错峰负载的 336 次均发生偏斜，首层四卡分别接收 148、36、36、36 行。96 段缺测均在 rank 3 的 combine。逐条原始记录显示该 rank 发送 0 行、接收 8 行，并有实际设备任务和通知。当前读取器只发布标量计数为正的 HCCL 记录。另在短请求的四个设备等待入口，同卡前序命令早于首个校时点，能证明它在驱动提交前至少 2.68 秒已完成。[路由与服务数](../../../data/architecture-acquisition-performance/v/physical/qwen30-tp4-ep4-staggered/scope.json) · [96 次零发送的实测载荷](../../../data/architecture-acquisition-performance/v/diagnosis/heldout-expert-zero-count.json) · [等待入口](../../../data/architecture-acquisition-performance/v/diagnosis/heldout-expert-entry-waits.json)
+- **PD**　两个 Decode rank 在错峰负载中各准备两个单请求批次和一个四请求批次。详细计时读取器在角色入口报告限制，单独核对原始记录后，留出负载的 24 个 token 发布均对应到 Decode rank 1 的 CPU 返回端口，起点为 Prefill 提交。开发记录的 3 个 token 也按同一规则对应。两种传感器分别保留本次运行的时延。[原生批次](../../../data/architecture-acquisition-performance/v/physical/qwen8-pd-tp1-tp2-staggered/scope.json) · [24 个发布端口](../../../data/architecture-acquisition-performance/v/diagnosis/heldout-pd-publication-ports.json) · [开发对照](../../../data/architecture-acquisition-performance/v/diagnosis/development-role-publications.json)
+- **缓存与混批**　错峰负载实际出现 7 个分块请求、12 个混合批次和 6 次驱逐，共驱逐 256 个 token，12 页中最少剩 1 页。首次查询完整命中所声明前缀的请求为 0。沿写入、查询、页释放和首个模型批次核对，req-0002 首次查询为空，后续查询继承了 32 个 token，33-token 的请求实际只计算 1 个。req-0006 从另一请求继承 16 个 token 后开始计算。[调度与容量](../../../data/architecture-acquisition-performance/v/physical/qwen8-tp1-cache-chunk-mixed-staggered/scope.json) · [写入者与首次实际 Prefill](../../../data/architecture-acquisition-performance/v/diagnosis/heldout-cache-prefix-reuse.json)
+
+**结论与限制**　V.2 完成。原生图、原生稳态时延和改变成本后仍可重算的因果条件分别取得资格。原评分器只在 TP1、TP2 和启用缓存的 TP1 的短请求上同时核齐逐段时长及固定图外部条件，这三个窗口均出现了首次特化加载。完整的结构比较、固定图成本评价及自主闭环结果由各自的独立检查给出。
+
+## 2026-11-22 — V.3、V.5 模板组合与自主评分
+
+**范围**　检查完整来源下 Qwen3-8B TP1、TP2 短请求的首个模板缺口，核对冻结自主闭环的 32 项结果。
+
+**改动**　静态追到子图候选索引。单请求和多请求的调度父图均已使用同一紧凑布局模型子图；训练中只有多请求父图调用过跨页布局。两种布局的子调用接口和实参映射相同，当前索引仍按父图定义编号限制候选。
+
+**验证**　分别在训练库的临时副本中保留单请求父图及其端口，只替换模型调用为已有的跨页布局。TP2 还保留了接收方自己的所有下级调用。两例均用冻结二进制展开，本次调用的工作内容和内部依赖都通过了独立的真实图对照。原自主闭环的 32 项中，23 项因轻量参考出现首次特化加载而在预测前结束，6 项缺合格来源，3 项进入预测后遇到成本缺口。[TP1 局部对照](../../../data/architecture-acquisition-performance/v/diagnosis/heldout-dense-child-composition.json) · [TP2 局部对照](../../../data/architecture-acquisition-performance/v/diagnosis/heldout-dense-child-local-body.json) · [自主闭环原始结果](../../../data/architecture-acquisition-performance/v/results/frozen/autonomous.json)
+
+错峰 TP1 另有两次 Decode 申请新页，分别含 1 和 3 个请求。对照同人数且沿用旧页的训练片段，分配器进入到调用驱逐之间的子图内容逐项一致，各有 10 段主机及 3 段设备工作。驱逐返回后的片段实际增加 23 段主机和 9 段设备工作。分支条件提前挡住了共享片段，下游也确实缺新页分配的训练观测。[目标图的 510、513、1105、1108 号片段](../../../data/architecture-acquisition-performance/v/targets/frozen/graphs/353d8f9f8b76a2f40699f05386d1573def71f572650dd058b65313baf8876624/work/0-graph.json) · [对应的训练图](../../../data/architecture-acquisition-performance/v/training/qwen8-tp1/full/collection/assets/0/work/0-graph.json)
+
+**结论与限制**　两例首个模型动作的实现已在训练中采到。局部对照每例留有 254 条需要整图核验的跨调用流依赖，原模板选择失败照实保留。冻结自主闭环中可计算误差的请求数为零。
+
+## 2026-11-22 — V.3、V.6 请求转发与新留出范围
+
+**范围**　用现有 Mistral PP3、TP2 × PP3 的四份详细观测核对 CPU 请求转发，同时登记修复后独立复验的取值范围。
+
+**改动**　按实际提交分组调用 SGLang 原生请求构造和序列化方法。一次调度器读取可以取出两条已分别序列化的消息。新留出范围登记了八种配置、两种请求模式、两种来源和三条路径，实际 workload 在修复版本和训练资产冻结后一次抽取。
+
+**验证**　按调度器读取和真实发送位置配对，六次重建的消息字节数均与原生发送相等。两种拓扑都出现过一次读取四个请求，其中各有两条双请求消息。核对本地已有的 33 种请求序列，已登记的新取值均与其区分。此次没有新增原生采集。[逐次消息成员及尺寸](../../../data/architecture-acquisition-performance/v/diagnosis/heldout-pp-forwarded-envelopes.json) · [新留出范围](../../../data/architecture-acquisition-performance/v-revalidation/inputs/specification.json)
+
+在组合并行的两个单卡来源案例中，局部比较器报告首个被拒绝的 launch 改变了动作入参。用原生完成信号还原 PP 微批次位置后，所有入参与预测一致。重新比较两份原始图，各有 21 个子作用域的工作差异。实测 TP 归约在独立通信流上提交，单卡图把它放在模型前向流，主机提交工作也不同；各有 75 个跨调用流关系仍须整图检查。[原生信号定位、内容和依赖](../../../data/architecture-acquisition-performance/v/diagnosis/heldout-pp-launch-placement.json)
+
+**结论与限制**　这四例说明按原生提交边界可以重建转发载荷。组合并行的两例还区分出了比较器遗漏的位置和子图自身的提交差异。控制器、来源适配和正式比较器仍待接入，原独立矩阵按冻结实现继续评分。
+
+## 2026-11-22 — V.3 首轮结构对照收齐
+
+**范围**　核对冻结清单的 32 个目标与来源组合。26 项实际走到结构对照，6 项在来源资格检查处停止。
+
+**改动**　沿每份报告追到第一个被拒绝的模板或布局。18 项模板缺口收敛到两处，11 项为申请新 KV 页前的共享分配片段，7 项为模型子图的跨页布局选择。6 项实际布局差异均来自单卡来源的多卡目标，位置分别是 TP 模型前向、PP 发送和组合并行的模型启动。
+
+**验证**　缓存调度配置的 TP1 短请求在完整部署和单卡来源下均匹配 148 个动作、10,834 段工作和 15,954 个计时端点，全部给定时间条件均已消费。两项共用同一份物理参考。[32 项结果与首个差异](../../../data/architecture-acquisition-performance/v/results/frozen/comparisons.json)
+
+**结论与限制**　V.3 完成了首轮证据交付。完整匹配覆盖一个短负载；其余场景保留第一处分歧和已匹配范围。修复后将单独报告新留出结果。
+
+## 2026-11-22 — V.4 至 V.6 首轮封存与验证职责修正
+
+**范围**　原矩阵 96 项均已终止，32 次物理参考启动均有完整记录，合计计费 4,475.56 秒。首轮结构完整匹配 2/32，固定图和自主闭环可计独立误差的请求均为零。[冻结报告](../../../data/architecture-acquisition-performance/v/results/independent-assessment.json)
+
+**改动**　采集端按本次 workload 和提交分组预热，取消独立的重复预热采样配方。请求提交的身份和时钟归一处读取。固定图按已执行的定义查询每段工作，先重算实测基线，再判可否替换成本。自主预测独立出结果，评分器另判轻量参考。整次结构对照沿用已由原生信号核对的 PP 位置，局部比较继续检查工作和依赖。
+
+**验证**　统一构建 C++、采集和控制镜像。已知 Qwen3-8B 缓存短请求额外做 1 次轻量物理开发采集，计费 105.28 秒。首次加载由 2 次降为 0 次，复用同一份 4-token 预测，首 token 和后续 token 时延的绝对百分比误差为 9.12% 和 6.74%。TP1 错峰案例的 42,295 个实测端点和 TP2 原开发案例的 40,630 个端点均重现，TP2 原误差复核一致。[预热与评分](../../../data/architecture-acquisition-performance/v-repair/representative-warmup/result.json) · [固定图与自主回归](../../../data/architecture-acquisition-performance/v-repair/reference-paths/results.json)
+
+MoE 和 PD 两份先前在成本查询时触发模板歧义的真实图，对两种成本来源均成功逐段查询，每份分别含 100,733 和 20,353 段工作，尚缺的成本保留具体位置。PD 两种请求的详细与轻量计时各核对 7 个请求、24 个输出 token。已有 PP 预测的首个被拒绝动作能检查到 21 处子图工作差异；同一比较器也重现了原 TP1 的完整匹配。[真实工作成本查询](../../../data/architecture-acquisition-performance/v-repair/observed-work/results.json) · [PD 发布边界](../../../data/architecture-acquisition-performance/v-repair/pd-publications.json) · [结构对照](../../../data/architecture-acquisition-performance/v-repair/structural-comparison/results.json)
+
+**结论与限制**　这是使用已公开案例的开发回归。错峰请求实际提交到读取之间的就绪时刻仍缺精确证据，改变成本后的时延尚待限定。来源模板、通信提交和服务成本缺口仍须修复，新留出尚未启动。
+
+## 2026-11-22 — V.6 子图选择与分页来源开发回归
+
+**范围**　使用首轮已公开的密集模型案例和独立于这些目标的原训练输入，检查局部模板能否跨父调用复用、分页条件归属以及补齐批次的来源资格。
+
+**改动**　核心从共同的已观测子实现和相同边界合同确定可复用的子调用，只替换局部定义及其条件。框架适配器将分配器返回信息交给当时的片段。来源规划在原请求和路由可覆盖的范围内补一个跨页请求，并在发布时核对实际分支。调度批次按逻辑请求数验收，模型模板保留实际补齐维度。
+
+**验证**　C++、采集镜像和控制镜像统一构建。Qwen3-8B TP1 与 TP2 短请求各自原先失败的 rank 0 模型调用均从原训练库唯一选出，实际工作和子图内部依赖均匹配。移除必需输入后两次选择均被拒绝。另一个具有两种实际工作定义的专家子图仍报告歧义。[两次局部对照](../../../data/architecture-acquisition-performance/v-repair/template-choice/results.json) · [歧义对照](../../../data/architecture-acquisition-performance/v-repair/template-choice/ambiguity.json)
+
+TP1 在物理卡 0 用原训练输入新增 1 次原生启动，计费 139.87 秒，发布 45 个动作候选、54 个共享定义。10 次 Decode 的驱逐前片段共享同一实现，驱逐后的实际分配包括 9 次沿用原页和 1 次申请新页。原 MoE 完整训练的四个 rank 均记录到一个逻辑请求对应四行模型输入。去掉逻辑单请求观测后，发布检查再次识别出覆盖缺口。[捕获与建库](../../../data/architecture-acquisition-performance/v-repair/allocation-source/results.json) · [八种配置的规划和 MoE 资格核对](../../../data/architecture-acquisition-performance/v-repair/qualification/results.json)
+
+**结论与限制**　局部模型对照各有 254 条跨调用执行流关系统一留给整图核对。跨页实机取证覆盖 TP1，其他配置仅检查了规划。首轮独立结论保留，新留出尚未启动。
+
+## 2026-11-22 — 将后续验证拆为递进的机制对照
+
+**范围**　调整架构与功能交付后的验证安排。原冻结实验及其已揭盲案例作为历史证据，单批复验原先登记的 16 组取值范围保留。
+
+**改动**　将参考与性能接口、模型与 TP、多角色交接、调度与流量分成四个里程碑。第 01–17 轮各自做开发回归、局部独立验证和返修，第 18 轮在一个版本上跨轮验收。增加模型与配置的成对对照，以及持续流量和长序列的取证安排。
+
+**验证**　静态核对轮次与覆盖表，并复核原登记及实物记录。首轮的 16 个物理目标共 59 个请求、204 个输出 token，得到 32 份原生参考和 96 项评价。两条性能路径可独立评分的请求数均为零。此次只核对文档与现有证据。[历史冻结结果](../../../data/architecture-acquisition-performance/v/results/independent-assessment.json)
+
+**结论与限制**　已有开发修复可用于各轮起步。新结论需各轮独立输入支持。第二个 MoE 与共用 EP 配置的原生资格、长负载的取证开销留待对应开发轮实测。goal 保持暂停。
+
+## 2026-11-22 — 第 01 轮独立验证交付
+
+**范围**　Qwen3-8B TP1 单请求与错峰六请求。核心问题是固定原生执行图并给回实测服务时长后，能否重现原生服务边界、首末 token 和请求时延。
+
+**改动**　固定图从声明的 token 发布端口读取结果，逐请求、逐 token 对照独立读取的原生发送标记，区分主机实测、校准后的设备时间和由依赖推出的汇合。首次校时前已完成的设备任务仅使用实测上界。示例矩阵可在同一物理目标上分别取得详细与轻量记录，供两种来源复用。开发对照重现 27 次发布。把一个发布端口移到入口，验证器检出了 212.02 微秒的提前；去掉端口也能定位缺失的 token。[开发正反对照](../../../data/architecture-acquisition-performance/rounds/01/development)
+
+**验证**　封存实现、评价器、镜像与原训练资产后抽取两组新请求。共 4 次原生启动，计费 472.59 秒，两组的预热与观测使用相同到达分组，排空并成功重置逻辑 KV，四个窗口均观察到零次首次加载。单请求重现 12,731 个端点和 3 次发布，错峰重现 38,922 个端点和 19 次发布。合计 36,862 个主机端点、14,304 个设备端点、487 个汇合，各设备时钟校准区间最宽分别为 21.563 和 17.462 微秒。每个请求的 TTFT、末 token 时刻和适用的 TPOT 与同次详细参考一致。[留出与额度](../../../data/architecture-acquisition-performance/rounds/01/independent/freeze.json) · [两种原生传感器](../../../data/architecture-acquisition-performance/rounds/01/independent/results/round-01/reference-latency.json)
+
+**结论与限制**　第 01 轮主判据通过。详细记录测量发送区间末端，轻量记录测量发送返回。单请求的详细/轻量 TTFT 分别为 1,395.7/711.8 毫秒，错峰各请求相差 671.4–2,464.2 毫秒。详细记录可单列的探针 CPU 活动合计分别为 412.0 和 1,211.0 毫秒，线程有重叠，每个传感器只运行一次，无法从这两个数分离全部运行波动。12 项评价中，结构与自主两路各 4 项遇到模板缺口，固定图换入成本时 2 项缺成本，2 项涉及四个忙碌请求在提交与读取之间的精确就绪时刻。完整模板展开、成本覆盖和忙碌输入分别在第 02–04 轮处理。原训练使用较早的观测镜像，两套来源均与独立目标隔离。[本轮汇总与限制](../../../data/architecture-acquisition-performance/rounds/01/result.json)
+
+## 2026-11-22 — 第 02 轮分页与模板展开的开发回归
+
+**范围**　复用第 01 轮已经公开的两个 TP1 物理目标。按原生调用逐项展开，六请求案例的 426 个动作中有 425 个的工作和内部依赖一致。余下的一次分配发生在三个请求同批 Decode、其中一个需要新页时。原来源分别采到了多请求 Decode 和单请求申请新页。
+
+**改动**　SGLang 在同一个训练会话安排紧凑的双请求 Prefill，以及能观察到单请求、多请求跨页的 Decode。来源发布分别核对模型的实际输入布局和同一次分配的分支与成员数。用一长一短两个 prompt 完全取代原短请求对时，实际丢失了一种 Prefill 页表布局。两种观察各自有实际消费者，能由同一组请求覆盖时共用。[来源规划与缺项对照](../../../data/architecture-acquisition-performance/rounds/02/development/combined-probes/scope.json)
+
+**验证**　开发中完整与单卡来源累计新增 7 次训练启动，计费 976.84 秒，两个目标始终复用原记录。最终两套来源对单请求均匹配 107/107 个动作，对错峰六请求均匹配 426/426 个动作，原生与展开图分别对齐 2,479 和 7,760 项动作顺序关系。[完整部署](../../../data/architecture-acquisition-performance/rounds/02/development/combined-probes/full/cases) · [单卡](../../../data/architecture-acquisition-performance/rounds/02/development/combined-probes/single_device/cases)
+
+**结论与限制**　两种来源均能从双请求训练实例展开开发目标的三请求跨页分配。新留出每组四请求，成对长度为 79 与 80。独立流程首次准备时缺少模型挂载和源图取证文件，原生目标启动数为零。修正编排后沿用同一抽样，并从原训练记录离线恢复取证文件。独立结果按原登记的四份物理参考、十二项评价另报。[准备记录](../../../data/architecture-acquisition-performance/rounds/02/independent/setup/outcome.json) · [独立验证范围](../../../data/architecture-acquisition-performance/rounds/02/independent/preregistration.json)
+
+## 2026-11-22 — 第 02 轮首次独立对照与空闲等待回归
+
+**范围**　Qwen3-8B TP1，页边界两侧各有三个同时到达的请求及八秒后到达的一个请求。四次物理启动共 532.49 秒，十二项评价全部取得终态。原生确认了 79 个 token 的目标沿用原页、80 个 token 的目标申请新页，两种情况都在三请求批和单请求批中发生。[首次独立结果](../../../data/architecture-acquisition-performance/rounds/02/independent/assessment.json)
+
+**改动**　原生调度器等待请求时会定时醒来。模拟器原先直接推进到下一次到达，错过了空读及随后实际执行的调度工作。现在由 SGLang 提供轮询期限，核心推进到请求、外部就绪或到期的时刻；给定实测输入时仍按本次读取的实测边界返回。原生采集在同组请求错峰到达时增加一次准备运行，再按相同到达流程预热。各次运行分别排空并清空逻辑 KV，复用同一个 Engine。
+
+**验证**　首次对照中，两套来源对两个目标都匹配了前 167/283 个动作，首次偏离发生在八秒空档里的第五次请求读取。修复后离线复用原记录，四组均匹配 283/283 个动作、动作内容及依赖，每组的 3,950 项动作顺序关系一致。此次只为预热另做两次物理开发采集，共 282.89 秒，分别在页边界的详细观测与边界以下的轻量观测中测到零次首次加载。[修复回归与原始测量位置](../../../data/architecture-acquisition-performance/rounds/02/development/idle-and-warmup/assessment.json)
+
+**结论与限制**　已公开两组请求现在可完整展开。首次独立物理窗口均有两项内核特化首次加载，自主运行另缺批次准备的主机成本，这批参考未给出合格的请求预测误差。第 02 轮的主判据由重新封存后抽取的新请求确认。[新留出及分母](../../../data/architecture-acquisition-performance/rounds/02/confirmation/inputs/denominators.json)
+
+## 2026-11-22 — 第 02 轮独立确认
+
+**范围**　重新封存修复版和原训练资产，抽取页边界两侧各四个请求。两组头次和末次请求的 prompt 分别为 31、32 个 token，其余请求分别为 50、21 个 token。两组都观察到三请求与单请求 Decode，分别沿用原页和申请新页。[留出输入与分母](../../../data/architecture-acquisition-performance/rounds/02/confirmation/inputs/denominators.json)
+
+**改动**　沿用开发回归确认的空闲轮询与预热流程。两套模板仍来自原训练，保留原测量和补采记录，两个新物理目标供两种模式共用。[封存与完工校验](../../../data/architecture-acquisition-performance/rounds/02/confirmation/integrity.json)
+
+**验证**　四次物理启动计费 551.60 秒。四个目标与来源组合分别匹配 283 个动作、283 个返回值和 3,950 项动作顺序关系，两组的资源操作及 16 次 token 发布均匹配。四份原生记录均观测到零次首次加载。固定图用本次实测服务时间复现两份详细记录的 38,866 个端点。[三路逐项对照](../../../data/architecture-acquisition-performance/rounds/02/confirmation/assessment.json)
+
+**结论与限制**　第 02 轮结构主判据通过。四项固定图预测和四项自主闭环都在三请求 Prefill 的 `ScheduleBatch.prepare_for_extend` 处发现主机成本缺项，旧样本只覆盖一至两个成员，可评分请求数为零。设备时钟保留各自的校准区间。[本轮交付](../../../data/architecture-acquisition-performance/rounds/02/result.json)
+
+## 2026-11-22 — 第 03 轮模型后端和固定图替换开发回归
+
+**范围**　Qwen3-8B TP1。原模板和测量可继续使用，按 attention 设备工作和有方向的张量读回检验绑定、求值与误差传播。仅做既有原生记录的离线回归。
+
+**改动**　Python 按工作合同注册候选模型，训练比较留出同一特征坐标。C++ 由已发布的模型族选择求值后端，工作识别与适用范围查询共用原入口。固定图验证可从真实图选出工作组，逐组换入预测时长，保存工作级误差及其传播到请求的变化。
+
+**验证**　复用两种来源的测量，分别选出 7 个、6 个 attention 后端绑定。两个开发图中核对的 12 个及 38 个工作点，在需求查询与图求值中返回相同的模型、覆盖和估值。两套来源各用学习资产自主完成一个训练形状的请求，分别核对 6,406 个运行中的成本绑定。短图的固定对照完整替换 288 段 Decode attention、3 次 token 读回及 1 次 KV 释放读回。两种来源的 attention 服务相对实测分别多 0.135 和 0.223 毫秒，影响了部分设备端点。单独替换 token 读回使首次发布提前约 44 和 46 微秒。[开发报告](../../../data/architecture-acquisition-performance/rounds/03/development/assessment.json)
+
+**结论与限制**　开发数据已证明两类模型可沿统一入口求值。以上服务与端点差异只描述已公开的短图，自主案例只证明绑定消费及闭环行为。独立目标用新的上下文长度和实际读回容量核对训练范围内外的行为。[独立登记](../../../data/architecture-acquisition-performance/rounds/03/independent/preregistration.json)
+
+## 2026-11-22 — 第 03 轮独立对照
+
+**范围**　同一 Qwen3-8B TP1 配置下，44 和 100 个 token 的新单请求均输出三个 token。原生详细与轻量参考共启动四次，计费 441.68 秒。四份记录均观测到零次首次加载。[留出输入](../../../data/architecture-acquisition-performance/rounds/03/independent/inputs/denominators.json)
+
+**改动**　使用封存的训练样本、模型后端和原模板。真实图完成后，以声明的工作组核对模型求值和端点传播。原生目标只用于独立评价。[封存校验](../../../data/architecture-acquisition-performance/rounds/03/independent/integrity.json)
+
+**验证**　训练范围内的目标中，两套资产均可估计 288 段新特征的 Decode attention，其中各有 216 段使用新后端。184 字节的 KV 释放读回也处于训练范围。100 个 token 的目标如预期超出 attention 和释放读回的实测范围。两类工作仍进入评价分母，求值器分别标记 288 段和 1 段超范围。两套来源在相同真实图上取得一致的覆盖判断，所有图上查询与批量成本查询都给出相同绑定和结果。四组结构对照各匹配 107 个动作。[本轮逐项结果](../../../data/architecture-acquisition-performance/rounds/03/independent/assessment.json)
+
+**结论与限制**　本轮模型替换和域内外判断通过。44 个 token 目标仅替换 attention 或释放读回时，首 token 和后续平均时延保持相同。单独替换发布 token 的读回时，两套来源的首 token 分别提前 43.26 和 44.99 微秒。两种来源各有两项整图成本及自主时延缺项，完整请求不可评分。
+
+## 2026-11-22 — 第 04 轮自主时序的开发回归
+
+**范围**　固定 TP1、模板与训练成本，以同到、错峰及忙碌期间的外部请求观察原生控制。另复用第 01 轮已公开的六请求详细参考，给两组假设耗时核对组批差异的定位。
+
+**改动**　C++ 控制器保留真正阻塞的 socket 轮询期限，资源增长唤醒对端或内部等待。仿真输出按相同合同记录用户到达、拉取见到的请求和轮询截止。独立比较按各 rank 的批次工作核对阶段、成员和 token 范围，在首处差异列出前一个共同批次、实际读入、释放和可读时间范围。
+
+**验证**　耗时较慢的开发运行匹配九个原生批次，缩短耗时的运行在第二批转为单请求 Decode，而原生接着做另一个 Prefill。学习资产下，三个错峰请求触发三次到期空读和两次由到达提前结束的等待。两请求在忙碌读入时合用一次 Decode，空闲后读入时分别 Decode。两套来源对后者均完成所有 token。[开发证据](../../../data/architecture-acquisition-performance/rounds/04/development/assessment.json)
+
+**结论与限制**　开发回归没有使用新物理参考。原生提交至拉取的区间保留为范围，详细采集的调度差异按实际运行解释。独立确认的两组新间隔分别为 930 和 2,750 毫秒，轻量参照各自评分。[留出及分母](../../../data/architecture-acquisition-performance/rounds/04/independent/inputs/denominators.json)
+
+## 2026-11-22 — 第 04 轮独立对照与第一个里程碑交付
+
+**范围**　同一 Qwen3-8B TP1 上固定两套模板和成本，各组两个 8-token 请求，各生成两个 token。第二个请求分别在 930、2,750 毫秒到达。四份详细和轻量记录共计费 500.81 秒。[留出输入](../../../data/architecture-acquisition-performance/rounds/04/independent/inputs/denominators.json)
+
+**改动**　随第一里程碑审查观测、模板、控制、成本和三路评价的交接。去除固定图对模板选择的依赖，多个评价器共用原生请求与发布记录，成本后端统一经 C++ 查询。代码相对前一交付提交，`src` 从 41,166 增到 41,806 行，示例从 676 增到 708 行。新增代码用于可切换的求值和取证，原有成本分派及重复入口读取已删除。C++23 构建、Python 静态检查和官方 SGLang 工作树已核对。
+
+**验证**　两套来源注入真实时间后分别匹配 148 和 177 个动作。930 毫秒案例的第二个请求在原生侧的可读时刻落在 930.841–1,436.684 毫秒内。自主预测先执行第一个请求的 Decode，详细原生先执行第二个请求的 Prefill，随后合批 Decode。2,750 毫秒案例在两种来源下的四个批次均匹配，自主空读在期限到达后返回。两组共 12 项评价收齐。[实测和预测决策](../../../data/architecture-acquisition-performance/rounds/04/independent/assessment.json)
+
+**结论与限制**　第 04 轮主判据通过。930 毫秒案例的两项固定图评分受忙碌读入的精确可用时刻缺失而暂缺，详细运行的探针开销也计入该次调度时序。自主评分使用独立轻量参考，四组两请求的 TTFT MAPE 为 0.52%–5.50%，TPOT MAPE 为 3.85%–6.57%。本里程碑交付 TP1 的验证路径，第 05 轮扩到三个模型在同一配置下的原生对照。

@@ -155,13 +155,13 @@ PYTHONPATH=src python3 -m prologue.app capture \
   --output <采集任务目录> --timeout 900 --budget-seconds 1800 --attempt-limit 2
 ```
 
-采集任务可包含 `submission_groups`：非空请求 ID 数组的数组，必须恰好覆盖所有请求一次；未提供时整个 workload 是一组。规划器自动生成此采集选项，探索输入和目标 workload 不增加字段。每组内部按 arrival_ns 调度；本组所有请求完成返回、所有worker到达原生空闲且所有实例到达屏障后，使用新的共同 RAW 起点提交下一组。只有一个 Engine、预热和 profiler 窗口，原生继续维护批次与资源，组间不 flush/reset。`request-delivery.json` 保留整个观察的 origin_ns，并为每次提交记录 group、组内 arrival_ns、相对全局原点的 scheduled_ns 和实际 submitted_ns；不能把串行探针误读为原来的并发 workload。
+采集任务的 `submission_groups` 包含一组或多组请求 ID，每个请求恰好出现一次。省略时整个 workload 共用一组。规划器生成分组，各组内按 arrival_ns 提交。上一组请求全部返回、worker 空闲且各实例到达屏障后，下一组取得共同的 RAW 起点。组间沿用同一 Engine 的批次与资源状态。`request-delivery.json` 按运行阶段记录起点、所属组、组内 arrival_ns、相对全局起点的 scheduled_ns 和实际 submitted_ns，可区分串行探针与目标并发请求。
 
 完整模式按各实例 TP×PP 之和确定物理卡数，从升序声明的 `physical_devices` 中依次取卡。原生逻辑设备 0、1……依次对应这些卡。代表 worker 复用可以减少观测和导出，原生并行组仍在实际设备上运行。[Ascend 可见设备顺序](https://www.hiascend.com/doc_center/source/zh/canncommercial/850/maintenref/envvar/envref_07_0028.html)
 
 单卡部署示例为 `{"acquisition_mode": "single_device", "physical_devices": [4]}`。Ascend runtime 将选定物理卡挂入非特权容器，原生 worker 使用容器内的设备 0。公开的 `capture` 和 `produce` 已在 TP1、TP2、TP8、PP3、TP2 × PP3、TP4 × EP4 和 Prefill TP1 / Decode TP2 上生成角色模板。各分片实际执行原生计算并交换张量。单卡单实例的本地进程组使用容器独立网络，PD 使用主机网络连接外部存储。单卡 `explore` 按原生模块布局和职责选择详细采集的代表，完整模式可同时观察参与通信的物理卡。
 
-单卡模式下，每个 Engine 只启动并预热一次。所有实例共同按代表角色的顺序重放请求，每个窗口由一个角色使用设备 profiler。`capture.json` 的 `profile_windows` 列出各实例负责的窗口，`protocol/worker-<rank>/` 保留该次执行中各参与者的协议记录。所有实例等本轮 profiler 关闭、各角色发布协议记录后才开始下一轮。不同窗口的时间分别用于本地服务采样，跨角色通信及 PD 通知的时延需要同一次物理执行的观测。
+单卡模式下，每个 Engine 启动一次，所有代表角色共用观测前的准备与预热。任一组含错峰到达时，先按实际分组做一次准备运行，再预热。两次分别排空并重置逻辑 KV。所有实例随后按代表角色顺序重放请求，每个窗口由一个角色使用设备 profiler。`capture.json` 的 `profile_windows` 列出各实例负责的窗口，`protocol/worker-<rank>/` 保留该次执行中各参与者的协议记录。所有实例等本轮 profiler 关闭、各角色发布协议记录后才开始下一轮。不同窗口的时间分别用于本地服务采样，跨角色通信及 PD 通知的时延需要同一次物理执行的观测。
 
 PP 点对点传输保持原生异步句柄的生命周期。发送时暂存实际张量，接收方的原生等待完成时将结果写回设备。采集器把暂存和恢复耗时计入采集开销。目标图用发送、接收双方就绪和完成端口连接独立传输服务，张量所有权保留到通信完成。单卡来源可验证本地工作和传输端口，跨卡传输时间另行取证。
 
@@ -185,7 +185,9 @@ PD 还需声明可达的 `store_url`，可选 `transfer_protocol` 接受 `sdma` 
 
 CPU P2P 的 source/protocol/rank-<rank>.json 是连接参与者所需的正式事实，不受该明细开关控制。NativeProfiles 统一创建/注册观察器、在profiler成功开始后记录并在停止成功后发布；所有原生参与者发布，任务等待全部协议文件，设备代表筛选不缩减该清单。没有消息的worker也发布空记录，不能以缺文件推断没有通信。
 
-该开关同时在原始 rank 文档记录 `request_input_attempts`：外部入口拉取的 RAW 起止时间、进入时的原生队列快照、消息数及 workload 请求成员，包含有效观察期间的空接收。TP 广播和 PP 转发不属于这段区间；首批拉取发生在请求激活前，非预热状态下仍记录实际进入上下文，未观测的上下文明示为未知。预热和窗口外空接收不记录。独立检查核对区间顺序及非空结果与入口记录的一致性；未启用或旧来源没有记录时明确报告未观察。这些区间既不是请求进入 socket 的时刻，也不是 CPU 成本或可直接回放的调度指令。
+该开关同时在原始 rank 文档记录 `request_input_attempts`。每次外部入口拉取保留 RAW 起止时间、进入时的队列快照、消息数及请求成员，有效窗口内的空读一并保留。TP 广播、PP 转发及预热使用各自的观测边界。独立检查核对拉取区间顺序及返回的请求。请求可用时刻只受实测提交和首次成功拉取两侧约束。范围内的精确可读时刻需要额外证据。
+
+自主控制保留原生 socket 轮询的期限，虚拟时钟按请求到达或轮询到期推进。资源释放及对端消息唤醒相应的内部等待。启用执行明细时，控制 trace 记录用户声明的请求到达、实际虚拟拉取及已生效的轮询期限。`prologue.verification.schedule` 用详细原生参考对照请求阶段、批次成员和 token 范围，报告第一处不同选择及其读入、释放和前次共同批次的时序依据。轻量参考单独用于请求时延评分。
 
 设备索引在 prologue.observer 范围内异步复制，窗口排空后才转换为 JSON；这些复制不属于业务子图，也不能把记录的调用墙钟当作校准后的成本。该材料观察原生对象，不运行核心分配算法；与预测的 resource 记录比较时，需要按请求、作用域与资源生命周期解释接口差异，不能逐行或按节点号硬配。开关属于采集执行选项，参与恢复输入核对，不修改 workload。
 
@@ -470,7 +472,7 @@ Event 返回 true 只说明完成不晚于查询返回，false 只说明完成�
 
 独立动作比较在CPU control容器内使用 `PYTHONPATH=src python3 -m prologue.verification.compare_actions --capture <closed-native-case> --graphs <projected-graphs> --execution <prediction.jsonl> --output <new-directory>`。它先调用与来源检查共用的原生阶段，再消费预测明细进行配对；原生图不依赖预测是否成功。它与时间提取共用逻辑工作身份，读取实际粗图及预测明细，不调用模板选择或实例化。实际完成时间通过已核对的具名端口对应原始测量；独立核对CPU边界及全部已消费设备端点是否具有一套由实际独立校准快照限定的共同分段仿射解释，不读取生成条件中的时钟映射自证。向上取整的开闭区间按精确有理数约束验证，不增加经验容差。 两者按共同框架ABI解释资源调用输入，其他原始字段仍逐项核对；随后核对 worker 记录与粗图的环境、scope 身份、绑定声明及查询归属，并逐个核对原始张量端口的 dtype、shape、value/storage 身份、版本和 buffer。原始记录必须具有统一状态查询数组，缺少记录不等于没有查询；作用或输出声明不能在图转换中丢失。每个动作按父子调用位置核对层次、参数、端口、数据张量的形状/别名/相对版本/生产者、工作种类及数量、逻辑 KV/槽位访问和通信参与者。运行地址和图事件编号不跨案例配对；元数据端口只比较布局，不把它声明成数据存储所有权。
 
-矩阵可按 `sources`、`targets`、`compare`、`fixed`、`autonomous` 分步运行。前两步核对训练来源和物理目标，后三步分别做实测时间下的结构比较、固定真实图的成本比较和自主预测评分。同一冻结矩阵内，两种来源使用同一份物理目标时，只投影一份粗图。每个比较结果保留自己的来源和计分范围。
+同一冻结矩阵内，两种来源可以共用物理目标的详细图和轻量计时。每个物理目标只投影一次粗图，各种来源各自报告结构、固定图和自主预测的结果及计分范围。
 
 域可声明 `exploration` 以规划训练，也可直接指定已发布的 `source.collection`。域的 `deployment` 描述原生目标部署，固定图和自主闭环读取 `costs`。每个目标给出 `capture_input` 与 `prediction_input`。结构验证从该目标重新提取所需布局。`environment.json` 固定镜像及共享预算，同目录的 `prologue` 固定程序。
 
@@ -478,11 +480,11 @@ Event 返回 true 只说明完成不晚于查询返回，false 只说明完成�
 
 代表 worker 的局部来源映射和共同校准须成立，整组原生资格单独记录。三阶段在 `results/<矩阵名>` 发布精简索引 `sources.json`、`targets.json` 和 `comparisons.json`，单案例验证输出位于 `cases/<案例名>`。有完整执行记录时检查 `execution.jsonl`，预测失败仍可用 `execution.partial.jsonl` 核对实际完成的前缀。完整结构结论由实际证据覆盖决定。
 
-调用形式为 `python3 example/coarse_graph/matrix.py --root <运行根> --matrix <固定矩阵.json> --phase sources|targets|compare|fixed|autonomous`。`targets` 采集结构对照所需的真实图，声明 `detailed_capture: service-reference` 的案例也可据此运行 `fixed`。性能阶段读取域内的 `costs`，`autonomous` 使用同一输入的独立轻量样本。已有参考可在案例的 `observation`（详细）和 `latency_observation`（轻量）给出原采集任务目录。矩阵核对完整原生输入、声明的部署、镜像及实际记录方式，相符即可在零原生额度下复用。各案例分别报告输入错误、来源资格和评价结果。新增采集共用设备锁和预算，终态步骤复用原记录。执行状态不明时保留额度及进程身份，核实后恢复。
+矩阵使用 `python3 example/coarse_graph/matrix.py --root <运行根> --matrix <固定矩阵.json> --phase <阶段>`。`sources` 准备来源，`targets` 生产目标图，`compare`、`fixed` 和 `autonomous` 执行三条对照。需要让两种来源共用物理目标时，案例在 `observation` 和 `latency_observation` 指定详细与轻量采集目录，`detailed` 和 `light` 分别生成这两份记录，后续阶段直接读取。声明 `detailed_capture: service-reference` 的详细采集可用于固定图。复用已有参考时核对完整输入、部署、镜像及记录方式。各案例分别报告输入、来源与评价情况。新增采集共用设备锁和预算，终态步骤复用原记录。执行状态不明时保留已占额度及进程身份，核实后恢复。
 
-输入准备使用 `PYTHONPATH=src python3 example/coarse_graph/prepare_matrix.py --root <运行根> --specification <覆盖声明.json> --stage <阶段> --seed <冻结交付提交> --phase sources|targets`。独立矩阵先声明配置、训练探针、留出请求的取值范围和种子。目标按种子一次抽出，整批经请求合同核对后发布，同一输入可接续。建库使用事先给出的训练 workload 或已发布的集合。缺少适用模板的目标仍可取得原生参考，结构和自主预测再按该目标实际选用的来源分别报告。EP 路由随请求通过正式合同检查。
+输入准备使用 `PYTHONPATH=src python3 example/coarse_graph/prepare_matrix.py --root <运行根> --specification <覆盖声明.json> --stage <阶段> --seed <冻结种子> --phase sources|targets`。独立矩阵先声明配置、训练探针、留出请求的取值范围和种子。在登记范围后封存实现、镜像、来源与成本，记录交付提交或冻结清单的内容摘要作为种子。目标按种子一次抽出，整批经请求合同核对后发布，同一输入可接续。建库使用事先给出的训练 workload 或已发布的集合。缺少适用模板的目标仍可取得原生参考，结构和自主预测再按该目标实际选用的来源分别报告。EP 路由随请求通过正式合同检查。
 
-请求按循环的`patterns`声明每个位置的prompt/output候选值及可选前缀；单值候选固定必要边界，多个候选在冻结后按seed选择。MoE模式还声明分层expert条件的偏移，可表达相同前缀仅在远端层路由不同；这些只是已有路由输入的构造，不是适配规则。固定库domain用`source`指定原`collection`，来源阶段只复核该集合拥有的计划、实际输入及原始事实，不规划、采集或占用物理卡；自动新来源domain仍走正式来源规划。
+请求按循环的`patterns`声明每个位置的prompt/output候选值及可选前缀；单值候选固定必要边界，多个候选在冻结后按 seed 选择。成对案例可以声明相同的 `draw_group`，按请求位置和字段从各自候选列表选取相同序号（两组列表等长时），从而只改变预先指定的因素。MoE模式还声明分层expert条件的偏移，可表达相同前缀仅在远端层路由不同；这些只是已有路由输入的构造，不是适配规则。固定库domain用`source`指定原`collection`，来源阶段只复核该集合拥有的计划、实际输入及原始事实，不规划、采集或占用物理卡；自动新来源domain仍走正式来源规划。
 
 依赖比较先核实每次运行自身的模型通信、CPU协议及PD前提，再将其全部rank图按真实端点连接。真实PD关系来自预留发送入口、实际服务返回和读取到的状态，不猜通知时刻；预测采用执行器实际输出的跨rank通信、信号和状态边。关系类别保留，CPU终止消息检查也使用同一完整图。内部具名边界可达关系、粗工作位置、跨动作顺序和重复调用位置统一使用这两份全rank图；路径可以离开动作树、经过其他rank后返回。不以孤立rank图中没有路径认定全局缺边，也不重复生成本地、仅模型通信及CPU通信多套判定。协议覆盖不足时保留内容和运行内检查，因果比较明确报告证据不足，不选择较弱图宣称对应。
 
