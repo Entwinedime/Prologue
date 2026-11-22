@@ -64,7 +64,7 @@ class EngineSubmissions:
 
     async def run(self, endpoint: Any, clock: Any, barrier: Any, directory, ranks) -> None:
         origin_ns = clock.origin.value
-        phase = "warmup" if self.prefix == "warmup" else "source"
+        phase = "source" if self.prefix == "capture" else self.prefix
 
         # A second observer replays the same declared arrivals and gets its own measured delivery times.
         groups = [[(payload, dict(record)) for payload, record in group] for group in self.submissions]
@@ -128,7 +128,7 @@ class EngineSubmissions:
             reason = metadata["finish_reason"]
             if reason is None or reason["type"] != "length" or metadata["completion_tokens"] != expected[identity]:
                 raise RuntimeError(f"native request {identity} did not finish its fixed output: {reason}")
-            if prefix != "warmup" and any(token != tokens[identity] for token in row["output_ids"]):
+            if any(token != tokens[identity] for token in row["output_ids"]):
                 raise RuntimeError(f"native request {identity} did not preserve its declared synthetic output")
             if identity in completed:
                 raise RuntimeError(f"native request completed twice: {identity}")

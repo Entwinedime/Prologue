@@ -92,6 +92,7 @@ private:
         std::optional<std::size_t> call = std::nullopt;
         nlohmann::json identity = nullptr;
         std::optional<std::int64_t> return_ns = std::nullopt;
+        std::optional<std::int64_t> poll_deadline_ns = std::nullopt;
         bool waiting = false;
         bool woken = false;
         bool in_flow = false;

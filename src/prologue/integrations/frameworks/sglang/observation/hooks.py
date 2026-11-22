@@ -183,7 +183,7 @@ class SGLangObservation:
                 and receiver.ps.pp_rank == 0 and receiver.ps.attn_tp_rank == 0 and receiver.ps.attn_cp_rank == 0):
 
             # The first source pull precedes profiler activation; warmup requests have no source identities.
-            context = self.calls.scheduler_work()["context"] if self.window.phase != "warmup" else None
+            context = self.calls.scheduler_work()["context"] if self.window.phase in (None, "source") else None
             attempt = {"context": context, "begin_raw_ns": time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)}
 
         requests = original(receiver)

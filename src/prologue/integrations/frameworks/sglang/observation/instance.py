@@ -37,23 +37,10 @@ class NativeServingInstance:
         configuration = instance.configuration
         self.configuration = configuration.values
         self.workload = source.workload
-        self.warmup = source.warmup if source.warmup is not None else self.warmup_requests(self.configuration["page_size"])
         self.submission_groups = source.submission_groups
-        self.warmup_groups = self.submission_groups if source.warmup == self.workload else None
         self.tp, self.pp, self.ep = configuration.tp, configuration.pp, configuration.ep
         self.roles = tuple(range(rank_offset, rank_offset + self.tp * self.pp))
         self.delivery = {}
-
-    @staticmethod
-    def warmup_requests(page_size: int) -> dict[str, Any]:
-        lengths = ((max(1, page_size - 1), 4), (page_size + 1, 1), (page_size // 2 + 1, 3), (1, 2))
-        return {
-            "requests": [
-                {"id": str(index), "arrival_ns": 0, "prompt_tokens": prompt, "output_tokens": output}
-                for index, (prompt, output) in enumerate(lengths)
-            ],
-            "prefixes": [],
-        }
 
     def generate(self, engine: Any, phase: str, submissions: EngineSubmissions, clock: Any, barrier: Any) -> None:
         submissions.content.check_vocabulary(engine.tokenizer_manager.model_config.vocab_size)
@@ -130,11 +117,19 @@ class NativeServingInstance:
         self.directory.mkdir()
         description = self.directory / "session.json"
         mode = self.instance.mode
-        warm = EngineSubmissions(self.warmup, mode, self.warmup_groups)
         capture = EngineSubmissions(self.workload, mode, self.submission_groups)
-        warm.prepare("warmup", bootstrap, 1)
-        warmup_count = len(self.warmup["requests"])
-        capture.prepare("capture", bootstrap, 1 + warmup_count)
+        preparation = {}
+        if any(len(arrivals) > 1 for arrivals in capture.groups):
+
+            # Cold compilation can overlap the next arrival. Replay the paced workload once warm before measuring it.
+            preparation["prime"] = EngineSubmissions(self.workload, mode, self.submission_groups)
+        preparation["warmup"] = EngineSubmissions(self.workload, mode, self.submission_groups)
+        passes = {**preparation, "source": capture}
+        count = len(self.workload["requests"])
+
+        # PD bootstrap rooms must stay distinct across the drain and logical cache reset.
+        for ordinal, (phase, submissions) in enumerate(passes.items()):
+            submissions.prepare("capture" if phase == "source" else phase, bootstrap, 1 + ordinal * count)
         session = {
             "output": str(self.output), "instance_directory": str(self.directory), "mode": mode,
             "rendezvous": {"host": rendezvous["MASTER_ADDR"], "port": int(rendezvous["MASTER_PORT"])},
@@ -146,12 +141,12 @@ class NativeServingInstance:
             "latency_only": self.latency_only,
             "host_timing": self.host_timing,
             "service_reference": self.service_reference,
-            "warmup_requests": [f"warmup/{index}" for index in range(warmup_count)],
-            "source_requests": [f"capture/{index}" for index in range(len(self.workload["requests"]))],
-            "representative_warmup": self.warmup_groups is not None,
+            **{f"{phase}_requests": [f"{submissions.prefix}/{index}" for index in range(count)]
+               for phase, submissions in passes.items()},
+            "representative_warmup": True,
             "protocol_requests": capture.protocol_requests,
             "content": self.workload,
-            "request_groups": {"warmup": warm.request_groups(), "source": capture.request_groups()},
+            "request_groups": {phase: submissions.request_groups() for phase, submissions in passes.items()},
             "serving_input": {"configuration": self.configuration, **self.workload},
         }
         if self.attention_sites:
@@ -209,9 +204,10 @@ class NativeServingInstance:
         engine = Engine(server_args=args)
         try:
             initialized_ns = time.monotonic_ns()
-            barrier.wait()
-            self.generate(engine, "warmup", warm, clock, barrier)
-            self.reset(engine, "warmup")
+            for phase, submissions in preparation.items():
+                barrier.wait()
+                self.generate(engine, phase, submissions, clock, barrier)
+                self.reset(engine, phase)
             warmed_ns = time.monotonic_ns()
 
             barrier.wait()

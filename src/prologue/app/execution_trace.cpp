@@ -176,11 +176,13 @@ void ExecutionTrace::notification_ready(const nlohmann::json & identity, std::si
     } << '\n';
 }
 
-void ExecutionTrace::input_read(const nlohmann::json & identity, std::span<const std::size_t> requests, bool in_flow, std::int64_t time_ns) {
+void ExecutionTrace::input_read(const nlohmann::json & identity, std::span<const std::size_t> requests, bool in_flow,
+                                std::int64_t time_ns, std::optional<std::int64_t> poll_deadline_ns) {
     auto observed = identity;
     ContextValues::encode(observed, [this](const auto & value) { return context_value(value); });
     stream_ << nlohmann::json{
         { "kind", "input_read" }, { "identity", std::move(observed) }, { "time_ns", time_ns }, { "in_flow", in_flow },
+        { "poll_deadline_ns", poll_deadline_ns ? nlohmann::json(*poll_deadline_ns) : nullptr },
         { "request_indices", std::vector<std::size_t>(requests.begin(), requests.end()) }
     } << '\n';
 }

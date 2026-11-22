@@ -33,7 +33,8 @@ public:
     void conditioned(const BoundaryCondition & condition) override;
     void initialized(const nlohmann::json & instances, const nlohmann::json & requests, std::int64_t clock_epoch_ns) override;
     void condition_used(std::string_view group, std::size_t step, std::string_view operation, const nlohmann::json & source) override;
-    void input_read(const nlohmann::json & identity, std::span<const std::size_t> requests, bool in_flow, std::int64_t time_ns) override;
+    void input_read(const nlohmann::json & identity, std::span<const std::size_t> requests, bool in_flow,
+                    std::int64_t time_ns, std::optional<std::int64_t> poll_deadline_ns) override;
     void observed_values(std::string_view group, std::size_t boundary, const nlohmann::json & values, std::int64_t time_ns) override;
     void native_protocol(std::string_view group, const nlohmann::json & record, std::int64_t time_ns) override;
     void queried(std::string_view group, std::size_t boundary, const nlohmann::json & result,

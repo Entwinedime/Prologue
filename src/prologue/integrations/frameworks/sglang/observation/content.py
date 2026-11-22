@@ -15,10 +15,10 @@ class NativeContent:
             native: request["id"]
             for native, request in zip(description["source_requests"], source["requests"], strict=True)
         }
-        self.execution_aliases = self.aliases
-        if description["representative_warmup"]:
-            warmup = {native: request["id"] for native, request in zip(description["warmup_requests"], source["requests"], strict=True)}
-            self.execution_aliases = self.aliases | warmup
+        self.execution_aliases = {
+            native: identity for phase in description["request_groups"]
+            for native, identity in zip(description[f"{phase}_requests"], self.aliases.values(), strict=True)
+        }
         self.auxiliary = auxiliary
         self.tokens = None
         self.routing = None

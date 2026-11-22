@@ -62,6 +62,7 @@ NativeController::NativeController(std::vector<Request> requests, std::span<cons
     for (const auto & request : requests_) {
         nlohmann::json value{
             {            "id",            request.id },
+            {    "arrival_ns",    request.arrival_ns },
             { "prompt_tokens", request.prompt_tokens },
             { "output_tokens", request.output_tokens }
         };
@@ -184,14 +185,17 @@ std::optional<ServingAction> NativeController::plan(std::int64_t now_ns) {
                 throw std::invalid_argument("native input read reached after its observed return: " + input.identity.dump());
 
             // A measured read completes at its own boundary; it never prescribes which requests or batch to choose.
-            // The adapter declares a safe wait; submitting another polling graph is not logical progress.
-            const bool ready = input.return_ns ? *input.return_ns == now_ns : arrived || input.woken || !input.waiting;
+            const bool expired = input.poll_deadline_ns && *input.poll_deadline_ns <= now_ns;
+
+            // Resource progress wakes internal waits. The native socket poll wakes for a message or its own timeout.
+            const bool progress = input.woken && !input.poll_deadline_ns;
+            const bool ready = input.return_ns ? *input.return_ns == now_ns : arrived || progress || expired || !input.waiting;
             if (ready) {
                 const auto arrivals = input.delivery.take(now_ns);
                 const bool in_flow = input.in_flow || !arrivals.empty();
 
                 // The first nonempty pull enters serving; idle polls after local drain remain observable outside it.
-                if (control_observer_) control_observer_->input_read(input.identity, arrivals, in_flow, now_ns);
+                if (control_observer_) control_observer_->input_read(input.identity, arrivals, in_flow, now_ns, input.poll_deadline_ns);
                 reply(*input.call,
                       {
                           {     "kind",           "advance" },
@@ -200,6 +204,7 @@ std::optional<ServingAction> NativeController::plan(std::int64_t now_ns) {
                 });
                 input.call.reset();
                 input.return_ns.reset();
+                input.poll_deadline_ns.reset();
 
                 // Peers can publish midway through a PP round; keep that wake until the next declared wait consumes it.
                 if (input.waiting) input.woken = false;
@@ -268,7 +273,11 @@ std::optional<ServingAction> NativeController::plan(std::int64_t now_ns) {
                 input.return_ns = std::max(now_ns, condition->begin_ns);
                 if (*input.return_ns > condition->end_ns) throw std::invalid_argument("native input entered after its supplied return window: " + input.identity.dump());
             }
-            else input.return_ns.reset();
+            else if (const auto & deadline = message.at("poll_deadline_ns"); !deadline.is_null()) {
+
+                // An ordinary timed socket poll can wake early when a request or a peer becomes ready.
+                input.poll_deadline_ns = deadline.get<std::int64_t>();
+            }
             continue;
         }
         if (kind == "wake") {
@@ -576,7 +585,7 @@ std::optional<std::int64_t> NativeController::next_wakeup_ns(std::int64_t now_ns
     for (const auto & [_, input] : inputs_) {
 
         // Arrivals and measured read returns wake control independently; elapsed boundaries cannot stall the clock.
-        for (const auto boundary : { input.delivery.next_ns(), input.return_ns }) {
+        for (const auto boundary : { input.delivery.next_ns(), input.return_ns, input.poll_deadline_ns }) {
             if (boundary && *boundary > now_ns && (!next || *boundary < *next)) next = boundary;
         }
     }

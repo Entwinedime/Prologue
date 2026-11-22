@@ -131,8 +131,9 @@ class NativeHostSamples(ServingCuts):
 
     @contextmanager
     def fragment(self, frame):
-        with self.native_call("segment", frame.original, condition=frame.condition) as occurrence:
+        with self.native_call("segment", frame.original) as occurrence:
             yield
+        occurrence["bindings"]["condition"] = frame.observed_condition
         occurrence["work"]["continuation"] = frame.continuation
 
     @contextmanager

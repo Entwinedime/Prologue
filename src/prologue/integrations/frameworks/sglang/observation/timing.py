@@ -114,7 +114,7 @@ class NativeTiming:
                 self.host.start(scheduler, rank, directory)
             elif self.attention is None:
                 self.specializations.start()
-        else:
+        elif self.window.phase == "source":
             if self.host is not None:
                 record = self.host.document()
             elif self.attention is not None:

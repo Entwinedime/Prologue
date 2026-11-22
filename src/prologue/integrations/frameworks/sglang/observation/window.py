@@ -15,13 +15,7 @@ class ObservationWindow:
     def __init__(self, directory: Path, description: dict[str, Any]) -> None:
         self.directory = directory
         self.participants = description["native_participants"]
-        self.requests = {
-            phase: set(description[field])
-            for phase, field in (
-                ("warmup", "warmup_requests"),
-                ("source", "source_requests"),
-            )
-        }
+        self.requests = {phase: set(description[f"{phase}_requests"]) for phase in description["request_groups"]}
         self.pending = {phase: set(requests) for phase, requests in self.requests.items()}
         self.groups = {phase: [set(group) for group in groups[:-1]] for phase, groups in description["request_groups"].items()}
         self.next_group = dict.fromkeys(self.groups, 0)

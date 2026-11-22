@@ -69,6 +69,7 @@ class NativeScheduler(Scheduler):
             device="cpu",
             load_format="dummy",
             skip_tokenizer_init=True,
+            sleep_on_idle=True,
             max_total_tokens=settings["max_total_tokens"],
             max_running_requests=settings["max_running_requests"],
             max_prefill_tokens=settings["max_prefill_tokens"],
@@ -130,6 +131,8 @@ class NativeScheduler(Scheduler):
         self.request_receiver = NativeRequestReceiver(
             replace(self.request_receiver, recv_from_tokenizer=self.request_input), self
         )
+        if self.idle_sleeper is not None:
+            self.idle_sleeper.poller = self.request_receiver
         self.model_worker.forward_batch_generation = self.model_result
         self.request_state.install()
         self.calls = FlowExecution(self)

@@ -20,6 +20,7 @@ class RequestInput:
         self.mode = mode
         self.arrivals = None
         self.waiting = False
+        self.poll_deadline_ns = None
         self.context = None
         self.in_flow = False
         self.requests = workload["requests"]
@@ -39,7 +40,8 @@ class RequestInput:
 
     def recv_pyobj(self, flags):
         if self.arrivals is None:
-            advance = self.peer.call("input", waiting=self.waiting, context=self.context, in_flow=self.in_flow)
+            advance = self.peer.call("input", waiting=self.waiting, poll_deadline_ns=self.poll_deadline_ns,
+                                     context=self.context, in_flow=self.in_flow)
             if advance["kind"] != "advance":
                 raise ValueError("Native control expected an advance boundary")
             self.arrivals = iter(advance["arrivals"])
@@ -85,13 +87,22 @@ class NativeRequestReceiver:
         self.round_started = False
         self.model_ran = False
         self.idle_reported = False
+        self.poll_deadline_ns = None
+
+    def poll(self, timeout):
+
+        # SGLang supplies the socket timeout. Simulated time advances at its next receive boundary.
+        if self.scheduler.calls.started and timeout >= 0:
+            self.poll_deadline_ns = self.scheduler.peer.call("clock") + timeout * 1_000_000
 
     def recv_requests(self):
         scheduler = self.scheduler
 
         # The native loop owns this cursor. A PP round includes every slot, not each individual receive.
         first_slot = scheduler.ps.pp_size == 1 or sys._getframe(1).f_locals["mb_id"] == 0
-        scheduler.request_input.waiting = False
+        inbox = scheduler.request_input
+        inbox.waiting = False
+        inbox.poll_deadline_ns = None
         if first_slot:
 
             # Native on_idle can precede round-tail work; park only after that work reaches the next receive.
@@ -99,18 +110,25 @@ class NativeRequestReceiver:
             self.idle_reported = False
             if idle:
                 if scheduler.ps.pp_rank == 0 and scheduler.ps.tp_rank == 0:
-                    scheduler.peer.call("idle", waiting=True)
+                    if scheduler.calls.started:
+
+                        # Between arrivals the native loop still polls. The read owns its return and wake conditions.
+                        inbox.waiting = True
+                        inbox.poll_deadline_ns = self.poll_deadline_ns
+                    else:
+                        scheduler.peer.call("idle", waiting=True)
                 else:
                     scheduler.peer.send({"kind": "idle", "waiting": False})
+            self.poll_deadline_ns = None
 
             # Pending transfers can bypass on_idle; completed rounds must still have a safe external wait.
-            scheduler.request_input.waiting = (
+            inbox.waiting |= (
                 self.round_started and not self.model_ran
                 and not scheduler.waiting_queue and scheduler.chunked_req is None
                 and scheduler.pd is not None and scheduler.pd.waiting()
             )
             self.round_started = True
             self.model_ran = False
-        scheduler.request_input.context = scheduler.calls.scheduler_work()["context"]
-        scheduler.request_input.in_flow = scheduler.calls.started
+        inbox.context = scheduler.calls.scheduler_work()["context"]
+        inbox.in_flow = scheduler.calls.started
         return self.receiver.recv_requests()
