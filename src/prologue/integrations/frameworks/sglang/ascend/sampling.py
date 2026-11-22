@@ -8,7 +8,6 @@ from prologue.acquisition.capture import NativeAttempt
 from prologue.acquisition.recording import PublishedCapture
 from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.ascend.attention_window import DecodeSampling
-from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples
 from prologue.integrations.frameworks.sglang.ascend.host_samples import HostCostSamples
 from prologue.integrations.platforms.ascend.copy_sampling import TensorCopySamples
 from prologue.integrations.platforms.ascend.deployment import AscendDeployment
@@ -142,9 +141,6 @@ class SGLangSampling:
         self.attention = DecodeSampling(self)
         self.measured_host = set()
         self.external = HostCostSamples.external_work(source.recording.source)
-
-    def device_samples(self, ranks):
-        return CostSamples(self.source.production, self.source.projection, ranks)
 
     def observe(self, rank, target, catalog, demand):
         self.attention.observe(rank, catalog)

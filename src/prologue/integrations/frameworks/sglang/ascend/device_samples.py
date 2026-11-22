@@ -58,11 +58,16 @@ class CostSamples:
 
     @classmethod
     def export(cls, arguments):
-        rank = arguments.rank
-        source = cls(arguments.production, arguments.projection, [rank])
-        catalog = WorkCatalog(source.work / f"{rank}-graph.json", arguments.work_identities)
-        report = source.measure(rank, catalog, transport_only=arguments.transport_only)
-        write_json(arguments.output, report, replace=False)
+        jobs = tuple(zip(arguments.rank, arguments.work_identities, arguments.output, strict=True))
+        ranks = tuple(arguments.rank)
+        if len(set(ranks)) != len(jobs) or len({path.resolve() for _, _, path in jobs}) != len(jobs):
+            raise ValueError("cost sample exports require distinct ranks and output paths")
+
+        source = cls(arguments.production, arguments.projection, ranks)
+        for rank, identities, path in jobs:
+            catalog = WorkCatalog(source.work / f"{rank}-graph.json", identities)
+            report = source.measure(rank, catalog, transport_only=arguments.transport_only)
+            write_json(path, report, replace=False)
 
     def measure(self, rank, catalog, *, transport_only=False):
         observation = {"production": str(self.production), "rank": rank}

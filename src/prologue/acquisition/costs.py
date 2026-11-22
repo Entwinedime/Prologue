@@ -203,35 +203,37 @@ class CostAcquisition:
 
     def inspect(self, source, requirements):
         self.project(source)
-        with self.processing():
-            pending = {}
-            for rank in source.ranks:
-                observation = {"production": str(source.production), "rank": rank}
-                if any(sample.get("observation") == observation for sample in self.samples.values()):
-                    continue
-                path = source.output / f"{rank}-device.json"
-                if path.is_file():
-                    self.samples[path] = read(path)
-                else:
-                    pending[rank] = path
-
-            # Read the peer observations and calibrate a joint capture once for all missing workers.
-            sampler = source.sampling.device_samples(tuple(pending)) if pending else None
-
         work = source.projection / "work"
+        needed = {}
         for rank in source.ranks:
-            graph = work / f"{rank}-graph.json"
-            identities = source.identities(rank)
-            self.run_model("work-identities", identities, graph)
+            self.run_model("work-identities", source.identities(rank), work / f"{rank}-graph.json")
+            observation = {"production": str(source.production), "rank": rank}
+            if not any(sample.get("observation") == observation for sample in self.samples.values()):
+                needed[rank] = source.output / f"{rank}-device.json"
+
+        pending = {rank: path for rank, path in needed.items() if not path.is_file()}
+        if pending:
+            self.export_device_samples(source, pending)
+
+        for rank in source.ranks:
             with self.processing():
-                catalog = WorkCatalog(graph, identities)
+                if rank in needed:
+                    path = needed[rank]
+                    self.samples[path] = read(path)
+
+                catalog = WorkCatalog(work / f"{rank}-graph.json", source.identities(rank))
                 owner = f"{source.recording.source / 'capture.json'}#rank={rank}"
                 source.sampling.observe(rank, owner, catalog, requirements)
-                if rank in pending:
-                    path = pending[rank]
-                    report = sampler.measure(rank, catalog)
-                    write_json(path, report, replace=False)
-                    self.samples[path] = report
+
+    def export_device_samples(self, source, pending):
+        command = [sys.executable, "-m", "prologue.app", "cost-samples", "--production", str(source.production)]
+        if source.projection != source.production:
+            command.extend(("--projection", str(source.projection)))
+        for rank, path in pending.items():
+            command.extend(("--rank", str(rank), "--work-identities", str(source.identities(rank)), "--output", str(path)))
+
+        # One bounded process calibrates the joint capture and publishes each completed rank in order.
+        self.command(next(reversed(pending.values())), command)
 
     @staticmethod
     def projection_usage(directory):

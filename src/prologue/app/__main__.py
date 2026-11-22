@@ -42,10 +42,10 @@ def main() -> None:
     samples = commands.add_parser("cost-samples", help="publish measured services from a projected source")
     samples.add_argument("--production", type=Path, required=True, help="published training production that owns the observation")
     samples.add_argument("--projection", type=Path, help="regenerated graph and facts for the same native observation")
-    samples.add_argument("--rank", type=int, required=True)
-    samples.add_argument("--work-identities", type=Path, required=True)
+    samples.add_argument("--rank", type=int, action="append", required=True, help="repeat with matching work and output paths")
+    samples.add_argument("--work-identities", type=Path, action="append", required=True)
     samples.add_argument("--transport-only", action="store_true", help="export only independently measured peer services and physical placement")
-    samples.add_argument("--output", type=Path, required=True)
+    samples.add_argument("--output", type=Path, action="append", required=True)
     hosts = commands.add_parser("host-cost-samples", help="qualify independently measured native host services")
     for name in ("detailed", "host", "facts", "trace", "graph", "work-identities", "output"):
         hosts.add_argument("--" + name, type=Path, required=True)
