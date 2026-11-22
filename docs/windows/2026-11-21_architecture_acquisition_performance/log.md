@@ -665,3 +665,247 @@ TP1 在物理卡 0 用原训练输入新增 1 次原生启动，计费 139.87 �
 **验证**　两套来源注入真实时间后分别匹配 148 和 177 个动作。930 毫秒案例的第二个请求在原生侧的可读时刻落在 930.841–1,436.684 毫秒内。自主预测先执行第一个请求的 Decode，详细原生先执行第二个请求的 Prefill，随后合批 Decode。2,750 毫秒案例在两种来源下的四个批次均匹配，自主空读在期限到达后返回。两组共 12 项评价收齐。[实测和预测决策](../../../data/architecture-acquisition-performance/rounds/04/independent/assessment.json)
 
 **结论与限制**　第 04 轮主判据通过。930 毫秒案例的两项固定图评分受忙碌读入的精确可用时刻缺失而暂缺，详细运行的探针开销也计入该次调度时序。自主评分使用独立轻量参考，四组两请求的 TTFT MAPE 为 0.52%–5.50%，TPOT MAPE 为 3.85%–6.57%。本里程碑交付 TP1 的验证路径，第 05 轮扩到三个模型在同一配置下的原生对照。
+
+## 2026-11-22 — 第 05 轮三模型共用配置的来源建库
+
+**范围**　Qwen3-8B、Mistral-7B-v0.3、Llama-3.1-8B-Instruct 共用 TP1、BF16、Ascend attention、16-token 页和相同 KV 容量。模型各自建库和拟合，两套来源分别使用物理卡 0 和 4。Mistral 与 Llama 的模型域独立，两者的逐层结构均来自 SGLang 的 `LlamaDecoderLayer`。[模型、采集配额与分组](../../../data/architecture-acquisition-performance/rounds/05/development/scope.json)
+
+**改动**　Mistral 与 Llama 使用相同的代表请求规划和正式采集入口。Qwen 复用已核对的来源及成本。开发阶段共用已揭盲的四请求负载，沿用 Qwen 的详细和轻量参考，给另两模型单独取证。
+
+**验证**　两种新模型共启动八次模板采集，计费 1,042.96 秒，四份完整和单卡集合都发布了主库和局部库。各主库确认 32 个 attention 站点。每个模型的两种来源有相同的定义、入口、实现域和资源类型，资源身份来自各自运行。两款模型的两种来源都在假设耗时下完成四个请求，分别生成八个 token。另用一组较长的开发负载，在三个模型的两种模式下分别完成 16 个请求、42 个输出 token。实际展开的工作区间为 Qwen 74,195 段，另两种模型各 62,579 段。[建库结果](../../../data/architecture-acquisition-performance/rounds/05/development/template-acquisition.json) · [模板核对](../../../data/architecture-acquisition-performance/rounds/05/development/primary-libraries.json) · [16 请求回归](../../../data/architecture-acquisition-performance/rounds/05/development/medium-shape-replay/assessment.json)
+
+**结论与限制**　Qwen 的模板不能给 Mistral 提供来源，Qwen 的成本在 Mistral 执行域内明确缺项。三模型的详细与轻量参考均已发布，注入详细实测时间后，六项结构对照各匹配 283 个动作。固定真实图和自主预测继续核对各自的本域成本。[跨域负例](../../../data/architecture-acquisition-performance/rounds/05/development/domain-isolation/assessment.json) · [六组开发对照](../../../data/architecture-acquisition-performance/rounds/05/development/shared-page-replay/results/round-05-development/comparisons.json)
+
+**成本归因**　两种新模型的四套成本资产各发布 1,076 个绑定，共启动 12 次，计费 1,056.30 秒。每套训练留一个相同的未覆盖特征点。将实际释放索引和 SDK 搬运记录按调用关联，确认对应的 12 段搬运均与归还页数一致。释放 8 个 token 时，数据覆盖一页或两页，回拷实测分别为 4 和 8 字节。原生在 CPU 按页去重后把页号传回设备。当前特征只含调用入参，拟合排除了同坐标的异载荷样本。修复须从该次释放取得实际页数，供对应区间的成本查询，沿用当前候选条件和已测依赖。[原生索引与搬运样本](../../../data/architecture-acquisition-performance/rounds/05/development/release-copy-evidence.json)
+
+**留出启动**　四请求开发回归的 18 项评价已收齐。六项固定图均用实测耗时复现全部 token 发布，换成预测成本后，与六项自主预测一样，首个成本缺口都在三请求、102 个输入 token 的 Prefill 批次准备。此缺项与页号回拷的特征冲突分别保留。独立对照已冻结资产，每个模型共用同一组新的 16 请求、49 个生成 token，合计六份物理参考和 18 项评价。本轮主判据为三个模型的执行结构。[固定图](../../../data/architecture-acquisition-performance/rounds/05/development/shared-page-replay/results/round-05-development/fixed.json) · [自主预测](../../../data/architecture-acquisition-performance/rounds/05/development/shared-page-replay/results/round-05-development/autonomous.json) · [封存输入](../../../data/architecture-acquisition-performance/rounds/05/independent/inputs/denominators.json)
+
+## 2026-11-22 — 第 05 轮页号回拷返修
+
+**范围**　沿原生页号张量、局部搬运、模板参数、控制器资源调用和定向采样核对第 05 轮的已公开训练缺口。在独立工作区和镜像上使用物理卡 4，留出对照继续由原代码与镜像在物理卡 0 上完成。[返修范围](../../../data/architecture-acquisition-performance/rounds/05/repair/release-copy/scope.json)
+
+**改动**　SGLang 从实际去重后传入 `Tensor.to()` 的 CPU 张量绑定页数，无设备控制从同一次归还给核心的页列表取得同一参数。Ascend 按源地址、方向和字节数将该操作数关联到 SDK 时间区间。沿用现有有向拷贝求值和采样入口，把准备好的回拷与原有读回纳入同一机制。共修改九个 Python 文件，C++ 工作合同可直接表达所需特征。
+
+**验证**　两次 Mistral TP1 原生训练共计费 265.17 秒，生成九段显式回拷。释放 8 个 token 的 4 和 8 字节回拷共享一个模板定义和工作序号。定向采样一次耗时 15.59 秒，两点各取得七个 SDK 时间样本，均可供共同成本求值。给定耗时的 16 请求展开完成 42 个 token，按逻辑页数产生 16 段回拷，覆盖 4、8、12、16 字节。[返修证据](../../../data/architecture-acquisition-performance/rounds/05/repair/release-copy/assessment.json)
+
+**结论与限制**　封存对照收齐并校验后，返修已合入工作树，测试过的采集和控制镜像成为本地默认镜像，独立结果保留原镜像摘要。四请求用例的首处性能阻断仍是三成员 Prefill 批次准备，训练实际只见一、二成员。后续 TP2 输入的离线预检发现，旧代表性计划压缩掉了四成员同到组。性能采集计划现按角色和阶段一起保留长度及同到成员数的端点。Qwen 和 Mistral 的主训练输入均保住一组四请求，每个模型只多保留一个请求，计划启动数不变。实际合批宽度仍由随后原生采集确认。[批次证据](../../../data/architecture-acquisition-performance/rounds/05/development/batch-preparation-evidence.json) · [原计划](../../../data/architecture-acquisition-performance/rounds/06/preflight/performance-plan-inspection.json) · [修订计划](../../../data/architecture-acquisition-performance/rounds/06/preflight/retained-performance-plan-inspection.json)
+
+## 2026-11-22 — 第 05 轮独立对照及第 06 轮启动
+
+**范围**　三个物理目标分别在三种模型上使用同一组 16 个新请求，每次生成 49 个 token。六次详细和轻量参考共计费 1,073.59 秒，两套来源共享各模型的真值。冻结代码和资产的校验一致。[输入及评价分母](../../../data/architecture-acquisition-performance/rounds/05/independent/inputs/denominators.json) · [冻结核对](../../../data/architecture-acquisition-performance/rounds/05/independent/integrity.json)
+
+**验证**　六项结构对照全匹配。每个模型有八次二成员 Prefill、十次二成员 Decode、十三次单成员 Decode。Qwen 两组各核对 1,340 个动作和 25,448 条因果关系，Mistral 和 Llama 四组各核对 1,370 个动作和 23,229 条关系。自主预测的四组可评分结果覆盖 Mistral 和 Llama。Qwen 的首个缺项是 `ModelRunner.forward` 的单成员 strided Decode，旧成本范围是二至三成员。[逐项结果](../../../data/architecture-acquisition-performance/rounds/05/independent/assessment.json)
+
+**结论与限制**　第 05 轮结构主判据通过。Mistral 固定图有一次输入可读时刻只能限在约 5 毫秒区间。Llama 的固定图 TTFT 和 TPOT MAPE 分别为 25.08%–27.01% 和 39.74%–40.18%，恢复详细参考的主机服务后均低于 0.34%。轻量参考和详细参考来自不同运行，现有证据没有单独量化插桩所占比例。第 06 轮两种模式已启动 Qwen TP2 训练，随后在同一配置换 Mistral；本轮比较本地分片与真实物理提交和对端依赖。[性能归因](../../../data/architecture-acquisition-performance/rounds/05/independent/performance-attribution.json) · [TP2 训练计划](../../../data/architecture-acquisition-performance/rounds/06/development/scope.json)
+
+## 2026-11-22 — 第 06 轮单卡和完整来源的协议取证
+
+**范围**　以 Qwen3-8B TP2 的首个共同训练输入追查一段工作从本地张量交给通信流，到通信完成后下一段设备工作可运行的关系。完整来源使用物理卡 0、1。单卡来源仅开放卡 4，在两个观测窗口分别采两个逻辑 rank。[当前训练范围](../../../data/architecture-acquisition-performance/rounds/06/development/scope.json)
+
+**验证**　两种来源均实际触发四成员 Prefill。每个 rank 配对 1,258 个具名通信调用，输入和输出张量几何、dtype、参与者及本地 KV 布局全部一致。全部调用可从本地流入口追到通信服务，再从完成端口追到后续设备工作。原生双卡归约内部有 7 段控制线程和 11 段提交线程工作，单卡暂存只观察到 2 段控制线程工作。双卡训练的两份独立成本证据各包含 1,258 段带已核对 HCCS 链路及物理角色的服务时间。[本地证据](../../../data/architecture-acquisition-performance/rounds/06/development/qwen-initial-source-protocol.json) · [物理服务样本](../../../data/architecture-acquisition-performance/rounds/06/development/joint-transport-study/profiles.json)
+
+**结论与限制**　单卡证据覆盖本地操作数和依赖，物理通信需要另外校准。现有外接成本键把实际张量 shape 写进服务身份，同一链路使用新载荷时，即使在已测大小之间也找不到模型。将以原生测量为依据验证按载荷拟合的适用范围，保留操作、角色和运行时的独立限定。[双模型开发对照输入](../../../data/architecture-acquisition-performance/rounds/06/development/shared-protocol-replay/scope.json)
+
+## 2026-11-22 — 第 06 轮跨卡服务的载荷范围
+
+**改动**　将共同成本查询的传输身份收敛为实际参与者、方向、实现和端口布局。C++ 从目标图计算各端口元素数，Ascend 导出端从同一坐标核对 SDK 载荷。单卡和完整图共用从物理记录导出的有界模型，固定图和补采使用同一接口。物理服务模型只承担对端就绪后的通信时间。
+
+**验证**　用原已采 Qwen TP2 双卡记录离线重算。每个 rank 的 11 个按尺寸区分的外接身份收敛到归约和聚合两种。同一实测尺寸的 73 次归约在各 rank 整组留出，估值与该组实测中位数分别相差 1.15% 和 0.90%。超出实测元素数的查询仍报告缺口。单卡粗图的 2,516 段服务全部通过新的成本接口。C++23 统一构建和 Python 检查通过，改动已合入工作树。[载荷回归](../../../data/architecture-acquisition-performance/rounds/06/development/transport-fit-repair/assessment.json)
+
+**结论与限制**　这项回归使用同一轮物理训练做离线留出，尚未验证新请求上的端到端精度。外接时间不补写原本未观察到的提交线程。Qwen 的四请求给定耗时开发用例已在两种来源完成 12 个 token，每种均核对 1,036 个通信端点。两模型的共享物理目标已按开发输入开始采集，随后分别做三条评价。[给定耗时结果](../../../data/architecture-acquisition-performance/rounds/06/development/shared-protocol-replay/given-qwen.json) · [开发矩阵](../../../data/architecture-acquisition-performance/rounds/06/development/shared-protocol-replay/matrix.json)
+
+## 2026-11-22 — 第 06 轮投影载荷与主机等待返修
+
+**改动**　Mistral 的 attention 投影结果被下一层归一化消费，解码层返回时已失去原张量的身份。SGLang 适配器从原生行并行投影的返回张量取得同一版本，沿已声明的输入轴与实际输出宽度注明归约操作数。固定图将接收唤醒和随后两次实测 futex 等待放入同一套线程切分及重算，删除整段 CPU 顺序边只能由一次空闲唤醒覆盖的实现。后者净减 19 行，沿用已有原生切换和唤醒事实。
+
+**验证**　沿用 Mistral 的原训练输入，在物理卡 0、1 和单卡 5 各启动一次，合计计费 493.60 秒，后处理 194.28 秒。两种模式的每个 rank 都有 1,105 次归约，其载荷分别与 SDK 元素数或真实暂存字节数一致。两种给定耗时展开分别核对 924 个通信端点。双卡原始证据每个 rank 发布 1,122 段物理通信样本。修订后成本采集新增四次启动，计费 462.96 秒，两个成本库覆盖各自的初始训练需求。[载荷证据](../../../data/architecture-acquisition-performance/rounds/06/development/projection-layout-repair/assessment.json) · [双卡成本](../../../data/architecture-acquisition-performance/rounds/06/development/projection-layout-repair/costs-full.json) · [单卡成本](../../../data/architecture-acquisition-performance/rounds/06/development/projection-layout-repair/costs-single_device.json)
+
+**开发结论**　共用四请求物理案例时，Qwen 双卡严格匹配 652 个动作，单卡在 124 个动作后确认 HCCL 提交结构差异。两个完整自主执行图各有 2,072 条通信依赖与物理目标匹配，其中 1,036 条跨 rank。用原 Qwen 详细参考复验固定图，实测重算仍匹配 93,786 个端点及全部 12 次 token 发布。双卡成本的 TTFT、TPOT MAPE 为 6.65%、9.39%，仅恢复主机服务实测值后为 0.09%、0.05%，结论限于该固定开发用例。四组自主预测均取得四请求评分。[严格结构对照](../../../data/architecture-acquisition-performance/rounds/06/development/shared-protocol-replay/results/round-06-development/comparisons.json) · [单卡通信依赖](../../../data/architecture-acquisition-performance/rounds/06/development/shared-protocol-replay/results/round-06-development/autonomous-structure-diagnostic/qwen-tp2-single-device-shared-protocol/actions.json) · [固定图重算](../../../data/architecture-acquisition-performance/rounds/06/development/shared-protocol-replay/results/round-06-development/fixed-wait-repair/qwen-tp2-full-shared-protocol/result.json)
+
+**独立启动**　封存 276 个实现文件和 102 个训练资产，再生成每模型相同的 16 个留出请求，各生成 46 个 token。两种来源分别使用各模型同一次详细参考和一次轻量参考，三条路径共 12 项评价。物理参考使用卡 0、1。整个对照收齐后再决定是否返修实际提交链路。[冻结记录](../../../data/architecture-acquisition-performance/rounds/06/independent/freeze.json) · [输入与分母](../../../data/architecture-acquisition-performance/rounds/06/independent/inputs/denominators.json)
+
+## 2026-11-22 — 第 06 轮物理参考与第 07 轮采集准备
+
+**取证**　第 06 轮收齐两份详细、两份轻量原生记录，累计四次启动、790.29 秒。两模型的每个 rank 均实际执行四批四成员 Prefill，Decode 覆盖一到四成员，实测 KV 各有四个 head。按 rank、请求成员、处理阶段、输入与上下文长度以及同批次中的具名操作配对。单卡来源展开的通信载荷和 attention 端口与物理记录分别完全配对 2,072 / 1,008 次和 1,848 / 896 次。两模型的通信因果边分别匹配 4,144 和 3,696 条，其中 2,072 和 1,848 条跨 rank。该诊断使用给定工作时长，独立评价沿用实测时间和严格布局。[实测范围](../../../data/architecture-acquisition-performance/rounds/06/independent/detailed-receipts.json) · [Qwen 通信](../../../data/architecture-acquisition-performance/rounds/06/analysis/communication-closure/qwen-tp2-local-protocol-single-device/result.json) · [Mistral 通信](../../../data/architecture-acquisition-performance/rounds/06/analysis/communication-closure/mistral-tp2-local-protocol-single-device/result.json)
+
+**下一轮准备**　沿正式入口为 Qwen 和 Mistral 的 TP4、TP8 生成两种来源计划。完整来源在一次物理执行中观察全部参与者以取得链路训练样本，单卡由初始化后的模块、KV 布局和通信组职责决定观测代表。历史 Qwen TP8 八个逻辑 rank 均执行，其中六个省去详细观测窗口。该早期记录缺少当前合同要求的 `released_pages`，本轮使用当前镜像采集。第 06 轮物理取证结束后，Mistral TP4 在卡 4、Qwen TP4 在卡 0–3 分别发布首份原生记录，计费 328.82、226.16 秒。两个模型的代表均为 rank 0、1，四个 rank 的 KV 布局均为两个 head。单卡用了两个观测窗口，完整来源用一个窗口观察四个 rank。[计划与预算](../../../data/architecture-acquisition-performance/rounds/07/preflight/scope.json) · [TP4 原生观测](../../../data/architecture-acquisition-performance/rounds/07/development/initial-native-evidence.json) · [旧 TP8 角色证据](../../../data/architecture-acquisition-performance/f1/tp8-representatives/tp8-role-reuse.json)
+
+## 2026-11-22 — 第 06 轮独立交付与第 07 轮开发发现
+
+**结论**　12 项评价全部结束，冻结代码、二进制、输入和 102 个训练资产核对一致。两套双卡来源严格匹配 1,934、1,954 个动作。单卡来源证明了同一留出请求下的本地分片、张量载荷及对端因果，严格结构分别在 230、225 个动作后遇到 HCCL 提交线程差异。物理链路成本来自独立的双卡训练资产。第 06 轮交付范围限于本地结构和连接，物理提交结构的差异继续保留。[逐项结论](../../../data/architecture-acquisition-performance/rounds/06/independent/assessment.json)
+
+**性能归因**　固定图的实测回算分别匹配 Qwen 190,516、Mistral 165,412 个端点。四项固定图的完整成本替换、四项自主预测均缺合格结果。四项自主预测的首个缺口一致。训练的四成员 Decode 使用现有尾页，申请新页实际发生在一或二成员；两个留出目标各有三次四成员新页分配。补充规则应联合规划分配分支与批次宽度，用当前可用页和原生组批定义构造采样机会，并在同一次观测中确认二者成立。分开保留两个条件会继续漏掉组合。[分支取证](../../../data/architecture-acquisition-performance/rounds/06/analysis/decode-allocation-coverage.json)
+
+**第 07 轮**　Mistral TP4 单卡、Qwen TP4 完整来源已走通建库及给定耗时展开，四个 rank 均实际生成带载荷的通信调用。Qwen 四卡校准各 rank 获得 1,258、764、508、409 段合格物理服务。其余 2,093 段均为跨设备先后不确定性使服务区间包含零，时钟坐标和载荷齐全。样本中的限制端是缺少直接配对通知的对端。后续需核对同一轮跨 rank 通知能否沿中间参与者收紧边界。[物理样本](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp4-full/peer-profiles/result.json) · [校时诊断](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp4-full/peer-profiles/clock-qualification.json)
+
+## 2026-11-22 — 第 07 轮联合通信校时与分配采样
+
+**改动**　Ascend 适配器将同一次集合通信的端点校时、本地耗时和成对的原生通知纳入同一组时差约束，替换原来的逐对端计算。传输服务范围仍从最后一个必要对端就绪计至本端完成。SGLang 适配器按实际提交组、到达和配置资源确定短探针可用的 Decode 宽度，在同一次主采集中取得申请新页的分支。计划与建库都要求实际批次成员数与分支同时满足，性能层照常使用工作定义和特征。两个改动各由原证据的所有者维护。[修订后的采集计划](../../../data/architecture-acquisition-performance/rounds/07/development/joint-allocation-plans/source-plans.json)
+
+**通信与角色证据**　对 Qwen TP4 现有训练记录，正式样本入口为四个 rank 各发布 1,258 段通信服务，恢复 2,093 段，未新增采集。rank 2、3 的 55 个模板定义与代表 rank 1 一致，43 个入口内的差异均为通信调用的本端 rank 绑定。同次物理运行中，三者有 846 个可配对的本地设备成本特征点。rank 2、3 相对于 rank 1 的逐点实测中位数差异中位数为 3.63%、3.39%，第 90 百分位约为 11.4%。模板共享的结论与各 rank 的成本适用性分别保留。[正式样本](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp4-full/joint-peer-profiles/result.json) · [角色与本地计时](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp4-full/role-structure-and-device-time.json)
+
+**采集回归**　两模型、两种宽度、两种模式的修订计划均通过正式规划入口。每套仍安排两个原生作业，主采集增加一组四请求，输入长度为 1、1、1 和 16。Mistral TP4 四个原生 rank 和 Qwen TP4 单卡的两个代表均观察到一、二、四成员分别申请新页。两套来源均已完成建库。Mistral 四卡发布每 rank 1,320 段合格通信服务。Qwen TP2 的历史物理观测重算后仍为每 rank 1,258 段。本地工作成本进入正式计时及拟合。独立对照的范围为四个物理目标，每组 16 请求，共 24 项评价，留出输入将在封存后生成。[Mistral 四卡观测](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp4-full/joint-decode-evidence.json) · [Qwen 单卡观测](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp4-single_device/joint-decode-evidence.json) · [独立范围](../../../data/architecture-acquisition-performance/rounds/07/preregistration.json)
+
+**取证进度**　四套 TP4 来源共启动八次，计费 1,701.03 秒，均用给定耗时完成同一组四请求、12 个输出 token。Mistral 四卡的 rank 2、3 也与 rank 1 共享 55 个定义，入口差异均可由通信调用的本端 rank 绑定解释。Qwen TP8 单卡主采集已发布两份 profiler 记录并建成主库，计费 489.19 秒。八个逻辑 rank 参与运行，各有一个 KV head，rank 2–7 的代表是 rank 1。两个被观察的 rank 均实际执行了四成员新页分配。当前继续采集局部操作，Mistral TP4 主来源的成本任务已收齐四份主机记录。[Mistral 模板核对](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp4-full/role-structure-and-device-time.json) · [Qwen TP8 单卡观测](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp8-single_device/joint-decode-evidence.json) · [TP8 主库](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp8-single_device/collection/assets/0/result.json)
+
+**主机成本**　Mistral TP4 的四成员新页分配在每个 rank 都有 51 段主机工作。按共同成本定义、区间及特征逐项配对，204 段均取得轻量实测。模型发布及 C++ 查询仍在当前成本任务内，得到的是开发训练证据。[rank 0 样本](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp4-full/costs/sources/0/observed-submission-0-host.json)
+
+## 2026-11-22 — 第 07 轮八角色展开与成本取证整理
+
+**已验证**　Mistral TP4 完整来源的 204 段四成员新页分配主机成本均可通过正式 C++ 查询。用训练资产自主预测同一开发用例，四个请求生成 12 个 token。Qwen TP8 完整、单卡两套来源均完成给定耗时展开，每个 rank 产生 518 个带张量载荷的通信调用。八卡主记录每 rank 发布 1,480 段合格通信服务。rank 2–7 的 55 个模板定义和 rank 1 相同，入口的差异来自调用的本端 rank。可配对的 961 个本地设备成本特征点仍有实际时差。[C++ 查询](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp4-full/joint-decode-cost-check.json) · [自主结果](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp4-full/autonomous-prediction/result.json) · [八卡角色](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp8-full/role-structure-and-device-time.json) · [八卡通信](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp8-full/peer-profiles/result.json)
+
+**设备成本导出**　将同一物理观测的读入、配对和校时放在一批样本的共同上下文中。每次集合通信只求解一次组内约束，再按各角色的端点计算独立服务范围。成本采集任务使用已经读取的工作图，公开的单 worker 导出共用同一逻辑。沿 Mistral TP4 两个原生作业重算 8 份设备样本，共 5,208 条数据与旧结果逐项一致。复用 12 份主机和搬运样本重新拟合，C++ 需求结果一致，新增原生启动为零。Qwen TP4 的单角色通信样本也与原产物一致。[批量回归](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp4-full/batched-device-regression/assessment.json)
+
+**单卡成本取证**　Mistral TP4 单卡拥有代表 rank 0、1 的本地样本，通信采用同模型四卡来源实测的服务样本。用实际模板绑定及 C++ 求值复现同一 Decode attention 工作在 rank 1 可估值，rank 2、3 缺各自的设备成本。SGLang 的定向采样据代表切口安排实际请求的 rank，专用记录仍核对设备任务序列，模型按实际采样角色绑定。离线规划已为 rank 2、3 各选择 17、18 token 的两个已观测坐标。原生验证先测 rank 2，同卡的两个工作点安排在一次有限会话。[缺口证据](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp4-single_device/available-local-evidence/role-cost-qualification.json) · [定向采样计划](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp4-single_device/targeted-attention-plan/result.json)
+
+**新增观测**　Mistral TP8 在物理卡 4 上执行八个逻辑 rank，主采集只开两个详细窗口，共计费 471.42 秒，两个代表均观测到四成员申请新页。Qwen TP4 补了同一分支的四卡主记录，计费 237.69 秒。局部操作输入与既有记录完全一致，按原始观测引用重建该部分资产。[Mistral TP8 单卡](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp8-single_device/joint-decode-evidence.json) · [Qwen TP4 主记录](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp4-wide-source/joint-decode-evidence.json)
+
+## 2026-11-22 — 第 07 轮：八角色通信展开与训练资产发布
+
+**范围：** 复核两模型 TP8 的角色展开，以及加入四成员新页分配的 Qwen TP4 完整来源。复用已生成的开发输入。
+
+**改动：** 发布 Mistral TP8 的单卡和八卡模板，均使用两次原生启动，分别计费 647.02、365.03 秒。八卡主记录中，各 rank 均观察到一、二、四成员分别申请新页。Qwen TP4 补采一次主记录并复用既有局部记录，共同建库，新增原生 237.69 秒。[Mistral 单卡账目](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp8-single_device/collection/status.json) · [Mistral 八卡账目](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp8-full/collection/status.json) · [Qwen 四卡账目](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp4-wide-source/collection/status.json)
+
+**验证：** Mistral TP8 两种来源分别展开四个请求及全部 12 个 token，各匹配 29,568 条必要对端依赖。Qwen TP8 两种来源各匹配 33,152 条依赖。Mistral 八卡每 rank 取得 1,320 段合格通信服务，Qwen TP4 更新版每 rank 取得 1,480 段。[Mistral TP8 通信依赖](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp8-role-protocol.json) · [Qwen TP8 通信依赖](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp8-role-protocol.json) · [Mistral 八卡计时](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp8-full/peer-profiles/result.json) · [Qwen 四卡计时](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp4-wide-source/peer-profiles/result.json)
+
+**结论与限制：** 两源通信展开对照采用同一组给定耗时。Mistral 八卡实测中 rank 2–7 与 rank 1 的 55 个模板定义相同，913 个可配对的本地设备成本坐标在各角色仍有时差。训练资产与留出评价继续独立。[Mistral 八卡角色](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp8-full/role-structure-and-device-time.json)
+
+## 2026-11-22 — 第 07 轮定向计时与第 08 轮协议预检
+
+**范围：** 验证 Mistral TP4 单卡能否测量未详细建库的逻辑 rank。在训练期间离线核对 PP3 的请求转发对象和两模型来源规划。
+
+**改动：** 物理卡 4 上安排一次有限会话，耗时 151.61 秒，在 rank 2 测量同一 attention 的两个上下文长度。为 Qwen、Mistral 以共同 PP3 配置运行正式来源规划，各生成两个待执行作业。[定向会话](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp4-single_device/targeted-attention-rank-2/assessment.json) · [PP3 规划输入与边界](../../../data/architecture-acquisition-performance/rounds/08/preflight/scope.json)
+
+**验证：** 两个设备样本沿 rank 1 的模板切口配对并按实际 rank 2 发布，均通过 C++ 成本覆盖查询。无设备调用固定版本的原生请求构造和打包，复现与现有模拟输入相差 272 字节。一个双请求封装与同一次读取取得两个单请求封装相差 21 字节。[定向样本与查询](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp4-single_device/targeted-attention-rank-2/assessment.json) · [PP 请求封装](../../../data/architecture-acquisition-performance/rounds/08/preflight/native-ingress-serialization.json)
+
+**结论与限制：** 定向结果限于该 rank 的两个设备特征点。PP3 离线构造的绝对大小与旧物理记录仍相差 2 字节，尚未经过真实接收与各 stage 的发送、等待、继续执行。生产修复留在第 08 轮。
+
+## 2026-11-22 — 第 07 轮 TP4 训练完成与第 08 轮请求协议候选
+
+**范围：** 收齐 TP4 剩余三套训练成本。复用旧 PP3 原生收发记录及现有 TP2 开发输入，在独立工作树验证请求接收改动。
+
+**改动：** Qwen TP4 完整、单卡及 Mistral TP4 单卡分别完成六、三、三次计时作业，原生计费 402.20、440.07、402.46 秒。PP3 候选将同次提交的请求保留为一个 SGLang 原生封装，观测与控制共用提交分组、原生名称及采样参数。控制侧在适配器内将原生名称还原为核心已有的请求索引。[Qwen 完整账目](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp4-wide-source/costs/status.json) · [Qwen 单卡账目](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp4-single_device/costs/status.json) · [Mistral 单卡账目](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp4-single_device/costs/status.json)
+
+**验证：** 四套 TP4 成本的已声明训练需求全部通过 C++ 求值。SGLang 在转发之前把 `bootstrap_port` 从空值设为原生默认端口，解释离线构造剩余的 2 字节。候选控制器在 Mistral PP3 的 rank 0→1 和 1→2 均实际生成并消费 1,968 字节消息，与既有物理记录相同。Qwen TP2 的两个双请求提交完整生成 12 个 token。[字节来源](../../../data/architecture-acquisition-performance/rounds/08/preflight/native-ingress-forwarding.json) · [无设备回归](../../../data/architecture-acquisition-performance/rounds/08/development/native-ingress-regression/assessment.json)
+
+**结论与限制：** TP4 成本结论限于各套资产声明的训练需求。PP3 候选已通过请求转发对照，继续展开时旧模板缺 Prefill 分配入口。候选仍在独立工作树，第 08 轮以当前口径的新来源验证模型工作与跨 stage 依赖。
+
+## 2026-11-22 — 第 07 轮：成本身份与父模板边界审查
+
+**范围：** 用现有四卡训练图，一次核对 Qwen、Mistral 的两种成本资产在四个 rank 上的适用范围。
+
+**改动：** 沿工作区间导出、Python 模型绑定和 C++ 在线查询追踪身份。当前以整份模板定义与区间序号关联成本，父图的子调用、依赖和导出端口都参与相等判断。
+
+**验证：** Qwen TP4 的单卡成本在四卡训练图上把 rank 0 的 3,920 个指定层内设备区间判为 `unseen_work`。用两份 SDK 记录逐项比较，3,920 段的工作特征、区间和本地任务序列完全一致，模板定义只在 `children`、`edges`、`exports` 三处有差异。Mistral 的相应层也有工作身份缺口。本批新增原生作业为零。[Qwen 逐角色查询](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp4-single_device/role-cost-coverage.json) · [Qwen 设备取证](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp4-single_device/local-interval-identity.json) · [Mistral 逐角色查询](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp4-single_device/role-cost-coverage.json)
+
+**结论与限制：** 一部分跨来源缺项来自成本身份的粒度。后续修复应以能独立证明的局部服务及其参数、资源定义成本身份，并保留主机提交、通信与不同物理角色的测量条件。本次取证仍限于训练数据，独立结果另行统计。
+
+## 2026-11-22 — 第 07 轮：逐设备工作成本合同候选
+
+**范围：** 将具有一致原生证据的设备服务从父图身份中提取出来。使用两个 Qwen TP4 既有来源及 Mistral TP4 已采的 rank 2 定向记录。
+
+**改动：** 在隔离工作树中，平台依据已有 SDK 记录提供各工作区间的有序设备操作，C++ 粗图、模板实例化和成本查询传递同一信息。归一化只用结构，共享定义只在各次观测一致时发布该区间的程序。`WorkContracts` 用单个区间的操作、资源和作用域操作数规则生成成本身份，已测 rank、实现域及实际特征仍参与求值。定向采样复用粗图区间的设备顺序，省去重复解析 SDK 文件。[候选改动](../../../data/architecture-acquisition-performance/rounds/07/development/work-service-contract/candidate.patch)
+
+**验证：** Docker C++23 构建成功。Qwen TP4 的单卡和四卡 rank 0 重建后，粗图和结构模板逐项一致。仅用单卡设备样本，四卡训练图可求值 11,982/12,000 段，原先受父模板差异影响的 3,920 段全部恢复。Mistral rank 2 已实测的两个特征点重新通过采样资格、拟合与 C++ 查询，回传时长与原记录相同。本批新增原生启动为零。[粗图和模板](../../../data/architecture-acquisition-performance/rounds/07/development/work-service-contract/assessment.json) · [逐区间查询](../../../data/architecture-acquisition-performance/rounds/07/development/work-service-contract/per-interval/assessment.json) · [定向采样](../../../data/architecture-acquisition-performance/rounds/07/development/work-service-contract/attention/assessment.json)
+
+**结论与限制：** 余下 18 段属于两个结构位置，原生设备程序在同一位置出现了变化，保留未覆盖。候选证据来自训练数据并限定到已核对角色。第 07 轮使用既有资产准备独立对照。Qwen、Mistral 单卡 TP8 均完成三次成本启动，分别计费 559.03、523.57 秒，已覆盖各自的训练需求。[残余差异](../../../data/architecture-acquisition-performance/rounds/07/development/work-service-contract/per-interval/residual.json) · [Qwen 成本账目](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp8-single_device/costs/status.json) · [Mistral 成本账目](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp8-single_device/costs/status.json)
+
+## 2026-11-22 — 第 07 轮八卡训练与第 08 轮主机交接审查
+
+**范围：** 验证完整八卡的成本训练覆盖。用既有 Mistral PP3 实测记录检查固定图的 CPU 通信端点。
+
+**改动：** Qwen、Mistral 完整八卡来源各完成十次计时启动，原生计费分别为 479.09、469.29 秒。隔离候选由 CPU 协议证据统一交接已核对的提交、等待和原始时刻，真实时间输入及其消费检查共用该证据，移除了两个重复读表入口。联合校时保留协议端点的原始 RAW 时间。[Qwen 八卡账目](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp8-full/costs/status.json) · [Mistral 八卡账目](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp8-full/costs/status.json) · [主机协议候选](../../../data/architecture-acquisition-performance/rounds/08/development/legacy-pp-recheck/cpu-protocol-contract.json)
+
+**验证：** 八套成本资产均覆盖各自的训练需求。PP3 原报告中的 676 个外部协议端点均有原始时间。正式运行的 216 个本地调用落在 80 条原有主机顺序边内，每个调用均有线程占用记录，36 个调用观察到唯一内核唤醒。核对了原条件输入中的 216 个调用及 56 个通信完成窗口，用原始端点重新验证同次运行的校时和因果约束。PP3 候选采集镜像已按正式打包段重建，与候选控制镜像共用同一份请求分组代码，两份镜像均通过无设备检查。[候选镜像](../../../data/architecture-acquisition-performance/rounds/08/preflight/candidate-images.json) · [主机边与线程占用](../../../data/architecture-acquisition-performance/rounds/08/development/legacy-pp-recheck/cpu-protocol-evidence.json) · [联合校时](../../../data/architecture-acquisition-performance/rounds/08/development/legacy-pp-recheck/cpu-protocol-clock.json)
+
+**结论与限制：** 旧固定图把协议调用落入的主机时间整段当作顺序边上的外围活动，未单独回放协议工作与消息等待。后续在这些已定位的主机边内切分服务和等待，保留通信完成窗口的取证限制。旧 PP3 资源记录缺当前采集合同的字段，回归以协议组件为范围。第 07 轮已按预登记封存 785 份资产和四个新物理目标，独立执行中。[冻结记录](../../../data/architecture-acquisition-performance/rounds/07/independent/freeze.json)
+
+## 2026-11-22 — 第 07 轮独立采集的模型挂载恢复
+
+**范围：** 四个留出物理目标、两种来源及八份原生参考。首次执行在父级协调容器中找不到模型目录，详细与轻量阶段的原生启动数为零。
+
+**改动：** 给协调容器提供模型和运行时目录的只读挂载。第二次执行使用原封存的输入、资产、源码和镜像，分别保留两次执行记录，复用在首次执行中已启动的来源证据核验。[首次详细阶段](../../../data/architecture-acquisition-performance/rounds/07/independent/results/round-07/detailed.json) · [恢复记录](../../../data/architecture-acquisition-performance/rounds/07/independent-recovery/launcher-receipt.json)
+
+**验证：** 在与正式矩阵相同的容器装配上确认所需路径可解析，并通过封存完整性复核。Qwen TP4 的首个详细参考已实际启动。[原生采集账目](../../../data/architecture-acquisition-performance/rounds/07/independent-recovery/physical/qwen-tp4/detailed/execution.json)
+
+**结论与限制：** 输入抽样及训练资产保持原登记内容。实际参考和三路评价正在取集，待终态后判断第 07 轮主判据。
+
+## 2026-11-22 — 第 08 轮固定图主机切分与设备信号回放
+
+**范围：** 使用已归档的 Mistral PP3 真实图与已揭盲的 Qwen TP2 参考，在隔离分支检查主机协议服务、驱动提交和设备信号的交接。
+
+**改动：** 主机在原有顺序边内按原生调用的起止点切分，单独计入线程实测占用，保留跨 rank 就绪和实际唤醒。固定图与正式预测共同使用已注册的 CPU 工作成本。设备记录和等待由同一规则处理：保留实际驱动提交、命令进入和完成三个边界，避免内部起点因提交边指向完成点而提前。[候选和构建依据](../../../data/architecture-acquisition-performance/rounds/08/development/host-protocol-replay/assessment.json) · [首处设备分歧](../../../data/architecture-acquisition-performance/rounds/08/development/host-protocol-replay/first-device-boundary.json)
+
+**验证：** Docker C++23 构建成功。Mistral PP3 用原采集合同读取旧资源字段，与 216 个 CPU 协议调用逐段对照，成本全部可求值。修复设备信号释放后，36 个偏早端点全部消除，15,004 个端点和三个 token 发布一致。邻近 Qwen TP2 的 190,516 个端点和 46 个 token 与之前的实测回放一致。本批新增加速器启动为零。[Mistral PP3](../../../data/architecture-acquisition-performance/rounds/08/development/host-protocol-replay/mistral-pp3/result.json) · [Qwen TP2](../../../data/architecture-acquisition-performance/rounds/08/development/host-protocol-replay/qwen-tp2/result.json)
+
+**结论与限制：** Mistral 的固定图可以在保留实测唤醒和消息因果条件时单独替换本地 CPU 占用；58 条消息的传输完成只具备时间上下界，整图的预测成本验收仍缺同次传输就绪证据。在同一采集镜像中，以真实双进程 Gloo 传输确认发送与接收回调可单独观测，二者相差约 233 微秒，均早于主动延迟的等待调用约 150 毫秒。该证据来自单次 CPU 探针，正式采集尚未接入。Qwen TP2 保留四成员 Decode 分配的成本缺口。[Gloo 端点取证](../../../data/architecture-acquisition-performance/rounds/08/development/host-protocol-replay/gloo-readiness/assessment.json)
+
+## 2026-11-22 — 第 07 轮参考收齐与第 08 轮 PP3 实测就绪
+
+**范围**　按原冻结口径收齐 Qwen、Mistral 的 TP4 与 TP8 参考。在隔离工作树验证 PP3 每条消息两端的就绪取证。
+
+**改动**　PyTorch 运行时适配层按原生缓冲区认领 CPU 通信调用，分别记录发送和接收的 Gloo 提交、回调区间和 `Work.wait()` 的实际返回。详细参考启用该观测。验证读取同次原生配对标识并核对两端的时钟证据。[候选和镜像](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/candidate.json)
+
+**验证**　第 07 轮四份详细参考、四份轻量参考和四张目标图均已发布。两种来源的八项自主预测均结束于成本缺口。第 08 轮先在真实双进程验证三条 Gloo 消息的六个端点，再启动一次 Mistral 三卡 PP3 开发采集，原生计费 199.80 秒。服务流程中 408 条消息均能配对并取得两端就绪区间，其中 365 条发送先就绪，10 条接收先就绪，33 条区间重叠。[第 07 轮自主预测](../../../data/architecture-acquisition-performance/rounds/07/independent-recovery/results/round-07/autonomous.json) · [双进程验证](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/assessment.json) · [PP3 实测](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/mistral-pp3/transport-evidence.json)
+
+**结论与限制**　第 07 轮仍在做结构及固定图评价。PP3 已取得发送和接收各自的可用时间证据，后续需在执行模型中分别约束两个端点。这次 PP3 使用已登记的开发请求，留出对照待完成。
+
+## 2026-11-22 — 第 08 轮固定图分别回放发送与接收
+
+**范围**　复用同一次 Mistral 三卡 PP3 开发采集，对照十个请求的主机消费、就绪和 token 发布。
+
+**改动**　固定图在原生 Gloo 提交时切分对应的主机工作，发送与接收分别从两端实际提交推进到自己的就绪边界。与回调属于同一线程、且时间落在回调区间内的内核唤醒，链接到对应就绪边界。起点前的传输只提供初态条件。入口空闲判断统一查实际请求进度，保留流水槽位的结构信息。[候选改动](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/fixed-readiness-candidate.json)
+
+**验证**　沿用已构建的 C++ 回放器。87,509 个具备时间证据的原图端点、806 个传输端点和 34 个 token 发布均匹配。保留两个初始传输条件，绑定 273 次线程唤醒及三次空闲入口到达。36 个原图端点缺少时间窗口，仍保留缺测。单次开发记录提供 34 个方向、角色和负载组合的成本特征点，其中 14 个只有一份观察。本批新增原生启动为零。[实测回放](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/mistral-pp3/fixed-readiness-confirmation/assessment.json) · [特征覆盖](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/mistral-pp3/readiness-feature-coverage.json)
+
+**结论与限制**　目前验证的是固定图使用真实服务时间回放。实时控制、按需采样和成本模型仍需共用双端就绪合同，再做 Qwen、Mistral 的留出对照。第 07 轮的冻结代码及资产沿原流程评价。
+
+## 2026-11-22 — 第 08 轮接通双端就绪的预测与采样
+
+**范围**　用 Mistral PP3 已有开发记录核对原生控制、粗图回放和成本查询，另在同拓扑的 Qwen PP3 取得实际主机样本。
+
+**改动**　原生提交成为明确定义的端口，提交前后分别计入本地 CPU 工作。执行器在两端提交时安排各自的就绪事件，后续本地等待只依赖本端事件。成本注册按实际角色及方向绑定。采样直接读取本次运行的 Gloo 回调与线程占用，删除另启两进程的 Gloo 微基准。[候选改动及镜像](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/dual-readiness-candidate.json)
+
+**验证**　C++23 构建通过。Mistral 的 3,395 个动作及 812 个就绪端点在同源控制回放中匹配。固定图另匹配 88,317 个图边界与全部 34 次 token 发布。用同次实测 812 段传输，拟合后经 C++ 查询命中 36 个特征点。Qwen 一次主机采样计费 208.82 秒，三 rank 共得到 2,760 段主机占用与 924 段传输就绪。另登记同镜像、同输入的一次详细采集，用于正式来源和样本装配。[固定图](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/mistral-pp3/dual-fixed-reference/assessment.json) · [成本查询](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/mistral-pp3/dual-transport-models/assessment.json) · [Qwen 采样](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/qwen-pp3-host-cost/assessment.json)
+
+**结论与限制**　本轮结果是开发证据。Mistral 仍有 36 个仅有顺序依据的图边界，独立精度及单卡来源需用新留出输入评估。第 07 轮继续按原冻结资产运行。
+
+## 2026-11-23 — 第 07 轮留出图的角色复用与固定图唤醒
+
+**范围**　复核 Qwen、Mistral 的 TP4、TP8 四份冻结留出图，定位固定图首个跨 rank 唤醒分歧。
+
+**改动**　角色核对使用留出图的归一化定义、attention 张量端口和归约操作数。隔离候选用同次实测的内核线程身份，将跨 rank 唤醒接到生产线程对应的 CPU 区间，保留唤醒至恢复的等待耗时。原冻结结果保留。[候选补丁](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/readiness-cohort-wake-candidate.json)
+
+**验证**　四个完整来源的结构分别匹配 4,062、7,966、4,098、8,000 个动作，四个单卡来源均测到提交线程布局差异。事后核对原生图，四个配置各用 rank 1 覆盖其他同等角色，16 个角色实例均匹配各自的 52 个定义、共 10,880 个 attention 张量端口实例和 22,400 个归约参与者及操作数实例。Qwen TP8 首处分歧的原生记录明确由 rank 1 唤醒 rank 7。[结构对照](../../../data/architecture-acquisition-performance/rounds/07/independent-recovery/results/round-07/comparisons.json) · [角色核对](../../../data/architecture-acquisition-performance/rounds/07/analysis/held-out-role-layouts.json) · [固定图证据](../../../data/architecture-acquisition-performance/rounds/07/independent-recovery/results/round-07/fixed/qwen-tp8-rank-reuse-full/result.json)
+
+**结论与限制**　代表角色的局部结构和张量绑定得到支持。单卡整图仍缺实机提交线程的结构证据。最后一项固定图评价及跨 rank 唤醒的离线开发回归仍在运行，本批没有新增原生启动。
+
+## 2026-11-23 — 第 08 轮 Qwen PP3 的消息成本与默认入口
+
+**范围**　用 Qwen PP3 同镜像三卡记录装配主机及设备成本，核对正式预测发现的传输载荷缺项。
+
+**改动**　采样适配器对已观测的主机协议服务，在原训练人为拆分了同到请求且目标坐标缺失时，提出一次默认入口组批的主机观测。沿用同一工作身份、拟合与求值入口。
+
+**验证**　详细来源启动一次、计费 216.61 秒，三段流水线均建库，正式拟合覆盖原记录的 154 个主机协议特征点。自主预测首次产生的 4,044 字节消息来自按默认入口合并的六个同到请求。一次主机采样计费 191.14 秒，实测取得同样大小的消息，补齐后 C++ 查询和自主预测均越过该点。含此前主机取证，Qwen 本批关联的三次原生合计计费 616.58 秒。[原成本装配](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/qwen-pp3-host-cost/detailed/assembled-costs/assessment.json) · [按需计划](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/qwen-pp3-host-cost/canonical-cohorts/planning-evidence.json) · [补齐证据](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/qwen-pp3-host-cost/canonical-cohorts/fit/assessment.json)
+
+**结论与限制**　下一缺口是四成员、35 token 的 Prefill 准备，主机记录已观察到同形调用，成本仍待与详细图工作区间相配。Mistral 两个单卡来源按已登记范围取证中。两模型的独立 PP3 验收待完成。[单卡取证范围](../../../data/architecture-acquisition-performance/rounds/08/development/mistral-pp3-single-device/scope.json)
+
+## 2026-11-23 — 第 07 轮留出结论与第二个验证里程碑交付
+
+**范围**　以 `84ef7f6` 为起点审查第 05–07 轮交付，核对发布、预算恢复、代表采样、成本与验证的调用边界。
+
+**改动**　SGLang 适配维护批次条件及实际张量切口，Ascend 适配核对通信操作数和时钟，C++ 共用成本查询规则。阶段审查发现批量导出曾把重校时移入协调进程，超时须等计算返回。恢复由既有额度机制终止导出进程，同时让同次物理观察的缺失 rank 共用校时，并逐份原子发布。第 07 轮冻结源码在 `fd56809` 可复现，收尾改动单独提交。
+
+**验证**　八次独立原生启动合计 1,624.65 秒，四个新物理目标共 64 个请求。24 项评价收齐，运行终点核对 1,077 份冻结文件无变化，冻结提交另复核全部 276 个源码及实现文件。代码沿生产者、消费者及恢复路径检查，28 个业务源文件净增 248 行，示例未改。核对当前二进制与冻结摘要，24 个 Python 文件通过 3.10 语法和静态错误检查。公开采集入口用两份既有 Qwen TP4 训练来源完成两次离线批量导出，共发布 8 份样本文件、5,432 行样本，后处理 76.51 秒，新增原生启动为零。窗口文档和证据链接已核对，保留原挂载失败及冻结对照。[冻结三路结果](../../../data/architecture-acquisition-performance/rounds/07/independent-recovery/case-evidence.json) · [采样回归](../../../data/architecture-acquisition-performance/rounds/07/handoff/bounded-sampling/status.json)
+
+**结论与限制**　里程碑主判据有独立证据。单卡角色复用覆盖已核对的本地结构和张量端口，严格整图最早在首个 Prefill 的实际提交线程分歧。六项固定图出现基线差异，八项自主预测均遇成本缺口，两条性能路径各有计划 128 个请求、可评分零个。Qwen TP8 的开发返修把首个跨 rank 唤醒还原到实测时刻，27 个提前边界剩 13 个，保留原独立判定。第 08 轮继续在 PP3 核对独立提交、双端就绪和 stage 交接。[唤醒回归](../../../data/architecture-acquisition-performance/rounds/07/analysis/cross-rank-wake-replay/assessment.json)
+
+## 2026-11-23 — 第 08 轮发布 Mistral PP3 的单卡来源
+
+**范围**　使用预登记的两份互补输入，在物理卡 4 上顺序观察 PP3 三个 stage。
+
+**改动**　使用记录有 Gloo 双端就绪的候选镜像，通过正式采集及模板构造入口发布来源。
+
+**验证**　两次原生执行合计计费 436.78 秒。两份产物均发布 rank 0、1、2 的模板，原生记录分别列出三个独立观测窗口。[单卡发布结果](../../../data/architecture-acquisition-performance/rounds/08/development/mistral-pp3-single-device/collection/result.json) · [用时与产物](../../../data/architecture-acquisition-performance/rounds/08/development/mistral-pp3-single-device/collection/status.json)
+
+**结论与限制**　两个来源属于开发训练。各 stage 的目标交接、物理跨卡耗时资产及两种模式的独立比较仍待核对。

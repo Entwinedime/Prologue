@@ -1,12 +1,30 @@
 # 窗口状态
 
-截至 2026-11-22，**当前窗口已交付 43/57 项（75.4%）**。前六阶段 39/39，第 01–17 轮已交付 4/17，第 18 轮最终验收待启动。按交付项等权计数，各项工时不同。第一个验证里程碑已完成，第 05 轮开始三模型同配置对照。
+截至 2026-11-23，**当前窗口已交付 46/57 项（80.7%）**。前六阶段 39/39，第 01–17 轮已交付 7/17，第 18 轮最终验收待启动。按交付项等权计数，各项工时不同。第二个验证里程碑以第 07 轮收口，目前进行第 08 轮。
 
 第 02 轮以 Qwen3-8B TP1 独立对照 31 与 32 个 token 的页边界。在两个目标、两种来源的四组对照中，全部匹配 283/283 个动作、返回值、资源效果及所查依赖。两份详细参考用实测耗时复现 38,866 个端点和 16 次 token 发布，四份物理参考均无首次加载。三路 12 项评价已收齐。两条性能路径仍缺三请求 Prefill 的批次准备成本，本轮验收依据执行结构。[独立确认](../../../data/architecture-acquisition-performance/rounds/02/confirmation/assessment.json) · [首次独立结果](../../../data/architecture-acquisition-performance/rounds/02/independent/assessment.json)
 
 第 03 轮在原训练样本上为两套来源分别选出 7 个和 6 个 attention 模型绑定。两个新目标均通过结构对照。44 个 token 的目标中，两种来源均可求值 288 段未见过该特征组合的 Decode attention 和一次 184 字节的 KV 释放读回。100 个 token 的目标中，实际测得的 288 段 Decode attention 和 408 字节的释放读回被明确记为超出训练范围。整图与自主耗时仍缺其他工作成本。[独立对照](../../../data/architecture-acquisition-performance/rounds/03/independent/assessment.json) · [开发回归](../../../data/architecture-acquisition-performance/rounds/03/development/assessment.json)
 
 第 04 轮的两组新到达间隔，各用两套来源完成结构和自主预测。930 毫秒案例的首个分歧发生在第二个批次。详细运行尚未结束第一个 Prefill，预测已结束该 Prefill 并选择 Decode；注入同次原生时间后，两套来源各匹配 148 个动作。2,750 毫秒案例的原生和自主预测均形成四个相同批次，固定图也可评分。两种来源的四项自主预测均取得独立轻量评分。[逐项结果](../../../data/architecture-acquisition-performance/rounds/04/independent/assessment.json)
+
+第 05 轮在同一 TP1 配置下对 Qwen3-8B、Mistral-7B、Llama-3.1-8B 各留出 16 个请求。六项实测时间注入均匹配全部动作、必要依赖和 49 个输出 token。Qwen 两套各匹配 1,340 个动作，另两种模型各匹配 1,370 个。Mistral 和 Llama 的四项自主预测均可评分，TTFT MAPE 为 2.06%–5.80%，TPOT MAPE 为 2.71%–5.53%。Qwen 的自主预测缺单成员 strided Decode 成本。Llama 固定图的主要差异定位到详细参考中的主机服务，恢复该类实测后两项误差均低于 0.34%。[独立结论](../../../data/architecture-acquisition-performance/rounds/05/independent/assessment.json) · [性能归因](../../../data/architecture-acquisition-performance/rounds/05/independent/performance-attribution.json)
+
+第 05 轮页号回拷返修已合入工作树。Mistral 单卡一次定向会话取得 4 和 8 字节各七个 SDK 样本，统一按实际归还页数求值。[回拷返修](../../../data/architecture-acquisition-performance/rounds/05/repair/release-copy/assessment.json)
+
+第 06 轮完成 12 项评价，交付单卡 TP2 本地结构及对端依赖的适用范围。Qwen、Mistral 双卡严格匹配 1,934、1,954 个动作。单卡分别核对 2,072、1,848 次通信调用及 1,008、896 次 attention 调用的张量端口，严格布局仍存在真实 HCCL 提交线程差异。四项固定图均通过实测回算。四项自主预测均停在四成员 Decode 的新页分配，训练中同一分支只见一、二成员，目标成本待补齐。[独立结论](../../../data/architecture-acquisition-performance/rounds/06/independent/assessment.json) · [分配分支与批次宽度](../../../data/architecture-acquisition-performance/rounds/06/analysis/decode-allocation-coverage.json)
+
+第 07 轮八套来源均已建库并完成给定耗时的开发展开。两种来源的 Qwen、Mistral TP8 分别核对了 33,152、29,568 条必要对端依赖。两模型在单卡上均只详细观察 rank 0、1，八卡实测中 rank 2–7 与 rank 1 各有 55 个相同模板定义。本地设备计时仍有角色差异。[Qwen 通信依赖](../../../data/architecture-acquisition-performance/rounds/07/development/qwen-tp8-role-protocol.json) · [Mistral 通信依赖](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp8-role-protocol.json) · [Mistral 八卡角色](../../../data/architecture-acquisition-performance/rounds/07/development/mistral-tp8-full/role-structure-and-device-time.json)
+
+第 07 轮四个留出目标共八项结构对照收齐。Qwen TP4、TP8 和 Mistral TP4、TP8 的完整来源分别匹配 4,062、7,966、4,098、8,000 个动作。对应的四项单卡整图在实机独立提交线程和控制线程工作布局上出现差异。两模型各宽度的单卡采集实际只观察 rank 0、1。逐一核对留出实机图，rank 2 起的 16 个角色实例均与各自的 rank 1 匹配 52 个归一化定义、attention 张量端口及归约参与者与操作数。[留出冻结](../../../data/architecture-acquisition-performance/rounds/07/independent/freeze.json) · [结构对照](../../../data/architecture-acquisition-performance/rounds/07/independent-recovery/results/round-07/comparisons.json) · [角色复用核对](../../../data/architecture-acquisition-performance/rounds/07/analysis/held-out-role-layouts.json)
+
+第 07 轮 24 项留出评价均有终态。Qwen TP4 的两项固定图实测回算匹配，替换预测成本时出现缺口。其余六项固定图出现实测回算差异。八项自主预测均遇成本缺口，完整来源首先缺四成员、187 token 的 Prefill 准备，单卡来源首先缺 `perf_counter` 主机成本。两条性能路径各计划评分 128 个请求，实际均为零。Qwen TP8 的离线开发候选接入跨 rank 唤醒后，首个提前端点恢复到实测时刻，总差异从 27 个减至 13 个。[留出结论](../../../data/architecture-acquisition-performance/rounds/07/independent-recovery/case-evidence.json) · [唤醒回归](../../../data/architecture-acquisition-performance/rounds/07/analysis/cross-rank-wake-replay/assessment.json) · [冻结源码提交](../../../data/architecture-acquisition-performance/rounds/07/handoff/frozen-commit.json)
+
+成本分层候选在隔离工作树通过离线回归。仅用 Qwen TP4 单卡 rank 0 的设备样本，即可求值四卡训练图上该角色的 11,982/12,000 段设备工作，包含原先因父模板差异丢失的 3,920 段。剩余 18 段对应的结构位置观测到了多种设备序列，尚无唯一的工作身份。粗图结构、模板归一化与 Mistral rank 2 的定向观测均完成针对性回归。[逐工作成本查询](../../../data/architecture-acquisition-performance/rounds/07/development/work-service-contract/per-interval/assessment.json) · [残余差异](../../../data/architecture-acquisition-performance/rounds/07/development/work-service-contract/per-interval/residual.json) · [定向采样回放](../../../data/architecture-acquisition-performance/rounds/07/development/work-service-contract/attention/assessment.json)
+
+第 08 轮在隔离工作树使用同一套 Gloo 提交与双端就绪边界做采样、成本绑定、原生控制和固定图回放。Mistral-7B 三卡 PP3 的同源开发回放匹配 3,395 个动作、808 个提交端口和 812 个就绪端点，固定图匹配 88,317 个有证据的图边界及 34 次 token 发布。Mistral 单卡已发布两套来源，每套顺序观察三个 stage。[Mistral 控制回放](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/mistral-pp3/dual-structure-self-replay/assessment.json) · [单卡来源](../../../data/architecture-acquisition-performance/rounds/08/development/mistral-pp3-single-device/collection/result.json)
+
+Qwen3-8B 三卡 PP3 的详细来源已发布，正式成本装配覆盖训练图中的全部 154 个主机协议特征点。按默认入口合并同到请求补取一次主机样本后，自主预测已通过 4,044 字节的消息提交点。下一缺口为四成员、35 token 的 Prefill 准备，主机观测已出现该调用，尚缺可与详细图对应的工作区间。两模型的 PP3 留出对照待完成。[候选改动](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/readiness-cohort-wake-candidate.json) · [训练成本装配](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/qwen-pp3-host-cost/detailed/assembled-costs/assessment.json) · [默认入口补采](../../../data/architecture-acquisition-performance/rounds/08/development/gloo-observation/qwen-pp3-host-cost/canonical-cohorts/fit/assessment.json)
 
 第 01 轮在 Qwen3-8B TP1 新单请求及错峰六请求上取得 4 份稳态物理参考。填回同次详细采集的实测服务耗时后，固定图重现 51,653 个可核对端点和 22 次 token 发布。两种来源共用这两个物理目标。三条路径的 12 项评价全部有终态，替换为预测成本及自主闭环均未取得合格的请求误差。[第 01 轮逐项结果](../../../data/architecture-acquisition-performance/rounds/01/result.json)
 

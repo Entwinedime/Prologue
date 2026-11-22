@@ -71,7 +71,7 @@ python3 example/coarse_graph/run.py \
 
 ### 给单卡任务提供物理通信样本
 
-在独立的完整拓扑训练来源上，对每个实际观察的 rank 运行一次 `cost-samples --transport-only`。`--production` 指向保留中间事实的单项生产目录，`--work-identities` 指向同一粗图经 `prologue work-identities` 生成的工作身份。导出只用已有记录，文件包含实测服务、HCCL 算法及元素数、参与者、设备放置和软件来源。
+在独立的完整拓扑训练来源上，用 `cost-samples --transport-only` 导出实际观察的 rank。`--production` 指向保留中间事实的单项生产目录，`--work-identities` 指向同一粗图经 `prologue work-identities` 生成的工作身份。将 `--rank`、`--work-identities`、`--output` 按相同顺序重复传入，可在一个进程中导出多个 rank 并共享同次校时。文件包含实测服务、HCCL 算法及元素数、参与者、设备放置和软件来源。原先按具体形状索引的文件从留存记录重新导出即可进入载荷范围拟合。
 
 ```bash
 python3 -m prologue.app cost-samples --transport-only \
@@ -157,6 +157,8 @@ PYTHONPATH=src python3 -m prologue.app capture \
 
 采集任务的 `submission_groups` 包含一组或多组请求 ID，每个请求恰好出现一次。省略时整个 workload 共用一组。规划器生成分组，各组内按 arrival_ns 提交。上一组请求全部返回、worker 空闲且各实例到达屏障后，下一组取得共同的 RAW 起点。组间沿用同一 Engine 的批次与资源状态。`request-delivery.json` 按运行阶段记录起点、所属组、组内 arrival_ns、相对全局起点的 scheduled_ns 和实际 submitted_ns，可区分串行探针与目标并发请求。
 
+SGLang 的普通分页服务可以在同一次主采集中加短请求组，取得 Decode 申请新页的样本。性能来源按同一提交组内的到达、批次和页容量选取并发宽度，建库按原生观测检查每个计划宽度上的新页申请。这项联合条件保留在建库收据中，所得样本仍按具体工作定义及实际特征拟合。
+
 完整模式按各实例 TP×PP 之和确定物理卡数，从升序声明的 `physical_devices` 中依次取卡。原生逻辑设备 0、1……依次对应这些卡。代表 worker 复用可以减少观测和导出，原生并行组仍在实际设备上运行。[Ascend 可见设备顺序](https://www.hiascend.com/doc_center/source/zh/canncommercial/850/maintenref/envvar/envref_07_0028.html)
 
 单卡部署示例为 `{"acquisition_mode": "single_device", "physical_devices": [4]}`。Ascend runtime 将选定物理卡挂入非特权容器，原生 worker 使用容器内的设备 0。公开的 `capture` 和 `produce` 已在 TP1、TP2、TP8、PP3、TP2 × PP3、TP4 × EP4 和 Prefill TP1 / Decode TP2 上生成角色模板。各分片实际执行原生计算并交换张量。单卡单实例的本地进程组使用容器独立网络，PD 使用主机网络连接外部存储。单卡 `explore` 按原生模块布局和职责选择详细采集的代表，完整模式可同时观察参与通信的物理卡。
@@ -176,6 +178,8 @@ PD 还需声明可达的 `store_url`，可选 `transfer_protocol` 接受 `sdma` 
 固定图开发与独立取证使用 `capture --service-reference`，在所有原生 worker 的详细图窗口内记录资源、线程切换及预热后加载的 Triton 特化。Ascend 详采从只读的宿主进程视图查询本 worker 的线程身份，在各 CPU 上按被唤醒线程过滤内核事件。采集使用同一 RAW 时钟记录这些唤醒的时间、发起线程和中断上下文。
 
 用 `produce --product graphs --keep-intermediates` 把同次主机活动绑定到粗图的工作切口。固定图以实际占用 CPU 的可计服务为准，排除已记录的观察器活动、设备同步等待和同步搬运，设备提交线程上的工作按实际队列执行区间核算。线程切出及恢复记录用于定位阻塞区间。通知读取可一次取出多个写入值，验证器先核对同一描述符的读写总量，再用实际唤醒确认释放方。[Linux eventfd(2)](https://man7.org/linux/man-pages/man2/eventfd.2.html)
+
+同一条 CPU 顺序边可以含多次等待。固定图按实际阻塞位置挂接请求到达后的唤醒、空轮询的实测等待和其他已匹配的线程唤醒，分别保留各自的依赖和恢复时刻。只有请求提交落在已核对的空闲等待范围内，才绑定该次输入的恢复边界。
 
 验证器将图内已核对的唤醒连到发起方的工作进度。已测得的图外唤醒作为重放条件，确认来自其他 rank 却尚未关联图内工作进度的唤醒保留为证据缺口。无设备提交的逻辑等待经原生 API、实际提交和记录信号核对，可在返回边界交接结果。重放沿原依赖推进，实际工作和物理事件继续使用各自的实测端点。
 
