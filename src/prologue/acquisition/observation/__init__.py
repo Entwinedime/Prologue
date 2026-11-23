@@ -1,1 +1,0 @@
-"""Framework-independent observation lifecycle."""

@@ -1,8 +1,10 @@
 .git
+**/.git
 .env
 .env.*
 deprecated
 reference
+docs
 build
 cmake-build-*
 .cache

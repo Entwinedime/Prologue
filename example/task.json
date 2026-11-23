@@ -1,0 +1,40 @@
+{
+  "model": {
+    "path": "/models/Qwen3-8B",
+    "dtype": "bfloat16",
+    "load_format": "dummy"
+  },
+  "configurations": [
+    {
+      "id": "tp1-page16",
+      "tp": 1,
+      "attention_backend": "ascend",
+      "page_size": 16,
+      "max_running_requests": 4,
+      "max_total_tokens": 4096,
+      "max_prefill_tokens": 256
+    },
+    {
+      "id": "tp1-small-pool",
+      "tp": 1,
+      "attention_backend": "ascend",
+      "page_size": 16,
+      "max_running_requests": 4,
+      "max_total_tokens": 2048,
+      "max_prefill_tokens": 256
+    }
+  ],
+  "workloads": [
+    {
+      "id": "short",
+      "requests": [{"id": "first", "arrival_ns": 0, "prompt_tokens": 8, "output_tokens": 3}]
+    },
+    {
+      "id": "staggered",
+      "requests": [
+        {"id": "later", "arrival_ns": 50000000, "prompt_tokens": 16, "output_tokens": 2},
+        {"id": "earlier", "arrival_ns": 0, "prompt_tokens": 17, "output_tokens": 4}
+      ]
+    }
+  ]
+}
