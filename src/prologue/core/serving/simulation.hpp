@@ -70,6 +70,7 @@ private:
     nlohmann::json actions_ = nlohmann::json::array();
     nlohmann::json current_;
     std::optional<ActionTiming> timing_;
+    Nanoseconds work_ready_ns_ = 0;
 };
 
 }

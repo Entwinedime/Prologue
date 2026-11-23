@@ -29,16 +29,21 @@ ActionTiming CostTiming::for_action(const nlohmann::json& action, const nlohmann
         timing.publications.emplace(request, BoundaryTime{0, host.at("publications_ns").at(index)});
     }
 
-    Nanoseconds submitted = 0;
+    const auto parallel = graph.contains("collectives");
+    const auto rank_count = parallel ? graph.at("calls").front().at("parameters").at("ranks").size() : 1;
+    std::vector<Nanoseconds> rank_submissions(rank_count, 0);
     for (std::size_t index = 0; index < queries.device.size(); ++index) {
         const auto& estimate = estimates.at(index + 1);
         const auto& work = graph.at("work").at(index);
+        const auto rank = parallel ? work.at("path").front().get<std::size_t>() : 0;
+        auto& submitted = rank_submissions.at(rank);
         const auto submission_ns = estimate.at("submission_ns").get<Nanoseconds>();
         if (submission_ns < 0 || submission_ns > std::numeric_limits<Nanoseconds>::max() - submitted) {
             throw std::invalid_argument("invalid driver submission duration");
         }
         submitted += submission_ns;
-        timing.work.push_back({work.at("lane"), submitted, estimate.at("dispatch_ns"), estimate.at("duration_ns")});
+        timing.work.push_back({work.at("lane"), submitted, estimate.at("dispatch_ns"), estimate.at("duration_ns"),
+                               work.value("after", std::vector<std::size_t>{})});
     }
     return timing;
 }

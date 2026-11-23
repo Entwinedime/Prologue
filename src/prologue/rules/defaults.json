@@ -2,7 +2,8 @@
   "templates": {"selector": "exact_query", "shared_operations": []},
   "performance": {
     "device_task": {"estimator": "exact_median"},
-    "host_thread": {"estimator": "exact_median"}
+    "host_thread": {"estimator": "exact_median"},
+    "collective": {"estimator": "exact_median"}
   },
   "acquisition": {
     "template_source": {"mode": "detailed"},
@@ -10,6 +11,7 @@
     "pd_page_table_assembly": {"mode": "boundary"},
     "device_task": {"mode": "detailed"},
     "device_attention": {"mode": "decode-attention"},
-    "host_thread": {"mode": "host-timing"}
+    "host_thread": {"mode": "host-timing"},
+    "collective": {"mode": "detailed"}
   }
 }

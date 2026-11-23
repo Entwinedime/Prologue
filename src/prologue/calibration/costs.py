@@ -4,8 +4,9 @@ import json
 from collections import defaultdict
 from statistics import median
 
-from prologue.acquisition.observation.batches import ObservedBatches
-from prologue.integrations.platforms.ascend.evidence import AscendEvidence
+from prologue.acquisition.observation.batches import ObservedBatches, aligned_batches, aligned_collectives
+from prologue.integrations.platforms.ascend.collectives import PhysicalCollectives
+from prologue.integrations.platforms.ascend.evidence import AscendEvidence, AscendRecording
 
 
 class Calibration:
@@ -18,20 +19,76 @@ class Calibration:
         self.sources = []
 
     def device(self, directory):
-        observation = AscendEvidence.open(directory, modes=("detailed", "decode-attention"))
-        family = "device_attention" if observation.manifest["mode"] == "decode-attention" else "device_task"
-        self.record_source(family, observation.manifest)
+        recording = AscendRecording(directory, modes=("detailed", "decode-attention"))
+        family = "device_attention" if recording.mode == "decode-attention" else "device_task"
+        self.record_source(family, recording.mode, recording.delivery)
+        ranks = [None] if recording.windows is None else sorted(recording.profiles)
+        for rank in ranks:
+            profile = directory if rank is None else recording.profile_directory(rank)
+            self.device_profile(recording.read(rank), AscendEvidence.hardware(profile))
+
+    def device_domain(self, domain, hardware):
+        expected = {**domain, "hardware": hardware}
+        if self.domain is not None:
+            actual_hardware = {key: value for key, value in self.domain["hardware"].items() if key != "transport_links"}
+            if {**self.domain, "hardware": actual_hardware} != expected:
+                raise ValueError("device observations are from different cost domains")
+        else:
+            self.domain = expected
+
+    def device_profile(self, observation, hardware):
         evidence = observation.document()
-        domain = {**evidence["domain"], "hardware": observation.hardware(directory)}
-        if self.domain is not None and self.domain != domain:
-            raise ValueError("device observations are from different cost domains")
-        self.domain = domain
+        self.device_domain(evidence["domain"], hardware)
         for batch in ObservedBatches(evidence).entries:
-            self.batches.append({"action": batch.action(), "graph": batch.graph})
+            communication = {scope for scope, _ in batch.collectives()}
+            work, recorded = [], []
+            for node, row in zip(batch.graph["work"], batch.device, strict=True):
+                if row["owner"] not in communication:
+                    work.append(node)
+                    recorded.append(row)
+            self.batches.append({"action": batch.action(), "graph": {**batch.graph, "work": work}})
             samples = []
-            for row in batch.measurements():
+            for row in batch.measurements(recorded):
                 samples.append({key: row[key] for key in ("duration_ns", "dispatch_ns", "submission_ns")})
             self.observations.append((None, samples))
+
+    def collective(self, directory):
+        recording = AscendRecording(directory)
+        physical = PhysicalCollectives(recording)
+        self.device_domain(recording.domain, physical.hardware)
+        links = self.domain["hardware"].setdefault("transport_links", physical.transport_links)
+        if links != physical.transport_links:
+            raise ValueError("the collective samples use a different physical topology")
+
+        measured, unavailable = 0, 0
+        ranks = [ObservedBatches(rank.evidence).entries for rank in physical.ranks]
+        for batches in aligned_batches(ranks):
+            graph = {"calls": [], "work": []}
+            samples = []
+            for entries in aligned_collectives(batches):
+                parameters = entries[0][1]["parameters"]
+                gates = [rank.gates.get(scope) for rank, (scope, _) in zip(physical.ranks, entries, strict=True)]
+                if None in gates:
+                    unavailable += len(entries)
+                    continue
+                ready = max(gate.ready_raw_ns for gate in gates)
+                for rank, ((_, call), gate) in enumerate(zip(entries, gates, strict=True)):
+                    duration = gate.completed_raw_ns - ready
+                    if duration < 0:
+                        raise ValueError("a collective result precedes the common device readiness")
+                    path = [rank, *call["path"]]
+                    graph["calls"].append({**call, "path": path})
+                    graph["work"].append({"path": path, "slot": 0, "ordinal": 0, "collective": True,
+                                          "kind": "collective", "name": parameters["kind"]})
+
+                    # Service starts at device readiness. Host submission is outside this coordinate.
+                    samples.append({"duration_ns": duration, "dispatch_ns": 0, "submission_ns": 0})
+                measured += len(entries)
+            self.batches.append({"action": batches[0].action(), "graph": graph})
+            self.observations.append((None, samples))
+
+        self.record_source("collective", recording.mode, recording.delivery)
+        self.sources[-1].update(measured_results=measured, unattested_results=unavailable)
 
     def host(self, directory):
         manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
@@ -39,7 +96,7 @@ class Calibration:
             raise ValueError("host observations are from a different native configuration")
         if manifest["initial_state"] != {"kv": "empty", "workspace": "warmed"}:
             raise ValueError("host observations require the warmed empty-KV initial state")
-        self.record_source("host_thread", manifest)
+        self.record_source("host_thread", manifest["mode"], manifest["delivery"])
         worker = json.loads((directory / "worker.json").read_text(encoding="utf-8"))
         for row in worker["host_work"]:
             members = row["members"]
@@ -52,10 +109,9 @@ class Calibration:
             }
             self.observations.append((sample, []))
 
-    def record_source(self, family, manifest):
-        self.rules.require_observation(family, manifest["mode"])
-        self.sources.append({"family": family, "mode": manifest["mode"],
-                             "origin_raw_ns": manifest["delivery"]["origin_raw_ns"]})
+    def record_source(self, family, mode, delivery):
+        self.rules.require_observation(family, mode)
+        self.sources.append({"family": family, "mode": mode, "origin_raw_ns": delivery["origin_raw_ns"]})
 
     def fit(self, coordinates):
         wanted = None

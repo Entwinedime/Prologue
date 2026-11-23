@@ -4,6 +4,30 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 
+def action_identity(action):
+    return action["phase"], tuple((row["request"], row["kv_committed_tokens"], row["output_tokens"])
+                                  for row in action["members"])
+
+
+def aligned_batches(ranks):
+    for batches in zip(*ranks, strict=True):
+        key = action_identity(batches[0].action())
+        if any(action_identity(batch.action()) != key for batch in batches[1:]):
+            raise ValueError(f"the physical ranks disagree on native action {key}")
+        yield batches
+
+
+def aligned_collectives(batches):
+    for entries in zip(*(batch.collectives() for batch in batches), strict=True):
+        first = entries[0][1]
+        if first["parameters"]["participants"] != list(range(len(entries))) or any(
+            any(call[name] != first[name] for name in ("parameters", "inputs", "outputs"))
+            for _, call in entries[1:]
+        ):
+            raise ValueError("the observed collective operands disagree across ranks")
+        yield entries
+
+
 @dataclass(slots=True)
 class ObservedBatch:
     call: dict
@@ -11,15 +35,20 @@ class ObservedBatch:
     device: list
     profile_begin_ns: int
     profile_end_ns: int
+    scopes: list
 
     def action(self):
         members = [{**member, "slot": member["slot"] - 1} for member in self.call["members"]]
         return {"phase": self.call["parameters"]["phase"], "members": members}
 
-    def measurements(self):
+    def collectives(self):
+        return [(scope, call) for scope, call in zip(self.scopes, self.graph["calls"], strict=True)
+                if call["operation"] == "collective"]
+
+    def measurements(self, device=None):
         owned = {row["id"] for row in self.device}
         result = []
-        for row in self.device:
+        for row in self.device if device is None else device:
             api = row["api_begin_ns"]
             prior_end = row["previous_device_end_ns"]
             ready = max(api, prior_end) if prior_end is not None else api
@@ -46,6 +75,7 @@ class ObservedBatches:
             owned[row["owner"]].append(row)
 
         calls_by_root = defaultdict(list)
+        scopes_by_root = defaultdict(list)
         work_by_root = defaultdict(list)
         device_by_root = defaultdict(list)
         coordinates = {}
@@ -53,6 +83,7 @@ class ObservedBatches:
             identity = call["id"]
             root, path = parents[identity]
             calls_by_root[root].append(self.call_structure(call, path, children[identity]))
+            scopes_by_root[root].append(identity)
             local = sorted(owned[identity], key=lambda row: (row["slot"], row["lane"]))
             for ordinal, row in enumerate(local):
                 description = {name: row[name] for name in ("slot", "lane", "kind", "name")}
@@ -67,9 +98,10 @@ class ObservedBatches:
             if call["parent"] is None:
                 identity = call["id"]
                 graph = {"calls": calls_by_root[identity], "work": work_by_root[identity]}
-                self.entries.append(ObservedBatch(call, graph, device_by_root[identity],
-                                                  evidence["profile_scope_begins_ns"][identity],
-                                                  evidence["profile_scope_ends_ns"][identity]))
+                self.entries.append(ObservedBatch(
+                    call, graph, device_by_root[identity], evidence["profile_scope_begins_ns"][identity],
+                    evidence["profile_scope_ends_ns"][identity], scopes_by_root[identity],
+                ))
 
     @staticmethod
     def identities(calls):

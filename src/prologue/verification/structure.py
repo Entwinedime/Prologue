@@ -1,53 +1,44 @@
 """Prepare measured time conditions and compare the result to native structure evidence."""
 
-from prologue.acquisition.observation.batches import ObservedBatches
+from prologue.acquisition.observation.batches import ObservedBatches, action_identity
 from prologue.verification.reference import validate_reference
 
 
-class StructureReference:
-    def __init__(self, evidence, publications, manifest):
+class StructureComparison:
+    def __init__(self, domain, publications, manifest):
         self.arrivals = validate_reference(manifest, publications, "detailed")
-        self.domain = evidence["domain"]
+        self.domain = domain
         self.workload = manifest["workload"]
-        self.observed = ObservedBatches(evidence).entries
         self.actions = []
         self.measurements = []
         self.indices = {}
-        boundaries = {(request, item["count"]): item["raw_ns"]
-                      for request, rows in publications.items() for item in rows}
-        for batch in self.observed:
-            action = batch.action()
-            call = batch.call
-            outputs = {member["request"]: member["output_tokens"] + 1 for member in action["members"]}
-            start = call["begin_ns"]
-            result = call["result_processing"]
-            key = self.action_key(action)
-            if key in self.indices:
-                raise ValueError(f"ambiguous reference timing for {key}")
-            self.indices[key] = len(self.actions)
+        self.boundaries = {(request, item["count"]): item["raw_ns"]
+                           for request, rows in publications.items() for item in rows}
 
-            self.measurements.append({
-                "work": batch.measurements(), "prepare_ns": 0,
-                "model_return_ns": call["end_ns"] - start,
-                "result_finished": self.boundary(result["end_ns"] - start),
-                "publications": {rid: self.boundary(boundaries[rid, count] - start) for rid, count in outputs.items()},
-            })
-            self.actions.append({
-                **action, "resources": call["resources"], "after_result": result["resources"],
-                "publications": outputs, "graph": batch.graph,
-            })
+    def record(self, action, graph, call, work, begin_ns, end_ns):
+        key = action_identity(action)
+        if key in self.indices:
+            raise ValueError(f"ambiguous reference timing for {key}")
+        self.indices[key] = len(self.actions)
+
+        outputs = {member["request"]: member["output_tokens"] + 1 for member in action["members"]}
+        self.measurements.append({
+            "work": work, "prepare_ns": 0, "model_return_ns": call["end_ns"] - begin_ns,
+            "result_finished": self.boundary(end_ns - begin_ns),
+            "publications": {rid: self.boundary(self.boundaries[rid, count] - begin_ns)
+                             for rid, count in outputs.items()},
+        })
+        self.actions.append({
+            **action, "resources": call["resources"], "after_result": call["result_processing"]["resources"],
+            "publications": outputs, "graph": graph,
+        })
 
     @staticmethod
     def boundary(after_start_ns, after_model_ns=0):
         return {"after_start_ns": after_start_ns, "after_model_ns": after_model_ns}
 
-    @staticmethod
-    def action_key(action):
-        return action["phase"], tuple((member["request"], member["kv_committed_tokens"], member["output_tokens"])
-                                      for member in action["members"])
-
     def conditions(self, query):
-        key = self.action_key(query["action"])
+        key = action_identity(query["action"])
         index = self.indices.get(key)
         if index is None:
             return {"failure": {"status": "action_mismatch", "reason": f"no observed action at {key}"}}
@@ -69,20 +60,30 @@ class StructureReference:
 
         began = actual["began_ns"]
         lanes = {}
-        for work, sample, (start, end) in zip(actual["graph"]["work"], samples, actual["intervals"], strict=True):
+        ends = []
+        graph = actual["graph"]
+        for work, sample, (start, end) in zip(graph["work"], samples, actual["intervals"], strict=True):
             ready = max(lanes.get(work["lane"], began), began + sample["submitted_after_ns"])
+            for predecessor in work.get("after", ()):
+                ready = max(ready, ends[predecessor])
             if start != ready + sample["dispatch_ns"] or end - start != sample["duration_ns"]:
                 return False
             lanes[work["lane"]] = end
+            ends.append(end)
 
-        ready = max(began + measured["model_return_ns"], max(lanes.values(), default=began))
+        work_ready = max(lanes.values(), default=began)
+        model_work_ready = work_ready
+        if "collectives" in graph:
+            publisher = graph["calls"][0]["parameters"]["publication_rank"]
+            model_work_ready = lanes[publisher]
+        ready = max(began + measured["model_return_ns"], model_work_ready)
         if ready != actual["model_ready_ns"]:
             return False
         for publication in actual["publications"]:
             ready = max(ready, began + measured["publications"][publication["request"]]["after_start_ns"])
             if ready != publication["at_ns"]:
                 return False
-        return actual["finished_ns"] == max(ready, began + measured["result_finished"]["after_start_ns"])
+        return actual["finished_ns"] == max(ready, work_ready, began + measured["result_finished"]["after_start_ns"])
 
     def compare(self, result):
         comparisons = 0
@@ -111,3 +112,13 @@ class StructureReference:
         if "gap" in result:
             report["gap"] = result["gap"]
         return report
+
+
+class StructureReference(StructureComparison):
+    def __init__(self, evidence, publications, manifest):
+        super().__init__(evidence["domain"], publications, manifest)
+        self.observed = ObservedBatches(evidence).entries
+        for batch in self.observed:
+            call = batch.call
+            self.record(batch.action(), batch.graph, call, batch.measurements(), call["begin_ns"],
+                        call["result_processing"]["end_ns"])

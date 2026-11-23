@@ -75,13 +75,18 @@ CostQueries::CostQueries(const json& action, const json& graph)
     // Identity is local to a reusable call, independent of request and layer instance IDs.
     for (const auto& work : graph.at("work")) {
         const auto& call = *scopes.at(work.at("path").dump());
-        device.push_back({
+        auto coordinate = json{
             {"family", "device_task"}, {"geometry", host.at("geometry")},
             {"operation", call.at("operation")}, {"implementation", call.at("implementation")},
             {"parameters", call.at("parameters")}, {"inputs", call.at("inputs")}, {"outputs", call.at("outputs")},
             {"kind", work.at("kind")}, {"name", work.at("name")}, {"slot", work.at("slot")},
             {"ordinal", work.at("ordinal")},
-        });
+        };
+        if (work.contains("collective")) {
+            coordinate["family"] = "collective";
+            coordinate["rank"] = work.at("path").front();
+        }
+        device.push_back(std::move(coordinate));
     }
 }
 

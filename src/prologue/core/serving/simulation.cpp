@@ -1,5 +1,8 @@
 #include "prologue/core/serving/simulation.hpp"
 
+#include <algorithm>
+#include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -109,14 +112,19 @@ void Simulation::execute(const json& message) {
     timing_ = timing_source_.for_action(message, graph);
     timeline_.advance_by(timing_->prepare_ns);
     const auto started = now();
-    const auto intervals = timeline_.complete_action(timing_->work, timing_->model_return_ns, record_structure_);
+    std::optional<std::int64_t> publisher;
+    if (graph.contains("collectives")) {
+        publisher = graph.at("calls").front().at("parameters").at("publication_rank").get<std::int64_t>();
+    }
+    const auto completed = timeline_.complete_action(timing_->work, timing_->model_return_ns, record_structure_, publisher);
+    work_ready_ns_ = completed.all_work_ready_ns;
     current_ = {
         {"phase", message.at("phase")}, {"members", message.at("members")}, {"began_ns", started},
         {"model_ready_ns", now()}, {"publications", json::array()},
     };
     if (record_structure_) {
         auto observed = json::array();
-        for (const auto& interval : intervals) {
+        for (const auto& interval : completed.intervals) {
             observed.push_back({interval.begin_ns, interval.end_ns});
         }
         current_["resources"] = capacity();
@@ -158,6 +166,9 @@ void Simulation::finish_action() {
         throw Stopped("controller_error", "native result has no executing action");
     }
     wait_for(timing_->result_finished);
+
+    // Other ranks may still be finishing when the publication owner emits a token.
+    timeline_.advance_to(std::max(now(), work_ready_ns_));
     current_["finished_ns"] = now();
     if (record_structure_) {
         current_["after_result"] = capacity();

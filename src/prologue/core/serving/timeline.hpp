@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace prologue::serving {
@@ -12,6 +14,7 @@ struct TimedWork final {
     Nanoseconds submitted_after_ns;
     Nanoseconds dispatch_ns;
     Nanoseconds duration_ns;
+    std::vector<std::size_t> after{};
 };
 
 struct BoundaryTime final {
@@ -24,6 +27,11 @@ struct Interval final {
     Nanoseconds end_ns;
 };
 
+struct ActionCompletion final {
+    std::vector<Interval> intervals;
+    Nanoseconds all_work_ready_ns;
+};
+
 class Timeline final {
 public:
     Nanoseconds now() const;
@@ -31,9 +39,8 @@ public:
     void advance_by(Nanoseconds elapsed);
     void satisfy(Nanoseconds started, Nanoseconds model_ready, BoundaryTime boundary);
 
-    // A synchronous action returns after its host boundary and every submitted device interval.
-    std::vector<Interval> complete_action(const std::vector<TimedWork>& work, Nanoseconds host_boundary_ns,
-                                          bool record_intervals);
+    ActionCompletion complete_action(const std::vector<TimedWork>& work, Nanoseconds host_boundary_ns,
+                                     bool record_intervals, std::optional<std::int64_t> publication_lane = {});
 
 private:
     Nanoseconds now_ = 0;

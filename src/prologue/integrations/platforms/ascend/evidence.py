@@ -160,19 +160,10 @@ class AscendEvidence:
             "evidence": {"clock": "ascend_profiler_ns", "unbound_device_records": dict(unbound)},
         }
 
-    @classmethod
-    def open(cls, directory, *, modes=("detailed",)):
-        manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
-        if manifest["mode"] not in modes:
-            raise ValueError(f"observation mode {manifest['mode']} does not qualify for this use")
-        worker = json.loads((directory / "worker.json").read_text(encoding="utf-8"))
-        trace = json.loads((directory / manifest["trace"]).read_text(encoding="utf-8"), parse_float=Decimal)
-        return cls(manifest, worker, trace)
-
     @staticmethod
     def hardware(directory):
-        device_file, = directory.rglob("info.json.0")
-        profile_file, = directory.rglob("profiler_info_0.json")
+        device_file, = (path for path in directory.rglob("info.json.*") if path.suffix[1:].isdigit())
+        profile_file, = directory.rglob("profiler_info_*.json")
         system = json.loads(device_file.read_text(encoding="utf-8"))
         profile = json.loads(profile_file.read_text(encoding="utf-8"))
         device, = system["DeviceInfo"]
@@ -181,3 +172,60 @@ class AscendEvidence:
             "cann": profile["cann_version"], "torch_npu": profile["torch_npu_version"],
             "device": {key: device[key] for key in ("ai_core_num", "aiv_num", "aic_frequency", "aiv_frequency")},
         }
+
+
+class AscendRecording:
+    def __init__(self, directory, *, modes=("detailed",)):
+        self.directory = directory
+        self.manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+        self.mode = self.manifest["mode"]
+        if self.mode not in modes:
+            raise ValueError(f"observation mode {self.mode} does not qualify for this use")
+        self.windows = self.manifest.get("windows")
+        self.profiles = {}
+        for window in self.windows or ():
+            for identity, trace in window["traces"].items():
+                rank = int(identity)
+                if rank in self.profiles:
+                    raise ValueError(f"the recording repeats the profile of rank {rank}")
+                worker = directory / window["directory"] / f"rank-{rank}" / "worker.json"
+                self.profiles[rank] = (worker, directory / trace)
+
+    @property
+    def delivery(self):
+        return self.manifest["delivery"] if self.windows is None else self.windows[0]["delivery"]
+
+    @property
+    def domain(self):
+        return {key: self.manifest[key] for key in ("framework_revision", "model", "configuration")}
+
+    def bindings(self):
+        ranks = range(self.manifest["configuration"]["tp"])
+        if self.manifest["placement"] == "single_device":
+            workers = self.manifest["workers"]
+            bindings = [workers[str(rank)]["representative"] for rank in ranks]
+        else:
+            bindings = list(ranks)
+        if set(bindings) != self.profiles.keys():
+            raise ValueError("observed ranks do not match the recording's rank bindings")
+        return bindings
+
+    def publication_rank(self):
+        rank, = (int(rank) for rank, worker in self.manifest["workers"].items() if worker["publication_owner"])
+        return rank
+
+    def profile_directory(self, rank):
+        return self.profiles[rank][1].parents[1]
+
+    def read(self, rank=None):
+        if rank is not None:
+            worker, trace = self.profiles[rank]
+        elif self.windows is None:
+            worker = self.directory / "worker.json"
+            trace = self.directory / self.manifest["trace"]
+        else:
+            raise ValueError("the recording has multiple rank profiles")
+
+        records = json.loads(worker.read_text(encoding="utf-8"))
+        rows = json.loads(trace.read_text(encoding="utf-8"), parse_float=Decimal)
+        return AscendEvidence(self.manifest, records, rows)

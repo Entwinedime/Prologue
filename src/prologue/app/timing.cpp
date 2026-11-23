@@ -46,8 +46,10 @@ serving::ActionTiming read_timing(const json& record, const json& work) {
                                   boundary(record.at("result_finished")), {}};
     for (std::size_t index = 0; index < work.size(); ++index) {
         const auto& sample = samples.at(index);
-        timing.work.push_back({work.at(index).at("lane"), elapsed(sample, "submitted_after_ns"),
-                               elapsed(sample, "dispatch_ns"), elapsed(sample, "duration_ns")});
+        const auto& entry = work.at(index);
+        timing.work.push_back({entry.at("lane"), elapsed(sample, "submitted_after_ns"),
+                               elapsed(sample, "dispatch_ns"), elapsed(sample, "duration_ns"),
+                               entry.value("after", std::vector<std::size_t>{})});
     }
     for (const auto& entry : record.at("publications").items()) {
         timing.publications.emplace(entry.key(), boundary(entry.value()));
@@ -90,7 +92,7 @@ json replay(const json& job) {
         timeline.advance_to(std::max(timeline.now(), row.at("input_ready_ns").get<Nanoseconds>()));
         timeline.advance_by(timing.prepare_ns);
         const auto started = timeline.now();
-        const auto intervals = timeline.complete_action(timing.work, timing.model_return_ns, !costs);
+        const auto completed = timeline.complete_action(timing.work, timing.model_return_ns, !costs);
         const auto device_ready = timeline.now();
         timeline.advance_by(row.at("model_tail_ns"));
         const auto model_ready = timeline.now();
@@ -107,7 +109,7 @@ json replay(const json& job) {
                            {"publications", std::move(publications)}, {"finished_ns", timeline.now()}};
         if (!costs) {
             auto observed = json::array();
-            for (const auto& interval : intervals) {
+            for (const auto& interval : completed.intervals) {
                 observed.push_back({interval.begin_ns, interval.end_ns});
             }
             result["intervals"] = std::move(observed);

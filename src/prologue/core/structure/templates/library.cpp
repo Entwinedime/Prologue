@@ -1,4 +1,5 @@
 #include "prologue/core/structure/templates/library.hpp"
+#include "prologue/core/structure/parallel.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -40,6 +41,9 @@ public:
             }
             std::vector<Index> path;
             visit(candidate, path, graph);
+            if (graph.at("calls").front().at("operation") == "parallel_batch") {
+                bind_collectives(graph);
+            }
             if (!selected.is_null() && (selected.at("calls") != graph.at("calls") ||
                                        selected.at("work") != graph.at("work"))) {
                 throw TemplateGap({{"status", "candidate_conflict"}, {"reason", "template candidates disagree"},
@@ -63,6 +67,12 @@ private:
             graph.at("definition_ids").push_back(identity);
         }
 
+        if (definition.at("operation") == "collective") {
+            graph.at("work").push_back({
+                {"path", path}, {"slot", 0}, {"ordinal", 0}, {"kind", "collective"},
+                {"name", definition.at("parameters").at("kind")},
+            });
+        }
         const auto& work = definition.at("device_work");
         const auto& children = definition.at("children");
         Index next = 0;

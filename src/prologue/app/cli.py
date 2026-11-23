@@ -17,8 +17,23 @@ from prologue.app.releases import (
 )
 from prologue.app.task import Plan
 from prologue.assets.publication import Store
-from prologue.integrations.platforms.ascend.evidence import AscendEvidence
+from prologue.integrations.platforms.ascend.evidence import AscendEvidence, AscendRecording
 from prologue.rules.catalog import Rules
+
+
+def template_document(recording):
+    if recording.windows is None:
+        return recording.read().document()
+
+    bindings = recording.bindings()
+    workers = []
+    evidence = {}
+    for rank in sorted(recording.profiles):
+        observation = recording.read(rank).document()
+        workers.append({"rank": rank, "document": {key: observation[key] for key in ("calls", "work")}})
+        evidence[rank] = observation["evidence"]
+    return {"domain": recording.domain, "workers": workers, "rank_bindings": bindings,
+            "publication_rank": recording.publication_rank(), "evidence": evidence}
 
 
 def compile_source(args):
@@ -28,11 +43,15 @@ def compile_source(args):
 
         document, source = PDSource(args.observation).document(args.pd_scope)
     else:
-        observation = AscendEvidence.open(args.observation)
-        document = observation.document()
-        model_config = observation.manifest.get("model_config")
-        source = {"purpose": "template_source", "mode": observation.manifest["mode"],
-                  "origin_raw_ns": observation.manifest["delivery"]["origin_raw_ns"]}
+        recording = AscendRecording(args.observation)
+        document = template_document(recording)
+        model_config = recording.manifest.get("model_config")
+        source = {"purpose": "template_source", "mode": recording.mode,
+                  "origin_raw_ns": recording.delivery["origin_raw_ns"]}
+        if recording.windows is not None:
+            source["placement"] = recording.manifest["placement"]
+            source["observed_ranks"] = sorted(recording.profiles)
+            source["rank_bindings"] = document["rank_bindings"]
 
     if args.model_config:
         supplied = read_document(args.model_config)
@@ -56,20 +75,26 @@ def compile_source(args):
     return asset
 
 
-def detailed_reference(path):
+def detailed_reference(recording):
     from prologue.verification.structure import StructureReference
 
-    observation = AscendEvidence.open(path)
-    return observation, StructureReference(observation.document(), observation.publications, observation.manifest)
+    observation = recording.read()
+    return StructureReference(observation.document(), observation.publications, observation.manifest)
 
 
 def verify_structure(args):
     store, release, rules = pinned(args)
     templates = store.asset(release, "templates")
-    observation, reference = detailed_reference(args.reference)
+    recording = AscendRecording(args.reference)
+    if recording.windows is None:
+        reference = detailed_reference(recording)
+    else:
+        from prologue.verification.parallel import ParallelStructureReference
+
+        reference = ParallelStructureReference(recording)
     if not any(source["domain"] == reference.domain for source in templates["sources"]):
         raise ValueError("template and reference domains disagree")
-    origin = observation.manifest["delivery"]["origin_raw_ns"]
+    origin = recording.delivery["origin_raw_ns"]
     if any(source["source"]["origin_raw_ns"] == origin for source in templates["sources"]):
         raise ValueError("the structure reference was used to build templates")
 
@@ -87,6 +112,8 @@ def fit_costs(args):
     calibration = Calibration(Rules.read(args.rules), query)
     for directory in args.device:
         calibration.device(directory)
+    for directory in args.collective or ():
+        calibration.collective(directory)
     for directory in args.host or ():
         calibration.host(directory)
     return calibration.fit(run_core("coordinates", calibration.batches))
@@ -119,11 +146,12 @@ def verify_performance(args):
     from prologue.verification.fixed_graph import FixedGraph
 
     store, release, rules = pinned(args)
-    observation, reference = detailed_reference(args.reference)
+    recording = AscendRecording(args.reference)
+    reference = detailed_reference(recording)
     costs = store.asset(release, "performance")
-    if any(row["origin_raw_ns"] == observation.manifest["delivery"]["origin_raw_ns"] for row in costs["sources"]):
+    if any(row["origin_raw_ns"] == recording.delivery["origin_raw_ns"] for row in costs["sources"]):
         raise ValueError("the fixed-graph reference was used in calibration")
-    graph = FixedGraph(reference, observation.manifest, observation.hardware(args.reference))
+    graph = FixedGraph(reference, recording.manifest, AscendEvidence.hardware(args.reference))
     baseline = graph.check_baseline(run_core("replay", graph.job()))
     report = {"status": baseline["status"], "baseline": baseline, "release": release["release"]}
     if baseline["status"] != "matched":
@@ -177,6 +205,7 @@ def main() -> None:
 
     fit = commands.add_parser("fit-costs", help="fit models from native training observations")
     fit.add_argument("--device", type=Path, action="append", required=True)
+    fit.add_argument("--collective", type=Path, action="append", help="include full physical collective timings")
     fit.add_argument("--host", type=Path, action="append")
     fit.add_argument("--rules", type=Path)
     fit.add_argument("--for-queries", type=Path, help="fit only the original work coordinates")

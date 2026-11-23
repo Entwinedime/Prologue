@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -21,6 +22,26 @@ using Index = std::size_t;
 struct Root final {
     Index call;
     json query;
+    Index definition = 0;
+};
+
+class Definitions final {
+public:
+    Index insert(json definition) {
+        const auto [position, inserted] = catalog_.emplace(definition.dump(), entries_.size());
+        if (inserted) {
+            entries_.push_back(std::move(definition));
+        }
+        return position->second;
+    }
+
+    json take() {
+        return std::move(entries_);
+    }
+
+private:
+    json entries_ = json::array();
+    std::unordered_map<std::string, Index> catalog_;
 };
 
 json layouts(const json& ports) {
@@ -97,16 +118,24 @@ public:
             }
         }
 
+        std::unordered_map<Index, Index> lanes;
         for (const auto& entry : observed_work) {
             const auto owner = entry.at("owner").get<Index>();
+            const auto& call = calls_.at(owner);
             const auto slot = entry.at("slot").get<Index>();
-            if (calls_.at(owner).contains("template_query")) {
+            if (call.contains("template_query")) {
                 throw std::invalid_argument("an imported call cannot own sampled work");
             }
             if (slot > children_.at(owner).size()) {
                 throw std::invalid_argument("device submission must fall between observed child calls");
             }
-            work_.at(owner).push_back({{"slot", slot}, {"lane", entry.at("lane")},
+
+            // The common collective owns the result. Transport tasks are physical evidence.
+            if (call.at("operation") == "collective") {
+                continue;
+            }
+            const auto lane = lanes.try_emplace(entry.at("lane").get<Index>(), lanes.size()).first->second;
+            work_.at(owner).push_back({{"slot", slot}, {"lane", lane},
                                        {"kind", entry.at("kind")}, {"name", entry.at("name")}});
         }
 
@@ -155,19 +184,10 @@ private:
     std::vector<std::vector<json>> work_;
 };
 
-}
-
-nlohmann::json Compiler::compile(const nlohmann::json& observation) const {
+std::vector<Root> compile_calls(const json& observation, const std::unordered_set<std::string>& wanted,
+                                Definitions& definitions) {
     const auto& calls = observation.at("calls");
     const Calls graph(calls, observation.at("work"));
-
-    const auto required = observation.find("required_queries");
-    std::unordered_set<std::string> target_keys;
-    if (required != observation.end()) {
-        for (const auto& query : *required) {
-            target_keys.insert(query.dump());
-        }
-    }
 
     std::vector<Root> selected_roots;
     std::vector<bool> included(calls.size());
@@ -181,7 +201,7 @@ nlohmann::json Compiler::compile(const nlohmann::json& observation) const {
 
         auto query = call.contains("query") ? call.at("query")
             : batch_geometry(call.at("parameters").at("phase"), call.at("members"));
-        if (required == observation.end() || target_keys.contains(query.dump())) {
+        if (wanted.empty() || wanted.contains(query.dump())) {
             included.at(index) = true;
             selected_roots.push_back({index, std::move(query)});
         }
@@ -190,28 +210,108 @@ nlohmann::json Compiler::compile(const nlohmann::json& observation) const {
         throw std::invalid_argument("source observations did not cover the required root queries");
     }
 
-    auto definitions = json::array();
-    std::unordered_map<std::string, Index> catalog;
     std::vector<Index> selected(calls.size());
     for (Index next = calls.size(); next > 0; --next) {
         const auto index = next - 1;
         if (!included.at(index) || calls.at(index).contains("template_query")) {
             continue;
         }
-        auto definition = graph.definition(index, selected);
-        const auto [position, inserted] = catalog.emplace(definition.dump(), definitions.size());
-        if (inserted) {
-            definitions.push_back(std::move(definition));
+        selected.at(index) = definitions.insert(graph.definition(index, selected));
+    }
+
+    for (auto& root : selected_roots) {
+        root.definition = selected.at(root.call);
+    }
+    return selected_roots;
+}
+
+std::string observed_action(const json& call) {
+    auto members = json::array();
+    for (const auto& member : call.at("members")) {
+        members.push_back(json::array({member.at("request"), member.at("kv_committed_tokens"),
+                                       member.at("output_tokens")}));
+    }
+    return json::array({call.at("parameters").at("phase"), std::move(members)}).dump();
+}
+
+json parallel_roots(const json& observation, const std::unordered_set<std::string>& wanted, Definitions& definitions) {
+    using Actions = std::map<std::string, Root>;
+    std::unordered_map<Index, Actions> workers;
+    for (const auto& worker : observation.at("workers")) {
+        auto [entry, inserted] = workers.try_emplace(worker.at("rank").get<Index>());
+        if (!inserted) {
+            throw std::invalid_argument("parallel source repeats a recorded rank");
         }
-        selected.at(index) = position->second;
+        const auto& document = worker.at("document");
+        for (auto& root : compile_calls(document, wanted, definitions)) {
+            auto key = observed_action(document.at("calls").at(root.call));
+            if (!entry->second.emplace(std::move(key), std::move(root)).second) {
+                throw std::invalid_argument("parallel source repeats an observed action");
+            }
+        }
+    }
+
+    const auto bindings = observation.at("rank_bindings").get<std::vector<Index>>();
+    if (bindings.size() < 2) {
+        throw std::invalid_argument("parallel source requires at least two bound ranks");
+    }
+    const auto publisher = observation.at("publication_rank").get<Index>();
+    if (publisher >= bindings.size()) {
+        throw std::invalid_argument("publication rank is outside the observed group");
+    }
+    auto ranks = json::array();
+    for (Index rank = 0; rank < bindings.size(); ++rank) {
+        ranks.push_back(rank);
+    }
+    const auto& first = workers.at(bindings.front());
+    for (const auto& worker : workers) {
+        if (worker.second.size() != first.size()) {
+            throw std::invalid_argument("recorded ranks do not cover the same native actions");
+        }
     }
 
     auto roots = json::array();
-    for (auto& root : selected_roots) {
-        roots.push_back({{"query", std::move(root.query)}, {"definition", selected.at(root.call)}});
+    for (const auto& [identity, root] : first) {
+        auto children = json::array();
+        for (const auto rank : bindings) {
+            const auto& actions = workers.at(rank);
+            const auto action = actions.find(identity);
+            if (action == actions.end() || action->second.query != root.query) {
+                throw std::invalid_argument("recorded ranks disagree on native action " + identity);
+            }
+            children.push_back(action->second.definition);
+        }
+        const auto identity_in_bank = definitions.insert({
+            {"operation", "parallel_batch"}, {"implementation", "parallel_batch"},
+            {"parameters", {{"ranks", ranks}, {"publication_rank", publisher}}}, {"children", std::move(children)},
+            {"inputs", json::array()}, {"outputs", json::array()},
+            {"device_work", json::array()}, {"tensor_links", json::array()},
+        });
+        roots.push_back({{"query", root.query}, {"definition", identity_in_bank}});
+    }
+    return roots;
+}
+
+}
+
+nlohmann::json Compiler::compile(const nlohmann::json& observation) const {
+    std::unordered_set<std::string> wanted;
+    if (const auto required = observation.find("required_queries"); required != observation.end()) {
+        for (const auto& query : *required) {
+            wanted.insert(query.dump());
+        }
+    }
+    Definitions definitions;
+    auto roots = json::array();
+    if (observation.contains("workers")) {
+        roots = parallel_roots(observation, wanted, definitions);
+    } else {
+        for (auto& root : compile_calls(observation, wanted, definitions)) {
+            roots.push_back({{"query", std::move(root.query)}, {"definition", root.definition}});
+        }
     }
     return {
-        {"domain", observation.at("domain")}, {"definitions", std::move(definitions)},
+        {"domain", observation.at("domain")}, {"definitions", definitions.take()},
         {"roots", std::move(roots)}, {"evidence", observation.at("evidence")},
     };
 }
