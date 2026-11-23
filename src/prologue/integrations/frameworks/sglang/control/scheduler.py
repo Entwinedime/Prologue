@@ -170,6 +170,11 @@ class NativeScheduler(Scheduler):
 
     def on_idle(self):
         super().on_idle()
+
+        # A batchless turn can retire Decode members and reopen local Prefill admission.
+        single_loop = self.disaggregation_mode == DisaggregationMode.NULL and self.server_args.pp_size == 1
+        if single_loop and self.last_batch is not None and not self.is_fully_idle():
+            return
         self.peer.call("idle")
 
     def drive(self):
