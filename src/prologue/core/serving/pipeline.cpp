@@ -95,26 +95,26 @@ public:
         return open ? entry(index) : returned(index);
     }
 
-    void send(Index actor, Index peer, const std::string& kind, Actor& clock, Nanoseconds& posted) {
+    void send(Index actor, Index peer, const std::string& kind, Timeline& clock, Nanoseconds& posted) {
         const auto cut = locate(actor, "send:" + kind);
         if (routes_.at(cut).target != peer) {
             throw Stopped("action_mismatch", "native send disagrees with the bound pipeline peer");
         }
-        apply(cut, clock.time_ns);
+        apply(cut, clock.now());
         posted = entry(cut);
-        clock.time_ns = returned(cut);
+        clock.advance_to(returned(cut));
     }
 
-    void wait(Index actor, const std::string& kind, Actor& clock) {
+    void wait(Index actor, const std::string& kind, Timeline& clock) {
         for (const auto cut : routes_.at(locate(actor, "send:" + kind)).waits) {
-            apply(cut, clock.time_ns);
-            clock.time_ns = returned(cut);
+            apply(cut, clock.now());
+            clock.advance_to(returned(cut));
         }
     }
 
-    void finish(Index actor, const json& resources, Actor& clock) {
+    void finish(Index actor, const json& resources, Timeline& clock) {
         const auto index = locate(actor, "process");
-        clock.time_ns = std::max(clock.time_ns, returned(index));
+        clock.advance_to(std::max(clock.now(), returned(index)));
         finished_.insert(actor);
         if (record_) {
             actor_states_.at(std::to_string(actor))["after_result"] = resources;
@@ -292,70 +292,26 @@ private:
     json receipts_ = json::array();
 };
 
-Simulation::Pipeline::Pipeline(Simulation& session, std::size_t width) : session_(session), actors_(width) {}
+Simulation::Pipeline::Pipeline(Simulation& session) : Group(session) {}
 Simulation::Pipeline::~Pipeline() = default;
-
-Nanoseconds Simulation::Pipeline::now() const {
-    return now_ns_;
-}
 
 bool Simulation::Pipeline::done() const {
     return session_.finished_ == session_.workload_.requests().size() && programs_.empty();
 }
 
-std::size_t Simulation::Pipeline::peak_inflight() const {
-    return peak_inflight_;
+void Simulation::Pipeline::report(json& output) {
+    output["peak_inflight"] = peak_inflight_;
 }
 
-json Simulation::Pipeline::request(const json& message) {
-    if (message.at("operation") == "setup_actor") {
-        return session_.resources(message.at("actor"), message.at("call"));
+Nanoseconds Simulation::Pipeline::drained_time(Nanoseconds actor_end) const {
+    for (const auto& lane : lanes_) {
+        actor_end = std::max(actor_end, lane.second);
     }
-    if (message.at("operation") != "turn") {
-        throw Stopped("controller_error", "pipeline control requires actor turns");
-    }
-    for (const auto& envelope : message.at("calls")) {
-        auto& pending = actors_.at(envelope.at("actor")).pending;
-        if (pending) {
-            throw Stopped("controller_error", "a stage has two outstanding calls");
-        }
-        pending = envelope.at("call");
-    }
-    if (done()) {
-        for (const auto& actor : actors_) {
-            now_ns_ = std::max(now_ns_, actor.time_ns);
-        }
-        for (const auto& lane : lanes_) {
-            now_ns_ = std::max(now_ns_, lane.second);
-        }
-        session_.arrivals(now_ns_, true);
-        return {{"done", true}};
-    }
-
-    std::optional<std::pair<Nanoseconds, Index>> selected;
-    for (Index index = 0; index < actors_.size(); ++index) {
-        const auto ready = eligible(index, actors_.at(index).pending.value());
-        if (ready) {
-            const auto candidate = std::pair{*ready, index};
-            if (!selected || candidate < *selected) {
-                selected = candidate;
-            }
-        }
-    }
-    if (!selected) {
-        throw Stopped("controller_stall", "native stages are waiting without an eligible delivery");
-    }
-    const auto [time, index] = *selected;
-    auto& actor = actors_.at(index);
-    now_ns_ = actor.time_ns = time;
-    auto result = dispatch(index, *actor.pending);
-    actor.pending.reset();
-    retire_programs();
-    return {{"done", false}, {"actor", index}, {"now_ns", actor.time_ns}, {"result", std::move(result)}};
+    return actor_end;
 }
 
 std::optional<Nanoseconds> Simulation::Pipeline::eligible(Index actor, const json& call) const {
-    auto time = std::max(now_ns_, actors_.at(actor).time_ns);
+    auto time = now();
     const auto& operation = call.at("operation");
     if (operation == "receive") {
         const auto channel = Channel{call.at("source"), actor, call.at("channel")};
@@ -370,21 +326,20 @@ std::optional<Nanoseconds> Simulation::Pipeline::eligible(Index actor, const jso
             return std::nullopt;
         }
     } else if (operation == "idle" && actor == 0 && programs_.empty()) {
-        const auto& requests = session_.workload_.requests();
-        if (session_.next_arrival_ < requests.size()) {
-            time = std::max(time, requests.at(session_.next_arrival_).arrival_ns);
-        } else {
-            throw Stopped("controller_stall", "ingress stage is idle with incomplete requests");
+        const auto arrival = session_.next_arrival(actor);
+        if (!arrival) {
+            return std::nullopt;
         }
+        time = *arrival;
     }
     return time;
 }
 
 json Simulation::Pipeline::dispatch(Index actor, const json& call) {
     const auto& op = call.at("operation");
-    auto& clock = actors_.at(actor);
+    auto& clock = session_.actors_.at(actor).clock;
     if (op == "arrivals") {
-        return session_.arrivals(clock.time_ns, false);
+        return session_.arrivals(actor, false);
     }
     if (op == "launch") {
         return launch(actor, call);
@@ -401,13 +356,13 @@ json Simulation::Pipeline::dispatch(Index actor, const json& call) {
     }
     if (op == "cut") {
         const auto name = call.at("cut").get<std::string>();
-        clock.time_ns = programs_.at(call.at("program"))->cut(actor, name, clock.time_ns, name == "process");
+        clock.advance_to(programs_.at(call.at("program"))->cut(actor, name, clock.now(), name == "process"));
         return nullptr;
     }
     if (op == "publish") {
         auto& program = *programs_.at(call.at("program"));
-        clock.time_ns = program.publication(actor, call, clock.time_ns);
-        session_.record_publication(call, clock.time_ns, program.publications);
+        clock.advance_to(program.publication(actor, call, clock.now()));
+        session_.record_publication(call, clock.now(), program.publications);
         return nullptr;
     }
     if (op == "result_finished") {
@@ -430,15 +385,15 @@ json Simulation::Pipeline::launch(Index actor, const json& call) {
         auto graph = session_.templates_.expand(structure::batch_geometry(call.at("phase"), call.at("members")));
         auto timing = session_.timing_source_.for_program(call, graph);
         programs_.emplace(next_program_++, std::make_unique<Program>(call, std::move(graph), std::move(timing),
-            actors_.size(), lanes_, session_.record_structure_));
+            session_.actors_.size(), lanes_, session_.record_structure_));
         peak_inflight_ = std::max(peak_inflight_, programs_.size());
     } else {
         program_id = call.at("program");
     }
     auto& program = *programs_.at(program_id);
     program.affirm(actor, call, session_.capacity(actor));
-    auto& clock = actors_.at(actor);
-    clock.time_ns = program.cut(actor, call.at("cut"), clock.time_ns);
+    auto& clock = session_.actors_.at(actor).clock;
+    clock.advance_to(program.cut(actor, call.at("cut"), clock.now()));
     return program_id;
 }
 
@@ -446,8 +401,8 @@ json Simulation::Pipeline::send(Index actor, const json& call) {
     const auto target = call.at("target").get<Index>();
     const auto channel = call.at("channel").get<std::string>();
     const auto& payload = call.at("payload");
-    auto& clock = actors_.at(actor);
-    auto posted = clock.time_ns;
+    auto& clock = session_.actors_.at(actor).clock;
+    auto posted = clock.now();
     if (channel == "tensors") {
         programs_.at(payload.at("program"))->send(actor, target, payload.at("kind"), clock, posted);
     }
@@ -466,9 +421,9 @@ json Simulation::Pipeline::receive(Index actor, const json& call) {
     auto& delivery = deliveries_.at(identity);
     auto payload = std::move(delivery.payload);
     if (std::get<2>(key) == "tensors") {
-        auto& clock = actors_.at(actor);
-        clock.time_ns = programs_.at(payload.at("program"))->cut(actor,
-            "receive:" + payload.at("kind").get<std::string>(), clock.time_ns);
+        auto& clock = session_.actors_.at(actor).clock;
+        clock.advance_to(programs_.at(payload.at("program"))->cut(actor,
+            "receive:" + payload.at("kind").get<std::string>(), clock.now()));
     }
     delivery.received = true;
     if (delivery.waited) {
@@ -486,7 +441,7 @@ void Simulation::Pipeline::wait_send(Index actor, Index identity) {
     }
     if (std::get<2>(delivery.channel) == "tensors") {
         const auto& payload = delivery.payload;
-        programs_.at(payload.at("program"))->wait(actor, payload.at("kind"), actors_.at(actor));
+        programs_.at(payload.at("program"))->wait(actor, payload.at("kind"), session_.actors_.at(actor).clock);
     }
     delivery.waited = true;
     if (delivery.received) {
@@ -494,7 +449,7 @@ void Simulation::Pipeline::wait_send(Index actor, Index identity) {
     }
 }
 
-void Simulation::Pipeline::retire_programs() {
+void Simulation::Pipeline::settle() {
     for (auto position = programs_.begin(); position != programs_.end();) {
         if (position->second->done()) {
             session_.actions_.push_back(position->second->response());

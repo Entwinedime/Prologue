@@ -116,39 +116,55 @@ def detailed_reference(recording):
     return StructureReference(observation.document(), observation.publications, observation.manifest)
 
 
+def structure_reference(recording, rules):
+    if "roles" in recording.manifest:
+        from prologue.integrations.frameworks.sglang.observation.pd_recording import PDRecording
+        from prologue.verification.disaggregation import PDStructureReference
+
+        return PDStructureReference(PDRecording(recording.directory, recording.manifest))
+    if recording.windows is None:
+        return detailed_reference(recording)
+    if recording.domain["configuration"].get("pp", 1) == 1:
+        from prologue.verification.parallel import ParallelStructureReference
+
+        return ParallelStructureReference(recording)
+
+    from prologue.app.releases import prepare_templates, query_templates
+    from prologue.verification.pipeline import PipelineReference
+
+    reference = PipelineReference(recording)
+    document = template_document(recording, {rank: trace.evidence for rank, trace in reference.traces.items()})
+    measured_asset = run_core("templates", document)
+    measured_asset["model_config"] = recording.manifest["model_config"]
+    measured_asset["source"] = {"purpose": "structure_reference"}
+    measured_bank = prepare_templates([measured_asset], rules.templates)
+    queries = [entry["query"] for entry in measured_asset["roots"]]
+    graphs, = query_templates(measured_bank, rules.templates,
+                              [{"domain": recording.domain, "queries": queries}], include_graph=True)
+    reference.prepare(document["programs"], graphs)
+    return reference
+
+
 def verify_structure(args):
     store, release, rules = pinned(args)
     templates = store.asset(release, "templates")
     recording = AscendRecording(args.reference)
     if not any(source["domain"] == recording.domain for source in templates["sources"]):
         raise ValueError("template and reference domains disagree")
-    origin = recording.delivery["origin_raw_ns"]
+    if "roles" in recording.manifest:
+        delivery = AscendRecording(recording.directory / "decode").delivery
+    else:
+        delivery = recording.delivery
+    origin = delivery["origin_raw_ns"]
     if any(source["source"]["origin_raw_ns"] == origin for source in templates["sources"]):
         raise ValueError("the structure reference was used to build templates")
 
-    if recording.windows is None:
-        reference = detailed_reference(recording)
-    elif recording.domain["configuration"].get("pp", 1) == 1:
-        from prologue.verification.parallel import ParallelStructureReference
-
-        reference = ParallelStructureReference(recording)
-    else:
-        from prologue.app.releases import prepare_templates, query_templates
-        from prologue.verification.pipeline import PipelineReference
-
-        reference = PipelineReference(recording)
-        document = template_document(recording, {rank: trace.evidence for rank, trace in reference.traces.items()})
-        measured_asset = run_core("templates", document)
-        measured_asset["model_config"] = recording.manifest["model_config"]
-        measured_asset["source"] = {"purpose": "structure_reference"}
-        measured_bank = prepare_templates([measured_asset], rules.templates)
-        queries = [entry["query"] for entry in measured_asset["roots"]]
-        graphs, = query_templates(measured_bank, rules.templates,
-                                  [{"domain": recording.domain, "queries": queries}], include_graph=True)
-        reference.prepare(document["programs"], graphs)
+    reference = structure_reference(recording, rules)
     job = {"domain": reference.domain, "workload": reference.workload,
            "templates": templates, **control_inputs(templates, reference.domain, reference.workload),
            "rules": rules.document, "record_structure": True}
+    if "roles" in recording.manifest:
+        job["measured_ingress"] = reference.ingress
     result = reference.compare(run_simulation(job, args.socket, reference))
     return {**result, "release": release["release"]}
 

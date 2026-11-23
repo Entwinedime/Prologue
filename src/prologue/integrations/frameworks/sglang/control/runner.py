@@ -23,9 +23,29 @@ class DeferredForward:
         raise RuntimeError("native control must submit model work to Prologue")
 
 
+class KvLayout:
+    def __init__(self, model, dtype, tokens, page_size, width, layers):
+        self.size, self.page_size = tokens, page_size
+        self.head_num = model.get_num_kv_heads(width)
+        self.start_layer, end_layer = layers
+        self.layers = end_layer - self.start_layer
+        self.item_bytes = page_size * model.head_dim * self.head_num * torch.empty((), dtype=dtype).element_size()
+
+    def get_contiguous_buf_infos(self):
+        # Native transport initialization needs the layout, with no real tensor addresses.
+        components = self.layers * 2
+        pages = self.size // self.page_size + 1
+        return [0] * components, [pages * self.item_bytes] * components, [self.item_bytes] * components
+
+    @staticmethod
+    def maybe_get_custom_mem_pool():
+        return None
+
+
 class MetadataRunner(ModelRunner):
-    def __init__(self, *args, peer, rendezvous, **kwargs):
+    def __init__(self, *args, peer, rendezvous, logical_tp, **kwargs):
         self.peer, self.rendezvous = peer, rendezvous
+        self.logical_tp = logical_tp
         super().__init__(*args, **kwargs)
 
     def load_model(self):
@@ -65,8 +85,15 @@ class MetadataRunner(ModelRunner):
 
     def _init_pools(self):
         context = self.model_config.context_len + get_req_to_token_extra_context_len(self.server_args)
-        self.req_to_token_pool = SlotView(self.peer, self.max_running_requests, context)
-        self.token_to_kv_pool_allocator = PageView(self.peer, self.max_total_num_tokens, self.server_args.page_size)
+        args = self.server_args
+        extra = args.disaggregation_decode_extra_slots if args.disaggregation_mode == "decode" else 0
+        self.req_to_token_pool = SlotView(self.peer, self.max_running_requests, context, extra)
+        layout = None
+        if args.disaggregation_mode != "null":
+            layers = self.model.start_layer, self.model.end_layer
+            layout = KvLayout(self.model_config, self.dtype, self.max_total_num_tokens, args.page_size, self.logical_tp,
+                              layers)
+        self.token_to_kv_pool_allocator = PageView(self.peer, self.max_total_num_tokens, args.page_size, layout)
         self.token_to_kv_pool = self.token_to_kv_pool_allocator.storage
 
     def init_shared_mooncake_transfer_engine(self):

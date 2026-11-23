@@ -66,8 +66,9 @@ json missing_cost(bool covered_domain) {
 CostGap::CostGap(json gap) : std::runtime_error(gap.at("reason").get<std::string>()), detail(std::move(gap)) {}
 
 CostQueries::CostQueries(const json& action, const json& graph)
-    : host{{"family", "host_thread"}, {"geometry", structure::batch_geometry(action.at("phase"), action.at("members"),
-                                                                            action.value("expert_routes", json{}))}},
+    : host{{"family", "host_thread"}, {"geometry", action.contains("query")
+        ? action.at("query")
+        : structure::batch_geometry(action.at("phase"), action.at("members"), action.value("expert_routes", json{}))}},
       device(json::array()) {
     std::unordered_map<std::string, const json*> scopes;
     for (const auto& call : graph.at("calls")) {

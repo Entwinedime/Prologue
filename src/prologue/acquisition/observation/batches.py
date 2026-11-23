@@ -157,25 +157,34 @@ class ObservedBatches:
         return paths, children
 
     @staticmethod
-    def call_structure(call, path, children):
-        links = []
-        written = {port["tensor"]: {"child": None, "port": port["name"]} for port in call["inputs"]}
-        for slot, child in enumerate(children):
-            for target in child["inputs"]:
-                source = written.get(target["tensor"])
-                if source is not None:
-                    links.append({"from": source, "to": {"child": slot, "port": target["name"]}})
-            for port in child["outputs"]:
-                written[port["tensor"]] = {"child": slot, "port": port["name"]}
+    def endpoints(ports, child):
+        for port in ports:
+            end = {"child": child, "port": port["name"]}
+            if "views" in port:
+                for view in port["views"]:
+                    yield view["tensor"], {**end, "interval": view["interval"]}
+            else:
+                yield port["tensor"], end
 
-        for target in call["outputs"]:
-            source = written.get(target["tensor"])
+    @classmethod
+    def call_structure(cls, call, path, children):
+        links = []
+        written = dict(cls.endpoints(call["inputs"], None))
+        for slot, child in enumerate(children):
+            for tensor, target in cls.endpoints(child["inputs"], slot):
+                source = written.get(tensor)
+                if source is not None:
+                    links.append({"from": source, "to": target})
+            written.update(cls.endpoints(child["outputs"], slot))
+
+        for tensor, target in cls.endpoints(call["outputs"], None):
+            source = written.get(tensor)
             if source is not None:
-                links.append({"from": source, "to": {"child": None, "port": target["name"]}})
+                links.append({"from": source, "to": target})
 
         return {
             "path": path, "tensor_links": links,
             **{key: call[key] for key in ("operation", "implementation", "parameters")},
-            **{key: [{k: v for k, v in port.items() if k != "tensor"} for port in call[key]]
+            **{key: [{k: v for k, v in port.items() if k not in ("tensor", "views")} for port in call[key]]
                for key in ("inputs", "outputs")},
         }

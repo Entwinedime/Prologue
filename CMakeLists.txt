@@ -11,6 +11,8 @@ find_package(nlohmann_json 3.11 REQUIRED)
 add_library(prologue_core STATIC
     src/prologue/core/performance/costs.cpp
     src/prologue/core/serving/cost_timing.cpp
+    src/prologue/core/serving/disaggregation.cpp
+    src/prologue/core/serving/group.cpp
     src/prologue/core/serving/pipeline.cpp
     src/prologue/core/serving/resources.cpp
     src/prologue/core/serving/simulation.cpp

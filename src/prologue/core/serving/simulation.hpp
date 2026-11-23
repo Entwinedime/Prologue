@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -62,34 +63,50 @@ public:
     bool done() const;
 
 private:
+    using Index = std::size_t;
+    class Group;
     class Pipeline;
+    class Disaggregation;
 
-    nlohmann::json arrivals(Nanoseconds time_ns, bool finished);
-    nlohmann::json capacity(std::size_t actor) const;
-    nlohmann::json resources(std::size_t actor, const nlohmann::json& message);
-    void require_residence(std::size_t actor, const nlohmann::json& action) const;
+    struct ActiveAction {
+        nlohmann::json record;
+        ActionTiming timing;
+        Nanoseconds work_ready_ns;
+    };
+
+    struct Actor {
+        Actor(const Workload& workload, ResourceLimits limits) : resources(workload, limits) {}
+
+        Resources resources;
+        Timeline clock;
+        Index next_arrival = 0;
+        std::vector<Nanoseconds> measured_arrivals;
+        std::optional<ActiveAction> action;
+    };
+
+    nlohmann::json arrivals(Index actor, bool finished);
+    std::optional<Nanoseconds> next_arrival(Index actor) const;
+    void require_drained() const;
+    nlohmann::json capacity(Index actor) const;
+    nlohmann::json resources(Index actor, const nlohmann::json& message);
+    void require_residence(Index actor, const nlohmann::json& action) const;
     void record_publication(const nlohmann::json& message, Nanoseconds time_ns, nlohmann::json& target);
-    void execute(const nlohmann::json& message);
-    void publish(const nlohmann::json& message);
-    void finish_action();
-    void wait_for(BoundaryTime boundary);
+    void execute(Index actor, const nlohmann::json& message);
+    void publish(Index actor, const nlohmann::json& message);
+    void finish_action(Index actor);
+    nlohmann::json direct(Index actor, const nlohmann::json& message);
 
     const nlohmann::json& job_;
     Workload workload_;
-    std::vector<Resources> pools_;
+    std::vector<Actor> actors_;
     structure::Templates templates_;
-    Timeline timeline_;
     TimingSource& timing_source_;
     bool record_structure_;
     std::unordered_map<std::string, std::int64_t> output_limits_;
     std::unordered_map<std::string, std::int64_t> output_counts_;
-    std::size_t next_arrival_ = 0;
     std::size_t finished_ = 0;
     nlohmann::json actions_ = nlohmann::json::array();
-    nlohmann::json current_;
-    std::optional<ActionTiming> timing_;
-    Nanoseconds work_ready_ns_ = 0;
-    std::unique_ptr<Pipeline> pipeline_;
+    std::unique_ptr<Group> group_;
 };
 
 }

@@ -1,4 +1,5 @@
 #include "prologue/core/serving/simulation.hpp"
+#include "prologue/core/serving/disaggregation.hpp"
 #include "prologue/core/serving/pipeline.hpp"
 
 #include <algorithm>
@@ -11,11 +12,6 @@ namespace prologue::serving {
 namespace {
 
 using nlohmann::json;
-
-ResourceLimits limits(const json& job) {
-    const auto& config = job.at("domain").at("configuration");
-    return {config.at("max_running_requests"), config.at("max_total_tokens"), config.at("page_size")};
-}
 
 }
 
@@ -34,48 +30,80 @@ Simulation::Simulation(const json& job, Workload workload, TimingSource& timing_
         output_counts_.emplace(request.id, 0);
     }
 
-    const auto width = job.at("domain").at("configuration").value("pp", std::size_t{1});
-    pools_.reserve(width);
-    for (std::size_t stage = 0; stage < width; ++stage) {
-        pools_.emplace_back(workload_, limits(job));
+    const auto& config = job.at("domain").at("configuration");
+    const auto page_size = config.at("page_size").get<std::int64_t>();
+    if (config.contains("disaggregation")) {
+        for (const auto& pool : job.at("actor_resources")) {
+            actors_.emplace_back(workload_, ResourceLimits{pool.at("slots"), pool.at("kv_tokens"), page_size,
+                pool.at("sort_released_pages")});
+        }
+        group_ = std::make_unique<Disaggregation>(*this, page_size);
+        return;
+    }
+
+    const auto width = config.value("pp", Index{1});
+    const ResourceLimits limits{config.at("max_running_requests"), config.at("max_total_tokens"), page_size};
+    actors_.reserve(width);
+    for (Index stage = 0; stage < width; ++stage) {
+        actors_.emplace_back(workload_, limits);
     }
     if (width > 1) {
-        pipeline_ = std::make_unique<Pipeline>(*this, width);
+        group_ = std::make_unique<Pipeline>(*this);
     }
 }
 
 Simulation::~Simulation() = default;
 
 Nanoseconds Simulation::now() const {
-    return pipeline_ ? pipeline_->now() : timeline_.now();
+    return group_ ? group_->now() : actors_.front().clock.now();
 }
 
 bool Simulation::done() const {
-    return pipeline_ ? pipeline_->done() : finished_ == workload_.requests().size() && !timing_;
+    return group_ ? group_->done() : finished_ == workload_.requests().size() && !actors_.front().action;
 }
 
-json Simulation::capacity(std::size_t actor) const {
-    const auto& pool = pools_.at(actor);
+json Simulation::capacity(Index actor) const {
+    const auto& pool = actors_.at(actor).resources;
     return {{"slots", pool.available_slots()}, {"kv_tokens", pool.available_tokens()}};
 }
 
-json Simulation::arrivals(Nanoseconds time_ns, bool finished) {
-    auto arrivals = json::array();
+std::optional<Nanoseconds> Simulation::next_arrival(Index actor) const {
+    const auto& state = actors_.at(actor);
+    const auto next = state.next_arrival;
     const auto& requests = workload_.requests();
-    while (next_arrival_ < requests.size() && requests.at(next_arrival_).arrival_ns <= time_ns) {
-        const auto& request = requests.at(next_arrival_++);
+    if (next == requests.size()) {
+        return std::nullopt;
+    }
+    return state.measured_arrivals.empty() ? requests.at(next).arrival_ns : state.measured_arrivals.at(next);
+}
+
+void Simulation::require_drained() const {
+    if (!std::ranges::all_of(actors_, [](const Actor& actor) { return actor.resources.drained(); })) {
+        throw Stopped("resource_error", "terminal resources are not fully returned");
+    }
+}
+
+json Simulation::arrivals(Index index, bool finished) {
+    auto arrivals = json::array();
+    auto& actor = actors_.at(index);
+    const auto& requests = workload_.requests();
+    while (const auto arrival = next_arrival(index)) {
+        if (*arrival > actor.clock.now()) {
+            break;
+        }
+        const auto& request = requests.at(actor.next_arrival++);
         arrivals.push_back({{"id", request.id}, {"prompt_tokens", request.prompt_tokens},
                             {"output_tokens", request.output_tokens}});
     }
-    if (finished && !std::ranges::all_of(pools_, &Resources::drained)) {
-        throw Stopped("resource_error", "terminal resources are not fully returned");
+    if (finished) {
+        require_drained();
     }
     return {{"requests", std::move(arrivals)}, {"done", finished}};
 }
 
-json Simulation::resources(std::size_t actor, const json& message) {
+json Simulation::resources(Index actor, const json& message) {
     const auto operation = message.at("operation").get<std::string>();
-    auto& pool = pools_.at(actor);
+    auto& pool = actors_.at(actor).resources;
     try {
         if (operation == "capacity") {
             return capacity(actor);
@@ -107,10 +135,10 @@ json Simulation::resources(std::size_t actor, const json& message) {
     throw Stopped("controller_error", "unknown operation " + operation);
 }
 
-void Simulation::require_residence(std::size_t actor, const json& message) const {
+void Simulation::require_residence(Index actor, const json& message) const {
     for (const auto& member : message.at("members")) {
         const auto request = member.at("request").get<std::string>();
-        const auto& residence = pools_.at(actor).residence(request);
+        const auto& residence = actors_.at(actor).resources.residence(request);
         if (!residence.slot || *residence.slot != member.at("slot") || residence.tokens != member.at("kv_committed_tokens") ||
             residence.tokens != member.at("kv_reserved_tokens")) {
             throw Stopped("resource_error", "native batch does not agree with its resource binding for " + request);
@@ -118,60 +146,63 @@ void Simulation::require_residence(std::size_t actor, const json& message) const
     }
 }
 
-void Simulation::execute(const json& message) {
-    if (timing_) {
+void Simulation::execute(Index index, const json& message) {
+    auto& actor = actors_.at(index);
+    if (actor.action) {
         throw Stopped("controller_error", "native action began before the preceding result finished");
     }
-    require_residence(0, message);
+    require_residence(index, message);
 
-    const auto query = structure::batch_geometry(message.at("phase"), message.at("members"),
-                                                 message.value("expert_routes", json{}));
+    const auto query = message.contains("query")
+        ? message.at("query")
+        : structure::batch_geometry(message.at("phase"), message.at("members"), message.value("expert_routes", json{}));
     auto graph = templates_.expand(query);
 
     // Only a fully selected action can query time. The provider cannot choose the graph.
-    timing_ = timing_source_.for_action(message, graph);
-    timeline_.advance_by(timing_->prepare_ns);
-    const auto started = now();
+    auto action = message;
+    action["clock_ns"] = actor.clock.now();
+    auto timing = timing_source_.for_action(action, graph);
+    actor.clock.advance_by(timing.prepare_ns);
+    const auto started = actor.clock.now();
     std::optional<std::int64_t> publisher;
     if (graph.contains("collectives")) {
         publisher = graph.at("calls").front().at("parameters").at("publication_rank").get<std::int64_t>();
     }
-    const auto completed = timeline_.complete_action(timing_->work, timing_->model_return_ns, record_structure_, publisher);
-    work_ready_ns_ = completed.all_work_ready_ns;
-    current_ = {
+    const auto completed = actor.clock.complete_action(timing.work, timing.model_return_ns, record_structure_, publisher);
+    json record{
         {"phase", message.at("phase")}, {"members", message.at("members")}, {"began_ns", started},
-        {"model_ready_ns", now()}, {"publications", json::array()},
+        {"model_ready_ns", actor.clock.now()}, {"publications", json::array()},
     };
     if (message.contains("expert_routes")) {
-        current_["expert_routes"] = message.at("expert_routes");
+        record["expert_routes"] = message.at("expert_routes");
     }
     if (record_structure_) {
         auto observed = json::array();
         for (const auto& interval : completed.intervals) {
             observed.push_back({interval.begin_ns, interval.end_ns});
         }
-        current_["resources"] = capacity(0);
-        current_["graph"] = std::move(graph);
-        current_["intervals"] = std::move(observed);
+        record["resources"] = capacity(index);
+        record["graph"] = std::move(graph);
+        record["intervals"] = std::move(observed);
     }
+    actor.action.emplace(ActiveAction{std::move(record), std::move(timing), completed.all_work_ready_ns});
 }
 
-void Simulation::wait_for(BoundaryTime boundary) {
-    timeline_.satisfy(current_.at("began_ns"), current_.at("model_ready_ns"), boundary);
-}
-
-void Simulation::publish(const json& message) {
-    if (!timing_) {
+void Simulation::publish(Index index, const json& message) {
+    auto& actor = actors_.at(index);
+    if (!actor.action) {
         throw Stopped("controller_error", "publication has no executing action");
     }
+    auto& action = *actor.action;
     const auto request = message.at("request").get<std::string>();
-    const auto offset = timing_->publications.find(request);
-    if (offset == timing_->publications.end()) {
+    const auto offset = action.timing.publications.find(request);
+    if (offset == action.timing.publications.end()) {
         throw Stopped("timing_gap", "missing publication readiness for " + request);
     }
 
-    wait_for(offset->second);
-    record_publication(message, now(), current_.at("publications"));
+    auto& record = action.record;
+    actor.clock.satisfy(record.at("began_ns"), record.at("model_ready_ns"), offset->second);
+    record_publication(message, actor.clock.now(), record.at("publications"));
 }
 
 void Simulation::record_publication(const json& message, Nanoseconds time_ns, json& target) {
@@ -189,20 +220,38 @@ void Simulation::record_publication(const json& message, Nanoseconds time_ns, js
     }
 }
 
-void Simulation::finish_action() {
-    if (!timing_) {
+void Simulation::finish_action(Index index) {
+    auto& actor = actors_.at(index);
+    if (!actor.action) {
         throw Stopped("controller_error", "native result has no executing action");
     }
-    wait_for(timing_->result_finished);
+    auto& action = *actor.action;
+    auto& record = action.record;
+    auto& clock = actor.clock;
+    clock.satisfy(record.at("began_ns"), record.at("model_ready_ns"), action.timing.result_finished);
 
     // Other ranks may still be finishing when the publication owner emits a token.
-    timeline_.advance_to(std::max(now(), work_ready_ns_));
-    current_["finished_ns"] = now();
+    clock.advance_to(std::max(clock.now(), action.work_ready_ns));
+    record["finished_ns"] = clock.now();
     if (record_structure_) {
-        current_["after_result"] = capacity(0);
+        record["after_result"] = capacity(index);
     }
-    actions_.push_back(std::move(current_));
-    timing_.reset();
+    actions_.push_back(std::move(record));
+    actor.action.reset();
+}
+
+json Simulation::direct(Index actor, const json& message) {
+    const auto& operation = message.at("operation");
+    if (operation == "execute") {
+        execute(actor, message);
+    } else if (operation == "publish") {
+        publish(actor, message);
+    } else if (operation == "result_finished") {
+        finish_action(actor);
+    } else {
+        return resources(actor, message);
+    }
+    return nullptr;
 }
 
 json Simulation::request(const json& message) {
@@ -214,40 +263,28 @@ json Simulation::request(const json& message) {
         }
         return setup;
     }
-    if (pipeline_) {
-        return pipeline_->request(message);
+    if (group_) {
+        return group_->request(message);
     }
     if (operation == "arrivals") {
-        return arrivals(now(), done());
+        return arrivals(0, done());
     }
     if (operation == "idle") {
-        if (next_arrival_ < workload_.requests().size()) {
-            timeline_.advance_to(workload_.requests().at(next_arrival_).arrival_ns);
+        if (const auto arrival = next_arrival(0)) {
+            actors_.front().clock.advance_to(*arrival);
         } else if (!done()) {
             throw Stopped("controller_stall", "native control is idle with incomplete requests and no arrivals");
         }
         return nullptr;
     }
-    if (operation == "execute") {
-        execute(message);
-        return nullptr;
-    }
-    if (operation == "publish") {
-        publish(message);
-        return nullptr;
-    }
-    if (operation == "result_finished") {
-        finish_action();
-        return nullptr;
-    }
-    return resources(0, message);
+    return direct(0, message);
 }
 
 json Simulation::result(std::string status, std::string reason) {
     json report{{"status", std::move(status)}, {"reason", std::move(reason)}, {"now_ns", now()},
                 {"finished_requests", finished_}, {"actions", std::move(actions_)}};
-    if (pipeline_) {
-        report["peak_inflight"] = pipeline_->peak_inflight();
+    if (group_) {
+        group_->report(report);
     }
     return report;
 }

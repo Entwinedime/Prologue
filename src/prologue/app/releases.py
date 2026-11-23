@@ -5,7 +5,7 @@ import json
 from prologue.acquisition.planning import structure_demands
 from prologue.app.core import run_core
 from prologue.assets.publication import Store
-from prologue.integrations.frameworks.sglang.configuration import Configuration
+from prologue.integrations.frameworks.sglang.configuration import Disaggregation, configuration_from
 from prologue.rules.catalog import Rules
 from prologue.rules.review import RuleReview
 
@@ -34,7 +34,10 @@ def template_model(templates, model):
 
 def control_inputs(templates, domain, workload):
     result = {"model_config": template_model(templates, domain["model"])}
-    routes = Configuration(**domain["configuration"]).route_table(workload)
+    config = configuration_from(domain["configuration"])
+    routes = config.route_table(workload)
+    if isinstance(config, Disaggregation):
+        result["actor_resources"] = config.resource_pools()
     if routes is None:
         return result
 

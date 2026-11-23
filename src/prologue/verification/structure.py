@@ -15,23 +15,25 @@ class StructureComparison:
         self.boundaries = {(request, item["count"]): item["raw_ns"]
                            for request, rows in publications.items() for item in rows}
 
-    def record(self, action, graph, call, work, begin_ns, end_ns):
+    def record(self, action, graph, call, work, begin_ns, end_ns, *, outputs=None):
         key = action_identity(action)
         if key in self.indices:
             raise ValueError(f"ambiguous reference timing for {key}")
         self.indices[key] = len(self.actions)
 
-        outputs = {member["request"]: member["output_tokens"] + 1 for member in action["members"]}
+        if outputs is None:
+            outputs = {member["request"]: member["output_tokens"] + 1 for member in action["members"]}
         self.measurements.append({
             "work": work, "prepare_ns": 0, "model_return_ns": call["end_ns"] - begin_ns,
             "result_finished": self.boundary(end_ns - begin_ns),
             "publications": {rid: self.boundary(self.boundaries[rid, count] - begin_ns)
                              for rid, count in outputs.items()},
         })
-        self.actions.append({
-            **action, "resources": call["resources"], "after_result": call["result_processing"]["resources"],
-            "publications": outputs, "graph": graph,
-        })
+        observed = {**action, "publications": outputs, "graph": graph}
+        if "resources" in call:
+            observed["resources"] = call["resources"]
+            observed["after_result"] = call["result_processing"]["resources"]
+        self.actions.append(observed)
 
     @staticmethod
     def boundary(after_start_ns, after_model_ns=0):
@@ -92,7 +94,7 @@ class StructureComparison:
         consumed = 0
         for index, (expected, actual) in enumerate(zip(self.actions, result["actions"], strict=False)):
             for field in ("phase", "members", "resources", "after_result", "graph"):
-                if actual[field] != expected[field]:
+                if field in expected and actual[field] != expected[field]:
                     return {"status": "structure_mismatch", "action": index, "field": field,
                             "matched_actions": comparisons}
             if expected["publications"] != {row["request"]: row["count"] for row in actual["publications"]}:

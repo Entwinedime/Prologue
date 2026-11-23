@@ -44,10 +44,16 @@ def main():
             model = Path(temporary)
             (model / "config.json").write_text(json.dumps(setup["model_config"]), encoding="utf-8")
             domain = setup["domain"]
-            if domain["configuration"].get("pp", 1) > 1:
+            config = domain["configuration"]
+            if "disaggregation" in config:
+                from prologue.app.control_group import ControlGroup
+                from prologue.integrations.frameworks.sglang.configuration import Disaggregation
+
+                ControlGroup(peer, model, domain, kernel_python, Disaggregation.roles).drive()
+            elif config.get("pp", 1) > 1:
                 from prologue.app.control_group import ControlGroup
 
-                ControlGroup(peer, model, domain, kernel_python).drive()
+                ControlGroup(peer, model, domain, kernel_python, range(config["pp"])).drive()
             else:
                 CpuDeclarations.install(kernel_python)
 

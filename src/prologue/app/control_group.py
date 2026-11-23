@@ -1,4 +1,4 @@
-"""Multiplex native stage processes through one simulated control session."""
+"""Multiplex native actor processes through one simulated control session."""
 
 import multiprocessing
 import traceback
@@ -7,7 +7,7 @@ from multiprocessing.connection import wait
 from prologue.integrations.runtimes.pytorch.control.cpu import CpuDeclarations
 
 
-class StagePeer:
+class ActorPeer:
     def __init__(self, connection):
         self.connection = connection
         self.now_ns = 0
@@ -23,18 +23,26 @@ class StagePeer:
         return answer["result"]
 
 
-def run_stage(connection, model, domain, stage, kernel_python):
+def run_actor(connection, model, domain, identity, kernel_python):
     CpuDeclarations.install(kernel_python)
 
     from sglang.srt.distributed import parallel_state
 
-    from prologue.integrations.frameworks.sglang.control.pipeline import PipelineScheduler
     from prologue.integrations.frameworks.sglang.control.scheduler import Finished
 
+    if isinstance(identity, str):
+        from prologue.integrations.frameworks.sglang.control.disaggregation import DisaggregatedScheduler
+
+        scheduler_type = DisaggregatedScheduler
+    else:
+        from prologue.integrations.frameworks.sglang.control.pipeline import PipelineScheduler
+
+        scheduler_type = PipelineScheduler
+
     with connection:
-        peer = StagePeer(connection)
+        peer = ActorPeer(connection)
         try:
-            scheduler = PipelineScheduler(peer, model, domain, stage)
+            scheduler = scheduler_type(peer, model, domain, identity)
             peer.call("ready")
             scheduler.drive()
         except Finished:
@@ -48,24 +56,24 @@ def run_stage(connection, model, domain, stage, kernel_python):
 
 
 class ControlGroup:
-    def __init__(self, peer, model, domain, kernel_python):
+    def __init__(self, peer, model, domain, kernel_python, identities):
         self.peer = peer
         self.model = model
         self.domain = domain
         self.kernel_python = kernel_python
+        self.identities = identities
         self.processes = []
-        self.stages = []
+        self.actors = []
 
     def drive(self):
         context = multiprocessing.get_context("spawn")
-        width = self.domain["configuration"]["pp"]
         try:
-            for stage in range(width):
+            for identity in self.identities:
                 parent, child = context.Pipe()
-                process = context.Process(target=run_stage, args=(
-                    child, self.model, self.domain, stage, self.kernel_python,
-                ))
-                self.stages.append(parent)
+                process = context.Process(target=run_actor, args=(
+                    child, self.model, self.domain, identity, self.kernel_python,
+                ), name=f"native-{identity}")
+                self.actors.append(parent)
                 with child:
                     process.start()
                 self.processes.append(process)
@@ -74,9 +82,9 @@ class ControlGroup:
             for process in self.processes:
                 process.join()
                 if process.exitcode:
-                    raise ValueError(f"native stage {process.name} exited with status {process.exitcode}")
+                    raise ValueError(f"{process.name} exited with status {process.exitcode}")
         finally:
-            for connection in self.stages:
+            for connection in self.actors:
                 connection.close()
             for process in self.processes:
                 if process.is_alive():
@@ -85,7 +93,7 @@ class ControlGroup:
                 process.join()
 
     def initialize(self):
-        awaiting = {connection: stage for stage, connection in enumerate(self.stages)}
+        awaiting = {connection: actor for actor, connection in enumerate(self.actors)}
         while awaiting:
             for connection in wait(awaiting):
                 message = self.receive(awaiting[connection])
@@ -94,29 +102,29 @@ class ControlGroup:
                     continue
                 result = self.peer.call("setup_actor", actor=awaiting[connection], call=message)
                 connection.send({"now_ns": self.peer.now_ns, "result": result, "done": False})
-        for connection in self.stages:
+        for connection in self.actors:
             connection.send({"now_ns": self.peer.now_ns, "result": None, "done": False})
 
     def dispatch(self):
-        ready = range(len(self.stages))
+        ready = range(len(self.actors))
         while True:
-            calls = [{"actor": stage, "call": self.receive(stage)} for stage in ready]
+            calls = [{"actor": actor, "call": self.receive(actor)} for actor in ready]
             reply = self.peer.call("turn", calls=calls)
             if reply["done"]:
-                for connection in self.stages:
+                for connection in self.actors:
                     connection.send({"done": True})
                 return
-            stage = reply.pop("actor")
-            self.stages[stage].send(reply)
-            ready = (stage,)
+            actor = reply.pop("actor")
+            self.actors[actor].send(reply)
+            ready = (actor,)
 
-    def receive(self, stage):
+    def receive(self, actor):
         try:
-            message = self.stages[stage].recv()
+            message = self.actors[actor].recv()
         except EOFError as error:
-            process = self.processes[stage]
+            process = self.processes[actor]
             process.join(timeout=1)
-            raise ConnectionError(f"native stage {stage} disconnected with exit status {process.exitcode}") from error
+            raise ConnectionError(f"{process.name} disconnected with exit status {process.exitcode}") from error
         if "failure" in message:
-            raise RuntimeError(f"native stage {stage} failed:\n{message['failure']}")
+            raise RuntimeError(f"{self.processes[actor].name} failed:\n{message['failure']}")
         return message

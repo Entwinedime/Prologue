@@ -10,7 +10,7 @@ from prologue.verification.structure import StructureComparison
 class RecordedParallelBatch:
     def __init__(self, profiles, batches, publisher):
         self.begin_ns = min(batch.call["begin_ns"] for batch in batches)
-        self.end_ns = max(batch.call["result_processing"]["end_ns"] for batch in batches)
+        self.end_ns = max(batch.call.get("result_processing", batch.call)["end_ns"] for batch in batches)
         self.calls = [{
             "operation": "parallel_batch", "implementation": "parallel_batch",
             "parameters": {"ranks": list(range(len(batches))), "publication_rank": publisher},

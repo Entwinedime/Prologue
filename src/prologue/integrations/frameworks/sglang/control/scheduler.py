@@ -41,8 +41,9 @@ class Clock:
 
 
 class Inbox:
-    def __init__(self, peer, vocabulary):
+    def __init__(self, peer, vocabulary, mode=DisaggregationMode.NULL):
         self.peer, self.vocabulary = peer, vocabulary
+        self.mode = mode
 
     def recv_requests(self):
         turn = self.peer.call("arrivals")
@@ -60,7 +61,7 @@ class Inbox:
                 rid=request["id"], input_text=None, input_ids=array("q", [1]) * request["prompt_tokens"],
                 input_embeds=None, mm_inputs=None, token_type_ids=None, sampling_params=sampling,
                 return_logprob=False, logprob_start_len=-1, top_logprobs_num=0, token_ids_logprob=None,
-                stream=True, time_stats=APIServerReqTimeStats(disagg_mode=DisaggregationMode.NULL),
+                stream=True, time_stats=APIServerReqTimeStats(disagg_mode=self.mode),
             ))
         return requests
 
@@ -71,7 +72,7 @@ class Publications:
         self.program = None
 
     def send_output(self, output, *args, **kwargs):
-        if not isinstance(output, BatchTokenIDOutput):
+        if self.peer is None or not isinstance(output, BatchTokenIDOutput):
             return
         publications = zip(output.rids, output.completion_tokens, output.finished_reasons, strict=True)
         for request, count, finished in publications:
@@ -79,7 +80,7 @@ class Publications:
 
 
 class NativeScheduler(Scheduler):
-    def __init__(self, peer, model_directory, domain, stage=0, *, expert_routes=None):
+    def __init__(self, peer, model_directory, domain, stage=0, *, expert_routes=None, runtime=None):
         self.peer = peer
         config = domain["configuration"]
         args = ServerArgs(
@@ -90,12 +91,15 @@ class NativeScheduler(Scheduler):
             chunked_prefill_size=-1, disable_radix_cache=True, disable_overlap_schedule=True,
             disable_cuda_graph=True, disable_custom_all_reduce=True, stream_interval=1, random_seed=13,
             pp_size=config.get("pp", 1), pp_max_micro_batch_size=config.get("microbatch_requests"),
+            **(runtime or {}),
         )
 
         # Native initialization still constructs the policy, caches and event loop.
         original_runner = model_runner.ModelRunner
         original_watchdog = native_scheduler.create_scheduler_watchdog
-        model_runner.ModelRunner = partial(MetadataRunner, peer=peer, rendezvous=(model_directory / "gloo").as_uri())
+        rendezvous = model_directory / f"gloo-{args.disaggregation_mode}"
+        model_runner.ModelRunner = partial(MetadataRunner, peer=peer, rendezvous=rendezvous.as_uri(),
+                                           logical_tp=config["tp"])
         native_scheduler.create_scheduler_watchdog = self.expiration_owner
         try:
             super().__init__(args, PortArgs.init_new(args), gpu_id=0, tp_rank=0, moe_ep_rank=0,
@@ -104,7 +108,7 @@ class NativeScheduler(Scheduler):
             model_runner.ModelRunner = original_runner
             native_scheduler.create_scheduler_watchdog = original_watchdog
 
-        self.request_receiver = Inbox(peer, self.model_config.vocab_size)
+        self.request_receiver = Inbox(peer, self.model_config.vocab_size, self.disaggregation_mode)
         self.expert_alignment = config["tp"] if config.get("ep", 1) > 1 else 1
         self.experts = None
         if expert_routes is not None:
@@ -112,7 +116,7 @@ class NativeScheduler(Scheduler):
                                         self.model_config.hf_config.num_hidden_layers)
         self.publications = None
         if self.output_streamer.send_to_detokenizer.socket is not None:
-            self.publications = Publications(peer)
+            self.publications = Publications(peer if self.disaggregation_mode != DisaggregationMode.PREFILL else None)
             self.output_streamer.send_to_detokenizer = self.publications
         self.model_worker.forward_batch_generation = self.model_result
         PageView.install()
@@ -137,14 +141,18 @@ class NativeScheduler(Scheduler):
         else:
             raise ValueError(f"unsupported native control action {batch.forward_mode}")
 
-        members = [
+        members = self.members(batch)
+        result = super().run_batch(batch, pp_proxy_tensors)
+        return self.submit_batch(batch, result, pp_proxy_tensors, phase, members)
+
+    @staticmethod
+    def members(batch):
+        return [
             {"request": request.rid, "slot": request.req_pool_idx - 1,
              "kv_committed_tokens": request.kv_committed_len, "kv_reserved_tokens": request.kv_allocated_len,
              "output_tokens": len(request.output_ids)}
             for request in batch.reqs
         ]
-        result = super().run_batch(batch, pp_proxy_tensors)
-        return self.submit_batch(batch, result, pp_proxy_tensors, phase, members)
 
     def submit_batch(self, batch, result, proxy, phase, members):
         # Result processing begins only after the core closes the device and host boundaries.

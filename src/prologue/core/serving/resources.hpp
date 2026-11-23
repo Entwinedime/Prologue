@@ -15,6 +15,7 @@ struct ResourceLimits final {
     std::int64_t slots;
     std::int64_t kv_tokens;
     std::int64_t page_size;
+    bool sort_released_pages = false;
 };
 
 struct KvGrowth final {
@@ -50,6 +51,7 @@ private:
     ResourceLimits limits_;
     std::deque<std::int64_t> free_slots_;
     std::deque<std::int64_t> free_pages_;
+    std::vector<std::int64_t> released_pages_;
     std::vector<bool> page_in_use_;
     std::unordered_map<std::string, Residence> residents_;
 };

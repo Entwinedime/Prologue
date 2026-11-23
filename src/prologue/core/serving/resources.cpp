@@ -1,5 +1,6 @@
 #include "prologue/core/serving/resources.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <numeric>
 #include <stdexcept>
@@ -27,11 +28,11 @@ std::int64_t Resources::available_slots() const {
 }
 
 std::int64_t Resources::available_tokens() const {
-    return static_cast<std::int64_t>(free_pages_.size()) * limits_.page_size;
+    return static_cast<std::int64_t>(free_pages_.size() + released_pages_.size()) * limits_.page_size;
 }
 
 bool Resources::drained() const {
-    return available_slots() == limits_.slots && free_pages_.size() == page_in_use_.size();
+    return available_slots() == limits_.slots && free_pages_.size() + released_pages_.size() == page_in_use_.size();
 }
 
 const std::deque<std::int64_t>& Resources::free_slots() const {
@@ -73,7 +74,8 @@ std::int64_t Resources::pages_for(std::int64_t tokens) const {
 
 std::vector<std::int64_t> Resources::grow(const std::vector<KvGrowth>& members) {
     std::unordered_set<std::string> distinct;
-    auto available = static_cast<std::int64_t>(free_pages_.size());
+    const auto total = static_cast<std::int64_t>(free_pages_.size() + released_pages_.size());
+    auto available = total;
     for (const auto& growth : members) {
         const auto& resident = residence(growth.request);
         if (!distinct.insert(growth.request).second || !resident.slot || growth.begin != resident.tokens ||
@@ -85,6 +87,13 @@ std::vector<std::int64_t> Resources::grow(const std::vector<KvGrowth>& members) 
             throw std::invalid_argument("KV pages exhausted");
         }
         available -= required;
+    }
+
+    // Pools with deferred reuse merge returned page identities only when the active supply is short.
+    if (total - available > static_cast<std::int64_t>(free_pages_.size())) {
+        free_pages_.insert(free_pages_.end(), released_pages_.begin(), released_pages_.end());
+        released_pages_.clear();
+        std::ranges::sort(free_pages_);
     }
 
     // Reserve all members only after the whole native allocation request is within capacity.
@@ -123,8 +132,11 @@ void Resources::release_pages(const std::vector<std::int64_t>& pages) {
         page_in_use_.at(static_cast<std::size_t>(page)) = false;
     }
 
-    // The non-overlapped resident pool returns pages to the front in the observed release order.
-    free_pages_.insert(free_pages_.begin(), pages.begin(), pages.end());
+    if (limits_.sort_released_pages) {
+        released_pages_.insert(released_pages_.end(), pages.begin(), pages.end());
+    } else {
+        free_pages_.insert(free_pages_.begin(), pages.begin(), pages.end());
+    }
 }
 
 }
