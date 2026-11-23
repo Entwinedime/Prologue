@@ -4,6 +4,8 @@ C++23 核心用 Ubuntu 24.04、GCC 13、CMake、Ninja 构建。建模镜像 `pro
 
 当前公开入口 `prologue plan <task.json>` 在 CPU 容器中读取一份任务。Python 装配模型与配置，C++ 校验请求并生成稳定到达顺序，应用输出配置与 workload 的组合。模型位置在此阶段是部署输入。任务计划成功表示输入合格，原生运行、模板、成本和精度分别取证。
 
+观察镜像 `prologue-observer:ubuntu22.04` 从已固定的官方 SGLang 源码和 Ascend 软件环境安装当前观察包，使用框架插件记录现行进程中的批次和模块调用。详细模式经原生 profiler 留下提交及设备证据，轻量模式从同一发布边界记录请求的 token 数和时刻。观察目录由一次会话独占，完成后写入清单。`prologue compile <observation>` 在无设备的应用容器内解释详细记录并编译模板，输出可追溯的定义、调用实例和设备工作归属。设备计时与主机 RAW 时间各自保留，交给后续时钟核对。
+
 ## 层次与构建边界
 
 - `src/prologue/app/` 维护公开命令及对应的跨语言装配，`src/prologue/core/` 负责统一业务判定。任务级字段与 SGLang 配置分别在入口和框架适配侧解释。

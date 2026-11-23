@@ -97,3 +97,23 @@
 **验证**　核对 CMake、Python 包、Docker COPY、示例和活动说明的引用。用暂存快照的干净检出编译并安装应用镜像 `3dfa03cf222f`。仅挂载合法输入时列出四个目标并按到达时间排序，零输出 token 的负例退出 2 且不产生计划。在暂存区核对实验数据、个人笔记和旧归档保持本地。[镜像标识](../../../data/shared-libraries-on-demand-acquisition/s02/image.txt) · [合法计划](../../../data/shared-libraries-on-demand-acquisition/s02/plan.json) · [合同负例](../../../data/shared-libraries-on-demand-acquisition/s02/invalid-stderr.txt)
 
 **结论与限制**　S02 的构建、安装和输入合同通过。原生观察、图模板和性能模拟将在后续阶段使用这一构建边界。
+
+## 2026-11-23 — S03 启动原生观察与模板编译
+
+**范围**　从已推送的 `2f4fbd9` 接续。首批 Qwen3-8B TP1 选用 16 token 页和固定短请求，分别构建详细来源和轻量参考。沿用登记的 4 次、1,440 卡秒上限，任一次原生运行限制 240 秒，本批先占用 1 张卡。
+
+**改动**　SGLang 的适配器记录实际批次、层与 attention 切口，同时从实际发送者取得 token 发布。详细路径使用原生 profiler，Ascend 适配器沿提交和设备连接归属设备工作，共同 C++ 编译器从内向外建立定义、子调用和能观察到的张量连接。轻量路径只保留 token 发布与同口径启动、预热及请求提交。
+
+**验证**　软件层从官方子模块、Ascend 依赖与固定 FA 源码编译完成，运行时镜像 `6700fadb789d` 可独立用于新采集包构建。源码静态核对请求预热后 drain、真实发送所有权、调用栈、时间单位及父子关系。
+
+**结论与限制**　不将未归属的设备任务、物理流间同步或缺少边界的宿主段视为已闭合结构。先用真实短参考核对多父调用共享子定义所需的实体，再决定局部 PD 与 attention 试采。
+
+## 2026-11-23 — S03 交付原生取证和分层模板
+
+**范围**　Qwen3-8B、BF16、dummy 权重、Ascend TP1，同一输入为 8 个 prompt token 和 3 个输出 token。4 次原生尝试均使用物理卡 4，合计 405.10 卡秒。详细原始记录、轻量参考、库和失败日志合计保留约 546 MiB。[采集计费及状态](../../../data/shared-libraries-on-demand-acquisition/s03/sampling-evidence.json)
+
+**改动**　详细观察从批次进入原生层，再记录 attention 及实际读取其返回张量的输出投影。分开保存工作和布局定义、父子位置、张量绑定及观测时间。Ascend 解释器只对具有唯一提交依据的设备工作归属，并区分切口外、缺提交和多来源。C++ 采用流内次序，模板签名忽略不同物理流间的偶然交错。新观察与编译安装利用同一项目包，只有详细参考可用作模板来源。
+
+**验证**　当前观察镜像 `0f1dd319521c` 和应用镜像 `b18a1bd60836` 完成统一构建。详细记录的 327 次调用生成 14 个定义，Prefill 和两次 Decode 的 attention 分别由 36 个层调用复用，每种形状跨两个父定义。逐项核对 108 条实际张量消费边、1,723 个设备工作记录及 1,722 条观测流内次序。49 条额外设备记录的提交均在当前切口之外。轻量参考按相同提交、预热、清 KV 口径记录三次真实 token 发布。离线验证拒绝用该参考编译模板。关联源、容器安装、SDK 数据和 C++ 消费完整审查，活动 `src/` 合计 1,013 行。[结构核对](../../../data/shared-libraries-on-demand-acquisition/s03/structure-evidence.json) · [轻量记录](../../../data/shared-libraries-on-demand-acquisition/s03/light/worker.json)
+
+**结论与限制**　PD 批准备需要传输完成后的原生准入、真实槽位及已提交 KV。S07 从运行中的 Decode 准入边界获取父调用和资源效果。框架独立批次工具完成真实 Prefill 和至少一个测量 Decode，随后原生 profiler 导出在路径和 `key_averages` 接口上失败。离线 SDK 输出也未闭合。S08 可继续用原生批次和真实 KV，需独立记录任务与完成边界后才能比较 serving、判断采样等价和节省。S04 负责补齐本批切口外的必要调度、主机和资源关系，并接入实测时序推进。[PD 历史准入证据](../../../data/architecture-acquisition-performance/rounds/13/independent-active-decode-confirmation/native-coverage.json) · [独立批次失败](../../../data/shared-libraries-on-demand-acquisition/s03/attention-probe/native.log) · [离线导出失败](../../../data/shared-libraries-on-demand-acquisition/s03/attention-probe/analysis.log)
