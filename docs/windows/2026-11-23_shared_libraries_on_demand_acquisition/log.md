@@ -117,3 +117,33 @@
 **验证**　当前观察镜像 `0f1dd319521c` 和应用镜像 `b18a1bd60836` 完成统一构建。详细记录的 327 次调用生成 14 个定义，Prefill 和两次 Decode 的 attention 分别由 36 个层调用复用，每种形状跨两个父定义。逐项核对 108 条实际张量消费边、1,723 个设备工作记录及 1,722 条观测流内次序。49 条额外设备记录的提交均在当前切口之外。轻量参考按相同提交、预热、清 KV 口径记录三次真实 token 发布。离线验证拒绝用该参考编译模板。关联源、容器安装、SDK 数据和 C++ 消费完整审查，活动 `src/` 合计 1,013 行。[结构核对](../../../data/shared-libraries-on-demand-acquisition/s03/structure-evidence.json) · [轻量记录](../../../data/shared-libraries-on-demand-acquisition/s03/light/worker.json)
 
 **结论与限制**　PD 批准备需要传输完成后的原生准入、真实槽位及已提交 KV。S07 从运行中的 Decode 准入边界获取父调用和资源效果。框架独立批次工具完成真实 Prefill 和至少一个测量 Decode，随后原生 profiler 导出在路径和 `key_averages` 接口上失败。离线 SDK 输出也未闭合。S08 可继续用原生批次和真实 KV，需独立记录任务与完成边界后才能比较 serving、判断采样等价和节省。S04 负责补齐本批切口外的必要调度、主机和资源关系，并接入实测时序推进。[PD 历史准入证据](../../../data/architecture-acquisition-performance/rounds/13/independent-active-decode-confirmation/native-coverage.json) · [独立批次失败](../../../data/shared-libraries-on-demand-acquisition/s03/attention-probe/native.log) · [离线导出失败](../../../data/shared-libraries-on-demand-acquisition/s03/attention-probe/analysis.log)
+
+## 2026-11-23 — S04 原生调度、资源合同和实测结构对照启动
+
+**范围**　从已推送的 `9b7241d` 接续。沿用 Qwen3-8B TP1 的 16 token 页和 S03 短来源。另取一个 16 token 请求作跨页来源，并用请求标识不同、短请求和跨页请求错峰到达的工作负载取得独立详细目标。首批最多 2 次原生启动、480 卡秒、20 分钟离线处理及 8 GiB 保留量。失败照实计入 S04–S05 合计预算。
+
+**改动**　模板来源只提供布局、定义和实参可用域。目标参考额外观察批次分配后和结果处理后可用槽位、KV 容量、token 发布以及同次设备时间。共同核心接收运行时资源操作和真实时长查询，原生调度依据其返回决定后续批次。单次开发对照固定单设备、无 overlap，避免将尚未观察的提交和等待视为有资格的服务模型。
+
+**验证**　对照原生事件循环、请求池和 paged KV 分配调用的位置，阶段结果将分别核对实际决策、每项条件消费和资源归还。首个来源与目标的依赖将按作用域内设备工作及观测流内顺序核对。
+
+**结论与限制**　目标采集只给评价器提供证据，来源库独立构建。实测时长旁路收口以后才接入自主性能模型。
+
+**范围调整**　首批两次原生运行完整结束，累计 250.26 卡秒。5 秒错峰触发两成员 Decode，首个请求的最后发布发生在 12.61 秒。保留该目标检查混批形状缺口，在同一模型和配置增加一次 20 秒错峰的详细参考，单独检查跨页增长和归还。该对照限定 240 秒，只使用一张卡，累计仍在 S04–S05 原始尝试和卡时配额内。
+
+**进展**　应用与原生控制镜像已构建，两份独立来源均已编译成模板库。20 秒错峰的两条请求均有完整 token 发布记录，但采集命令超时退出，缺少采集清单，暂不用于验收。本阶段累计 484.02 卡秒。先复用完整的 5 秒错峰参考运行离线对照。[20 秒错峰采集记录](../../../data/shared-libraries-on-demand-acquisition/s04/isolated-attempt.json) · [应用构建](../../../data/shared-libraries-on-demand-acquisition/s04/app-build.log) · [控制镜像构建](../../../data/shared-libraries-on-demand-acquisition/s04/control-build.log)
+
+**离线对照**　首次对照匹配首个 Prefill，首次 Decode 因分配钩子未接受原生关键字参数中止。将两个分配入口的参数原样转发后，复用同一参考核对前三个批次，消费 2,084 项实测设备工作。原生控制在第四批自行选出与参考成员及进度一致的双成员 Decode，核心按预期报告 `template_gap` 并保留已匹配前缀。跨页增长和终态资源归还仍需要完整成功对照。[首次对照](../../../data/shared-libraries-on-demand-acquisition/s04/target-control/verify.json) · [修复后对照](../../../data/shared-libraries-on-demand-acquisition/s04/target-control-r2/verify.json)
+
+**取证收紧**　20 秒错峰已有六个原生批次和请求发布，缺的是设备导出。失败记录中的 Python tracer 文件为 250 MiB，完整的 5 秒对照为 17 MiB。设备关联依赖语义标记、API 和 stream，张量布局由切口记录。关闭原生 profiler 的 Python 栈与算子形状重复记录，并单列导出耗时。以同一 20 秒错峰输入再取一次完整参考，沿用两份独立来源。此次最多使用一张卡 240 秒，成功条件为六个批次均有合格设备证据并完成资源归还对照。停止时保留缺证位置和原记录。
+
+## 2026-11-23 — S04 实测条件下的原生结构闭环交付
+
+**范围**　Qwen3-8B、BF16、Ascend、TP1，16 token 页。复用两份来源模板，用 20 秒错峰完整参考核对普通请求与跨页请求，用 5 秒错峰参考核对双成员 Decode 缺口。
+
+**改动**　C++ 持有槽位、KV 页与时间线，原生控制载入同一官方版本运行真实组批、页请求和结果处理。命令进程只传目标合同及来源资产。实例化后向验证端查询实测时长和就绪条件，返回值只含计时，真实图和批次留在验证端。控制与观察共用固定框架镜像，目标参考出具完整清单后才可用于对照。
+
+**验证**　错峰完整对照匹配 6/6 批、3,448 项设备工作和两个请求的发布。跨页 Decode 将已提交长度从 16 增到 17，空闲 KV 从 4,080 降到 4,064，结束后归还至 4,096，四个槽位均归还。真实混合目标匹配前三批，在第四批报告 `template_gap`。另用同一参考核对缺时长 `timing_gap` 和请求身份错配 `action_mismatch`，用实际分配入口核对超容量 `resource_error`。[完整对照](../../../data/shared-libraries-on-demand-acquisition/s04/structure-checks/staggered/verify.json) · [混批缺口](../../../data/shared-libraries-on-demand-acquisition/s04/structure-checks/mixed/verify.json) · [缺时长](../../../data/shared-libraries-on-demand-acquisition/s04/structure-checks/missing-timing/verify.json) · [动作错配](../../../data/shared-libraries-on-demand-acquisition/s04/structure-checks/action-mismatch/verify.json) · [资源越界](../../../data/shared-libraries-on-demand-acquisition/s04/structure-checks/resource-error.json)
+
+**审查与留存**　沿原生分配、模板选择、实测查询、沿流推进和结果处理核对所有权。将初始容量与终态检查收在资源服务，导出缩减到 26 MiB 的轨迹，包含设备解析的实际导出用时为 8.13 秒。自有 Python、C++ 和头文件由 978 行增至 2,491 行，示例未增。构建无须归档源码，第三方工作树干净。四次实机尝试合计 619.77 卡秒，含一次导出超时。本阶段目录保留约 1.3 GiB 及各次记录，S05 仍有两次原生尝试和 820.23 卡秒。[新版采集费用](../../../data/shared-libraries-on-demand-acquisition/s04/staggered-attempt.json) · [应用构建](../../../data/shared-libraries-on-demand-acquisition/s04/app-sealed-build.log)
+
+**结论与限制**　跨页证据核对了槽位、页容量和结果释放，页表逐物理页以及多流、多 rank 同步留待相应阶段。这里核对了每项时长和可观察边界的实际消费。设备内自主排队精度和独立性能评分由 S05 接续验证。

@@ -1,6 +1,6 @@
 # Prologue
 
-Prologue models serving for one model across multiple configurations and request workloads. The current commands plan tasks, observe native SGLang serving on one Ascend card, and build hierarchical execution templates.
+Prologue models serving for one model across multiple configurations and request workloads. The current commands plan tasks, observe native SGLang serving on one Ascend card, build hierarchical execution templates, and verify their expansion under native scheduling.
 
 ## Build and plan a task
 
@@ -24,8 +24,9 @@ Use the pinned SGLang checkout and a compatible Ascend device. Build the softwar
 git submodule update --init third_party/sglang
 test -z "$(git -C third_party/sglang status --porcelain)"
 docker build -t prologue-sglang-env:ubuntu22.04 docker/images/base/sglang
-docker build -f docker/images/observer/Dockerfile -t prologue-observer:ubuntu22.04 \
+docker build -f docker/images/framework/sglang/Dockerfile -t prologue-sglang-runtime:ubuntu22.04 \
   --build-arg "SGLANG_REVISION=$(git -C third_party/sglang rev-parse HEAD)" .
+docker build -f docker/images/observer/Dockerfile -t prologue-observer:ubuntu22.04 .
 
 run="$PWD/data/$(date -u +%Y%m%dT%H%M%SZ)_observation"
 mkdir -p "$run"
@@ -47,7 +48,35 @@ docker run --rm --runtime runc --network none \
   prologue-app:ubuntu24.04 compile /source > "$run/templates.json"
 ```
 
-Use `--mode light` and a separate output directory for scheduler publication times without a profiler. Each observation records the inputs and the native revision. The template library stores definitions and concrete call bindings. Device records with unresolved ownership are counted separately. Autonomous prediction is a subsequent stage.
+Use `--mode light` and a separate output directory for scheduler publication times without a profiler. Each observation records the inputs and the native revision. The template library stores definitions and concrete call bindings. Device records with unresolved ownership are counted separately.
+
+## Verify execution structure on CPU
+
+Capture a separate detailed target under the source configuration and save it as `reference` in the run directory. The verifier uses that observation to answer timing queries and compare the resulting graph. The native controller reads the workload and simulated resources to make its own decisions. Both processes run without an accelerator.
+
+```bash
+docker build -f docker/images/control/Dockerfile -t prologue-scheduler:ubuntu22.04 .
+cp /models/Qwen3-8B/config.json "$run/model-config.json"
+mkdir "$run/control"
+
+# Start the verifier and wait for its socket before starting the controller.
+docker run --rm --runtime runc --network none \
+  --mount type=bind,src="$run",dst=/case,readonly \
+  --mount type=bind,src="$run/control",dst=/control \
+  prologue-app:ubuntu24.04 verify-structure /case/reference \
+  --library /case/templates.json --model-config /case/model-config.json \
+  --socket /control/control.sock
+```
+
+In a second terminal, with `run` set to the same directory, start the native control worker.
+
+```bash
+docker run --rm --runtime runc --network none \
+  --mount type=bind,src="$run/control",dst=/control \
+  prologue-scheduler:ubuntu22.04 /control/control.sock
+```
+
+This verification path currently covers synchronous TP1 actions whose batch shapes have source templates. Repeat `--library` to load additional observations collected in the same domain. The report includes the first missing condition or disagreement and the matched action count.
 
 ## License
 
