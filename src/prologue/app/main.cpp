@@ -5,6 +5,7 @@
 #include "prologue/core/serving/simulation.hpp"
 #include "prologue/core/serving/workload.hpp"
 #include "prologue/core/structure/templates/compiler.hpp"
+#include "prologue/core/structure/templates/library.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -113,7 +114,7 @@ json work_coordinates(const json& batches) {
 }
 
 json cost_quotes(const json& input) {
-    const prologue::performance::CostCatalog costs(input.at("costs"));
+    const prologue::performance::CostCatalog costs(input.at("costs"), input.at("rules").at("performance"));
     auto result = json::array();
     for (const auto& coordinate : input.at("coordinates")) {
         result.push_back(costs.quote(input.at("domain"), coordinate));
@@ -121,11 +122,19 @@ json cost_quotes(const json& input) {
     return result;
 }
 
+json qualify_release(const json& input) {
+    const auto& rules = input.at("rules");
+    const prologue::structure::Templates templates(input.at("libraries"), rules.at("templates"));
+    const prologue::performance::CostCatalog costs(input.at("costs"), rules.at("performance"));
+    templates.qualify();
+    return {{"status", "qualified"}};
+}
+
 }
 
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 3) {
-        std::cerr << "Usage: prologue-core workloads|templates|simulate|predict|coordinates|quote|replay [socket]\n";
+        std::cerr << "Usage: prologue-core workloads|templates|qualify-release|simulate|predict|coordinates|quote|replay [socket]\n";
         return 2;
     }
 
@@ -135,6 +144,8 @@ int main(int argc, char** argv) {
             std::cout << normalize_workloads(json::parse(std::cin)) << '\n';
         } else if (argc == 2 && command == "templates") {
             std::cout << prologue::structure::Compiler{}.compile(json::parse(std::cin)) << '\n';
+        } else if (argc == 2 && command == "qualify-release") {
+            std::cout << qualify_release(json::parse(std::cin)) << '\n';
         } else if (argc == 3 && command == "simulate") {
             const auto job = read_record();
             StreamTiming timing;
@@ -142,7 +153,7 @@ int main(int argc, char** argv) {
             std::cout << json{{"result", prologue::app::serve_control(argv[2], simulation)}} << '\n';
         } else if (argc == 3 && command == "predict") {
             const auto job = json::parse(std::cin);
-            const prologue::performance::CostCatalog costs(job.at("costs"));
+            const prologue::performance::CostCatalog costs(job.at("costs"), job.at("rules").at("performance"));
             prologue::serving::CostTiming timing(job.at("cost_domain"), costs);
             prologue::serving::Simulation simulation(job, read_workload(job.at("workload")), timing);
             std::cout << prologue::app::serve_control(argv[2], simulation) << '\n';

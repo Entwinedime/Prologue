@@ -21,6 +21,9 @@ include-package-data = false
 where = ["src"]
 include = ["prologue", "prologue.*"]
 
+[tool.setuptools.package-data]
+"prologue.rules" = ["defaults.json"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"

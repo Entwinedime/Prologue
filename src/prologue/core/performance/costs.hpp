@@ -2,11 +2,14 @@
 
 #include <nlohmann/json.hpp>
 
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 
 namespace prologue::performance {
+
+class Estimator;
 
 class CostGap final : public std::runtime_error {
 public:
@@ -25,14 +28,15 @@ public:
 
 class CostCatalog final {
 public:
-    explicit CostCatalog(const nlohmann::json& asset);
+    CostCatalog(const nlohmann::json& asset, const nlohmann::json& rules);
+    ~CostCatalog();
 
-    const nlohmann::json& require(const nlohmann::json& domain, const nlohmann::json& coordinate) const;
+    nlohmann::json require(const nlohmann::json& domain, const nlohmann::json& coordinate) const;
     nlohmann::json quote(const nlohmann::json& domain, const nlohmann::json& coordinate) const;
 
 private:
     nlohmann::json domain_;
-    std::unordered_map<std::string, nlohmann::json> estimates_;
+    std::unordered_map<std::string, std::unique_ptr<Estimator>> models_;
 };
 
 }

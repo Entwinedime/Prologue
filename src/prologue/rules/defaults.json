@@ -1,0 +1,12 @@
+{
+  "templates": {"selector": "exact_batch_geometry"},
+  "performance": {
+    "device_task": {"estimator": "exact_median"},
+    "host_thread": {"estimator": "exact_median"}
+  },
+  "acquisition": {
+    "template_source": {"mode": "detailed"},
+    "device_task": {"mode": "detailed"},
+    "host_thread": {"mode": "host-timing"}
+  }
+}

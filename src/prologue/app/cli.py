@@ -5,22 +5,21 @@ import json
 from pathlib import Path
 
 from prologue.app.core import run_core, run_simulation
+from prologue.app.releases import pinned, publish, read_document
 from prologue.app.task import Plan
+from prologue.assets.publication import Store
 from prologue.integrations.platforms.ascend.evidence import AscendEvidence
+from prologue.rules.catalog import Rules
 
 
-def read(path):
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def template_sources(sources, domain):
-    libraries = []
-    for source in sources:
-        if source["domain"] != domain:
-            raise ValueError("template source and target have different domains")
-        libraries.append({"definitions": source["definitions"],
-                          "instances": [row for row in source["instances"] if row["parent"] is None]})
-    return libraries
+def compile_source(args):
+    observation = AscendEvidence.open(args.observation)
+    rules = Rules.read(args.rules)
+    rules.require_observation("template_source", observation.manifest["mode"])
+    asset = run_core("templates", observation.document())
+    asset["source"] = {"mode": observation.manifest["mode"],
+                       "origin_raw_ns": observation.manifest["delivery"]["origin_raw_ns"]}
+    return asset
 
 
 def detailed_reference(path):
@@ -31,18 +30,26 @@ def detailed_reference(path):
 
 
 def verify_structure(args):
-    _, reference = detailed_reference(args.reference)
-    sources = [read(path) for path in args.library]
+    store, release, rules = pinned(args)
+    templates = store.asset(release, "templates")
+    observation, reference = detailed_reference(args.reference)
+    if templates["domain"] != reference.domain:
+        raise ValueError("template and reference domains disagree")
+    origin = observation.manifest["delivery"]["origin_raw_ns"]
+    if any(library["source"]["origin_raw_ns"] == origin for library in templates["libraries"]):
+        raise ValueError("the structure reference was used to build templates")
+
     job = {"domain": reference.domain, "workload": reference.workload,
-           "libraries": template_sources(sources, reference.domain), "model_config": read(args.model_config),
-           "record_structure": True}
-    return reference.compare(run_simulation(job, args.socket, reference))
+           "libraries": templates["libraries"], "model_config": templates["model_config"],
+           "rules": rules.document, "record_structure": True}
+    result = reference.compare(run_simulation(job, args.socket, reference))
+    return {**result, "release": release["release"]}
 
 
 def fit_costs(args):
     from prologue.calibration.costs import Calibration
 
-    calibration = Calibration()
+    calibration = Calibration(Rules.read(args.rules))
     for directory in args.device:
         calibration.device(directory)
     for directory in args.host:
@@ -51,37 +58,45 @@ def fit_costs(args):
 
 
 def predict(args):
+    store, release, rules = pinned(args)
+    templates = store.asset(release, "templates")
+    costs = store.asset(release, "performance")
     task = Plan(args.task).document()
     if {"configuration": args.configuration, "workload": args.workload} not in task["targets"]:
         raise ValueError("the requested target is absent from the task")
     configuration = next(row for row in task["configurations"] if row["id"] == args.configuration)
     workload = next(row for row in task["workloads"] if row["id"] == args.workload)
-    sources = [read(path) for path in args.library]
-    domain = {"framework_revision": sources[0]["domain"]["framework_revision"],
+    domain = {"framework_revision": templates["domain"]["framework_revision"],
               "model": task["model"], "configuration": configuration}
-    costs = read(args.costs)
-    job = {"domain": domain, "cost_domain": {**domain, "hardware": read(args.hardware)}, "workload": workload,
-           "costs": costs, "libraries": template_sources(sources, domain), "model_config": read(args.model_config)}
+    if templates["domain"] != domain:
+        raise ValueError("published template domain does not cover the prediction target")
+
+    job = {"domain": domain, "cost_domain": {**domain, "hardware": read_document(args.hardware)}, "workload": workload,
+           "costs": costs, "libraries": templates["libraries"], "model_config": templates["model_config"],
+           "rules": rules.document}
     result = run_core("predict", job, str(args.socket))
-    return {**result, "domain": domain, "workload": workload, "cost_sources": costs["sources"]}
+    return {**result, "domain": domain, "workload": workload, "cost_sources": costs["sources"],
+            "release": release["release"]}
 
 
 def verify_performance(args):
     from prologue.verification.fixed_graph import FixedGraph
 
+    store, release, rules = pinned(args)
     observation, reference = detailed_reference(args.reference)
-    costs = read(args.costs)
+    costs = store.asset(release, "performance")
     if any(row["origin_raw_ns"] == observation.manifest["delivery"]["origin_raw_ns"] for row in costs["sources"]):
         raise ValueError("the fixed-graph reference was used in calibration")
     graph = FixedGraph(reference, observation.manifest, observation.hardware(args.reference))
     baseline = graph.check_baseline(run_core("replay", graph.job()))
+    report = {"status": baseline["status"], "baseline": baseline, "release": release["release"]}
     if baseline["status"] != "matched":
-        return {"status": baseline["status"], "baseline": baseline}
+        return report
 
-    estimate = graph.compare(run_core("replay", graph.job(costs)))
-    report = {"status": estimate["status"], "baseline": baseline, "estimate": estimate}
+    estimate = graph.compare(run_core("replay", graph.job(costs, rules.document)))
+    report.update(status=estimate["status"], estimate=estimate)
     if estimate["status"] == "complete":
-        report["restored"] = {kind: graph.compare(run_core("replay", graph.job(costs, kind)))
+        report["restored"] = {kind: graph.compare(run_core("replay", graph.job(costs, rules.document, kind)))
                               for kind in sorted(graph.kinds)}
     return report
 
@@ -89,18 +104,19 @@ def verify_performance(args):
 def score(args):
     from prologue.verification.autonomous import AutonomousReference
 
-    return AutonomousReference(args.reference).score(read(args.prediction))
+    return AutonomousReference(args.reference).score(read_document(args.prediction))
 
 
 def quote(args):
-    query = read(args.query)
-    return run_core("quote", {**query, "costs": read(args.costs)})
+    store, release, rules = pinned(args)
+    query = read_document(args.query)
+    payload = {**query, "costs": store.asset(release, "performance"), "rules": rules.document}
+    return {"release": release["release"], "quotes": run_core("quote", payload)}
 
 
-def control_arguments(parser):
-    parser.add_argument("--library", type=Path, action="append", required=True)
-    parser.add_argument("--model-config", type=Path, required=True)
-    parser.add_argument("--socket", type=Path, required=True)
+def release_arguments(parser):
+    parser.add_argument("--store", type=Path, default=Path("data/libraries"))
+    parser.add_argument("--release", default="current", help="release UUID or current")
 
 
 def main() -> None:
@@ -112,35 +128,51 @@ def main() -> None:
 
     compile_command = commands.add_parser("compile", help="compile hierarchical templates from a detailed observation")
     compile_command.add_argument("observation", type=Path)
-    compile_command.set_defaults(handler=lambda args: run_core("templates", AscendEvidence.open(args.observation).document()))
+    compile_command.add_argument("--rules", type=Path)
+    compile_command.set_defaults(handler=compile_source)
 
     structure = commands.add_parser("verify-structure", help="compare native control and expanded templates to a reference")
     structure.add_argument("reference", type=Path)
-    control_arguments(structure)
+    structure.add_argument("--socket", type=Path, required=True)
+    release_arguments(structure)
     structure.set_defaults(handler=verify_structure)
 
     fit = commands.add_parser("fit-costs", help="fit models from native training observations")
     fit.add_argument("--device", type=Path, action="append", required=True)
     fit.add_argument("--host", type=Path, action="append", required=True)
+    fit.add_argument("--rules", type=Path)
     fit.set_defaults(handler=fit_costs)
+
+    publication = commands.add_parser("publish", help="atomically publish template, performance and rule assets")
+    publication.add_argument("--store", type=Path, default=Path("data/libraries"))
+    publication.add_argument("--base", default="current", help="expected current release UUID, current or empty")
+    publication.add_argument("--library", type=Path, action="append")
+    publication.add_argument("--costs", type=Path)
+    publication.add_argument("--rules", type=Path)
+    publication.add_argument("--model-config", type=Path)
+    publication.set_defaults(handler=publish)
+
+    inspect = commands.add_parser("show-release", help="show the immutable record of a published release")
+    release_arguments(inspect)
+    inspect.set_defaults(handler=lambda args: Store(args.store).release(args.release))
 
     query = commands.add_parser("quote-costs", help="query modeled service for bound work coordinates")
     query.add_argument("query", type=Path)
-    query.add_argument("--costs", type=Path, required=True)
+    release_arguments(query)
     query.set_defaults(handler=quote)
 
-    forecast = commands.add_parser("predict", help="predict a target with explicit template and cost assets")
+    forecast = commands.add_parser("predict", help="predict a target using a pinned release")
     forecast.add_argument("task", type=Path)
     forecast.add_argument("--configuration", required=True)
     forecast.add_argument("--workload", required=True)
-    forecast.add_argument("--costs", type=Path, required=True)
     forecast.add_argument("--hardware", type=Path, required=True)
-    control_arguments(forecast)
+    forecast.add_argument("--socket", type=Path, required=True)
+    release_arguments(forecast)
     forecast.set_defaults(handler=predict)
 
     fixed = commands.add_parser("verify-performance", help="compare measured and modeled durations on a fixed native graph")
     fixed.add_argument("reference", type=Path)
-    fixed.add_argument("--costs", type=Path, required=True)
+    release_arguments(fixed)
     fixed.set_defaults(handler=verify_performance)
 
     scoring = commands.add_parser("score", help="score a prediction against an independent lightweight recording")

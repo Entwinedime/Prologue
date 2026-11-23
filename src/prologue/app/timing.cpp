@@ -59,7 +59,7 @@ json replay(const json& job) {
     const auto restore = job.at("restore_kind");
     std::optional<performance::CostCatalog> costs;
     if (job.contains("costs")) {
-        costs.emplace(job.at("costs"));
+        costs.emplace(job.at("costs"), job.at("rules").at("performance"));
     }
 
     serving::Timeline timeline;

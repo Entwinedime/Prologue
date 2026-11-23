@@ -54,10 +54,11 @@ class FixedGraph:
                                 "intervals": true_intervals, "publications": published})
             previous_end = finish
 
-    def job(self, costs=None, restore_kind=None):
+    def job(self, costs=None, rules=None, restore_kind=None):
         result = {"domain": self.domain, "batches": self.batches, "restore_kind": restore_kind}
         if costs is not None:
             result["costs"] = costs
+            result["rules"] = rules
         return result
 
     def check_baseline(self, output):

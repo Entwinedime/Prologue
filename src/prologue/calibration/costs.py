@@ -9,7 +9,8 @@ from prologue.integrations.platforms.ascend.evidence import AscendEvidence
 
 
 class Calibration:
-    def __init__(self):
+    def __init__(self, rules):
+        self.rules = rules
         self.domain = None
         self.batches = []
         self.observations = []
@@ -17,12 +18,12 @@ class Calibration:
 
     def device(self, directory):
         observation = AscendEvidence.open(directory)
+        self.record_source("device_task", observation.manifest)
         evidence = observation.document()
         domain = {**evidence["domain"], "hardware": observation.hardware(directory)}
         if self.domain is not None and self.domain != domain:
             raise ValueError("device observations are from different cost domains")
         self.domain = domain
-        self.record_source(observation.manifest)
         for batch in ObservedBatches(evidence).entries:
             self.batches.append({"action": batch.action(), "graph": batch.graph})
             samples = []
@@ -32,13 +33,11 @@ class Calibration:
 
     def host(self, directory):
         manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
-        if manifest["mode"] != "host-timing":
-            raise ValueError("host fitting requires thread-time observations")
         if any(self.domain[key] != manifest[key] for key in ("framework_revision", "model", "configuration")):
             raise ValueError("host observations are from a different native configuration")
         if manifest["initial_state"] != {"kv": "empty", "workspace": "warmed"}:
             raise ValueError("host observations require the warmed empty-KV initial state")
-        self.record_source(manifest)
+        self.record_source("host_thread", manifest)
         worker = json.loads((directory / "worker.json").read_text(encoding="utf-8"))
         for row in worker["host_work"]:
             members = row["members"]
@@ -51,8 +50,10 @@ class Calibration:
             }
             self.observations.append((sample, []))
 
-    def record_source(self, manifest):
-        self.sources.append({"mode": manifest["mode"], "origin_raw_ns": manifest["delivery"]["origin_raw_ns"]})
+    def record_source(self, family, manifest):
+        self.rules.require_observation(family, manifest["mode"])
+        self.sources.append({"family": family, "mode": manifest["mode"],
+                             "origin_raw_ns": manifest["delivery"]["origin_raw_ns"]})
 
     def fit(self, coordinates):
         samples = defaultdict(list)
@@ -63,12 +64,16 @@ class Calibration:
                 samples[json.dumps(work, sort_keys=True)].append(record)
 
         models = []
-        for coordinate, rows in sorted(samples.items()):
+        for identity, rows in sorted(samples.items()):
+            coordinate = json.loads(identity)
+            estimator = self.rules.estimator(coordinate["family"])
+            if estimator != "exact_median":
+                raise ValueError(f"no fitter is registered for {estimator}")
             estimate = {}
             for key, first in rows[0].items():
                 if isinstance(first, list):
                     estimate[key] = [round(median(row[key][index] for row in rows)) for index in range(len(first))]
                 else:
                     estimate[key] = round(median(row[key] for row in rows))
-            models.append({"coordinate": json.loads(coordinate), "estimate": estimate, "samples": len(rows)})
-        return {"domain": self.domain, "estimator": "exact_median", "sources": self.sources, "models": models}
+            models.append({"coordinate": coordinate, "estimator": estimator, "estimate": estimate, "samples": len(rows)})
+        return {"domain": self.domain, "sources": self.sources, "models": models}

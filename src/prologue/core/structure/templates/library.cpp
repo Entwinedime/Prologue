@@ -11,14 +11,6 @@ namespace {
 using nlohmann::json;
 using Index = std::size_t;
 
-std::string geometry(const json& phase, const json& members) {
-    auto sequence = json::array();
-    for (const auto& member : members) {
-        sequence.push_back(member.at("kv_committed_tokens"));
-    }
-    return json::array({phase, sequence}).dump();
-}
-
 class Expansion final {
 public:
     explicit Expansion(const json& definitions) : definitions_(definitions) {}
@@ -70,34 +62,58 @@ private:
 
 }
 
-Templates::Templates(const nlohmann::json& libraries) : libraries_(libraries) {
+json batch_geometry(const json& phase, const json& members) {
+    auto sequence = json::array();
+    for (const auto& member : members) {
+        sequence.push_back(member.at("kv_committed_tokens"));
+    }
+    return {{"phase", phase}, {"sequence_lengths", std::move(sequence)}};
+}
+
+Templates::Templates(const json& libraries, const json& rule) : libraries_(libraries) {
+    if (rule.at("selector") != "exact_batch_geometry") {
+        throw std::invalid_argument("unsupported template selector");
+    }
     for (Index source = 0; source < libraries_.size(); ++source) {
         const auto& library = libraries_.at(source);
         for (const auto& instance : library.at("instances")) {
             if (!instance.at("parent").is_null()) {
                 continue;
             }
-            const auto key = geometry(instance.at("parameters").at("phase"), instance.at("members"));
+            const auto key = batch_geometry(instance.at("parameters").at("phase"), instance.at("members")).dump();
             batches_[key].push_back({source, instance.at("definition").get<Index>()});
         }
     }
 }
 
-std::optional<nlohmann::json> Templates::expand(const nlohmann::json& action) const {
-    const auto candidate = batches_.find(geometry(action.at("phase"), action.at("members")));
+std::optional<json> Templates::expand(const json& action) const {
+    const auto key = batch_geometry(action.at("phase"), action.at("members")).dump();
+    const auto candidate = batches_.find(key);
     if (candidate == batches_.end()) {
         return std::nullopt;
     }
+    return select(key, candidate->second);
+}
 
-    std::optional<json> graph;
-    for (const auto& match : candidate->second) {
+json Templates::select(const std::string& geometry, const std::vector<Candidate>& candidates) const {
+    json graph;
+    for (const auto& match : candidates) {
         auto expanded = Expansion(libraries_.at(match.library).at("definitions")).build(match.definition);
-        if (graph && *graph != expanded) {
-            throw std::invalid_argument("source templates disagree at batch geometry " + candidate->first);
+        if (!graph.is_null() && graph != expanded) {
+            throw std::invalid_argument("source templates disagree at batch geometry " + geometry);
         }
         graph = std::move(expanded);
     }
     return graph;
+}
+
+void Templates::qualify() const {
+    if (batches_.empty()) {
+        throw std::invalid_argument("template sources have no root candidates");
+    }
+    for (const auto& [geometry, candidates] : batches_) {
+        select(geometry, candidates);
+    }
 }
 
 }

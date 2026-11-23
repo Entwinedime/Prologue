@@ -1,0 +1,27 @@
+{
+  "model": {
+    "path": "/models/Qwen3-8B",
+    "dtype": "bfloat16",
+    "load_format": "dummy"
+  },
+  "configurations": [
+    {
+      "id": "tp1-page16",
+      "tp": 1,
+      "attention_backend": "ascend",
+      "page_size": 16,
+      "max_running_requests": 4,
+      "max_total_tokens": 4096,
+      "max_prefill_tokens": 256
+    }
+  ],
+  "workloads": [
+    {
+      "id": "reuse",
+      "requests": [
+        {"id": "new-first", "arrival_ns": 25000000, "prompt_tokens": 8, "output_tokens": 3},
+        {"id": "new-second", "arrival_ns": 2025000000, "prompt_tokens": 8, "output_tokens": 3}
+      ]
+    }
+  ]
+}
