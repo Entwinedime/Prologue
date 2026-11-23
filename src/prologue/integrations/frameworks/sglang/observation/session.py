@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from dataclasses import asdict
+from itertools import groupby
 from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns, monotonic, sleep
 
@@ -25,30 +26,44 @@ class Session:
         if self.ranked and mode != "detailed":
             raise ValueError("parallel workers currently require detailed observation")
 
-    async def request(self, engine, native, request):
-        tokens = self.content.prompt(request["id"]) if self.content is not None else [1] * request["prompt_tokens"]
+    def output_count(self, request):
+        return request["output_tokens"]
+
+    async def generate(self, engine, phase, requests, **transport):
+        identities = [f"{phase}/{index}" for index, _ in requests]
+        prompts = [self.content.prompt(request["id"]) if self.content is not None else [1] * request["prompt_tokens"]
+                   for _, request in requests]
+        sampling = [{"max_new_tokens": request["output_tokens"], "ignore_eos": True, "temperature": 0}
+                    for _, request in requests]
         submitted = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
         output = await engine.async_generate(
-            rid=native, input_ids=tokens, stream=True,
-            sampling_params={"max_new_tokens": request["output_tokens"], "ignore_eos": True, "temperature": 0},
+            rid=identities, input_ids=prompts, stream=True, sampling_params=sampling, **transport,
         )
-        last = None
+        finished = {}
         async for chunk in output:
-            last = chunk
-        if last is None or last["meta_info"]["completion_tokens"] != request["output_tokens"]:
-            raise ValueError(f"native output count did not match request {request['id']}")
-        return {"request": request["id"], "submitted_raw_ns": submitted, "offset_ns": request["arrival_ns"]}
+            metadata = chunk["meta_info"]
+            if metadata["finish_reason"] is not None:
+                finished[metadata["id"]] = metadata["completion_tokens"]
+        for identity, (_, request) in zip(identities, requests, strict=True):
+            if finished.get(identity) != self.output_count(request):
+                raise ValueError(f"native output count did not match request {request['id']}")
+        return [{"request": request["id"], "submitted_raw_ns": submitted, "offset_ns": request["arrival_ns"]}
+                for _, request in requests]
 
     async def dispatch(self, engine, phase):
-        origin = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+        return await self.dispatch_at(engine, phase, clock_gettime_ns(CLOCK_MONOTONIC_RAW))
+
+    async def dispatch_at(self, engine, phase, origin, *role_arguments):
         pending = []
-        for index, request in enumerate(self.workload["requests"]):
-            # Submit tied requests in input order while earlier requests keep running.
-            delay_ns = origin + request["arrival_ns"] - clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+        for offset, tied in groupby(enumerate(self.workload["requests"]), key=lambda item: item[1]["arrival_ns"]):
+
+            # One native request envelope preserves tied ingress without deciding serving batches.
+            delay_ns = origin + offset - clock_gettime_ns(CLOCK_MONOTONIC_RAW)
             if delay_ns > 0:
                 await asyncio.sleep(delay_ns / 1_000_000_000)
-            pending.append(asyncio.create_task(self.request(engine, f"{phase}/{index}", request)))
-        return {"origin_raw_ns": origin, "requests": await asyncio.gather(*pending)}
+            pending.append(asyncio.create_task(self.generate(engine, phase, list(tied), *role_arguments)))
+        delivered = [row for cohort in await asyncio.gather(*pending) for row in cohort]
+        return {"origin_raw_ns": origin, "requests": delivered}
 
     @staticmethod
     def drain(engine):
@@ -136,17 +151,18 @@ class Session:
     def prepare(self, **details):
         self.output.mkdir()
         specification = self.output / "observation.json"
-        description = {"requests": self.aliases("source"), "mode": self.mode, "pp": self.configuration.pp,
-                       "scheduled": bool(self.configuration.prefill_chunk_tokens or self.configuration.prefix_cache),
-                       "prefix_cache": self.configuration.prefix_cache,
+        config = self.configuration
+        description = {"requests": self.aliases("source"), "mode": self.mode, "pp": config.pp,
+                       "snapshot_cache": bool(config.prefill_chunk_tokens or config.prefix_cache),
+                       "prefix_cache": config.prefix_cache,
                        "parallel_placement": self.placement if self.ranked else None, **details}
         if self.content is not None:
             description["synthetic_sampling"] = {"outputs": self.content.outputs, "warmup": self.aliases("warmup"),
                                                  "vocabulary": self.content.vocabulary}
-        ep = self.configuration.ep
+        ep = config.ep
         if ep > 1:
             os.environ.update(DEEP_USE_ALLTOALL_MODE="1", DEEPEP_HCCL_BUFFSIZE="1024", HCCL_BUFFSIZE="1024")
-        routes = self.configuration.route_table(self.workload)
+        routes = config.route_table(self.workload)
         if routes is not None:
             description["experts"] = {"width": ep, "routes": routes, "requests": self.workload["requests"],
                                       "warmup": self.aliases("warmup")}

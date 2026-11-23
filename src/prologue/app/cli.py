@@ -145,10 +145,7 @@ def structure_reference(recording, rules):
     return reference
 
 
-def verify_structure(args):
-    store, release, rules = pinned(args)
-    templates = store.asset(release, "templates")
-    recording = AscendRecording(args.reference)
+def validate_structure_sources(recording, templates):
     if not any(source["domain"] == recording.domain for source in templates["sources"]):
         raise ValueError("template and reference domains disagree")
     if "roles" in recording.manifest:
@@ -159,13 +156,26 @@ def verify_structure(args):
     if any(source["source"]["origin_raw_ns"] == origin for source in templates["sources"]):
         raise ValueError("the structure reference was used to build templates")
 
-    reference = structure_reference(recording, rules)
+
+def structure_job(reference, templates, rules):
     job = {"domain": reference.domain, "workload": reference.workload,
            "templates": templates, **control_inputs(templates, reference.domain, reference.workload),
            "rules": rules.document, "record_structure": True}
     if ingress := getattr(reference, "ingress", None):
         job["measured_ingress"] = ingress
-        job["record_cache"] = "roles" not in recording.manifest
+    if getattr(reference, "record_cache", False):
+        job["record_cache"] = True
+    return job
+
+
+def verify_structure(args):
+    store, release, rules = pinned(args)
+    templates = store.asset(release, "templates")
+    recording = AscendRecording(args.reference)
+    validate_structure_sources(recording, templates)
+
+    reference = structure_reference(recording, rules)
+    job = structure_job(reference, templates, rules)
     result = reference.compare(run_simulation(job, args.socket, reference))
     return {**result, "release": release["release"]}
 

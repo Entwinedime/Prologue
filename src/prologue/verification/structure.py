@@ -7,6 +7,8 @@ from prologue.verification.reference import validate_reference
 
 
 class StructureComparison:
+    record_cache = False
+
     def __init__(self, domain, publications, manifest):
         self.arrivals = validate_reference(manifest, publications, "detailed")
         self.domain = domain
@@ -134,7 +136,9 @@ class ScheduledReference(StructureComparison):
         self.origin = manifest["delivery"]["origin_raw_ns"]
         self.starts = {}
         self.resident = {}
-        self.page_size = domain["configuration"]["page_size"]
+        configuration = domain["configuration"]
+        self.page_size = configuration["page_size"]
+        self.record_cache = bool(configuration.get("prefill_chunk_tokens") or configuration.get("prefix_cache"))
         self.cache_effects = evidence.get("cache_effects")
         self.pending_effects = deque(self.cache_effects or ())
         self.cached_pages = set()
@@ -144,13 +148,14 @@ class ScheduledReference(StructureComparison):
                 raise ValueError("native ingress must cover the full observed workload")
             self.arrivals = {request: read - self.origin for request, read in observed.items()}
             self.ingress = {"arrivals": [self.arrivals]}
-        if domain["configuration"].get("prefix_cache") and (self.ingress is None or self.cache_effects is None):
+        if configuration.get("prefix_cache") and (self.ingress is None or self.cache_effects is None):
             raise ValueError("a cached schedule requires both measured ingress and cache effects")
 
     def record(self, action, graph, call, work, begin_ns, end_ns, *, outputs=None):
         super().record(action, graph, call, work, begin_ns, end_ns, outputs=outputs)
         if self.ingress is not None:
             self.starts[action_identity(action)] = begin_ns - self.origin
+        if self.record_cache:
             self.apply_cache_effects(len(self.actions) - 1)
             self.check_state(action, call)
 

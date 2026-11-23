@@ -1,6 +1,5 @@
 """Capture the two native serving roles against one workload clock."""
 
-import asyncio
 import json
 import multiprocessing
 import os
@@ -9,7 +8,6 @@ import socket
 import traceback
 from contextlib import ExitStack
 from dataclasses import asdict
-from itertools import groupby
 from multiprocessing.connection import wait
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 
@@ -40,46 +38,21 @@ class ServingRole(Session):
         self.offset = offset
         self.submissions = 0
 
+    def output_count(self, request):
+        return 1 if self.role == "prefill" else super().output_count(request)
+
     async def generate(self, engine, phase, requests, rooms):
-        submitted = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
-        stream = await engine.async_generate(
-            rid=[f"{phase}/{index}" for index, _ in requests],
-            input_ids=[[1] * request["prompt_tokens"] for _, request in requests],
-            sampling_params=[{"max_new_tokens": request["output_tokens"], "ignore_eos": True, "temperature": 0}
-                             for _, request in requests],
+        return await super().generate(
+            engine, phase, requests,
             bootstrap_host="127.0.0.1", bootstrap_port=self.bootstrap,
             bootstrap_room=[rooms + index for index, _ in requests],
-            stream=True,
         )
-        finished = {}
-        async for row in stream:
-            metadata = row["meta_info"]
-            if metadata["finish_reason"] is not None:
-                finished[metadata["id"]] = metadata["completion_tokens"]
-
-        delivered = []
-        for index, request in requests:
-            expected = request["output_tokens"] if self.role == "decode" else 1
-            if finished.get(f"{phase}/{index}") != expected:
-                raise ValueError(f"native {self.role} did not complete request {request['id']}")
-            delivered.append({"request": request["id"], "submitted_raw_ns": submitted,
-                              "offset_ns": request["arrival_ns"]})
-        return delivered
 
     async def dispatch(self, engine, phase):
         self.barrier.wait()
-        origin = self.clock.origin.value
-        requests = self.workload["requests"]
-        rooms = self.submissions * len(requests) + 1
+        rooms = self.submissions * len(self.workload["requests"]) + 1
         self.submissions += 1
-        pending = []
-        for offset, group in groupby(enumerate(requests), key=lambda item: item[1]["arrival_ns"]):
-            delay = origin + offset - clock_gettime_ns(CLOCK_MONOTONIC_RAW)
-            if delay > 0:
-                await asyncio.sleep(delay / 1_000_000_000)
-            pending.append(asyncio.create_task(self.generate(engine, phase, list(group), rooms)))
-        delivered = [row for group in await asyncio.gather(*pending) for row in group]
-        return {"origin_raw_ns": origin, "requests": delivered}
+        return await self.dispatch_at(engine, phase, self.clock.origin.value, rooms)
 
     def check_publications(self, directory):
         if self.role == "decode":

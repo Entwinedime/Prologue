@@ -30,7 +30,8 @@ class Observation:
         self.result_cpu_started = None
         self.host_work = []
         self.prepare_cpu_ns = 0
-        self.scheduled = document.get("scheduled", False) and mode == "detailed"
+        self.measure_arrivals = mode == "detailed" and document["pp"] == 1 and "disaggregation" not in document
+        self.snapshot_cache = mode == "detailed" and document.get("snapshot_cache", False)
         self.ingress = {}
         self.awaiting_read = None
         self.sampling = document.get("synthetic_sampling")
@@ -56,7 +57,7 @@ class Observation:
 
             self.pd = PDHandoff(self, disaggregation, document.get("stream_handoff", False))
         self.cache = None
-        if document.get("prefix_cache", False) and self.scheduled:
+        if document.get("prefix_cache", False) and self.snapshot_cache:
             from prologue.integrations.frameworks.sglang.observation.residency import CacheObservation
 
             self.cache = CacheObservation(self)
@@ -114,7 +115,7 @@ class Observation:
             if self.pending_batches:
                 raise ValueError("the native observation closed before every captured batch finished")
             document["calls"] = self.calls.rows
-            if self.scheduled:
+            if self.measure_arrivals:
                 document["ingress"] = self.ingress
             if self.cache is not None:
                 document["cache_effects"] = self.cache.effects
@@ -136,7 +137,7 @@ class Observation:
         self.prepare_cpu_ns = thread_time_ns() - began
         return batch
 
-    def receive(self, original, receiver):
+    def receive(self, generate_batch, original, receiver):
         inputs = original(receiver)
         if not self.capture_calls:
             return inputs
@@ -145,9 +146,11 @@ class Observation:
             self.awaiting_read["next_read_ns"] = read
             self.awaiting_read = None
         for item in inputs:
-            identity = self.requests.get(getattr(item, "rid", None))
-            if identity is not None:
-                self.ingress[identity] = read
+            requests = item.batch if isinstance(item, generate_batch) else (item,)
+            for request in requests:
+                identity = self.requests.get(getattr(request, "rid", None))
+                if identity is not None:
+                    self.ingress[identity] = read
         return inputs
 
     def batch(self, original, scheduler, batch, pp_proxy_tensors=None):
@@ -201,7 +204,7 @@ class Observation:
             self.pending_batches[id(batch)] = call
             call["members"] = members
             call["resources"] = self.resources(scheduler)
-            if self.pd is not None or self.scheduled:
+            if self.pd is not None or self.snapshot_cache:
                 with self.calls.scope("capture_auxiliary", "PageTable.snapshot", phase, {}):
                     call["cache"] = BatchWork.cache(batch, members, prefix_cache=self.cache is not None)
             if pp_proxy_tensors is not None:
@@ -251,7 +254,7 @@ class Observation:
             "begin_ns": begin, "end_ns": clock_gettime_ns(CLOCK_MONOTONIC_RAW),
             "resources": self.resources(scheduler),
         }
-        if self.scheduled:
+        if self.measure_arrivals:
             self.awaiting_read = call["result_processing"]
         return value
 
@@ -323,9 +326,12 @@ class Observation:
                                   self.sample, HookType.AROUND)
         if self.mode == "host-timing":
             HookRegistry.register(scheduler + "get_next_batch_to_run", self.prepare, HookType.AROUND)
-        if self.scheduled:
+        if self.measure_arrivals:
+            from sglang.srt.managers.io_struct import BatchTokenizedGenerateReqInput
+
             receiver = "sglang.srt.managers.scheduler_components.request_receiver.SchedulerRequestReceiver."
-            HookRegistry.register(receiver + "recv_requests", self.receive, HookType.AROUND)
+            HookRegistry.register(receiver + "recv_requests", partial(self.receive, BatchTokenizedGenerateReqInput),
+                                  HookType.AROUND)
         HookRegistry.register("sglang.srt.model_executor.model_runner.ModelRunner.load_model",
                               self.load_model, HookType.AROUND)
         if self.parallel is not None:
