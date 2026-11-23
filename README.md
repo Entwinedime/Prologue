@@ -1,6 +1,6 @@
 # Prologue
 
-Prologue models serving for one model across multiple configurations and request workloads. The current commands plan tasks, observe native SGLang serving on one Ascend card, build hierarchical execution templates, and predict or verify covered TP1 targets.
+Prologue models serving for one model across multiple configurations and request workloads. The current commands plan tasks, observe native SGLang serving, build hierarchical execution templates, and predict or verify targets covered by their released assets. Tensor-parallel templates can be built using one Ascend card.
 
 ## Build and plan a task
 
@@ -50,6 +50,14 @@ docker run --rm --runtime runc --network none \
 
 Use `--mode light` and a separate output directory for scheduler publication times without a profiler. Each observation records inputs, concrete call bindings and the native revision. Compiled sources carry model metadata, reusable definitions and their exact root queries. Supply `compile --model-config` with the original model configuration when the recording lacks it. Device records with unresolved ownership are counted separately.
 
+### Observe a tensor-parallel target
+
+Set `tp` in the task configuration to the logical width. With one exposed card, run the observer with `--mode detailed --placement single_device`. SGLang loads each native shard on that card and exchanges operands through the host. After warmup, the observer profiles one representative at a time. The manifest records the logical ranks, their representatives and the actual profiles. Use `compile` on the whole observation directory to produce one template source.
+
+For a physical reference, expose the devices for the target topology and use `--placement full`. The full recording captures all ranks in the same window. Use a separate observation from the template source when running `verify-structure`.
+
+The current ranked path covers synchronous dense TP with one observed compute stream per rank. It preserves the native publication owner's timing and the other ranks' result dependencies.
+
 ## Fit and publish shared assets
 
 Capture a separate training observation as `host-training` with `--mode host-timing`. Use detailed training observations for device tasks, and reserve separate observations for evaluation.
@@ -69,6 +77,12 @@ docker run --rm --runtime runc --network none \
 ```
 
 The release records the template, performance and rule objects together. `show-release` displays their identifiers. For a template update, repeat `--library` with the full set of desired sources. Omitted asset families use the base release. Pass `--base <release UUID>` when an update is prepared against a specific release.
+
+To combine local shard costs with physical communication costs, use the current default rules with the `collective` family. Each result latency comes from the measured time between the last participant becoming ready and that rank's result becoming available. The cost asset includes the measured directed transport links.
+
+```bash
+prologue fit-costs --device single-device-observation --collective full-observation > costs.json
+```
 
 `query-structure` uses the same selection and expansion as prediction. Pass a JSON document with the target `domain` and `targets`, an array of `{ "target": "case-id", "query": { "phase": "decode", "sequence_lengths": [9] } }` entries. `--candidate` previews an additional source and `--graph` includes the expanded graph and a definition ID for each call in graph order. The report distinguishes an unobserved domain, a missing parent, a missing child and conflicting candidates. Use `publish --add-library ... --require-structure queries.json` to add sources for the original query domain and resolve those queries before changing the release.
 
@@ -127,7 +141,7 @@ docker run --rm --runtime runc --network none \
   prologue-scheduler:ubuntu22.04 /control/control.sock
 ```
 
-The prediction reports the resolved release UUID. Pass that UUID to `--release` to replay the same asset selection later. The current template and cost rules cover observed synchronous TP1 geometries.
+The prediction reports the resolved release UUID. Pass that UUID to `--release` to replay the same asset selection later. Autonomous prediction requires released cost coverage for host preparation, forward and result handling, local device work and any collective results.
 
 ## Verify from a release
 
