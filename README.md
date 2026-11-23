@@ -48,7 +48,7 @@ docker run --rm --runtime runc --network none \
   prologue-app:ubuntu24.04 compile /source > "$run/templates.json"
 ```
 
-Use `--mode light` and a separate output directory for scheduler publication times without a profiler. Each observation records inputs, concrete call bindings and the native revision. Compiled sources carry model metadata, reusable definitions and their exact root queries. Supply `compile --model-config` with the original model configuration when the recording lacks it. Device records with unresolved ownership are counted separately.
+Use `--mode light` and a separate output directory for native submission and token publication times without a profiler. For parallel or disaggregated targets, use `--placement full` with the devices required by the topology. PD reference time starts at Prefill submission and ends at Decode publication. Detailed observations carry concrete call bindings and device work for compiling templates or checking structure. Supply `compile --model-config` with the original model configuration when a source lacks it. Device records with unresolved ownership are counted separately.
 
 ### Observe a tensor-parallel target
 
