@@ -48,7 +48,7 @@ docker run --rm --runtime runc --network none \
   prologue-app:ubuntu24.04 compile /source > "$run/templates.json"
 ```
 
-Use `--mode light` and a separate output directory for scheduler publication times without a profiler. Each observation records the inputs and the native revision. The template library stores definitions and concrete call bindings. Device records with unresolved ownership are counted separately.
+Use `--mode light` and a separate output directory for scheduler publication times without a profiler. Each observation records inputs, concrete call bindings and the native revision. Compiled sources carry reusable definitions and their exact root queries. Device records with unresolved ownership are counted separately.
 
 ## Fit and publish shared assets
 
@@ -70,6 +70,20 @@ docker run --rm --runtime runc --network none \
 ```
 
 The release records the template, performance and rule objects together. `show-release` displays their identifiers. For a template update, repeat `--library` with the full set of desired sources. Omitted asset families use the base release. Pass `--base <release UUID>` when an update is prepared against a specific release.
+
+`query-structure` uses the same selection and expansion as prediction. Pass a JSON document with the published `domain` and `targets`, an array of `{ "target": "case-id", "query": { "phase": "decode", "sequence_lengths": [9] } }` entries. `--candidate` previews an additional source and `--graph` includes the expanded graph. The report distinguishes a missing parent, a missing child and conflicting candidates. Use `publish --add-library ... --require-structure queries.json` to keep the base sources and require the original queries to resolve before changing the current release.
+
+### Compile a native Decode page-table cut
+
+For a native SGLang Prefill/Decode pair, enable the Prologue plugin on Decode and set `PROLOGUE_PD_CUT` to a JSON file in a fresh output directory. Set `configuration_id`, `detail_requests` and `parent_requests`. Use native request IDs for both lists. Run the profiler around `detail_requests` with output under `profile/` in the same directory. Submit `parent_requests` with the profiler stopped. The observer records the effective domain, KV handover and admitted page-table slices.
+
+```bash
+prologue compile copy-observation --pd-scope copy > page-copy.json
+prologue compile assembly-observation --pd-scope assembly --for-queries queries.json > page-assembly.json
+prologue publish --store data/pd-library --add-library page-assembly.json --require-structure queries.json
+```
+
+Publish the detailed copy source first in a store with the matching PD Decode domain. The assembly source refers to its copy definitions by exact query and requires the same ports on resolution. This path covers the Decode page-table assembly boundary. Complete PD execution and communication timing are separate from this structural check.
 
 ## Predict from a release on CPU
 
