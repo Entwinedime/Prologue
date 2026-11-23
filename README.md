@@ -128,6 +128,20 @@ prologue score prediction.json light-reference
 
 Fixed-graph verification checks recorded endpoints before replacing device service durations. Autonomous scoring uses a separate lightweight recording of the prediction workload for TTFT, TPOT and throughput. `quote-costs` accepts a JSON document with `domain` and `coordinates` and uses the same released estimator.
 
+## Collect missing Decode attention costs
+
+`plan-costs` accepts a `targets` array. Each target has a name in `target` and the `domain` and `coordinates` from a reported cost gap. It checks a pinned release and groups uncovered coordinates by actual sampling conditions. The native sampler supports single-member Ascend TP1 Decode and uses SGLang to build the real KV context. Other gaps remain in the plan with their coordinates and affected targets.
+
+```bash
+prologue plan-costs gaps.json --store /library > sampling.json
+prologue sample-costs sampling.json collection --attempts 1 --card-seconds 180 --max-bytes 2147483648
+prologue fit-costs --device collection/attempts/0001/9 --device collection/attempts/0001/17 \
+  --for-queries collection/plan.json > added-costs.json
+prologue publish --store /library --add-costs added-costs.json --require-costs collection/plan.json
+```
+
+Run `sample-costs` in the Ascend observer image with one physical card and the declared model mounted. Run planning, readback and publication in the application image. The sampling receipt lists the actual observation directories for `--device`. Reopening the same collection directory preserves prior attempts and reuses completed observations. Publication adds only requested, previously uncovered coordinates after checking the original query.
+
 ## License
 
 Prologue is licensed under the [Apache License 2.0](LICENSE). Third-party dependencies retain their own licenses.
