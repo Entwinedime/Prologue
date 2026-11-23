@@ -28,7 +28,7 @@ json Simulation::Group::request(const json& message) {
         }
         pending = envelope.at("call");
     }
-    if (done()) {
+    if (done() && std::ranges::none_of(session_.actors_, [](const Actor& actor) { return actor.read.has_value(); })) {
         session_.require_drained();
         for (const auto& actor : session_.actors_) {
             now_ns_ = std::max(now_ns_, actor.clock.now());
@@ -39,11 +39,17 @@ json Simulation::Group::request(const json& message) {
 
     std::optional<std::pair<Nanoseconds, Index>> selected;
     for (Index index = 0; index < pending_.size(); ++index) {
-        const auto ready = eligible(index, pending_.at(index).value());
+        const auto& call = pending_.at(index).value();
+        const auto ready = eligible(index, call);
         if (!ready) {
             continue;
         }
-        const auto time = std::max({*ready, now_ns_, session_.actors_.at(index).clock.now()});
+
+        const auto& actor = session_.actors_.at(index);
+        auto time = std::max({*ready, now_ns_, actor.clock.now()});
+        if (actor.read && call.at("operation") == "arrivals") {
+            time = std::max(time, actor.read->earliest_ns);
+        }
         const auto candidate = std::pair{time, index};
         if (!selected || candidate < *selected) {
             selected = candidate;

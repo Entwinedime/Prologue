@@ -178,8 +178,7 @@ class PDHandoff:
             return original(processor, batch)
         began = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
         result = original(processor, batch)
-        call["result_processing"] = {"begin_ns": began, "end_ns": clock_gettime_ns(CLOCK_MONOTONIC_RAW),
-                                     "resources": self.observation.resources(processor)}
+        self.observation.processed(call, processor, began)
         return result
 
     def admission_switch(self, kind, original, scheduler, request):

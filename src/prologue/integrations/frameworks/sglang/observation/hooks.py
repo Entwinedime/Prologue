@@ -30,7 +30,7 @@ class Observation:
         self.result_cpu_started = None
         self.host_work = []
         self.prepare_cpu_ns = 0
-        self.measure_arrivals = mode == "detailed" and document["pp"] == 1 and "disaggregation" not in document
+        self.measure_arrivals = mode == "detailed" and document["pp"] == 1
         self.snapshot_cache = mode == "detailed" and document.get("snapshot_cache", False)
         self.ingress = {}
         self.awaiting_read = None
@@ -250,13 +250,16 @@ class Observation:
 
         begin = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
         value = original(scheduler, batch, result)
+        self.processed(call, scheduler, begin)
+        return value
+
+    def processed(self, call, scheduler, begin):
         call["result_processing"] = {
             "begin_ns": begin, "end_ns": clock_gettime_ns(CLOCK_MONOTONIC_RAW),
             "resources": self.resources(scheduler),
         }
         if self.measure_arrivals:
             self.awaiting_read = call["result_processing"]
-        return value
 
     def layer(self, original, module, site, positions, hidden_states, forward_batch, residual, *args, **kwargs):
         if not self.calls.stack:

@@ -37,14 +37,14 @@ void Timeline::satisfy(Nanoseconds started, Nanoseconds model_ready, BoundaryTim
     now_ = std::max({now_, after(started, boundary.after_start_ns), after(model_ready, boundary.after_model_ns)});
 }
 
-ActionCompletion Timeline::complete_action(const std::vector<TimedWork>& work, Nanoseconds host_boundary_ns,
-                                           bool record_intervals, std::optional<std::int64_t> publication_lane) {
+ActionCompletion Timeline::schedule_work(const std::vector<TimedWork>& work, bool record_intervals,
+                                         std::optional<std::int64_t> publication_lane) const {
     std::unordered_map<std::int64_t, Nanoseconds> lanes;
     std::vector<Nanoseconds> completed;
     completed.reserve(work.size());
     std::vector<Interval> intervals;
-    auto completion = after(now_, host_boundary_ns);
-    auto all_work_ready = completion;
+    auto output_ready = now_;
+    auto all_work_ready = now_;
 
     for (const auto& entry : work) {
         auto& available = lanes[entry.lane];
@@ -61,11 +61,10 @@ ActionCompletion Timeline::complete_action(const std::vector<TimedWork>& work, N
         available = end;
         all_work_ready = std::max(all_work_ready, end);
         if (!publication_lane || entry.lane == *publication_lane) {
-            completion = std::max(completion, end);
+            output_ready = std::max(output_ready, end);
         }
     }
-    now_ = completion;
-    return {std::move(intervals), all_work_ready};
+    return {std::move(intervals), all_work_ready, output_ready};
 }
 
 }

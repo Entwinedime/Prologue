@@ -33,6 +33,7 @@ struct ActionTiming final {
     BoundaryTime result_finished;
     std::unordered_map<std::string, BoundaryTime> publications;
     std::optional<BoundaryTime> next_read{};
+    bool await_output_lane = false;
 };
 
 struct CutTiming final {
@@ -75,6 +76,11 @@ private:
         Nanoseconds work_ready_ns;
     };
 
+    struct PendingRead {
+        Nanoseconds earliest_ns;
+        Index preceding_action;
+    };
+
     struct Actor {
         Actor(const Workload& workload, ResourceLimits limits) : resources(workload, limits) {}
 
@@ -83,6 +89,7 @@ private:
         Index next_arrival = 0;
         std::vector<Nanoseconds> measured_arrivals;
         std::optional<ActiveAction> action;
+        std::optional<PendingRead> read;
     };
 
     nlohmann::json arrivals(Index actor, bool finished);

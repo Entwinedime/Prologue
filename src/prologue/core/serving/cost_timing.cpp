@@ -23,6 +23,7 @@ ActionTiming CostTiming::for_action(const nlohmann::json& action, const nlohmann
     const auto& host = estimates.front();
     ActionTiming timing{{}, host.at("prepare_ns"), host.at("forward_ns"),
                         {0, host.at("result_ns")}, {}};
+    timing.await_output_lane = true;
     std::size_t publication = 0;
     for (const auto& member : action.at("members")) {
         if (member.value("publishes", true)) {

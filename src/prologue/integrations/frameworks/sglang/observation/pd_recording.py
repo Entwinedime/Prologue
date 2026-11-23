@@ -7,19 +7,40 @@ from prologue.integrations.frameworks.sglang.page_table import PageTable
 from prologue.integrations.platforms.ascend.evidence import AscendRecording
 
 
+class PDWorker:
+    def __init__(self, worker):
+        self.document = worker
+        self.events = defaultdict(list)
+        for row in worker["pd_events"]:
+            if "request" in row:
+                self.events[row["request"], row["kind"], row.get("peer")].append(row)
+
+        # Build the request index once. Later output iterations do not witness the first KV read.
+        self.batches = defaultdict(list) if "calls" in worker else None
+        for call in worker.get("calls", ()):
+            if call["operation"] != "batch":
+                continue
+            for index, member in enumerate(call["members"]):
+                if member["output_tokens"] <= 1:
+                    self.batches[member["request"], member["output_tokens"]].append((call, index))
+
+    def event(self, request, kind, peer=None):
+        row, = self.events[request, kind, peer]
+        return row
+
+    def member_batch(self, request, output):
+        if self.batches is None:
+            return None
+        match, = self.batches[request, output]
+        return match
+
+
 class PDWindow:
     def __init__(self, prefill, decoders, requests, page_size, publisher):
-        self.prefill, self.decoders = prefill, decoders
+        self.prefill = PDWorker(prefill)
+        self.decoders = [PDWorker(worker) for worker in decoders]
         self.requests, self.page_size = requests, page_size
         self.publisher = publisher
-
-    @staticmethod
-    def events(worker, request, peer=None):
-        selected = defaultdict(list)
-        for row in worker["pd_events"]:
-            if row.get("request") == request and ("peer" not in row or row["peer"] == peer):
-                selected[row["kind"]].append(row)
-        return {kind: rows for kind, rows in selected.items()}
 
     @staticmethod
     def admits(worker):
@@ -39,28 +60,17 @@ class PDWindow:
             batches.append(event)
         return batches
 
-    @staticmethod
-    def member_batch(worker, request, output):
-        if "calls" not in worker:
-            return None
-        rows = [(call, index) for call in worker["calls"] if call["operation"] == "batch"
-                for index, member in enumerate(call["members"])
-                if member["request"] == request and member["output_tokens"] == output]
-        match, = rows
-        return match
-
     def request(self, request, admissions):
         name, tokens = request["id"], request["prompt_tokens"]
-        source = self.events(self.prefill, name)
-        offer, = source["offer"]
-        page_row, = source["source_pages"]
+        offer = self.prefill.event(name, "offer")
+        page_row = self.prefill.event(name, "source_pages")
         pages = page_row["pages"]
         page_count = (tokens + self.page_size - 1) // self.page_size
         if (not offer["last"] or offer["tokens"] != [0, tokens] or len(pages) != page_count
                 or page_row["positions"] != [0, page_count]):
             raise ValueError(f"incomplete Prefill offer for {name}")
 
-        captured = self.member_batch(self.prefill, name, 0)
+        captured = self.prefill.member_batch(name, 0)
         if captured is not None:
             call, position = captured
             cache = call["cache"]
@@ -78,16 +88,13 @@ class PDWindow:
                 "offer_ns": offer["begin_ns"], "source_metadata_slot": offer["metadata_slot"]}
 
     def receiver(self, name, tokens, rank, decoder, admissions, offer, source_pages, reads):
-        source = self.events(self.prefill, name, rank)
-        target = self.events(decoder, name)
-        kv, = source["kv"]
-        metadata, = source["metadata"]
-        notice, = source["notify"]
-        reserved, = target["reserve"]
-        ready, = target["ready"]
-        committed, = target["commit"]
-        (admitted, member), = ((row, member) for row in admissions for member in row["members"]
-                               if member["request"] == name)
+        kv = self.prefill.event(name, "kv", rank)
+        metadata = self.prefill.event(name, "metadata", rank)
+        notice = self.prefill.event(name, "notify", rank)
+        reserved = decoder.event(name, "reserve")
+        ready = decoder.event(name, "ready")
+        committed = decoder.event(name, "commit")
+        (admitted, member), = admissions[name]
 
         if ({row["room"] for row in (kv, metadata, notice, reserved, ready, committed, offer, source_pages)}
                 != {offer["room"]} or kv["status"] != 0 or metadata["status"] != 0
@@ -105,7 +112,7 @@ class PDWindow:
         if boundaries != sorted(boundaries):
             raise ValueError(f"native PD boundaries are out of order for {name} to rank {rank}")
 
-        read = self.member_batch(decoder, name, 1) if reads else None
+        read = decoder.member_batch(name, 1) if reads else None
         if read is not None:
             call, index = read
             cache = call["cache"]
@@ -127,19 +134,28 @@ class PDWindow:
         return [loc // self.page_size for loc in locations[::self.page_size]]
 
     def qualify(self):
-        admissions = [self.admits(worker) for worker in self.decoders]
+        admissions = [self.admits(worker.document) for worker in self.decoders]
         members = [[member["request"] for member in row["members"]] for row in admissions[0]]
         if any([[member["request"] for member in row["members"]] for row in other] != members
                for other in admissions[1:]):
             raise ValueError("Decode ranks did not agree on the observed admissions")
 
-        controls = [[row for row in worker["pd_events"] if row["kind"] in ("paused", "resumed")]
+        controls = [[row for row in worker.document["pd_events"] if row["kind"] in ("paused", "resumed")]
                     for worker in self.decoders]
         if any([row["kind"] for row in events] != [row["kind"] for row in controls[self.publisher]]
                for events in controls):
             raise ValueError("Decode ranks did not observe the same admission commands")
-        handoffs = [self.request(request, admissions) for request in self.requests]
-        publications = self.decoders[self.publisher]["publications"]
+        admitted_members = []
+        for batches in admissions:
+            indexed = defaultdict(list)
+            for batch in batches:
+                for member in batch["members"]:
+                    indexed[member["request"]].append((batch, member))
+            admitted_members.append(indexed)
+
+        handoffs = [self.request(request, admitted_members) for request in self.requests]
+        decoder = self.decoders[self.publisher].document
+        publications = decoder["publications"]
         for handoff, request in zip(handoffs, self.requests, strict=True):
             outputs = publications[request["id"]]
             ready = max(port["notification_ns"] for port in handoff["ports"])
@@ -148,7 +164,8 @@ class PDWindow:
                     or outputs[0]["raw_ns"] < max(ready, admitted)):
                 raise ValueError(f"Decode publications disagree with the handoff for {request['id']}")
             handoff["publications"] = outputs
-        return {"admissions": members, "handoffs": handoffs, "controls": controls[self.publisher]}
+        return {"admissions": members, "handoffs": handoffs, "controls": controls[self.publisher],
+                "ingress": [self.prefill.document.get("ingress"), decoder.get("ingress")]}
 
 
 class PDRecording:

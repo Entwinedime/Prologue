@@ -84,11 +84,7 @@ class StructureComparison:
             ends.append(end)
 
         work_ready = max(lanes.values(), default=began)
-        model_work_ready = work_ready
-        if "collectives" in graph:
-            publisher = graph["calls"][0]["parameters"]["publication_rank"]
-            model_work_ready = lanes[publisher]
-        ready = max(began + measured["model_return_ns"], model_work_ready)
+        ready = began + measured["model_return_ns"]
         if ready != actual["model_ready_ns"]:
             return False
         for publication in actual["publications"]:
@@ -97,7 +93,7 @@ class StructureComparison:
                 return False
         finish = max(ready, work_ready, began + measured["result_finished"]["after_start_ns"])
         if "next_read" in measured:
-            if actual["next_read_ns"] != max(finish, began + measured["next_read"]["after_start_ns"]):
+            if actual.get("next_read_ns") != max(finish, began + measured["next_read"]["after_start_ns"]):
                 return False
         return actual["finished_ns"] == finish
 
@@ -114,6 +110,8 @@ class StructureComparison:
                         "matched_actions": comparisons}
 
             measured = self.measurements[index]
+            if "next_read" in measured and "next_read_ns" not in actual and result["status"] != "complete":
+                break
             if not self.consumed_conditions(actual, measured):
                 return {"status": "timing_mismatch", "action": index, "matched_actions": comparisons}
             comparisons += 1

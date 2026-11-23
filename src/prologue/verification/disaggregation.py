@@ -18,9 +18,11 @@ class PDStructureReference(StructureComparison):
         manifest = {**pair.decode.manifest, "delivery": pair.decode.delivery}
         super().__init__(pair.domain, publications, manifest)
 
+        self.arrival_sources = ["scheduler_receive" if observed is not None else "tokenizer_submit"
+                                for observed in window["ingress"]]
         self.ingress = {
-            "arrivals": [{row["request"]: row["submitted_raw_ns"] - self.origin
-                          for row in recording.delivery["requests"]} for recording in (pair.prefill, pair.decode)],
+            "arrivals": [self.at_ingress(recording.delivery, observed) for recording, observed in
+                         zip((pair.prefill, pair.decode), window["ingress"], strict=True)],
             "admission": [{"at_ns": row["at_ns"] - self.origin, "pause": row["kind"] == "paused"}
                           for row in window["controls"]],
         }
@@ -34,6 +36,14 @@ class PDStructureReference(StructureComparison):
             self.record(batch.action(), batch.graph, call, batch.measurements(), call["begin_ns"],
                         call["result_processing"]["end_ns"], outputs={})
         self.read_decoder(pair)
+
+    def at_ingress(self, delivery, observed):
+        submitted = {row["request"]: row["submitted_raw_ns"] for row in delivery["requests"]}
+        if observed is not None:
+            if observed.keys() != submitted.keys() or any(at < submitted[request] for request, at in observed.items()):
+                raise ValueError("native PD ingress disagrees with submissions in the same window")
+            submitted = observed
+        return {request: at - self.origin for request, at in submitted.items()}
 
     def read_decoder(self, pair):
         if len(pair.decode.bindings()) == 1:
@@ -157,7 +167,8 @@ class PDStructureReference(StructureComparison):
     def compare(self, result):
         # The two native schedulers have separate action orders and share only the handoff.
         actions = sorted(result["actions"], key=lambda action: action["phase"] != "prefill")
-        report = super().compare({**result, "actions": actions})
+        report = {**super().compare({**result, "actions": actions}),
+                  "arrival_sources": dict(zip(("prefill", "decode"), self.arrival_sources, strict=True))}
         if report["status"] != "matched":
             return report
         if result["handoffs"].keys() != self.handoffs.keys():

@@ -129,7 +129,9 @@ json replay(const json& job) {
         timeline.advance_to(std::max(timeline.now(), row.at("input_ready_ns").get<Nanoseconds>()));
         timeline.advance_by(timing.prepare_ns);
         const auto started = timeline.now();
-        const auto completed = timeline.complete_action(timing.work, timing.model_return_ns, !costs);
+        const auto completed = timeline.schedule_work(timing.work, !costs);
+        timeline.advance_by(timing.model_return_ns);
+        timeline.advance_to(std::max(timeline.now(), completed.all_work_ready_ns));
         const auto device_ready = timeline.now();
         timeline.advance_by(row.at("model_tail_ns"));
         const auto model_ready = timeline.now();

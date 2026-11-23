@@ -168,7 +168,9 @@ void Simulation::Disaggregation::transfer(const json& call) {
     link.advance_to(now());
     link.advance_by(timing.prepare_ns);
     const auto started = link.now();
-    const auto completed = link.complete_action(timing.work, timing.model_return_ns, session_.record_structure_);
+    const auto completed = link.schedule_work(timing.work, session_.record_structure_);
+    link.advance_by(timing.model_return_ns);
+    link.advance_to(std::max(link.now(), completed.all_work_ready_ns));
     const auto returned = link.now();
     link.satisfy(started, returned, timing.result_finished);
     state.transfer.emplace(Transfer{link.now(), call.at("metadata")});

@@ -30,6 +30,7 @@ struct Interval final {
 struct ActionCompletion final {
     std::vector<Interval> intervals;
     Nanoseconds all_work_ready_ns;
+    Nanoseconds output_lane_ready_ns;
 };
 
 class Timeline final {
@@ -39,8 +40,8 @@ public:
     void advance_by(Nanoseconds elapsed);
     void satisfy(Nanoseconds started, Nanoseconds model_ready, BoundaryTime boundary);
 
-    ActionCompletion complete_action(const std::vector<TimedWork>& work, Nanoseconds host_boundary_ns,
-                                     bool record_intervals, std::optional<std::int64_t> publication_lane = {});
+    ActionCompletion schedule_work(const std::vector<TimedWork>& work, bool record_intervals,
+                                   std::optional<std::int64_t> publication_lane = {}) const;
 
 private:
     Nanoseconds now_ = 0;

@@ -122,6 +122,12 @@ void Simulation::require_drained() const {
 json Simulation::arrivals(Index index, bool finished) {
     auto arrivals = json::array();
     auto& actor = actors_.at(index);
+    if (actor.read) {
+        actor.clock.advance_to(std::max(actor.clock.now(), actor.read->earliest_ns));
+        actions_.at(actor.read->preceding_action)["next_read_ns"] = actor.clock.now();
+        actor.read.reset();
+    }
+
     const auto& requests = workload_.requests();
     while (const auto arrival = next_arrival(index)) {
         if (*arrival > actor.clock.now()) {
@@ -228,6 +234,9 @@ void Simulation::execute(Index index, const json& message) {
     if (actor.action) {
         throw Stopped("controller_error", "native action began before the preceding result finished");
     }
+    if (actor.read) {
+        throw Stopped("action_mismatch", "native action began before a measured ingress boundary");
+    }
     require_residence(index, message);
 
     const auto query = message.contains("query")
@@ -245,7 +254,14 @@ void Simulation::execute(Index index, const json& message) {
     if (graph.contains("collectives")) {
         publisher = graph.at("calls").front().at("parameters").at("publication_rank").get<std::int64_t>();
     }
-    const auto completed = actor.clock.complete_action(timing.work, timing.model_return_ns, record_structure_, publisher);
+    const auto completed = actor.clock.schedule_work(timing.work, record_structure_, publisher);
+    actor.clock.advance_by(timing.model_return_ns);
+
+    // A measured host return is independent of device work relaying tokens to the next iteration.
+    if (timing.await_output_lane) {
+        actor.clock.advance_to(std::max(actor.clock.now(), completed.output_lane_ready_ns));
+    }
+
     json record{
         {"phase", message.at("phase")}, {"members", message.at("members")}, {"began_ns", started},
         {"model_ready_ns", actor.clock.now()}, {"publications", json::array()},
@@ -317,8 +333,11 @@ void Simulation::finish_action(Index index) {
         record["after_result"] = capacity(index);
     }
     if (action.timing.next_read) {
-        clock.satisfy(record.at("began_ns"), record.at("model_ready_ns"), *action.timing.next_read);
-        record["next_read_ns"] = clock.now();
+
+        // Other native callbacks can run before the scheduler reads its input queue.
+        auto input = clock;
+        input.satisfy(record.at("began_ns"), record.at("model_ready_ns"), *action.timing.next_read);
+        actor.read = PendingRead{input.now(), actions_.size()};
     }
     actions_.push_back(std::move(record));
     actor.action.reset();
