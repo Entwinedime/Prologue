@@ -1,15 +1,18 @@
 # 窗口状态
 
-截至 2026-11-23，**已交付 52/57 项（91.2%）**，按交付项等权计数。前六阶段和第 01–13 轮已交付。下一阶段从第 14 轮的分块预填充开始。
+窗口于 2026-11-23 提前结束。关闭时**完成 55/57 项（96.5%）**，按计划项等权计数。前六阶段和第 01–16 轮已达到各自主判据。关窗前最近一次阶段交付为 `83dbfab`。里程碑四的后续代码与文档纳入关窗快照，实验数据留在本地。
 
-| 阶段 | 已交付 | 当前结论 |
+| 阶段 | 完成项 | 关闭时的证据 |
 | --- | ---: | --- |
 | R1、R2、F1、R3、F2、R4 | 39/39 | 重建业务目录和任务入口，交付两种采集模式、按缺口取证、按工作绑定成本以及三条独立评价路径。[单卡证据](../../../data/architecture-acquisition-performance/f1/configuration-evidence.json) · [按需采集](../../../data/architecture-acquisition-performance/f2/handoff.json) · [第四轮重构](../../../data/architecture-acquisition-performance/r4/handoff.json) |
 | 01–04 三条评价路径 | 4/4 | 在 Qwen3-8B TP1 上核对固定图实测回算、KV 页边界、模型更换和到达改变批次的首处差异。[固定图](../../../data/architecture-acquisition-performance/rounds/01/result.json) · [页边界](../../../data/architecture-acquisition-performance/rounds/02/confirmation/assessment.json) · [模型与成本域](../../../data/architecture-acquisition-performance/rounds/03/independent/assessment.json) · [时序反馈](../../../data/architecture-acquisition-performance/rounds/04/independent/assessment.json) |
 | 05–07 模型、单卡来源与 TP 宽度 | 3/3 | Qwen、Mistral、Llama 的共同 TP1 结构对照全部匹配。Qwen 与 Mistral 在 TP4、TP8 的完整来源匹配受检结构，单卡观察 rank 0、1 后核对其余等价角色的定义、张量端口和归约条件。更宽 TP 的单卡整图仍有通信资源布局差异。[三模型](../../../data/architecture-acquisition-performance/rounds/05/independent/assessment.json) · [TP2](../../../data/architecture-acquisition-performance/rounds/06/independent/assessment.json) · [TP4 / TP8](../../../data/architecture-acquisition-performance/rounds/07/independent-recovery/case-evidence.json) |
 | 08–13 多角色交接 | 6/6 | PP、TP × PP、EP 开关与变长路由、PD 单请求和多成员交接均有独立主判据证据。五批最新留出合计 19 个物理目标、38 份原生参考、114 项评价。两条性能路径各 0/150 个可评分请求。 |
-| 14–17 调度机制与持续流量 | 0/4 | 待启动。依次检查分块预填充、混合批次、前缀缓存、持续流量。 |
-| 18 同版本跨轮验收 | 0/1 | 待启动。使用新的留出输入，分别核对三条路径及两项 MAPE 指标。 |
+| 14 分块 Prefill | 1/1 | 4 个物理目标的 24 项评价收齐。完整及单卡的 8 组结构比较匹配，逐层核对续接和 KV 区间。每种来源自主评分 32/32，TTFT、TPOT MAPE 分别为 3.69%、4.91%。Mistral 32 token 案例 TTFT 为 6.13%。固定图各 0/32，保留搬运成本缺项及输入就绪证据限制。[独立结果](../../../data/architecture-acquisition-performance/rounds/14/independent-chunk-spans/assessment.json) |
+| 15 混批到达 | 1/1 | 两模型各实测 2 批混合工作，晚到对照均为零。两种来源的 4 组结构对照全部匹配，12 项评价收齐。原留出固定图各来源 0/8 可评分。修正输入交付后，离线开发回归在完整来源上可评分 8/8。[混批留出](../../../data/architecture-acquisition-performance/rounds/15/independent-mixed-arrivals/assessment.json) · [固定图回归](../../../data/architecture-acquisition-performance/rounds/15/development/active-delivery-regression) |
+| 16 前缀缓存与调度组合 | 1/1 | 隔离及组合共收齐 24 项独立评价。组合留出两模型均触发分块、混批、48 token 复用、驱逐 14 页及从零重算，4 组结构全部匹配。组合自主每种来源评分 14/14，两模型 TTFT MAPE 为 9.58%、10.68%，TPOT 为 3.11%、5.97%。原冻结固定图各 0/14，保留活动输入交付限制。[隔离前缀](../../../data/architecture-acquisition-performance/rounds/16/independent-prefix/assessment.json) · [组合留出](../../../data/architecture-acquisition-performance/rounds/16/independent-combination/assessment.json) |
+| 17 持续流量 | 0/1 | 32 请求完整回放匹配 6,602 个动作。两模型各完成错峰和突发两组 128 请求原生录制，错峰参考图各成功实例化 23,898 个局部动作。整图对照未收齐，35 请求小池组合的原生采集超时。持续 PD、四组独立真实流量和 256 请求压力对照只完成登记。[32 请求回放](../../../data/architecture-acquisition-performance/rounds/17/development/sustained-tp2/qwen/medium-native/sustained-replay/result.json) · [128 请求登记](../../../data/architecture-acquisition-performance/rounds/17/development/sustained-tp2/scaled-native-registration.json) · [小池失败记录](../../../data/architecture-acquisition-performance/rounds/17/development/scheduled-cache-pressure/qwen/physical/detailed/execution.json) · [真实流量范围](../../../data/architecture-acquisition-performance/rounds/17/trace-source/held-out-scope.json) |
+| 18 同版本跨轮验收 | 0/1 | 未启动。跨配置三路径对照和 TTFT、TPOT 各低于 6% MAPE 的目标仍待验证。 |
 
 ## 第 08–13 轮的当前证据
 
@@ -22,8 +25,8 @@
 | 12 PD 单请求 | 两模型各有两种 prompt 长度，完整和单卡均匹配两端 KV 与元数据交接及受检动作顺序。单卡保留工作布局差异。固定图四份实测参考匹配 267,178 个边界。 | 24 项评价已收齐。固定图与自主预测仍有目标成本缺口。[独立结果](../../../data/architecture-acquisition-performance/rounds/12/independent-protocol-reconfirmation/assessment.json) |
 | 13 PD 多成员预建 | 两款模型均在两个 Decode rank 实测同一对请求进入同一预建批次，隔离负载只触发单成员。完整和单卡均匹配 47,110 个动作及 258,996 条受检顺序，单卡保留工作布局差异。 | 24 项评价已收齐，两条性能路径各 0/28 个可评分请求。原冻结结果原地保留，补入真实宿主等待后的开发回归已推进至成本查询。[独立结果](../../../data/architecture-acquisition-performance/rounds/13/independent-active-decode-confirmation/assessment.json) · [真实批次](../../../data/architecture-acquisition-performance/rounds/13/independent-active-decode-confirmation/native-coverage.json) · [等待归属回归](../../../data/architecture-acquisition-performance/m3-early-wake-regression/assessment.json) |
 
-## 接续条件
+## 遗留范围
 
-阶段审查覆盖共同执行依赖、框架观测、设备计时、成本特征和独立评价的交接。C++23 核心及正式采集、控制镜像已构建。第 14 轮先在 Qwen 与 Mistral 上隔离 chunk 续接，使用页与 chunk 边界两侧的请求，再检查混批和缓存。[核心构建](../../../data/architecture-acquisition-performance/m3-delivery-build.json) · [镜像](../../../data/architecture-acquisition-performance/m3-handoff-images.txt)
+关闭时已启动的采集、投影和回放按原额度收尾。陆续生成的结果仍属于已有开发任务。持续流量的独立验证及后续交付如需接续，由新窗口明确范围。
 
-单卡来源给出实际分片工作和约定范围的对端依赖，外接通信成本仍依赖物理采样及其适用范围。整体结构匹配、固定图可评分和自主精度分别取证。最终 TTFT 与 TPOT 的 6% MAPE 门槛待同版本的新留出验收。
+单卡来源提供实际分片工作和受检对端依赖，跨卡通信成本依赖物理采样及其适用范围。组合调度留出的 TTFT 误差和多角色性能证据缺口仍需解决。修正输入交付后的固定图结果已记录为开发回归。
