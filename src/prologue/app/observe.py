@@ -13,7 +13,7 @@ def main():
     parser.add_argument("output", type=Path)
     parser.add_argument("--configuration", required=True)
     parser.add_argument("--workload", required=True)
-    parser.add_argument("--mode", choices=("detailed", "light"), required=True)
+    parser.add_argument("--mode", choices=("detailed", "light", "host-timing"), required=True)
     args = parser.parse_args()
 
     receipt = json.loads(args.plan.read_text(encoding="utf-8"))

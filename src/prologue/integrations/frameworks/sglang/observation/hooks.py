@@ -4,20 +4,23 @@ import json
 import os
 from functools import partial
 from pathlib import Path
-from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
+from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns, thread_time_ns
 
 from prologue.acquisition.observation.calls import Calls
 
 
 class Observation:
-    def __init__(self, output, requests, detailed):
+    def __init__(self, output, requests, mode):
         self.output = output
         self.requests = requests
         self.publications = {native: [] for native in requests}
         self.finished = set()
-        self.detailed = detailed
+        self.mode = mode
         self.active_batch = None
-        if detailed:
+        self.result_cpu_started = None
+        self.host_work = []
+        self.prepare_cpu_ns = 0
+        if mode == "detailed":
             from torch.autograd.profiler import record_function
 
             self.calls = Calls(record_function)
@@ -43,20 +46,30 @@ class Observation:
             rows = self.publications[rid]
             if count > (rows[-1]["count"] if rows else 0):
                 rows.append({"count": count, "raw_ns": now})
+                if self.result_cpu_started is not None:
+                    self.active_batch["publication_cpu_ns"][self.requests[rid]] = thread_time_ns() - self.result_cpu_started
             if finished is not None:
                 self.finished.add(rid)
         return result
 
     def save(self):
         document = {"publications": {self.requests[rid]: rows for rid, rows in self.publications.items()}}
-        if self.detailed:
+        if self.mode == "detailed":
             document["calls"] = self.calls.rows
+        elif self.mode == "host-timing":
+            document["host_work"] = self.host_work
 
         # Only the output owner writes this file, after the observed publications.
         path = self.output / "worker.json"
         pending = path.with_suffix(".tmp")
         pending.write_text(json.dumps(document, separators=(",", ":")) + "\n", encoding="utf-8")
         pending.replace(path)
+
+    def prepare(self, original, scheduler, *args, **kwargs):
+        began = thread_time_ns()
+        batch = original(scheduler, *args, **kwargs)
+        self.prepare_cpu_ns = thread_time_ns() - began
+        return batch
 
     def batch(self, original, scheduler, batch, *args, **kwargs):
         requests = [self.requests.get(request.rid) for request in batch.reqs]
@@ -71,14 +84,23 @@ class Observation:
             phase = "prefill"
         else:
             raise ValueError(f"unsupported observed forward mode: {batch.forward_mode}")
+        members = [
+            {"request": identity, "slot": int(request.req_pool_idx), "kv_committed_tokens": request.kv_committed_len,
+             "kv_reserved_tokens": request.kv_allocated_len, "output_tokens": len(request.output_ids)}
+            for identity, request in zip(requests, batch.reqs, strict=True)
+        ]
+        if self.mode == "host-timing":
+            self.active_batch = {"phase": phase, "members": members, "prepare_cpu_ns": self.prepare_cpu_ns,
+                                 "publication_cpu_ns": {}}
+            began = thread_time_ns()
+            value = original(scheduler, batch, *args, **kwargs)
+            self.active_batch["forward_cpu_ns"] = thread_time_ns() - began
+            return value
+
         parameters = {"phase": phase, "members": len(requests)}
         with self.calls.scope("batch", "Scheduler.run_batch", "scheduler", parameters) as call:
             self.active_batch = call
-            call["members"] = [
-                {"request": identity, "slot": int(request.req_pool_idx), "kv_committed_tokens": request.kv_committed_len,
-                 "kv_reserved_tokens": request.kv_allocated_len, "output_tokens": len(request.output_ids)}
-                for identity, request in zip(requests, batch.reqs, strict=True)
-            ]
+            call["members"] = members
             call["resources"] = self.resources(scheduler)
             return original(scheduler, batch, *args, **kwargs)
 
@@ -94,6 +116,17 @@ class Observation:
             return original(scheduler, batch, result)
 
         call = self.active_batch
+        if self.mode == "host-timing":
+            self.result_cpu_started = thread_time_ns()
+            try:
+                value = original(scheduler, batch, result)
+                call["result_cpu_ns"] = thread_time_ns() - self.result_cpu_started
+                self.host_work.append(call)
+                return value
+            finally:
+                self.result_cpu_started = None
+                self.active_batch = None
+
         self.active_batch = None
         begin = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
         value = original(scheduler, batch, result)
@@ -170,9 +203,12 @@ class Observation:
         sender = "sglang.srt.managers.scheduler_components.output_sender.SenderWrapper.send_output"
         HookRegistry.register(scheduler + "flush_cache", self.flush, HookType.AROUND)
         HookRegistry.register(sender, self.publish, HookType.AROUND)
-        if self.detailed:
+        if self.mode != "light":
             HookRegistry.register(scheduler + "run_batch", self.batch, HookType.AROUND)
             HookRegistry.register(scheduler + "process_batch_result", self.process_result, HookType.AROUND)
+        if self.mode == "host-timing":
+            HookRegistry.register(scheduler + "get_next_batch_to_run", self.prepare, HookType.AROUND)
+        elif self.mode == "detailed":
             HookRegistry.register("sglang.srt.model_executor.model_runner.ModelRunner.load_model",
                                   self.load_model, HookType.AROUND)
 
@@ -182,4 +218,4 @@ def install():
     if path is not None:
         path = Path(path)
         document = json.loads(path.read_text(encoding="utf-8"))
-        Observation(path.parent, document["requests"], document["detailed"]).install()
+        Observation(path.parent, document["requests"], document["mode"]).install()

@@ -23,7 +23,7 @@ const std::string& Stopped::status() const {
 
 Simulation::Simulation(const json& job, Workload workload, TimingSource& timing_source)
     : job_(job), workload_(std::move(workload)), resources_(workload_, limits(job)), templates_(job.at("libraries")),
-      timing_source_(timing_source) {
+      timing_source_(timing_source), record_structure_(job.value("record_structure", false)) {
     for (const auto& request : workload_.requests()) {
         output_limits_.emplace(request.id, request.output_tokens);
         output_counts_.emplace(request.id, 0);
@@ -107,25 +107,27 @@ void Simulation::execute(const json& message) {
     }
 
     // Only a fully selected action can query time. The provider cannot choose the graph.
-    timing_ = timing_source_.for_action(message, graph->at("work"));
+    timing_ = timing_source_.for_action(message, *graph);
+    timeline_.advance_by(timing_->prepare_ns);
     const auto started = now();
-    const auto intervals = timeline_.complete_action(timing_->work, timing_->model_return_ns);
-    auto intervals_json = json::array();
-    for (const auto& interval : intervals) {
-        intervals_json.push_back({interval.begin_ns, interval.end_ns});
-    }
+    const auto intervals = timeline_.complete_action(timing_->work, timing_->model_return_ns, record_structure_);
     current_ = {
-        {"phase", message.at("phase")}, {"members", message.at("members")}, {"resources", capacity()},
-        {"began_ns", started}, {"model_ready_ns", now()}, {"graph", std::move(*graph)},
-        {"intervals", std::move(intervals_json)}, {"publications", json::array()},
+        {"phase", message.at("phase")}, {"members", message.at("members")}, {"began_ns", started},
+        {"model_ready_ns", now()}, {"publications", json::array()},
     };
+    if (record_structure_) {
+        auto observed = json::array();
+        for (const auto& interval : intervals) {
+            observed.push_back({interval.begin_ns, interval.end_ns});
+        }
+        current_["resources"] = capacity();
+        current_["graph"] = std::move(*graph);
+        current_["intervals"] = std::move(observed);
+    }
 }
 
-void Simulation::wait_for_action_offset(Nanoseconds offset) {
-    const auto elapsed = now() - current_.at("began_ns").get<Nanoseconds>();
-    if (offset > elapsed) {
-        timeline_.advance_by(offset - elapsed);
-    }
+void Simulation::wait_for(BoundaryTime boundary) {
+    timeline_.satisfy(current_.at("began_ns"), current_.at("model_ready_ns"), boundary);
 }
 
 void Simulation::publish(const json& message) {
@@ -144,7 +146,7 @@ void Simulation::publish(const json& message) {
         throw Stopped("timing_gap", "missing publication readiness for " + request);
     }
 
-    wait_for_action_offset(offset->second);
+    wait_for(offset->second);
     current_.at("publications").push_back({{"request", request}, {"count", count}, {"at_ns", now()}});
     previous = count;
     if (message.at("finished").get<bool>()) {
@@ -156,9 +158,11 @@ void Simulation::finish_action() {
     if (!timing_) {
         throw Stopped("controller_error", "native result has no executing action");
     }
-    wait_for_action_offset(timing_->result_finished_ns);
+    wait_for(timing_->result_finished);
     current_["finished_ns"] = now();
-    current_["after_result"] = capacity();
+    if (record_structure_) {
+        current_["after_result"] = capacity();
+    }
     actions_.push_back(std::move(current_));
     timing_.reset();
 }

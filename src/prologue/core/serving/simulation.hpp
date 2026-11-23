@@ -26,15 +26,16 @@ private:
 
 struct ActionTiming final {
     std::vector<TimedWork> work;
+    Nanoseconds prepare_ns;
     Nanoseconds model_return_ns;
-    Nanoseconds result_finished_ns;
-    std::unordered_map<std::string, Nanoseconds> publications;
+    BoundaryTime result_finished;
+    std::unordered_map<std::string, BoundaryTime> publications;
 };
 
 class TimingSource {
 public:
     virtual ~TimingSource() = default;
-    virtual ActionTiming for_action(const nlohmann::json& action, const nlohmann::json& work) = 0;
+    virtual ActionTiming for_action(const nlohmann::json& action, const nlohmann::json& graph) = 0;
 };
 
 class Simulation final {
@@ -53,7 +54,7 @@ private:
     void execute(const nlohmann::json& message);
     void publish(const nlohmann::json& message);
     void finish_action();
-    void wait_for_action_offset(Nanoseconds offset);
+    void wait_for(BoundaryTime boundary);
 
     const nlohmann::json& job_;
     Workload workload_;
@@ -61,6 +62,7 @@ private:
     structure::Templates templates_;
     Timeline timeline_;
     TimingSource& timing_source_;
+    bool record_structure_;
     std::unordered_map<std::string, std::int64_t> output_limits_;
     std::unordered_map<std::string, std::int64_t> output_counts_;
     std::size_t next_arrival_ = 0;

@@ -9,6 +9,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(nlohmann_json 3.11 REQUIRED)
 
 add_library(prologue_core STATIC
+    src/prologue/core/performance/costs.cpp
+    src/prologue/core/serving/cost_timing.cpp
     src/prologue/core/serving/resources.cpp
     src/prologue/core/serving/simulation.cpp
     src/prologue/core/serving/timeline.cpp
@@ -19,7 +21,11 @@ add_library(prologue_core STATIC
 target_include_directories(prologue_core PUBLIC src)
 target_link_libraries(prologue_core PUBLIC nlohmann_json::nlohmann_json)
 
-add_executable(prologue-core src/prologue/app/main.cpp src/prologue/app/control_channel.cpp)
+add_executable(prologue-core
+    src/prologue/app/control_channel.cpp
+    src/prologue/app/main.cpp
+    src/prologue/app/timing.cpp
+)
 target_link_libraries(prologue-core PRIVATE prologue_core)
 
 foreach(target prologue_core prologue-core)

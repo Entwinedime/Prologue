@@ -70,7 +70,7 @@ class Session:
         detail = self.mode == "detailed"
         specification = self.output / "observation.json"
         aliases = {f"source/{index}": request["id"] for index, request in enumerate(self.workload["requests"])}
-        specification.write_text(json.dumps({"requests": aliases, "detailed": detail}), encoding="utf-8")
+        specification.write_text(json.dumps({"requests": aliases, "mode": self.mode}), encoding="utf-8")
         os.environ["PROLOGUE_OBSERVATION"] = str(specification)
 
         from sglang import Engine

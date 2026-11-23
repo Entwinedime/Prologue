@@ -1,4 +1,7 @@
 #include "prologue/app/control_channel.hpp"
+#include "prologue/app/timing.hpp"
+#include "prologue/core/performance/costs.hpp"
+#include "prologue/core/serving/cost_timing.hpp"
 #include "prologue/core/serving/simulation.hpp"
 #include "prologue/core/serving/workload.hpp"
 #include "prologue/core/structure/templates/compiler.hpp"
@@ -21,7 +24,6 @@ namespace {
 
 using nlohmann::json;
 using prologue::serving::ActionTiming;
-using prologue::serving::Nanoseconds;
 using prologue::serving::Request;
 using prologue::serving::Stopped;
 using prologue::serving::TimingSource;
@@ -46,41 +48,15 @@ json read_record() {
 
 class StreamTiming final : public TimingSource {
 public:
-    ActionTiming for_action(const json& action, const json& work) override {
+    ActionTiming for_action(const json& action, const json& graph) override {
+        const auto& work = graph.at("work");
         std::cout << json{{"timing_query", {{"action", action}, {"work", work}}}} << std::endl;
         const auto reply = read_record();
         if (const auto failure = reply.find("failure"); failure != reply.end()) {
             throw Stopped(failure->at("status"), failure->at("reason"));
         }
 
-        const auto& samples = reply.at("work");
-        if (!samples.is_array() || samples.size() != work.size()) {
-            throw Stopped("timing_gap", "one measured interval is required per selected work");
-        }
-
-        ActionTiming timing{{}, elapsed(reply, "model_return_ns"), elapsed(reply, "result_finished_ns"), {}};
-        for (std::size_t index = 0; index < work.size(); ++index) {
-            const auto& sample = samples.at(index);
-            timing.work.push_back({work.at(index).at("lane"), elapsed(sample, "submitted_after_ns"),
-                                   elapsed(sample, "duration_ns")});
-        }
-        const auto& publications = reply.at("publications_after_ns");
-        for (const auto& entry : publications.items()) {
-            timing.publications.emplace(entry.key(), elapsed(publications, entry.key().c_str()));
-        }
-        return timing;
-    }
-
-private:
-    static Nanoseconds elapsed(const json& row, const char* key) {
-        if (!row.contains(key)) {
-            throw Stopped("timing_gap", std::string("missing measured ") + key);
-        }
-        const auto result = integer(row, key);
-        if (result < 0) {
-            throw Stopped("timing_gap", std::string("negative measured ") + key);
-        }
-        return result;
+        return prologue::app::read_timing(reply, work);
     }
 };
 
@@ -127,11 +103,29 @@ json normalize_workloads(const json& source) {
     return workloads;
 }
 
+json work_coordinates(const json& batches) {
+    auto result = json::array();
+    for (const auto& batch : batches) {
+        prologue::performance::CostQueries queries(batch.at("action"), batch.at("graph"));
+        result.push_back({{"host", std::move(queries.host)}, {"device", std::move(queries.device)}});
+    }
+    return result;
+}
+
+json cost_quotes(const json& input) {
+    const prologue::performance::CostCatalog costs(input.at("costs"));
+    auto result = json::array();
+    for (const auto& coordinate : input.at("coordinates")) {
+        result.push_back(costs.quote(input.at("domain"), coordinate));
+    }
+    return result;
+}
+
 }
 
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 3) {
-        std::cerr << "Usage: prologue-core workloads|templates|simulate [socket] < input.json\n";
+        std::cerr << "Usage: prologue-core workloads|templates|simulate|predict|coordinates|quote|replay [socket]\n";
         return 2;
     }
 
@@ -146,9 +140,23 @@ int main(int argc, char** argv) {
             StreamTiming timing;
             prologue::serving::Simulation simulation(job, read_workload(job.at("workload")), timing);
             std::cout << json{{"result", prologue::app::serve_control(argv[2], simulation)}} << '\n';
+        } else if (argc == 3 && command == "predict") {
+            const auto job = json::parse(std::cin);
+            const prologue::performance::CostCatalog costs(job.at("costs"));
+            prologue::serving::CostTiming timing(job.at("cost_domain"), costs);
+            prologue::serving::Simulation simulation(job, read_workload(job.at("workload")), timing);
+            std::cout << prologue::app::serve_control(argv[2], simulation) << '\n';
+        } else if (argc == 2 && command == "coordinates") {
+            std::cout << work_coordinates(json::parse(std::cin)) << '\n';
+        } else if (argc == 2 && command == "quote") {
+            std::cout << cost_quotes(json::parse(std::cin)) << '\n';
+        } else if (argc == 2 && command == "replay") {
+            std::cout << prologue::app::replay(json::parse(std::cin)) << '\n';
         } else {
             throw std::invalid_argument("unknown core command " + std::string(command));
         }
+    } catch (const prologue::performance::CostGap& gap) {
+        std::cout << gap.detail << '\n';
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 2;

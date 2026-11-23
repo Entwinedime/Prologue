@@ -100,7 +100,7 @@ class AscendEvidence:
                 continue
             marker = markers.enclosing(origin)
             identity = int(marker.row["name"].removeprefix(self.marker_prefix)) if marker else None
-            owners[arguments["connection_id"]].add((identity, origin.begin))
+            owners[arguments["connection_id"]].add((identity, origin.begin, api.begin, api.end))
         return owners
 
     def document(self):
@@ -111,36 +111,44 @@ class AscendEvidence:
             if call["parent"] is not None:
                 children[call["parent"]].append(scopes[call["id"]].end)
 
-        pending, unbound = [], defaultdict(Counter)
+        pending = []
         for row in self.rows:
             details = row.get("args", {})
             if "Physic Stream Id" not in details or details["Task Type"] in self.profiler_controls:
                 continue
+            pending.append(Span.read(row))
+
+        work, order, lanes = [], [], {}
+        physical_predecessor, owned_predecessor = {}, {}
+        unbound = defaultdict(Counter)
+        for span in sorted(pending, key=lambda entry: (entry.begin, entry.end)):
+            details = span.row["args"]
+            stream = int(details["Physic Stream Id"])
+            previous_end, previous_work = physical_predecessor.get(stream, (None, None))
+            physical_predecessor[stream] = (span.end, None)
             possible = owners.get(details.get("connection_id"), ())
             if len(possible) != 1:
                 reason = "multiple_submissions" if possible else "missing_submission"
                 unbound[reason][details["Task Type"]] += 1
                 continue
-            (owner, submission), = possible
+            (owner, submission, api_begin, api_end), = possible
             if owner is None:
                 unbound["outside_calls"][details["Task Type"]] += 1
                 continue
-            pending.append((Span.read(row), submission, owner))
 
-        work, order, lanes, predecessor = [], [], {}, {}
-        for span, submission, owner in sorted(pending, key=lambda entry: (entry[0].begin, entry[0].end)):
-            details = span.row["args"]
-            stream = int(details["Physic Stream Id"])
             lane = lanes.setdefault(stream, len(lanes))
             index = len(work)
             work.append({
                 "id": index, "owner": owner, "slot": bisect_right(children[owner], submission), "lane": lane,
                 "kind": details["Task Type"], "name": span.row["name"],
                 "submitted_ns": submission, "begin_ns": span.begin, "end_ns": span.end,
+                "api_begin_ns": api_begin, "api_end_ns": api_end,
+                "previous_device_end_ns": previous_end, "previous_work": previous_work,
             })
-            if lane in predecessor:
-                order.append([predecessor[lane], index])
-            predecessor[lane] = index
+            if lane in owned_predecessor:
+                order.append([owned_predecessor[lane], index])
+            owned_predecessor[lane] = index
+            physical_predecessor[stream] = (span.end, index)
 
         if not work:
             raise ValueError("the trace contains no unambiguously owned device work")
@@ -148,6 +156,7 @@ class AscendEvidence:
             "domain": {key: self.manifest[key] for key in ("framework_revision", "model", "configuration")},
             "calls": self.calls, "work": work, "stream_order": order,
             "profile_scope_begins_ns": [scopes[call["id"]].begin for call in self.calls],
+            "profile_scope_ends_ns": [scopes[call["id"]].end for call in self.calls],
             "evidence": {"clock": "ascend_profiler_ns", "unbound_device_records": dict(unbound)},
         }
 
@@ -159,3 +168,16 @@ class AscendEvidence:
         worker = json.loads((directory / "worker.json").read_text(encoding="utf-8"))
         trace = json.loads((directory / manifest["trace"]).read_text(encoding="utf-8"), parse_float=Decimal)
         return cls(manifest, worker, trace)
+
+    @staticmethod
+    def hardware(directory):
+        device_file, = directory.rglob("info.json.0")
+        profile_file, = directory.rglob("profiler_info_0.json")
+        system = json.loads(device_file.read_text(encoding="utf-8"))
+        profile = json.loads(profile_file.read_text(encoding="utf-8"))
+        device, = system["DeviceInfo"]
+        return {
+            "platform": "ascend", "driver": system["drvVersion"], "host_cpu": system["CPU"][0]["Type"],
+            "cann": profile["cann_version"], "torch_npu": profile["torch_npu_version"],
+            "device": {key: device[key] for key in ("ai_core_num", "aiv_num", "aic_frequency", "aiv_frequency")},
+        }
