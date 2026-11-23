@@ -1,11 +1,13 @@
 {
-  "templates": {"selector": "exact_batch_geometry"},
+  "templates": {"selector": "exact_query"},
   "performance": {
     "device_task": {"estimator": "exact_median"},
     "host_thread": {"estimator": "exact_median"}
   },
   "acquisition": {
     "template_source": {"mode": "detailed"},
+    "pd_page_copy": {"mode": "detailed"},
+    "pd_page_table_assembly": {"mode": "boundary"},
     "device_task": {"mode": "detailed"},
     "host_thread": {"mode": "host-timing"}
   }

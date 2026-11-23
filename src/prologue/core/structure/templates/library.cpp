@@ -1,66 +1,116 @@
 #include "prologue/core/structure/templates/library.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
 namespace prologue::structure {
-namespace {
 
 using nlohmann::json;
 using Index = std::size_t;
 
-class Expansion final {
-public:
-    explicit Expansion(const json& definitions) : definitions_(definitions) {}
+TemplateGap::TemplateGap(json gap) : std::runtime_error(gap.at("reason").get<std::string>()), detail(std::move(gap)) {}
 
-    json build(Index root) {
-        visit(root);
-        return {{"calls", std::move(calls_)}, {"work", std::move(work_)}};
+class Templates::Expansion final {
+public:
+    Expansion(const Templates& library, const json& request) : library_(library), request_(request) {}
+
+    json resolve(const json& query) {
+        const auto key = query.dump();
+        const auto candidates = library_.queries_.find(key);
+        if (candidates == library_.queries_.end()) {
+            throw TemplateGap({{"status", active_.empty() ? "parent_gap" : "child_gap"},
+                               {"reason", "no template covers the required query"},
+                               {"query", request_}, {"required", query}});
+        }
+        if (std::ranges::find(active_, key) != active_.end()) {
+            throw std::invalid_argument("template queries form a cycle");
+        }
+
+        active_.push_back(key);
+        json selected;
+        for (const auto& candidate : candidates->second) {
+            auto graph = json{{"calls", json::array()}, {"work", json::array()}};
+            std::vector<Index> path;
+            const auto& definitions = library_.libraries_.at(candidate.library).at("definitions");
+            visit(definitions, candidate.definition, path, graph);
+            if (!selected.is_null() && selected != graph) {
+                throw TemplateGap({{"status", "candidate_conflict"}, {"reason", "template candidates disagree"},
+                                   {"query", request_}, {"required", query}});
+            }
+            selected = std::move(graph);
+        }
+        active_.pop_back();
+        return selected;
     }
 
 private:
-    void visit(Index identity) {
-        const auto& definition = definitions_.at(identity);
+    void visit(const json& definitions, Index identity, std::vector<Index>& path, json& graph) {
+        const auto& definition = definitions.at(identity);
         auto call = definition;
         call.erase("children");
         call.erase("device_work");
-        call["path"] = path_;
-        calls_.push_back(std::move(call));
+        call["path"] = path;
+        graph.at("calls").push_back(std::move(call));
 
         const auto& work = definition.at("device_work");
         const auto& children = definition.at("children");
-        Index next_work = 0;
+        Index next = 0;
         for (Index slot = 0; slot <= children.size(); ++slot) {
-            while (next_work < work.size() && work.at(next_work).at("slot") == slot) {
-                auto entry = work.at(next_work);
-                entry["path"] = path_;
-                entry["ordinal"] = next_work++;
-                work_.push_back(std::move(entry));
+            while (next < work.size() && work.at(next).at("slot") == slot) {
+                auto entry = work.at(next);
+                entry["path"] = path;
+                entry["ordinal"] = next++;
+                graph.at("work").push_back(std::move(entry));
             }
-            if (slot < children.size()) {
-                const auto child = children.at(slot).get<Index>();
-                if (child >= identity) {
+            if (slot == children.size()) {
+                break;
+            }
+
+            path.push_back(slot);
+            const auto& child = children.at(slot);
+            if (child.is_number_integer()) {
+                const auto index = child.get<Index>();
+                if (index >= identity) {
                     throw std::invalid_argument("template child must precede its parent definition");
                 }
-                path_.push_back(slot);
-                visit(child);
-                path_.pop_back();
+                visit(definitions, index, path, graph);
+            } else {
+                auto resolved = resolve(child.at("query"));
+                const auto& ports = resolved.at("calls").front();
+                if (ports.at("inputs") != child.at("inputs") || ports.at("outputs") != child.at("outputs")) {
+                    throw std::invalid_argument("an imported template does not match its call ports");
+                }
+                append(std::move(resolved), path, graph);
             }
+            path.pop_back();
         }
-        if (next_work != work.size()) {
+        if (next != work.size()) {
             throw std::invalid_argument("template work is outside its child slots");
         }
     }
 
-    const json& definitions_;
-    std::vector<Index> path_;
-    json calls_ = json::array();
-    json work_ = json::array();
-};
+    static void append(json child, const std::vector<Index>& prefix, json& graph) {
+        // Keep reusable definitions relative to their own root and bind their paths at the call site.
+        for (const auto* kind : {"calls", "work"}) {
+            for (auto& row : child.at(kind)) {
+                auto path = prefix;
+                for (const auto& index : row.at("path")) {
+                    path.push_back(index.get<Index>());
+                }
+                row["path"] = std::move(path);
+                graph.at(kind).push_back(std::move(row));
+            }
+        }
+    }
 
-}
+    const Templates& library_;
+    const json& request_;
+    std::vector<std::string> active_;
+};
 
 json batch_geometry(const json& phase, const json& members) {
     auto sequence = json::array();
@@ -71,48 +121,26 @@ json batch_geometry(const json& phase, const json& members) {
 }
 
 Templates::Templates(const json& libraries, const json& rule) : libraries_(libraries) {
-    if (rule.at("selector") != "exact_batch_geometry") {
+    if (rule.at("selector") != "exact_query") {
         throw std::invalid_argument("unsupported template selector");
     }
     for (Index source = 0; source < libraries_.size(); ++source) {
-        const auto& library = libraries_.at(source);
-        for (const auto& instance : library.at("instances")) {
-            if (!instance.at("parent").is_null()) {
-                continue;
-            }
-            const auto key = batch_geometry(instance.at("parameters").at("phase"), instance.at("members")).dump();
-            batches_[key].push_back({source, instance.at("definition").get<Index>()});
+        for (const auto& root : libraries_.at(source).at("roots")) {
+            queries_[root.at("query").dump()].push_back({source, root.at("definition").get<Index>()});
         }
     }
 }
 
-std::optional<json> Templates::expand(const json& action) const {
-    const auto key = batch_geometry(action.at("phase"), action.at("members")).dump();
-    const auto candidate = batches_.find(key);
-    if (candidate == batches_.end()) {
-        return std::nullopt;
-    }
-    return select(key, candidate->second);
-}
-
-json Templates::select(const std::string& geometry, const std::vector<Candidate>& candidates) const {
-    json graph;
-    for (const auto& match : candidates) {
-        auto expanded = Expansion(libraries_.at(match.library).at("definitions")).build(match.definition);
-        if (!graph.is_null() && graph != expanded) {
-            throw std::invalid_argument("source templates disagree at batch geometry " + geometry);
-        }
-        graph = std::move(expanded);
-    }
-    return graph;
+json Templates::expand(const json& query) const {
+    return Expansion(*this, query).resolve(query);
 }
 
 void Templates::qualify() const {
-    if (batches_.empty()) {
+    if (queries_.empty()) {
         throw std::invalid_argument("template sources have no root candidates");
     }
-    for (const auto& [geometry, candidates] : batches_) {
-        select(geometry, candidates);
+    for (const auto& [query, candidates] : queries_) {
+        expand(json::parse(query));
     }
 }
 

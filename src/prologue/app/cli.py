@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from prologue.app.core import run_core, run_simulation
-from prologue.app.releases import pinned, publish, read_document
+from prologue.app.releases import pinned, publish, query_structure, read_document, structure_targets
 from prologue.app.task import Plan
 from prologue.assets.publication import Store
 from prologue.integrations.platforms.ascend.evidence import AscendEvidence
@@ -13,12 +13,23 @@ from prologue.rules.catalog import Rules
 
 
 def compile_source(args):
-    observation = AscendEvidence.open(args.observation)
+    if args.pd_scope:
+        from prologue.integrations.frameworks.sglang.observation.pd_source import PDSource
+
+        document, source = PDSource(args.observation).document(args.pd_scope)
+    else:
+        observation = AscendEvidence.open(args.observation)
+        document = observation.document()
+        source = {"purpose": "template_source", "mode": observation.manifest["mode"],
+                  "origin_raw_ns": observation.manifest["delivery"]["origin_raw_ns"]}
+
     rules = Rules.read(args.rules)
-    rules.require_observation("template_source", observation.manifest["mode"])
-    asset = run_core("templates", observation.document())
-    asset["source"] = {"mode": observation.manifest["mode"],
-                       "origin_raw_ns": observation.manifest["delivery"]["origin_raw_ns"]}
+    rules.require_observation(source["purpose"], source["mode"])
+    if args.for_queries:
+        targets = structure_targets(document["domain"], read_document(args.for_queries))
+        document["required_queries"] = [row["query"] for row in targets]
+    asset = run_core("templates", document)
+    asset["source"] = source
     return asset
 
 
@@ -129,9 +140,11 @@ def main() -> None:
     compile_command = commands.add_parser("compile", help="compile hierarchical templates from a detailed observation")
     compile_command.add_argument("observation", type=Path)
     compile_command.add_argument("--rules", type=Path)
+    compile_command.add_argument("--pd-scope", choices=("copy", "assembly"), help="compile a native PD cut")
+    compile_command.add_argument("--for-queries", type=Path, help="limit roots to the original structural queries")
     compile_command.set_defaults(handler=compile_source)
 
-    structure = commands.add_parser("verify-structure", help="compare native control and expanded templates to a reference")
+    structure = commands.add_parser("verify-structure", help="compare expanded serving actions to a native reference")
     structure.add_argument("reference", type=Path)
     structure.add_argument("--socket", type=Path, required=True)
     release_arguments(structure)
@@ -146,7 +159,10 @@ def main() -> None:
     publication = commands.add_parser("publish", help="atomically publish template, performance and rule assets")
     publication.add_argument("--store", type=Path, default=Path("data/libraries"))
     publication.add_argument("--base", default="current", help="expected current release UUID, current or empty")
-    publication.add_argument("--library", type=Path, action="append")
+    libraries = publication.add_mutually_exclusive_group()
+    libraries.add_argument("--library", type=Path, action="append", help="complete set of template sources")
+    libraries.add_argument("--add-library", type=Path, action="append", help="add to the base template sources")
+    publication.add_argument("--require-structure", type=Path, help="require coverage for the original query batch")
     publication.add_argument("--costs", type=Path)
     publication.add_argument("--rules", type=Path)
     publication.add_argument("--model-config", type=Path)
@@ -155,6 +171,13 @@ def main() -> None:
     inspect = commands.add_parser("show-release", help="show the immutable record of a published release")
     release_arguments(inspect)
     inspect.set_defaults(handler=lambda args: Store(args.store).release(args.release))
+
+    lookup = commands.add_parser("query-structure", help="resolve structural queries and group shared gaps")
+    lookup.add_argument("query", type=Path)
+    lookup.add_argument("--candidate", type=Path, action="append", help="include an unpublished template source")
+    lookup.add_argument("--graph", action="store_true", help="include expanded graphs for covered queries")
+    release_arguments(lookup)
+    lookup.set_defaults(handler=query_structure)
 
     query = commands.add_parser("quote-costs", help="query modeled service for bound work coordinates")
     query.add_argument("query", type=Path)
@@ -170,7 +193,7 @@ def main() -> None:
     release_arguments(forecast)
     forecast.set_defaults(handler=predict)
 
-    fixed = commands.add_parser("verify-performance", help="compare measured and modeled durations on a fixed native graph")
+    fixed = commands.add_parser("verify-performance", help="compare measured and modeled costs on a fixed native graph")
     fixed.add_argument("reference", type=Path)
     release_arguments(fixed)
     fixed.set_defaults(handler=verify_performance)

@@ -2,6 +2,7 @@
 
 #include "prologue/core/performance/costs.hpp"
 #include "prologue/core/serving/simulation.hpp"
+#include "prologue/core/structure/templates/library.hpp"
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -108,6 +109,11 @@ nlohmann::json serve_control(const std::string& socket_path, serving::Simulation
         } catch (const serving::Stopped& stopped) {
             channel.respond({{"failure", stopped.what()}});
             return simulation.result(stopped.status(), stopped.what());
+        } catch (const structure::TemplateGap& gap) {
+            channel.respond({{"failure", gap.what()}});
+            auto result = simulation.result(gap.detail.at("status"), gap.what());
+            result["gap"] = gap.detail;
+            return result;
         } catch (const performance::CostGap& gap) {
             channel.respond({{"failure", gap.what()}});
             auto result = simulation.result(gap.detail.at("status"), gap.what());

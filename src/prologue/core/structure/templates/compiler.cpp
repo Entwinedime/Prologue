@@ -1,4 +1,5 @@
 #include "prologue/core/structure/templates/compiler.hpp"
+#include "prologue/core/structure/templates/library.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -7,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -16,11 +18,17 @@ namespace {
 using nlohmann::json;
 using Index = std::size_t;
 
+struct Root final {
+    Index call;
+    json query;
+};
+
 json layouts(const json& ports) {
     auto result = json::array();
     for (const auto& port : ports) {
         auto layout = port;
         layout.erase("tensor");
+        layout.erase("views");
         result.push_back(std::move(layout));
     }
     return result;
@@ -28,19 +36,20 @@ json layouts(const json& ports) {
 
 class PortBindings final {
 public:
+    enum class Use { source, target };
+
     PortBindings() : links_(json::array()) {}
 
-    void publish(const json& ports, const json& child) {
+    void bind(const json& ports, const json& child, Use use) {
         for (const auto& port : ports) {
-            producers_[port.at("tensor").get<Index>()] = endpoint(child, port);
-        }
-    }
-
-    void consume(const json& ports, const json& child) {
-        for (const auto& port : ports) {
-            const auto producer = producers_.find(port.at("tensor").get<Index>());
-            if (producer != producers_.end()) {
-                links_.push_back({{"from", producer->second}, {"to", endpoint(child, port)}});
+            auto endpoint = json{{"child", child}, {"port", port.at("name")}};
+            if (const auto views = port.find("views"); views != port.end()) {
+                for (const auto& view : *views) {
+                    endpoint["interval"] = view.at("interval");
+                    connect(view.at("tensor"), endpoint, use);
+                }
+            } else {
+                connect(port.at("tensor"), std::move(endpoint), use);
             }
         }
     }
@@ -50,8 +59,12 @@ public:
     }
 
 private:
-    static json endpoint(const json& child, const json& port) {
-        return {{"child", child}, {"port", port.at("name")}};
+    void connect(Index tensor, json endpoint, Use use) {
+        if (use == Use::source) {
+            producers_[tensor] = std::move(endpoint);
+        } else if (const auto source = producers_.find(tensor); source != producers_.end()) {
+            links_.push_back({{"from", source->second}, {"to", std::move(endpoint)}});
+        }
     }
 
     std::unordered_map<Index, json> producers_;
@@ -72,14 +85,24 @@ public:
             if (call.at("id") != index || (!enclosing.is_null() && enclosing.get<Index>() >= index)) {
                 throw std::invalid_argument("calls must declare their parent before their children");
             }
+            if (call.contains("template_query") && enclosing.is_null()) {
+                throw std::invalid_argument("an imported call requires a parent scope");
+            }
             if (!enclosing.is_null()) {
-                children_.at(enclosing.get<Index>()).push_back(index);
+                const auto parent = enclosing.get<Index>();
+                if (calls_.at(parent).contains("template_query")) {
+                    throw std::invalid_argument("an imported call only observes ports");
+                }
+                children_.at(parent).push_back(index);
             }
         }
 
         for (const auto& entry : observed_work) {
             const auto owner = entry.at("owner").get<Index>();
             const auto slot = entry.at("slot").get<Index>();
+            if (calls_.at(owner).contains("template_query")) {
+                throw std::invalid_argument("an imported call cannot own sampled work");
+            }
             if (slot > children_.at(owner).size()) {
                 throw std::invalid_argument("device submission must fall between observed child calls");
             }
@@ -100,16 +123,23 @@ public:
         const auto& direct = children_.at(index);
         PortBindings bindings;
         auto children = json::array();
-        bindings.publish(call.at("inputs"), nullptr);
+        bindings.bind(call.at("inputs"), nullptr, PortBindings::Use::source);
 
         // Port references use a child ordinal and an interface name, independent of observation IDs.
         for (Index ordinal = 0; ordinal < direct.size(); ++ordinal) {
-            const auto child = direct.at(ordinal);
-            children.push_back(selected.at(child));
-            bindings.consume(calls_.at(child).at("inputs"), ordinal);
-            bindings.publish(calls_.at(child).at("outputs"), ordinal);
+            const auto identity = direct.at(ordinal);
+            const auto& child = calls_.at(identity);
+            const auto& inputs = child.at("inputs");
+            const auto& outputs = child.at("outputs");
+            if (const auto query = child.find("template_query"); query != child.end()) {
+                children.push_back({{"query", *query}, {"inputs", layouts(inputs)}, {"outputs", layouts(outputs)}});
+            } else {
+                children.push_back(selected.at(identity));
+            }
+            bindings.bind(inputs, ordinal, PortBindings::Use::target);
+            bindings.bind(outputs, ordinal, PortBindings::Use::source);
         }
-        bindings.consume(call.at("outputs"), nullptr);
+        bindings.bind(call.at("outputs"), nullptr, PortBindings::Use::target);
 
         return {
             {"operation", call.at("operation")}, {"implementation", call.at("implementation")},
@@ -129,14 +159,45 @@ private:
 
 nlohmann::json Compiler::compile(const nlohmann::json& observation) const {
     const auto& calls = observation.at("calls");
-    const auto& work = observation.at("work");
-    Calls graph(calls, work);
+    const Calls graph(calls, observation.at("work"));
+
+    const auto required = observation.find("required_queries");
+    std::unordered_set<std::string> target_keys;
+    if (required != observation.end()) {
+        for (const auto& query : *required) {
+            target_keys.insert(query.dump());
+        }
+    }
+
+    std::vector<Root> selected_roots;
+    std::vector<bool> included(calls.size());
+    for (Index index = 0; index < calls.size(); ++index) {
+        const auto& call = calls.at(index);
+        const auto& parent = call.at("parent");
+        if (!parent.is_null()) {
+            included.at(index) = included.at(parent.get<Index>());
+            continue;
+        }
+
+        auto query = call.contains("query") ? call.at("query")
+            : batch_geometry(call.at("parameters").at("phase"), call.at("members"));
+        if (required == observation.end() || target_keys.contains(query.dump())) {
+            included.at(index) = true;
+            selected_roots.push_back({index, std::move(query)});
+        }
+    }
+    if (selected_roots.empty()) {
+        throw std::invalid_argument("source observations did not cover the required root queries");
+    }
 
     auto definitions = json::array();
     std::unordered_map<std::string, Index> catalog;
     std::vector<Index> selected(calls.size());
     for (Index next = calls.size(); next > 0; --next) {
         const auto index = next - 1;
+        if (!included.at(index) || calls.at(index).contains("template_query")) {
+            continue;
+        }
         auto definition = graph.definition(index, selected);
         const auto [position, inserted] = catalog.emplace(definition.dump(), definitions.size());
         if (inserted) {
@@ -145,15 +206,13 @@ nlohmann::json Compiler::compile(const nlohmann::json& observation) const {
         selected.at(index) = position->second;
     }
 
-    // Preserve concrete tensor identities, call sites and timing only on the observed instances.
-    auto instances = calls;
-    for (Index index = 0; index < instances.size(); ++index) {
-        instances.at(index)["definition"] = selected.at(index);
+    auto roots = json::array();
+    for (auto& root : selected_roots) {
+        roots.push_back({{"query", std::move(root.query)}, {"definition", selected.at(root.call)}});
     }
     return {
         {"domain", observation.at("domain")}, {"definitions", std::move(definitions)},
-        {"instances", std::move(instances)}, {"evidence", observation.at("evidence")},
-        {"work", work}, {"stream_order", observation.at("stream_order")},
+        {"roots", std::move(roots)}, {"evidence", observation.at("evidence")},
     };
 }
 

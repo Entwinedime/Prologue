@@ -102,13 +102,11 @@ void Simulation::execute(const json& message) {
         }
     }
 
-    auto graph = templates_.expand(message);
-    if (!graph) {
-        throw Stopped("template_gap", "no source template for native action " + message.dump());
-    }
+    const auto query = structure::batch_geometry(message.at("phase"), message.at("members"));
+    auto graph = templates_.expand(query);
 
     // Only a fully selected action can query time. The provider cannot choose the graph.
-    timing_ = timing_source_.for_action(message, *graph);
+    timing_ = timing_source_.for_action(message, graph);
     timeline_.advance_by(timing_->prepare_ns);
     const auto started = now();
     const auto intervals = timeline_.complete_action(timing_->work, timing_->model_return_ns, record_structure_);
@@ -122,7 +120,7 @@ void Simulation::execute(const json& message) {
             observed.push_back({interval.begin_ns, interval.end_ns});
         }
         current_["resources"] = capacity();
-        current_["graph"] = std::move(*graph);
+        current_["graph"] = std::move(graph);
         current_["intervals"] = std::move(observed);
     }
 }

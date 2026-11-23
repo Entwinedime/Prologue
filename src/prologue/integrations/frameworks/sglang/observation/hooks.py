@@ -47,7 +47,8 @@ class Observation:
             if count > (rows[-1]["count"] if rows else 0):
                 rows.append({"count": count, "raw_ns": now})
                 if self.result_cpu_started is not None:
-                    self.active_batch["publication_cpu_ns"][self.requests[rid]] = thread_time_ns() - self.result_cpu_started
+                    elapsed = thread_time_ns() - self.result_cpu_started
+                    self.active_batch["publication_cpu_ns"][self.requests[rid]] = elapsed
             if finished is not None:
                 self.finished.add(rid)
         return result
@@ -214,6 +215,14 @@ class Observation:
 
 
 def install():
+    pd_cut = os.environ.get("PROLOGUE_PD_CUT")
+    if pd_cut is not None:
+        from prologue.integrations.frameworks.sglang.observation.pd import PDObservation
+
+        specification = Path(pd_cut)
+        PDObservation(specification.parent, json.loads(specification.read_text(encoding="utf-8"))).install()
+        return
+
     path = os.environ.get("PROLOGUE_OBSERVATION")
     if path is not None:
         path = Path(path)

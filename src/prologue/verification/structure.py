@@ -87,7 +87,7 @@ class StructureReference:
     def compare(self, result):
         comparisons = 0
         consumed = 0
-        for index, (expected, actual) in enumerate(zip(self.actions, result["actions"])):
+        for index, (expected, actual) in enumerate(zip(self.actions, result["actions"], strict=False)):
             for field in ("phase", "members", "resources", "after_result", "graph"):
                 if actual[field] != expected[field]:
                     return {"status": "structure_mismatch", "action": index, "field": field,
@@ -105,6 +105,9 @@ class StructureReference:
         status = result["status"]
         if status == "complete":
             status = "matched" if comparisons == len(self.actions) == len(result["actions"]) else "structure_mismatch"
-        return {"status": status, "reason": result["reason"], "matched_actions": comparisons,
-                "expected_actions": len(self.actions), "measured_work_consumed": consumed,
-                "finished_requests": result["finished_requests"]}
+        report = {"status": status, "reason": result["reason"], "matched_actions": comparisons,
+                  "expected_actions": len(self.actions), "measured_work_consumed": consumed,
+                  "finished_requests": result["finished_requests"]}
+        if "gap" in result:
+            report["gap"] = result["gap"]
+        return report

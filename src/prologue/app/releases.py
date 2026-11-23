@@ -2,6 +2,7 @@
 
 import json
 
+from prologue.acquisition.planning import structure_demands
 from prologue.app.core import run_core
 from prologue.assets.publication import Store
 from prologue.rules.catalog import Rules
@@ -18,23 +19,50 @@ def pinned(args):
     return store, release, rules
 
 
-def prepare_templates(paths, model_config):
+def prepare_templates(paths, model_config, previous=None):
     sources = [read_document(path) for path in paths]
-    domain = sources[0]["domain"]
-    libraries = []
+    domain = previous["domain"] if previous else sources[0]["domain"]
+    libraries = previous["libraries"].copy() if previous else []
     for source in sources:
         if source["domain"] != domain:
             raise ValueError("template sources must belong to the same domain")
-        roots = []
-        for row in source["instances"]:
-            if row["parent"] is None:
-                roots.append({
-                    "parent": None, "parameters": {"phase": row["parameters"]["phase"]},
-                    "members": [{"kv_committed_tokens": member["kv_committed_tokens"]} for member in row["members"]],
-                    "definition": row["definition"],
-                })
-        libraries.append({"definitions": source["definitions"], "instances": roots, "source": source["source"]})
+        library = {key: source[key] for key in ("definitions", "roots", "source")}
+        if library not in libraries:
+            libraries.append(library)
     return {"domain": domain, "libraries": libraries, "model_config": model_config}
+
+
+def structure_targets(domain, batch):
+    if batch["domain"] != domain:
+        raise ValueError("source domain does not match the structure queries")
+    targets = batch["targets"]
+    if not isinstance(targets, list) or not targets:
+        raise ValueError("a structure query requires at least one target")
+    for row in targets:
+        if (not isinstance(row, dict) or row.keys() != {"target", "query"}
+                or not isinstance(row["target"], str) or not row["target"]
+                or not isinstance(row["query"], dict) or not row["query"]):
+            raise ValueError("each target must have a nonempty name and query object")
+    return targets
+
+
+def examine_structure(templates, rules, batch, include_graph=False):
+    targets = structure_targets(templates["domain"], batch)
+    decisions = run_core("query-structure", {
+        "libraries": templates["libraries"], "rule": rules.templates,
+        "queries": [row["query"] for row in targets], "include_graph": include_graph,
+    })
+    return structure_demands(targets, decisions)
+
+
+def query_structure(args):
+    store, release, rules = pinned(args)
+    templates = store.asset(release, "templates")
+    if args.candidate:
+        templates = prepare_templates(args.candidate, templates["model_config"], templates)
+    batch = read_document(args.query)
+    return {"release": release["release"], "preview": bool(args.candidate),
+            **examine_structure(templates, rules, batch, args.graph)}
 
 
 def qualify(documents, rules):
@@ -44,7 +72,8 @@ def qualify(documents, rules):
     if domain != templates["domain"]:
         raise ValueError("template and performance asset domains disagree")
     for library in templates["libraries"]:
-        rules.require_observation("template_source", library["source"]["mode"])
+        source = library["source"]
+        rules.require_observation(source["purpose"], source["mode"])
     for source in costs["sources"]:
         rules.require_observation(source["family"], source["mode"])
     run_core("qualify-release", {"libraries": templates["libraries"], "costs": costs,
@@ -72,6 +101,12 @@ def publish(args):
         if previous and templates["domain"]["model"] != previous["domain"]["model"] and not args.model_config:
             raise ValueError("changing the model requires --model-config")
         documents["templates"] = templates
+    elif args.add_library:
+        if previous is None:
+            raise ValueError("adding a template source requires a published base")
+        if not args.require_structure:
+            raise ValueError("adding a template source requires the original query batch with --require-structure")
+        documents["templates"] = prepare_templates(args.add_library, model_config, previous)
     elif args.model_config and previous:
         documents["templates"] = {**previous, "model_config": model_config}
     if args.costs:
@@ -85,5 +120,10 @@ def publish(args):
     else:
         rules = Rules(documents["rules"])
 
+    if args.require_structure:
+        batch = read_document(args.require_structure)
+        report = examine_structure(documents["templates"], rules, batch)
+        if report["demands"]:
+            return {"status": "unresolved_structure", "release": base, **report}
     qualify(documents, rules)
     return store.publish(snapshot, documents)

@@ -122,6 +122,25 @@ json cost_quotes(const json& input) {
     return result;
 }
 
+json structure_queries(const json& input) {
+    const prologue::structure::Templates templates(input.at("libraries"), input.at("rule"));
+    const auto include_graph = input.at("include_graph").get<bool>();
+    auto results = json::array();
+    for (const auto& query : input.at("queries")) {
+        try {
+            auto graph = templates.expand(query);
+            auto result = json{{"status", "covered"}};
+            if (include_graph) {
+                result["graph"] = std::move(graph);
+            }
+            results.push_back(std::move(result));
+        } catch (const prologue::structure::TemplateGap& gap) {
+            results.push_back(gap.detail);
+        }
+    }
+    return results;
+}
+
 json qualify_release(const json& input) {
     const auto& rules = input.at("rules");
     const prologue::structure::Templates templates(input.at("libraries"), rules.at("templates"));
@@ -134,7 +153,7 @@ json qualify_release(const json& input) {
 
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 3) {
-        std::cerr << "Usage: prologue-core workloads|templates|qualify-release|simulate|predict|coordinates|quote|replay [socket]\n";
+        std::cerr << "Usage: prologue-core workloads|templates|query-structure|qualify-release|simulate|predict|coordinates|quote|replay [socket]\n";
         return 2;
     }
 
@@ -144,6 +163,8 @@ int main(int argc, char** argv) {
             std::cout << normalize_workloads(json::parse(std::cin)) << '\n';
         } else if (argc == 2 && command == "templates") {
             std::cout << prologue::structure::Compiler{}.compile(json::parse(std::cin)) << '\n';
+        } else if (argc == 2 && command == "query-structure") {
+            std::cout << structure_queries(json::parse(std::cin)) << '\n';
         } else if (argc == 2 && command == "qualify-release") {
             std::cout << qualify_release(json::parse(std::cin)) << '\n';
         } else if (argc == 3 && command == "simulate") {
