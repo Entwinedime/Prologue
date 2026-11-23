@@ -9,6 +9,7 @@
     "pd_page_copy": {"mode": "detailed"},
     "pd_page_table_assembly": {"mode": "boundary"},
     "device_task": {"mode": "detailed"},
+    "device_attention": {"mode": "decode-attention"},
     "host_thread": {"mode": "host-timing"}
   }
 }

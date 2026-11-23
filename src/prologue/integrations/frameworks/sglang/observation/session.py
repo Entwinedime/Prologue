@@ -7,31 +7,19 @@ from dataclasses import asdict
 from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 
-from prologue.integrations.frameworks.sglang.configuration import Configuration, Model
+from prologue.integrations.frameworks.sglang.configuration import Configuration, Model, native_options
 
 
 class Session:
     def __init__(self, receipt, configuration, workload, output, mode):
         self.model = Model(**receipt["model"])
-        self.configuration = Configuration(**next(row for row in receipt["configurations"] if row["id"] == configuration))
+        configured = next(row for row in receipt["configurations"] if row["id"] == configuration)
+        self.configuration = Configuration(**configured)
         self.workload = next(row for row in receipt["workloads"] if row["id"] == workload)
         self.output = output.resolve()
         self.mode = mode
         if self.configuration.tp != 1:
             raise ValueError("this observation entry supports a single native TP1 worker")
-
-    def engine_options(self):
-        configuration = asdict(self.configuration)
-        del configuration["id"]
-        configuration["tp_size"] = configuration.pop("tp")
-        model = asdict(self.model)
-        model["model_path"] = model.pop("path")
-        return {
-            **model, **configuration, "device": "npu", "skip_tokenizer_init": True,
-            "disable_overlap_schedule": True, "disable_cuda_graph": True,
-            "disable_radix_cache": True, "chunked_prefill_size": -1, "stream_interval": 1,
-            "mem_fraction_static": 0.8, "log_level": "warning",
-        }
 
     @staticmethod
     async def request(engine, native, request):
@@ -76,7 +64,7 @@ class Session:
         from sglang import Engine
 
         started = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
-        with Engine(**self.engine_options()) as engine:
+        with Engine(**native_options(self.model, self.configuration)) as engine:
             initialized = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
             engine.loop.run_until_complete(self.dispatch(engine, "warmup"))
             self.drain(engine)

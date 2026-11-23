@@ -1,6 +1,6 @@
 """Input fields interpreted by the SGLang integration."""
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,3 +39,17 @@ class Configuration:
                 raise ValueError(f"{self.id}/{field} must be a positive signed 64-bit integer")
         if self.max_total_tokens < self.page_size:
             raise ValueError(f"{self.id} KV capacity must hold one page")
+
+
+def native_options(model, configuration):
+    config = asdict(configuration)
+    del config["id"]
+    config["tp_size"] = config.pop("tp")
+    weights = asdict(model)
+    weights["model_path"] = weights.pop("path")
+    return {
+        **weights, **config, "device": "npu", "skip_tokenizer_init": True,
+        "disable_overlap_schedule": True, "disable_cuda_graph": True,
+        "disable_radix_cache": True, "chunked_prefill_size": -1, "stream_interval": 1,
+        "mem_fraction_static": 0.8, "log_level": "warning",
+    }

@@ -65,6 +65,27 @@ def query_structure(args):
             **examine_structure(templates, rules, batch, args.graph)}
 
 
+def cost_quotes(costs, rules, query):
+    return run_core("quote", {**query, "costs": costs, "rules": rules.document})
+
+
+def extend_costs(previous, addition, required):
+    if previous["domain"] != addition["domain"]:
+        raise ValueError("additional costs require the same physical domain")
+    models = {json.dumps(row["coordinate"], sort_keys=True): row for row in previous["models"]}
+    wanted = {json.dumps(row, sort_keys=True) for row in required["coordinates"]}
+    count = len(models)
+    for row in addition["models"]:
+        key = json.dumps(row["coordinate"], sort_keys=True)
+        if key in wanted:
+            models.setdefault(key, row)
+    if len(models) == count:
+        return previous
+
+    sources = previous["sources"] + [row for row in addition["sources"] if row not in previous["sources"]]
+    return {**previous, "sources": sources, "models": list(models.values())}
+
+
 def qualify(documents, rules):
     templates = documents["templates"]
     costs = documents["performance"]
@@ -90,6 +111,7 @@ def publish(args):
 
     snapshot = store.snapshot(base)
     documents = snapshot.documents.copy()
+    cost_requirements = read_document(args.require_costs) if args.require_costs else None
     previous = documents.get("templates")
     model_config = previous["model_config"] if previous else None
     if args.model_config:
@@ -111,6 +133,11 @@ def publish(args):
         documents["templates"] = {**previous, "model_config": model_config}
     if args.costs:
         documents["performance"] = read_document(args.costs)
+    elif args.add_costs:
+        if "performance" not in documents or cost_requirements is None:
+            raise ValueError("adding costs requires a published base and the original --require-costs query")
+        addition = read_document(args.add_costs)
+        documents["performance"] = extend_costs(documents["performance"], addition, cost_requirements)
     if "templates" not in documents or "performance" not in documents:
         raise ValueError("the initial publication requires --library, --model-config and --costs")
 
@@ -125,5 +152,11 @@ def publish(args):
         report = examine_structure(documents["templates"], rules, batch)
         if report["demands"]:
             return {"status": "unresolved_structure", "release": base, **report}
+    if cost_requirements is not None:
+        quotes = cost_quotes(documents["performance"], rules, cost_requirements)
+        missing = [row for row in quotes if row["status"] != "covered"]
+        if missing:
+            return {"status": "unresolved_costs", "release": base,
+                    "domain": cost_requirements["domain"], "missing": missing}
     qualify(documents, rules)
     return store.publish(snapshot, documents)

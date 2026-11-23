@@ -4,6 +4,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace prologue::serving {
 
@@ -12,7 +13,14 @@ CostTiming::CostTiming(const nlohmann::json& domain, const performance::CostCata
 
 ActionTiming CostTiming::for_action(const nlohmann::json& action, const nlohmann::json& graph) {
     const performance::CostQueries queries(action, graph);
-    const auto& host = costs_.require(domain_, queries.host);
+    std::vector<const nlohmann::json*> coordinates{&queries.host};
+    coordinates.reserve(queries.device.size() + 1);
+    for (const auto& coordinate : queries.device) {
+        coordinates.push_back(&coordinate);
+    }
+
+    const auto estimates = costs_.require(domain_, coordinates);
+    const auto& host = estimates.front();
     ActionTiming timing{{}, host.at("prepare_ns"), host.at("forward_ns"),
                         {0, host.at("result_ns")}, {}};
     const auto& members = action.at("members");
@@ -23,7 +31,7 @@ ActionTiming CostTiming::for_action(const nlohmann::json& action, const nlohmann
 
     Nanoseconds submitted = 0;
     for (std::size_t index = 0; index < queries.device.size(); ++index) {
-        const auto& estimate = costs_.require(domain_, queries.device.at(index));
+        const auto& estimate = estimates.at(index + 1);
         const auto& work = graph.at("work").at(index);
         const auto submission_ns = estimate.at("submission_ns").get<Nanoseconds>();
         if (submission_ns < 0 || submission_ns > std::numeric_limits<Nanoseconds>::max() - submitted) {

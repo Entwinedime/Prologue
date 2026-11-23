@@ -3,6 +3,8 @@
 #include "prologue/core/structure/templates/library.hpp"
 
 #include <optional>
+#include <span>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -49,6 +51,13 @@ private:
 
 std::unique_ptr<Estimator> exact_median(const Samples& rows) {
     return std::make_unique<ExactMedian>(rows);
+}
+
+json missing_cost(bool covered_domain) {
+    if (covered_domain) {
+        return {{"status", "cost_gap"}, {"reason", "no cost model covers the work coordinate"}};
+    }
+    return {{"status", "cost_domain_gap"}, {"reason", "cost asset does not cover the requested domain"}};
 }
 
 }
@@ -100,27 +109,49 @@ CostCatalog::CostCatalog(const json& asset, const json& rules) : domain_(asset.a
 
 CostCatalog::~CostCatalog() = default;
 
-json CostCatalog::require(const json& domain, const json& coordinate) const {
-    if (domain != domain_) {
-        throw CostGap({{"status", "cost_domain_gap"}, {"reason", "cost asset does not cover the requested domain"},
-                       {"coordinate", coordinate}});
-    }
+std::optional<json> CostCatalog::estimate(const json& coordinate) const {
     const auto model = models_.find(coordinate.at("family").get<std::string>());
-    if (model != models_.end()) {
-        if (auto estimate = model->second->estimate(coordinate)) {
-            return std::move(*estimate);
+    return model == models_.end() ? std::nullopt : model->second->estimate(coordinate);
+}
+
+std::vector<json> CostCatalog::require(const json& domain, std::span<const json* const> coordinates) const {
+    const auto covered_domain = domain == domain_;
+    std::vector<json> estimates;
+    estimates.reserve(coordinates.size());
+    auto missing = json::array();
+    std::unordered_set<std::string> reported;
+    for (const auto* coordinate : coordinates) {
+        if (covered_domain) {
+            if (auto value = estimate(*coordinate)) {
+                estimates.push_back(std::move(*value));
+                continue;
+            }
+        }
+        if (reported.insert(coordinate->dump()).second) {
+            missing.push_back(*coordinate);
         }
     }
-    throw CostGap({{"status", "cost_gap"}, {"reason", "no cost model covers the work coordinate"},
-                   {"coordinate", coordinate}});
+
+    // A caller can schedule the action only after all of its costs are known.
+    if (!missing.empty()) {
+        auto gap = missing_cost(covered_domain);
+        gap["domain"] = domain;
+        gap["coordinates"] = std::move(missing);
+        throw CostGap(std::move(gap));
+    }
+    return estimates;
 }
 
 json CostCatalog::quote(const json& domain, const json& coordinate) const {
-    try {
-        return {{"status", "covered"}, {"estimate", require(domain, coordinate)}};
-    } catch (const CostGap& gap) {
-        return gap.detail;
+    const auto covered_domain = domain == domain_;
+    if (covered_domain) {
+        if (auto value = estimate(coordinate)) {
+            return {{"status", "covered"}, {"estimate", std::move(*value)}};
+        }
     }
+    auto gap = missing_cost(covered_domain);
+    gap["coordinate"] = coordinate;
+    return gap;
 }
 
 }

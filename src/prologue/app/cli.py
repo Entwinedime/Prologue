@@ -4,8 +4,9 @@ import argparse
 import json
 from pathlib import Path
 
+from prologue.app.acquire import plan_costs, sample_costs
 from prologue.app.core import run_core, run_simulation
-from prologue.app.releases import pinned, publish, query_structure, read_document, structure_targets
+from prologue.app.releases import cost_quotes, pinned, publish, query_structure, read_document, structure_targets
 from prologue.app.task import Plan
 from prologue.assets.publication import Store
 from prologue.integrations.platforms.ascend.evidence import AscendEvidence
@@ -60,10 +61,11 @@ def verify_structure(args):
 def fit_costs(args):
     from prologue.calibration.costs import Calibration
 
-    calibration = Calibration(Rules.read(args.rules))
+    query = read_document(args.for_queries) if args.for_queries else None
+    calibration = Calibration(Rules.read(args.rules), query)
     for directory in args.device:
         calibration.device(directory)
-    for directory in args.host:
+    for directory in args.host or ():
         calibration.host(directory)
     return calibration.fit(run_core("coordinates", calibration.batches))
 
@@ -121,8 +123,7 @@ def score(args):
 def quote(args):
     store, release, rules = pinned(args)
     query = read_document(args.query)
-    payload = {**query, "costs": store.asset(release, "performance"), "rules": rules.document}
-    return {"release": release["release"], "quotes": run_core("quote", payload)}
+    return {"release": release["release"], "quotes": cost_quotes(store.asset(release, "performance"), rules, query)}
 
 
 def release_arguments(parser):
@@ -152,8 +153,9 @@ def main() -> None:
 
     fit = commands.add_parser("fit-costs", help="fit models from native training observations")
     fit.add_argument("--device", type=Path, action="append", required=True)
-    fit.add_argument("--host", type=Path, action="append", required=True)
+    fit.add_argument("--host", type=Path, action="append")
     fit.add_argument("--rules", type=Path)
+    fit.add_argument("--for-queries", type=Path, help="fit only the original work coordinates")
     fit.set_defaults(handler=fit_costs)
 
     publication = commands.add_parser("publish", help="atomically publish template, performance and rule assets")
@@ -163,7 +165,10 @@ def main() -> None:
     libraries.add_argument("--library", type=Path, action="append", help="complete set of template sources")
     libraries.add_argument("--add-library", type=Path, action="append", help="add to the base template sources")
     publication.add_argument("--require-structure", type=Path, help="require coverage for the original query batch")
-    publication.add_argument("--costs", type=Path)
+    costs = publication.add_mutually_exclusive_group()
+    costs.add_argument("--costs", type=Path)
+    costs.add_argument("--add-costs", type=Path, help="add uncovered work coordinates to the published costs")
+    publication.add_argument("--require-costs", type=Path, help="require coverage for the original cost queries")
     publication.add_argument("--rules", type=Path)
     publication.add_argument("--model-config", type=Path)
     publication.set_defaults(handler=publish)
@@ -183,6 +188,20 @@ def main() -> None:
     query.add_argument("query", type=Path)
     release_arguments(query)
     query.set_defaults(handler=quote)
+
+    sampling = commands.add_parser("plan-costs", help="group known cost gaps into eligible native sampling jobs")
+    sampling.add_argument("query", type=Path)
+    release_arguments(sampling)
+    sampling.set_defaults(handler=plan_costs)
+
+    collection = commands.add_parser("sample-costs", help="run one bounded sampling job in the native observer image")
+    collection.add_argument("plan", type=Path)
+    collection.add_argument("output", type=Path)
+    collection.add_argument("--job", type=int, default=0)
+    collection.add_argument("--attempts", type=int, required=True)
+    collection.add_argument("--card-seconds", type=int, required=True)
+    collection.add_argument("--max-bytes", type=int, required=True)
+    collection.set_defaults(handler=sample_costs)
 
     forecast = commands.add_parser("predict", help="predict a target using a pinned release")
     forecast.add_argument("task", type=Path)

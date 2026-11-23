@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace prologue::app {
 namespace {
@@ -70,12 +71,19 @@ json replay(const json& job) {
         auto timing = read_timing(row.at("timing"), graph.at("work"));
         if (costs) {
             const performance::CostQueries queries(action, graph);
+            std::vector<const json*> coordinates;
+            std::vector<std::size_t> modeled;
             for (std::size_t index = 0; index < queries.device.size(); ++index) {
                 const auto& coordinate = queries.device.at(index);
                 if (coordinate.at("kind") != restore) {
-                    const auto& estimate = costs->require(domain, coordinate);
-                    timing.work.at(index).duration_ns = estimate.at("duration_ns").get<Nanoseconds>();
+                    coordinates.push_back(&coordinate);
+                    modeled.push_back(index);
                 }
+            }
+
+            const auto estimates = costs->require(domain, coordinates);
+            for (std::size_t index = 0; index < modeled.size(); ++index) {
+                timing.work.at(modeled.at(index)).duration_ns = estimates.at(index).at("duration_ns").get<Nanoseconds>();
             }
         }
 

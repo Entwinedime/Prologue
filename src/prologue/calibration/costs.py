@@ -9,16 +9,18 @@ from prologue.integrations.platforms.ascend.evidence import AscendEvidence
 
 
 class Calibration:
-    def __init__(self, rules):
+    def __init__(self, rules, query=None):
         self.rules = rules
+        self.query = query
         self.domain = None
         self.batches = []
         self.observations = []
         self.sources = []
 
     def device(self, directory):
-        observation = AscendEvidence.open(directory)
-        self.record_source("device_task", observation.manifest)
+        observation = AscendEvidence.open(directory, modes=("detailed", "decode-attention"))
+        family = "device_attention" if observation.manifest["mode"] == "decode-attention" else "device_task"
+        self.record_source(family, observation.manifest)
         evidence = observation.document()
         domain = {**evidence["domain"], "hardware": observation.hardware(directory)}
         if self.domain is not None and self.domain != domain:
@@ -56,6 +58,12 @@ class Calibration:
                              "origin_raw_ns": manifest["delivery"]["origin_raw_ns"]})
 
     def fit(self, coordinates):
+        wanted = None
+        if self.query is not None:
+            if self.query["domain"] != self.domain:
+                raise ValueError("the sampled physical domain does not match the cost queries")
+            wanted = {json.dumps(row, sort_keys=True) for row in self.query["coordinates"]}
+
         samples = defaultdict(list)
         for coordinate, (host, device) in zip(coordinates, self.observations, strict=True):
             if host is not None:
@@ -65,6 +73,8 @@ class Calibration:
 
         models = []
         for identity, rows in sorted(samples.items()):
+            if wanted is not None and identity not in wanted:
+                continue
             coordinate = json.loads(identity)
             estimator = self.rules.estimator(coordinate["family"])
             if estimator != "exact_median":
@@ -75,5 +85,6 @@ class Calibration:
                     estimate[key] = [round(median(row[key][index] for row in rows)) for index in range(len(first))]
                 else:
                     estimate[key] = round(median(row[key] for row in rows))
-            models.append({"coordinate": coordinate, "estimator": estimator, "estimate": estimate, "samples": len(rows)})
+            models.append({"coordinate": coordinate, "estimator": estimator, "estimate": estimate,
+                           "samples": len(rows)})
         return {"domain": self.domain, "sources": self.sources, "models": models}

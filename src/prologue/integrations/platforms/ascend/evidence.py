@@ -161,10 +161,10 @@ class AscendEvidence:
         }
 
     @classmethod
-    def open(cls, directory):
+    def open(cls, directory, *, modes=("detailed",)):
         manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
-        if manifest["mode"] != "detailed":
-            raise ValueError("template compilation requires a detailed native observation")
+        if manifest["mode"] not in modes:
+            raise ValueError(f"observation mode {manifest['mode']} does not qualify for this use")
         worker = json.loads((directory / "worker.json").read_text(encoding="utf-8"))
         trace = json.loads((directory / manifest["trace"]).read_text(encoding="utf-8"), parse_float=Decimal)
         return cls(manifest, worker, trace)

@@ -7,6 +7,7 @@ from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns, thread_time_ns
 
 from prologue.acquisition.observation.calls import Calls
+from prologue.integrations.frameworks.sglang.observation.attention import AttentionCall, implementation
 
 
 class Observation:
@@ -137,43 +138,21 @@ class Observation:
         }
         return value
 
-    @staticmethod
-    def implementation(module):
-        return f"{type(module).__module__}.{type(module).__qualname__}"
-
     def layer(self, original, module, site, positions, hidden_states, forward_batch, residual, *args, **kwargs):
         if not self.calls.stack:
             return original(positions, hidden_states, forward_batch, residual, *args, **kwargs)
 
-        with self.calls.scope("layer", self.implementation(module), site, {}) as call:
+        with self.calls.scope("layer", implementation(module), site, {}) as call:
             call["inputs"] = self.calls.ports(positions=positions, hidden=hidden_states, residual=residual)
             result = original(positions, hidden_states, forward_batch, residual, *args, **kwargs)
             call["outputs"] = self.calls.ports(hidden=result[0], residual=result[1])
-            return result
-
-    def attention(self, original, module, site, q, k, v, forward_batch, save_kv_cache=True, **kwargs):
-        if not self.calls.stack:
-            return original(q, k, v, forward_batch, save_kv_cache, **kwargs)
-
-        parameters = {
-            "phase": "decode" if forward_batch.forward_mode.is_decode() else "prefill",
-            "seq_lens": forward_batch.seq_lens_cpu.tolist(),
-            "query_heads": module.tp_q_head_num,
-            "key_heads": module.tp_k_head_num,
-            "value_heads": module.tp_v_head_num,
-            "writes_kv": save_kv_cache,
-        }
-        with self.calls.scope("attention", self.implementation(module), site, parameters) as call:
-            call["inputs"] = self.calls.ports(query=q, key=k, value=v)
-            result = original(q, k, v, forward_batch, save_kv_cache, **kwargs)
-            call["outputs"] = self.calls.ports(output=result)
             return result
 
     def projection(self, original, module, site, input_, *args, **kwargs):
         if not self.calls.stack:
             return original(input_, *args, **kwargs)
 
-        with self.calls.scope("projection", self.implementation(module), site, {}) as call:
+        with self.calls.scope("projection", implementation(module), site, {}) as call:
             call["inputs"] = self.calls.ports(input=input_)
             result = original(input_, *args, **kwargs)
             call["outputs"] = self.calls.ports(output=result[0], bias=result[1])
@@ -193,7 +172,7 @@ class Observation:
 
             # Separate the producer and its native consumer so the compiler can retain their tensor edge.
             projection = self_attention.o_proj
-            attention.forward = partial(self.attention, attention.forward, attention, f"{site}.self_attn.attn")
+            attention.forward = AttentionCall(self.calls, attention, f"{site}.self_attn.attn", require_parent=True)
             projection.forward = partial(self.projection, projection.forward, projection, f"{site}.self_attn.o_proj")
         return result
 
