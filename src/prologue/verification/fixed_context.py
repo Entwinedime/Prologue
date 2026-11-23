@@ -340,7 +340,7 @@ class FixedHostContext:
         pauses = self.active.within(self.active.runnable[thread], begin, end)
         if pauses != [(left[1], right[0]) for left, right in pairwise(segments)]:
             return None
-        return self.progress(thread, step, begin)
+        return self.progress(thread, step, end)
 
     def synchronous_calls(self, graph, threads):
         windows = []

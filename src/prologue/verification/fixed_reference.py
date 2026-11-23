@@ -61,10 +61,11 @@ class FixedTimeline:
             self.dependencies.append((endpoint, self.indices[consumer], 0))
         self.protocol.update((interval.post.posted, self.event()) for interval in reference.cpu_transfers)
         self.post_frontiers = {}
-        take_releases = {(rank, wait.take_entry): wait.take_entry.observed_ns - reference.origin_ns
-                         for (rank, _), wait in reference.host_waits.items() if wait.take_entry is not None}
-        self.progress = {(rank, cut): self.event(max(0, take_releases.get((rank, cut), 0)))
+        released = set(reference.active_input_reads)
+        released.update(wait.take_entry for wait in reference.host_waits.values() if wait.take_entry is not None)
+        self.progress = {(rank, cut): self.event(max(0, cut.observed_ns - reference.origin_ns) if cut in released else 0)
                          for (rank, _, _), cuts in reference.progress_cuts.items() for cut in cuts}
+        self.input_progress = {cut: self.event() for cut in reference.active_input_reads}
 
     def event(self, release_ns=0):
         position = len(self.releases)
@@ -112,7 +113,12 @@ class FixedTimeline:
         fixed_prefix = 0
         for cut in cuts:
             at = self.progress[rank, cut]
-            edges.append((start, at, cut.fixed_prefix_ns - fixed_prefix))
+            reached = self.input_progress.get(cut, at)
+            edges.append((start, reached, cut.fixed_prefix_ns - fixed_prefix))
+
+            # Check local progress before the measured delivery can release the successful read.
+            if reached != at:
+                self.dependencies.append((reached, at, 0))
             start, fixed_prefix = at, cut.fixed_prefix_ns
             if wait := self.reference.host_waits.get((rank, cut)):
                 start = self.resume(rank, at, wait)
@@ -717,20 +723,22 @@ class FixedReference:
         if fixed or order_cuts:
             raise ValueError("fixed timing condition does not belong to a verified dependency")
         self.protocol_positions = timeline.protocol
-        self.input_positions = {cut: timeline.progress[cut.rank, cut] for cut in self.active_input_reads}
+        self.input_positions = {cut: (reached, timeline.progress[cut.rank, cut]) for cut, reached in timeline.input_progress.items()}
         return timeline.document()
 
     def compare_active_input_reads(self, replayed, *, measured=False):
         differences = []
-        for cut, position in self.input_positions.items():
+        waiting_ns, delayed = 0, 0
+        for cut, (progress, delivered) in self.input_positions.items():
             observed = cut.observed_ns - self.origin_ns
-            actual = replayed[position]
-
-            # The earlier arrival bound is unknown. A successful unmodeled read can shift later, but not earlier.
-            if actual < observed or (measured and actual != observed):
+            reached, actual = replayed[progress], replayed[delivered]
+            waiting_ns += actual - reached
+            delayed += actual > reached
+            if actual != max(observed, reached) or (measured and reached != observed):
                 differences.append({"rank": cut.rank, "requests": self.active_input_reads[cut],
-                                    "observed_ns": observed, "replayed_ns": actual})
-        return {"checked": len(self.input_positions), "different": len(differences), "differences": differences}
+                                    "observed_ns": observed, "local_progress_ns": reached, "replayed_ns": actual})
+        return {"checked": len(self.input_positions), "delayed_deliveries": delayed, "total_delivery_wait_ns": waiting_ns,
+                "different": len(differences), "differences": differences}
 
     def transport_baseline(self, replayed):
         report = {"checked": len(self.cpu_transfers), "initial_conditions": len(self.cpu_initial_readiness), "different": 0}
