@@ -50,25 +50,49 @@ docker run --rm --runtime runc --network none \
 
 Use `--mode light` and a separate output directory for scheduler publication times without a profiler. Each observation records the inputs and the native revision. The template library stores definitions and concrete call bindings. Device records with unresolved ownership are counted separately.
 
-## Verify execution structure on CPU
+## Fit and publish shared assets
 
-Capture a separate detailed target under the source configuration and save it as `reference` in the run directory. The verifier uses that observation to answer timing queries and compare the resulting graph. The native controller reads the workload and simulated resources to make its own decisions. Both processes run without an accelerator.
+Capture a separate training observation as `host-training` with `--mode host-timing`. Use detailed training observations for device tasks, and reserve separate observations for evaluation.
 
 ```bash
-docker build -f docker/images/control/Dockerfile -t prologue-scheduler:ubuntu22.04 .
+store="$PWD/data/libraries"
+mkdir -p "$store"
 cp /models/Qwen3-8B/config.json "$run/model-config.json"
-mkdir "$run/control"
 
-# Start the verifier and wait for its socket before starting the controller.
 docker run --rm --runtime runc --network none \
   --mount type=bind,src="$run",dst=/case,readonly \
-  --mount type=bind,src="$run/control",dst=/control \
-  prologue-app:ubuntu24.04 verify-structure /case/reference \
-  --library /case/templates.json --model-config /case/model-config.json \
-  --socket /control/control.sock
+  prologue-app:ubuntu24.04 fit-costs --device /case/detailed --host /case/host-training > "$run/costs.json"
+docker run --rm --runtime runc --network none \
+  --mount type=bind,src="$run",dst=/case,readonly \
+  --mount type=bind,src="$store",dst=/library \
+  prologue-app:ubuntu24.04 publish --store /library --library /case/templates.json \
+  --costs /case/costs.json --model-config /case/model-config.json
 ```
 
-In a second terminal, with `run` set to the same directory, start the native control worker.
+The release records the template, performance and rule objects together. `show-release` displays their identifiers. For a template update, repeat `--library` with the full set of desired sources. Omitted asset families use the base release. Pass `--base <release UUID>` when an update is prepared against a specific release.
+
+## Predict from a release on CPU
+
+Declare the target deployment in `hardware.json` using the fields in `domain.hardware` from the cost asset. Use the training descriptor for the same deployment. The [reuse task](example/reuse-task.json) changes request identities and arrivals while using the covered 8-token geometry.
+
+```bash
+python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["domain"]["hardware"]))' \
+  < "$run/costs.json" > "$run/hardware.json"
+docker build -f docker/images/control/Dockerfile -t prologue-scheduler:ubuntu22.04 .
+mkdir "$run/control"
+
+# Wait for the socket before starting the control process.
+docker run --rm --runtime runc --network none \
+  --mount type=bind,src="$store",dst=/library,readonly \
+  --mount type=bind,src="$PWD/example/reuse-task.json",dst=/task.json,readonly \
+  --mount type=bind,src="$run/hardware.json",dst=/hardware.json,readonly \
+  --mount type=bind,src="$run/control",dst=/control \
+  prologue-app:ubuntu24.04 predict /task.json --configuration tp1-page16 --workload reuse \
+  --store /library --release current --hardware /hardware.json \
+  --socket /control/control.sock > "$run/prediction.json"
+```
+
+Start the native control worker in a second terminal with `run` set to the same directory.
 
 ```bash
 docker run --rm --runtime runc --network none \
@@ -76,24 +100,19 @@ docker run --rm --runtime runc --network none \
   prologue-scheduler:ubuntu22.04 /control/control.sock
 ```
 
-This verification path currently covers synchronous TP1 actions whose batch shapes have source templates. Repeat `--library` to load additional observations collected in the same domain. The report includes the first missing condition or disagreement and the matched action count.
+The prediction reports the resolved release UUID. Pass that UUID to `--release` to replay the same asset selection later. The current template and cost rules cover observed synchronous TP1 geometries.
 
-## Fit costs and predict
+## Verify from a release
 
-Collect a separate observation on the source deployment with `--mode host-timing` for scheduler thread time. Use detailed training observations for device tasks. Keep the detailed evaluation target and lightweight scoring run separate from training.
+Use a separate detailed recording as `reference`. The structure verifier answers timing queries while the controller chooses actions from the workload and simulated resources. Run the verifier with the same two-process socket procedure. The application container reads the shared store and the detailed reference.
 
 ```bash
-prologue fit-costs --device detailed --host host-training > costs.json
-prologue predict task.json --configuration tp1-page16 --workload short \
-  --library templates.json --model-config model-config.json \
-  --costs costs.json --hardware hardware.json --socket control/control.sock > prediction.json
-prologue verify-performance reference --costs costs.json
+prologue verify-structure reference --store /library --release current --socket /control/control.sock
+prologue verify-performance reference --store /library --release current
 prologue score prediction.json light-reference
 ```
 
-Run these commands inside the application image. Start the CPU scheduler for `predict` using the same socket procedure as structure verification. Declare the target deployment with a hardware descriptor matching the fields in `costs.json` under `domain.hardware`. The current estimator covers observed joint feature coordinates in that deployment. Use `quote-costs` to check a set of coordinates before running a target.
-
-Fixed-graph verification first replays the recorded work and checks its endpoints. It then replaces device service durations and reports changes before publication and after restoring each device work kind. Autonomous scoring uses a separate lightweight reference for TTFT, TPOT, and throughput.
+Fixed-graph verification checks recorded endpoints before replacing device service durations. Autonomous scoring uses a separate lightweight recording of the prediction workload for TTFT, TPOT and throughput. `quote-costs` accepts a JSON document with `domain` and `coordinates` and uses the same released estimator.
 
 ## License
 
