@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from dataclasses import asdict
+from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 
 from prologue.integrations.frameworks.sglang.configuration import Configuration, Model
@@ -82,14 +83,17 @@ class Session:
             warmed = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
 
             if detail:
-                engine.start_profile(output_dir=str(self.output / "profile"), activities=["CPU", "GPU"])
+                # Semantic scopes already record call identity and tensor layout.
+                engine.start_profile(output_dir=str(self.output / "profile"), activities=["CPU", "GPU"],
+                                     with_stack=False, record_shapes=False)
             try:
                 delivery = engine.loop.run_until_complete(self.dispatch(engine, "source"))
                 self.drain(engine)
+                observed = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
             finally:
                 if detail:
                     engine.stop_profile()
-            observed = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+            exported = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
 
         worker = json.loads((self.output / "worker.json").read_text(encoding="utf-8"))
         for request in self.workload["requests"]:
@@ -105,7 +109,9 @@ class Session:
             "initialization_ns": initialized - started, "warmup_ns": warmed - initialized,
             "observation_ns": observed - warmed,
         }
+        manifest["model_config"] = json.loads((Path(self.model.path) / "config.json").read_text(encoding="utf-8"))
         if detail:
             trace, = (self.output / "profile").rglob("trace_view.json")
             manifest["trace"] = str(trace.relative_to(self.output))
+            manifest["profile_export_ns"] = exported - observed
         (self.output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

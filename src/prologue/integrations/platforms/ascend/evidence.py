@@ -58,6 +58,7 @@ class AscendEvidence:
 
     def __init__(self, manifest, worker, rows):
         self.manifest = manifest
+        self.publications = worker["publications"]
         self.calls = worker["calls"]
         self.rows = [row for row in rows if row.get("ph") == "X"]
 
@@ -146,14 +147,15 @@ class AscendEvidence:
         return {
             "domain": {key: self.manifest[key] for key in ("framework_revision", "model", "configuration")},
             "calls": self.calls, "work": work, "stream_order": order,
+            "profile_scope_begins_ns": [scopes[call["id"]].begin for call in self.calls],
             "evidence": {"clock": "ascend_profiler_ns", "unbound_device_records": dict(unbound)},
         }
 
     @classmethod
-    def read(cls, directory):
+    def open(cls, directory):
         manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
         if manifest["mode"] != "detailed":
             raise ValueError("template compilation requires a detailed native observation")
         worker = json.loads((directory / "worker.json").read_text(encoding="utf-8"))
         trace = json.loads((directory / manifest["trace"]).read_text(encoding="utf-8"), parse_float=Decimal)
-        return cls(manifest, worker, trace).document()
+        return cls(manifest, worker, trace)

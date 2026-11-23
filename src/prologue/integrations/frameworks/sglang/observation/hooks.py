@@ -16,15 +16,18 @@ class Observation:
         self.publications = {native: [] for native in requests}
         self.finished = set()
         self.detailed = detailed
+        self.active_batch = None
         if detailed:
             from torch.autograd.profiler import record_function
 
             self.calls = Calls(record_function)
 
-    @staticmethod
-    def flush(original, scheduler, empty_cache=True):
+    def flush(self, original, scheduler, empty_cache=True):
         # Drain logical KV state while preserving warmed device allocator workspaces.
-        return original(scheduler, empty_cache=False)
+        drained = original(scheduler, empty_cache=False)
+        if drained and self.finished == self.publications.keys():
+            self.save()
+        return drained
 
     def publish(self, original, sender, output, *args, **kwargs):
         from sglang.srt.managers.io_struct import BatchTokenIDOutput
@@ -42,8 +45,6 @@ class Observation:
                 rows.append({"count": count, "raw_ns": now})
             if finished is not None:
                 self.finished.add(rid)
-                if self.finished == self.publications.keys():
-                    self.save()
         return result
 
     def save(self):
@@ -72,12 +73,35 @@ class Observation:
             raise ValueError(f"unsupported observed forward mode: {batch.forward_mode}")
         parameters = {"phase": phase, "members": len(requests)}
         with self.calls.scope("batch", "Scheduler.run_batch", "scheduler", parameters) as call:
+            self.active_batch = call
             call["members"] = [
                 {"request": identity, "slot": int(request.req_pool_idx), "kv_committed_tokens": request.kv_committed_len,
-                 "output_tokens": len(request.output_ids)}
+                 "kv_reserved_tokens": request.kv_allocated_len, "output_tokens": len(request.output_ids)}
                 for identity, request in zip(requests, batch.reqs, strict=True)
             ]
+            call["resources"] = self.resources(scheduler)
             return original(scheduler, batch, *args, **kwargs)
+
+    @staticmethod
+    def resources(scheduler):
+        return {
+            "slots": scheduler.req_to_token_pool.available_size(),
+            "kv_tokens": scheduler.token_to_kv_pool_allocator.available_size(),
+        }
+
+    def process_result(self, original, scheduler, batch, result):
+        if self.active_batch is None:
+            return original(scheduler, batch, result)
+
+        call = self.active_batch
+        self.active_batch = None
+        begin = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+        value = original(scheduler, batch, result)
+        call["result_processing"] = {
+            "begin_ns": begin, "end_ns": clock_gettime_ns(CLOCK_MONOTONIC_RAW),
+            "resources": self.resources(scheduler),
+        }
+        return value
 
     @staticmethod
     def implementation(module):
@@ -148,6 +172,7 @@ class Observation:
         HookRegistry.register(sender, self.publish, HookType.AROUND)
         if self.detailed:
             HookRegistry.register(scheduler + "run_batch", self.batch, HookType.AROUND)
+            HookRegistry.register(scheduler + "process_batch_result", self.process_result, HookType.AROUND)
             HookRegistry.register("sglang.srt.model_executor.model_runner.ModelRunner.load_model",
                                   self.load_model, HookType.AROUND)
 
