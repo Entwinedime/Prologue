@@ -12,6 +12,7 @@ class StructureComparison:
         self.actions = []
         self.measurements = []
         self.indices = {}
+        self.ingress = None
         self.boundaries = {(request, item["count"]): item["raw_ns"]
                            for request, rows in publications.items() for item in rows}
 
@@ -22,7 +23,8 @@ class StructureComparison:
         self.indices[key] = len(self.actions)
 
         if outputs is None:
-            outputs = {member["request"]: member["output_tokens"] + 1 for member in action["members"]}
+            outputs = {member["request"]: member["output_tokens"] + 1 for member in action["members"]
+                       if member.get("publishes", True)}
         self.measurements.append({
             "work": work, "prepare_ns": 0, "model_return_ns": call["end_ns"] - begin_ns,
             "result_finished": self.boundary(end_ns - begin_ns),
@@ -33,6 +35,8 @@ class StructureComparison:
         if "resources" in call:
             observed["resources"] = call["resources"]
             observed["after_result"] = call["result_processing"]["resources"]
+        if "next_read_ns" in call.get("result_processing", {}):
+            self.measurements[-1]["next_read"] = self.boundary(call["result_processing"]["next_read_ns"] - begin_ns)
         self.actions.append(observed)
 
     @staticmethod
@@ -87,13 +91,17 @@ class StructureComparison:
             ready = max(ready, began + measured["publications"][publication["request"]]["after_start_ns"])
             if ready != publication["at_ns"]:
                 return False
-        return actual["finished_ns"] == max(ready, work_ready, began + measured["result_finished"]["after_start_ns"])
+        finish = max(ready, work_ready, began + measured["result_finished"]["after_start_ns"])
+        if "next_read" in measured:
+            if actual["next_read_ns"] != max(finish, began + measured["next_read"]["after_start_ns"]):
+                return False
+        return actual["finished_ns"] == finish
 
     def compare(self, result):
         comparisons = 0
         consumed = 0
         for index, (expected, actual) in enumerate(zip(self.actions, result["actions"], strict=False)):
-            for field in ("phase", "members", "resources", "after_result", "graph"):
+            for field in ("phase", "members", "resources", "after_result", "graph", "cache"):
                 if field in expected and actual[field] != expected[field]:
                     return {"status": "structure_mismatch", "action": index, "field": field,
                             "matched_actions": comparisons}
@@ -121,8 +129,57 @@ class StructureComparison:
 class StructureReference(StructureComparison):
     def __init__(self, evidence, publications, manifest):
         super().__init__(evidence["domain"], publications, manifest)
+        origin = manifest["delivery"]["origin_raw_ns"]
+        self.starts = {}
+        if "ingress" in evidence:
+            observed = evidence["ingress"]
+            if observed.keys() != self.arrivals.keys():
+                raise ValueError("native ingress must cover the full observed workload")
+            self.arrivals = {request: read - origin for request, read in observed.items()}
+            self.ingress = {"arrivals": [self.arrivals]}
         self.observed = ObservedBatches(evidence).entries
+        resident = {}
         for batch in self.observed:
             call = batch.call
-            self.record(batch.action(), batch.graph, call, batch.measurements(), call["begin_ns"],
-                        call["result_processing"]["end_ns"])
+            action = batch.action()
+            result = call["result_processing"]
+            self.record(action, batch.graph, call, batch.measurements(), call["begin_ns"], result["end_ns"])
+            if self.ingress is not None:
+                self.starts[action_identity(action)] = call["begin_ns"] - origin
+                self.check_state(action, call, resident)
+
+    def check_state(self, action, call, resident):
+        phase = action["phase"]
+        processing = call["result_processing"]
+        cache = call["cache"]
+        written = []
+        for member, row in zip(action["members"], cache["rows"], strict=True):
+            request = member["request"]
+            extent = member["kv_committed_tokens"]
+            begin = member.get("read_tokens", extent - 1 if phase == "decode" else 0)
+            if len(row) != extent or not 0 <= begin < extent or row[:begin] != resident.get(request, [])[:begin]:
+                raise ValueError(f"observed KV prefix changed during {phase} for {request}")
+            resident[request] = row
+            written.extend(row[begin:])
+
+            count = member["output_tokens"] + 1
+            publication = self.boundaries.get((request, count))
+            publishes = publication is not None and processing["begin_ns"] <= publication <= processing["end_ns"]
+            if publishes != member.get("publishes", True):
+                raise ValueError(f"observed publication disagrees with {phase} for {request}")
+        if written != cache["written"]:
+            raise ValueError("native writes do not cover the batch's declared token intervals")
+
+        page_size = self.domain["configuration"]["page_size"]
+        self.actions[-1]["cache"] = {
+            "rows": [[index - page_size for index in row] for row in cache["rows"]],
+            "written": [index - page_size for index in written],
+        }
+
+    def conditions(self, query):
+        timing = super().conditions(query)
+        if self.ingress is None or "failure" in timing:
+            return timing
+        action = query["action"]
+        start = self.starts[action_identity(action)]
+        return {**timing, "prepare_ns": max(0, start - action["clock_ns"])}

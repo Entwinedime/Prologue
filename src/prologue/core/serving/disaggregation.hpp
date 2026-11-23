@@ -42,7 +42,7 @@ private:
 
     std::optional<Nanoseconds> eligible(Index actor, const nlohmann::json& call) const override;
     nlohmann::json dispatch(Index actor, const nlohmann::json& call) override;
-    void measure_inputs(const nlohmann::json& conditions);
+    void measure_admission(const nlohmann::json& commands);
     nlohmann::json arrivals(Index actor);
     nlohmann::json endpoint(Index actor, const nlohmann::json& call) const;
     void reserve(const nlohmann::json& call);

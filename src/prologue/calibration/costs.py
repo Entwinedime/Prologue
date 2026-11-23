@@ -115,7 +115,8 @@ class Calibration:
             sample = {
                 "prepare_ns": row["prepare_cpu_ns"], "forward_ns": row["forward_cpu_ns"],
                 "result_ns": row["result_cpu_ns"],
-                "publications_ns": [row["publication_cpu_ns"][member["request"]] for member in members],
+                "publications_ns": [row["publication_cpu_ns"][member["request"]] for member in members
+                                    if member.get("publishes", True)],
             }
             self.observations.append((sample, []))
 

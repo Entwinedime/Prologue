@@ -70,6 +70,17 @@ CostQueries::CostQueries(const json& action, const json& graph)
         ? action.at("query")
         : structure::batch_geometry(action.at("phase"), action.at("members"), action.value("expert_routes", json{}))}},
       device(json::array()) {
+    auto positions = json::array();
+    const auto& members = action.at("members");
+    for (std::size_t index = 0; index < members.size(); ++index) {
+        if (members.at(index).value("publishes", true)) {
+            positions.push_back(index);
+        }
+    }
+    if (positions.size() != members.size()) {
+        host["publication_positions"] = std::move(positions);
+    }
+
     std::unordered_map<std::string, const json*> scopes;
     for (const auto& call : graph.at("calls")) {
         scopes.emplace(call.at("path").dump(), &call);

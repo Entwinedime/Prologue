@@ -16,6 +16,8 @@ from sglang.srt.observability.req_time_stats import APIServerReqTimeStats
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
 
+from prologue.integrations.frameworks.sglang.batch import BatchWork
+from prologue.integrations.frameworks.sglang.configuration import scheduling_options
 from prologue.integrations.frameworks.sglang.control.resources import PageView
 from prologue.integrations.frameworks.sglang.control.runner import MetadataRunner
 from prologue.integrations.frameworks.sglang.expert_routes import ExpertRoutes
@@ -88,10 +90,10 @@ class NativeScheduler(Scheduler):
             load_format="dummy", skip_tokenizer_init=True, attention_backend="torch_native",
             max_running_requests=config["max_running_requests"], max_total_tokens=config["max_total_tokens"],
             max_prefill_tokens=config["max_prefill_tokens"], page_size=config["page_size"],
-            chunked_prefill_size=-1, disable_radix_cache=True, disable_overlap_schedule=True,
+            disable_overlap_schedule=True,
             disable_cuda_graph=True, disable_custom_all_reduce=True, stream_interval=1, random_seed=13,
             pp_size=config.get("pp", 1), pp_max_micro_batch_size=config.get("microbatch_requests"),
-            **(runtime or {}),
+            **{**scheduling_options(config), **(runtime or {})},
         )
 
         # Native initialization still constructs the policy, caches and event loop.
@@ -134,25 +136,14 @@ class NativeScheduler(Scheduler):
         )
 
     def run_batch(self, batch, pp_proxy_tensors=None):
-        if batch.forward_mode.is_decode():
-            phase = "decode"
-        elif batch.forward_mode.is_extend():
-            phase = "prefill"
-        else:
-            raise ValueError(f"unsupported native control action {batch.forward_mode}")
-
+        phase = BatchWork.phase(batch.forward_mode)
         members = self.members(batch)
         result = super().run_batch(batch, pp_proxy_tensors)
         return self.submit_batch(batch, result, pp_proxy_tensors, phase, members)
 
     @staticmethod
     def members(batch):
-        return [
-            {"request": request.rid, "slot": request.req_pool_idx - 1,
-             "kv_committed_tokens": request.kv_committed_len, "kv_reserved_tokens": request.kv_allocated_len,
-             "output_tokens": len(request.output_ids)}
-            for request in batch.reqs
-        ]
+        return BatchWork.members(batch, (request.rid for request in batch.reqs), slot_offset=1)
 
     def submit_batch(self, batch, result, proxy, phase, members):
         # Result processing begins only after the core closes the device and host boundaries.

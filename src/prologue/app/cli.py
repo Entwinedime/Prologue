@@ -163,8 +163,9 @@ def verify_structure(args):
     job = {"domain": reference.domain, "workload": reference.workload,
            "templates": templates, **control_inputs(templates, reference.domain, reference.workload),
            "rules": rules.document, "record_structure": True}
-    if "roles" in recording.manifest:
-        job["measured_ingress"] = reference.ingress
+    if ingress := getattr(reference, "ingress", None):
+        job["measured_ingress"] = ingress
+        job["record_cache"] = "roles" not in recording.manifest
     result = reference.compare(run_simulation(job, args.socket, reference))
     return {**result, "release": release["release"]}
 

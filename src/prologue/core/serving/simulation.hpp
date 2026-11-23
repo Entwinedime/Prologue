@@ -32,6 +32,7 @@ struct ActionTiming final {
     Nanoseconds model_return_ns;
     BoundaryTime result_finished;
     std::unordered_map<std::string, BoundaryTime> publications;
+    std::optional<BoundaryTime> next_read{};
 };
 
 struct CutTiming final {
@@ -85,9 +86,11 @@ private:
     };
 
     nlohmann::json arrivals(Index actor, bool finished);
+    void measure_arrivals(const nlohmann::json& sources);
     std::optional<Nanoseconds> next_arrival(Index actor) const;
     void require_drained() const;
     nlohmann::json capacity(Index actor) const;
+    nlohmann::json cache(Index actor, const nlohmann::json& message) const;
     nlohmann::json resources(Index actor, const nlohmann::json& message);
     void require_residence(Index actor, const nlohmann::json& action) const;
     void record_publication(const nlohmann::json& message, Nanoseconds time_ns, nlohmann::json& target);

@@ -32,22 +32,27 @@ Simulation::Simulation(const json& job, Workload workload, TimingSource& timing_
 
     const auto& config = job.at("domain").at("configuration");
     const auto page_size = config.at("page_size").get<std::int64_t>();
-    if (config.contains("disaggregation")) {
+    const bool disaggregated = config.contains("disaggregation");
+    if (disaggregated) {
         for (const auto& pool : job.at("actor_resources")) {
             actors_.emplace_back(workload_, ResourceLimits{pool.at("slots"), pool.at("kv_tokens"), page_size,
                 pool.at("sort_released_pages")});
         }
-        group_ = std::make_unique<Disaggregation>(*this, page_size);
-        return;
+    } else {
+        const auto width = config.value("pp", Index{1});
+        const ResourceLimits limits{config.at("max_running_requests"), config.at("max_total_tokens"), page_size};
+        actors_.reserve(width);
+        for (Index stage = 0; stage < width; ++stage) {
+            actors_.emplace_back(workload_, limits);
+        }
     }
 
-    const auto width = config.value("pp", Index{1});
-    const ResourceLimits limits{config.at("max_running_requests"), config.at("max_total_tokens"), page_size};
-    actors_.reserve(width);
-    for (Index stage = 0; stage < width; ++stage) {
-        actors_.emplace_back(workload_, limits);
+    if (const auto ingress = job.find("measured_ingress"); ingress != job.end()) {
+        measure_arrivals(ingress->at("arrivals"));
     }
-    if (width > 1) {
+    if (disaggregated) {
+        group_ = std::make_unique<Disaggregation>(*this, page_size);
+    } else if (actors_.size() > 1) {
         group_ = std::make_unique<Pipeline>(*this);
     }
 }
@@ -65,6 +70,22 @@ bool Simulation::done() const {
 json Simulation::capacity(Index actor) const {
     const auto& pool = actors_.at(actor).resources;
     return {{"slots", pool.available_slots()}, {"kv_tokens", pool.available_tokens()}};
+}
+
+void Simulation::measure_arrivals(const json& sources) {
+    if (sources.size() != actors_.size()) {
+        throw Stopped("timing_gap", "measured ingress must cover every actor");
+    }
+    for (Index actor = 0; actor < actors_.size(); ++actor) {
+        auto& arrivals = actors_.at(actor).measured_arrivals;
+        for (const auto& request : workload_.requests()) {
+            const auto instant = sources.at(actor).at(request.id).get<Nanoseconds>();
+            if (instant < 0 || (!arrivals.empty() && instant < arrivals.back())) {
+                throw Stopped("timing_gap", "measured ingress disagrees with workload order");
+            }
+            arrivals.push_back(instant);
+        }
+    }
 }
 
 std::optional<Nanoseconds> Simulation::next_arrival(Index actor) const {
@@ -146,6 +167,24 @@ void Simulation::require_residence(Index actor, const json& message) const {
     }
 }
 
+json Simulation::cache(Index actor, const json& message) const {
+    auto rows = json::array();
+    auto written = json::array();
+    const auto& pool = actors_.at(actor).resources;
+    for (const auto& member : message.at("members")) {
+        auto locations = pool.locations(member.at("request"));
+        const auto begin = structure::batch_read_tokens(message.at("phase"), member);
+        if (begin < 0 || static_cast<Index>(begin) >= locations.size()) {
+            throw Stopped("resource_error", "batch KV read prefix leaves no write extent");
+        }
+        for (auto token = static_cast<Index>(begin); token < locations.size(); ++token) {
+            written.push_back(locations.at(token));
+        }
+        rows.push_back(std::move(locations));
+    }
+    return {{"rows", std::move(rows)}, {"written", std::move(written)}};
+}
+
 void Simulation::execute(Index index, const json& message) {
     auto& actor = actors_.at(index);
     if (actor.action) {
@@ -184,6 +223,9 @@ void Simulation::execute(Index index, const json& message) {
         record["resources"] = capacity(index);
         record["graph"] = std::move(graph);
         record["intervals"] = std::move(observed);
+        if (job_.value("record_cache", false)) {
+            record["cache"] = cache(index, message);
+        }
     }
     actor.action.emplace(ActiveAction{std::move(record), std::move(timing), completed.all_work_ready_ns});
 }
@@ -235,6 +277,10 @@ void Simulation::finish_action(Index index) {
     record["finished_ns"] = clock.now();
     if (record_structure_) {
         record["after_result"] = capacity(index);
+    }
+    if (action.timing.next_read) {
+        clock.satisfy(record.at("began_ns"), record.at("model_ready_ns"), *action.timing.next_read);
+        record["next_read_ns"] = clock.now();
     }
     actions_.push_back(std::move(record));
     actor.action.reset();

@@ -39,6 +39,7 @@ public:
     bool drained() const;
     const std::deque<std::int64_t>& free_slots() const;
     const Residence& residence(const std::string& request) const;
+    std::vector<std::int64_t> locations(const std::string& request) const;
 
     std::vector<std::int64_t> bind_slots(const std::vector<std::string>& requests);
     std::vector<std::int64_t> grow(const std::vector<KvGrowth>& members);
@@ -47,6 +48,8 @@ public:
 
 private:
     std::int64_t pages_for(std::int64_t tokens) const;
+    void append_locations(const Residence& resident, std::int64_t begin, std::int64_t end,
+                          std::vector<std::int64_t>& indices) const;
 
     ResourceLimits limits_;
     std::deque<std::int64_t> free_slots_;

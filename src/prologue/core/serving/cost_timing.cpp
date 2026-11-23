@@ -23,10 +23,12 @@ ActionTiming CostTiming::for_action(const nlohmann::json& action, const nlohmann
     const auto& host = estimates.front();
     ActionTiming timing{{}, host.at("prepare_ns"), host.at("forward_ns"),
                         {0, host.at("result_ns")}, {}};
-    const auto& members = action.at("members");
-    for (std::size_t index = 0; index < members.size(); ++index) {
-        const auto request = members.at(index).at("request").get<std::string>();
-        timing.publications.emplace(request, BoundaryTime{0, host.at("publications_ns").at(index)});
+    std::size_t publication = 0;
+    for (const auto& member : action.at("members")) {
+        if (member.value("publishes", true)) {
+            const auto request = member.at("request").get<std::string>();
+            timing.publications.emplace(request, BoundaryTime{0, host.at("publications_ns").at(publication++)});
+        }
     }
 
     const auto parallel = graph.contains("collectives");

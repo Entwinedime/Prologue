@@ -13,7 +13,7 @@ Simulation::Disaggregation::Disaggregation(Simulation& session, std::int64_t pag
         throw std::invalid_argument("disaggregation requires one Prefill actor and one Decode actor");
     }
     if (const auto conditions = session_.job_.find("measured_ingress"); conditions != session_.job_.end()) {
-        measure_inputs(*conditions);
+        measure_admission(conditions->at("admission"));
     }
 }
 
@@ -29,20 +29,8 @@ void Simulation::Disaggregation::report(json& output) {
     }
 }
 
-void Simulation::Disaggregation::measure_inputs(const json& conditions) {
-    const auto& sources = conditions.at("arrivals");
-    for (Index actor = 0; actor < session_.actors_.size(); ++actor) {
-        auto& arrivals = session_.actors_.at(actor).measured_arrivals;
-        for (const auto& request : session_.workload_.requests()) {
-            const auto instant = sources.at(actor).at(request.id).get<Nanoseconds>();
-            if (instant < 0 || (!arrivals.empty() && instant < arrivals.back())) {
-                throw std::invalid_argument("measured PD ingress disagrees with workload order");
-            }
-            arrivals.push_back(instant);
-        }
-    }
-
-    for (const auto& event : conditions.at("admission")) {
+void Simulation::Disaggregation::measure_admission(const json& commands) {
+    for (const auto& event : commands) {
         const Admission boundary{event.at("at_ns"), event.at("pause")};
         if (boundary.at_ns < 0 || (!administration_.empty() && boundary.at_ns <= administration_.back().at_ns)) {
             throw std::invalid_argument("PD admission commands must follow their measured order");

@@ -43,6 +43,22 @@ const Residence& Resources::residence(const std::string& request) const {
     return residents_.at(request);
 }
 
+std::vector<std::int64_t> Resources::locations(const std::string& request) const {
+    const auto& resident = residence(request);
+    std::vector<std::int64_t> indices;
+    indices.reserve(static_cast<std::size_t>(resident.tokens));
+    append_locations(resident, 0, resident.tokens, indices);
+    return indices;
+}
+
+void Resources::append_locations(const Residence& resident, std::int64_t begin, std::int64_t end,
+                                std::vector<std::int64_t>& indices) const {
+    for (auto token = begin; token < end; ++token) {
+        const auto page = resident.pages.at(static_cast<std::size_t>(token / limits_.page_size));
+        indices.push_back(page * limits_.page_size + token % limits_.page_size);
+    }
+}
+
 std::vector<std::int64_t> Resources::bind_slots(const std::vector<std::string>& requests) {
     std::unordered_set<std::string> distinct;
     std::size_t required = 0;
@@ -106,10 +122,7 @@ std::vector<std::int64_t> Resources::grow(const std::vector<KvGrowth>& members) 
             page_in_use_.at(static_cast<std::size_t>(page)) = true;
             resident.pages.push_back(page);
         }
-        for (auto token = growth.begin; token < growth.end; ++token) {
-            const auto page = resident.pages.at(static_cast<std::size_t>(token / limits_.page_size));
-            indices.push_back(page * limits_.page_size + token % limits_.page_size);
-        }
+        append_locations(resident, growth.begin, growth.end, indices);
         resident.tokens = growth.end;
     }
     return indices;

@@ -67,6 +67,8 @@ class FixedGraph:
             if (action["intervals"] != expected["intervals"] or action["began_ns"] != expected["began_ns"]
                     or action["device_ready_ns"] != expected["device_ready_ns"]):
                 return {"status": "device_baseline_mismatch"}
+            if {row["request"] for row in action["publications"]} != expected["publications"].keys():
+                return {"status": "publication_baseline_mismatch"}
             for row in action["publications"]:
                 worst = max(worst, abs(row["at_ns"] - expected["publications"][row["request"]]))
             worst = max(worst, abs(action["finished_ns"] - expected["finished_ns"]))

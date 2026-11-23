@@ -14,6 +14,10 @@ class PDStructureReference(StructureComparison):
         window, = pair.qualify()
         self.origin = window["origin_raw_ns"]
         self.handoffs = {row["request"]: row for row in window["handoffs"]}
+        publications = {request: handoff["publications"] for request, handoff in self.handoffs.items()}
+        manifest = {**pair.decode.manifest, "delivery": pair.decode.delivery}
+        super().__init__(pair.domain, publications, manifest)
+
         self.ingress = {
             "arrivals": [{row["request"]: row["submitted_raw_ns"] - self.origin
                           for row in recording.delivery["requests"]} for recording in (pair.prefill, pair.decode)],
@@ -21,9 +25,6 @@ class PDStructureReference(StructureComparison):
                           for row in window["controls"]],
         }
         self.publisher = pair.decode.publication_rank()
-        publications = {request: handoff["publications"] for request, handoff in self.handoffs.items()}
-        manifest = {**pair.decode.manifest, "delivery": pair.decode.delivery}
-        super().__init__(pair.domain, publications, manifest)
         self.starts = {}
         self.prebuilt_result_boundaries = 0
 

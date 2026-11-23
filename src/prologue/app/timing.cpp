@@ -54,6 +54,9 @@ serving::ActionTiming read_timing(const json& record, const json& work) {
     for (const auto& entry : record.at("publications").items()) {
         timing.publications.emplace(entry.key(), boundary(entry.value()));
     }
+    if (const auto next = record.find("next_read"); next != record.end()) {
+        timing.next_read = boundary(*next);
+    }
     return timing;
 }
 
@@ -134,6 +137,9 @@ json replay(const json& job) {
         auto publications = json::array();
         for (const auto& member : action.at("members")) {
             const auto request = member.at("request").get<std::string>();
+            if (!timing.publications.contains(request)) {
+                continue;
+            }
             timeline.satisfy(started, model_ready, timing.publications.at(request));
             publications.push_back({{"request", request}, {"count", member.at("output_tokens").get<std::int64_t>() + 1},
                                     {"at_ns", timeline.now()}});
