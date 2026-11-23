@@ -25,6 +25,9 @@ class Plan:
 
         # The core owns request validation and arrival order for both planning and simulation.
         self.workloads = run_core("workloads", source["workloads"])
+        for workload in self.workloads:
+            for configuration in self.configurations:
+                configuration.route_table(workload)
 
     def document(self) -> dict:
         return {

@@ -6,6 +6,26 @@ from functools import partial
 from pathlib import Path
 
 
+class ObservedWork:
+    def __init__(self, observation, work, operation, site, post):
+        self.observation = observation
+        self.work = work
+        self.operation = operation
+        self.site = site
+        self.post = post
+        self.rows = observation.calls.rows
+
+    def wait(self, *args, **kwargs):
+        calls = self.observation.calls
+        if not self.observation.capture_calls or self.rows is not calls.rows:
+            return self.work.wait(*args, **kwargs)
+
+        with calls.scope(self.operation, "Work.wait", self.site, {"post": self.post}) as call:
+            completed = self.work.wait(*args, **kwargs)
+            call["completed"] = completed
+            return completed
+
+
 class RankProfiles:
     def __init__(self, observation):
         self.observation = observation
@@ -34,6 +54,10 @@ class RankProfiles:
             "parameters": [(name, list(tensor.shape), str(tensor.dtype)) for name, tensor in model.named_parameters()],
         }
         workers = {"layout": layout, "tp_members": tp.ranks, "pp_members": pp.ranks}
+        experts = self.observation.experts
+        if experts is not None and experts.width > 1:
+            layout["expert_index"] = experts.group.rank_in_group
+            workers["ep_members"] = experts.group.ranks
         (self.root / f"layout-{tp.rank}.json").write_text(json.dumps(workers), encoding="utf-8")
 
     def profile(self, original, manager, request):
@@ -90,6 +114,20 @@ class RankProfiles:
             call["outputs"] = calls.ports(result=result)
             return result
 
+    def tensor_collective(self, name, original, group, output, input):
+        calls = self.observation.calls
+        if not calls.stack or group.world_size == 1 or input.device.type != "npu":
+            return original(group, output, input)
+
+        parameters = {"kind": name, "participants": group.ranks, "dimension": 0}
+        if name == "reduce_scatter":
+            parameters["reduction"] = "sum"
+        with calls.scope("collective", f"GroupCoordinator.{name}_tensor", "tensor_parallel", parameters) as call:
+            call["inputs"] = calls.ports(operand=input)
+            result = original(group, output, input)
+            call["outputs"] = calls.ports(result=output)
+            return result
+
     def install(self):
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
@@ -100,6 +138,8 @@ class RankProfiles:
         group = "sglang.srt.distributed.parallel_state.GroupCoordinator."
         for name in ("all_reduce", "all_gather"):
             HookRegistry.register(group + name, partial(self.collective, name), HookType.AROUND)
+        for method, name in (("all_gather_into_tensor", "all_gather"), ("reduce_scatter_tensor", "reduce_scatter")):
+            HookRegistry.register(group + method, partial(self.tensor_collective, name), HookType.AROUND)
 
 
 class RankPlan:
@@ -114,6 +154,8 @@ class RankPlan:
             pp_members = list(range(lane, configuration.worker_count, configuration.tp))
             if loaded["tp_members"] != tp_members or loaded["pp_members"] != pp_members or layout["stage"] != stage:
                 raise ValueError(f"rank {rank} native groups differ from the requested topology")
+            if configuration.ep > 1 and loaded["ep_members"] != tp_members:
+                raise ValueError(f"rank {rank} native expert group differs from the requested topology")
 
             key = json.dumps(layout, sort_keys=True)
             representative = representatives.setdefault(key, rank)
@@ -122,6 +164,8 @@ class RankPlan:
                 "heads": layout["heads"], "stage": stage, "layers": layout["layers"],
                 "tp_members": tp_members, "pp_members": pp_members,
             }
+            if configuration.ep > 1:
+                self.workers[rank]["ep_members"] = loaded["ep_members"]
         self.publisher, = (rank for rank, worker in self.workers.items() if worker["publication_owner"])
         if placement == "single_device":
             self.windows = [[rank] for rank in representatives.values()]

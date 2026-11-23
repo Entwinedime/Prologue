@@ -7,12 +7,13 @@ from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns, thread_time_ns
 
 from prologue.acquisition.observation.calls import Calls
+from prologue.integrations.frameworks.sglang.expert_routes import ExpertRoutes
 from prologue.integrations.frameworks.sglang.observation.attention import AttentionCall, implementation
 from prologue.integrations.frameworks.sglang.observation.parallel import RankProfiles
 
 
 class Observation:
-    def __init__(self, output, requests, mode, parallel, pipeline):
+    def __init__(self, output, requests, mode, parallel, pipeline, experts):
         self.output = output
         self.requests = requests
         self.publications = {native: [] for native in requests}
@@ -25,6 +26,7 @@ class Observation:
         self.result_cpu_started = None
         self.host_work = []
         self.prepare_cpu_ns = 0
+        self.calls = None
         if mode == "detailed":
             from torch.autograd.profiler import record_function
 
@@ -34,6 +36,11 @@ class Observation:
             from prologue.integrations.frameworks.sglang.observation.pipeline import PipelineObservation
 
             self.pipeline = PipelineObservation(self)
+        self.experts = None
+        if experts is not None:
+            from prologue.integrations.frameworks.sglang.observation.experts import ExpertObservation
+
+            self.experts = ExpertObservation(self, experts)
 
     def begin_window(self, output, requests, capture_calls):
         self.output = output
@@ -133,6 +140,8 @@ class Observation:
             if pp_proxy_tensors is not None:
                 call["inputs"] = self.pipeline.ports(pp_proxy_tensors.tensors)
             result = original(scheduler, batch, pp_proxy_tensors)
+            if self.experts is not None:
+                call["expert_routes"] = self.experts.bindings
             if self.pipeline is not None:
                 proxy = result.pp_hidden_states_proxy_tensors
                 call["outputs"] = (self.pipeline.ports(proxy.tensors) if proxy is not None else
@@ -198,6 +207,14 @@ class Observation:
         from sglang.srt.layers.radix_attention import RadixAttention
 
         result = original(runner)
+        routed_modules = ExpertRoutes.native_modules(runner.model)
+        if bool(routed_modules) != (self.experts is not None):
+            raise ValueError("a workload expert route table is required exactly for models with native routed experts")
+        if self.experts is not None:
+            self.experts.loaded(runner, routed_modules)
+        if self.mode != "detailed":
+            return result
+
         body = runner.model.model
         for index in range(body.start_layer, body.end_layer):
             layer = body.layers[index]
@@ -228,13 +245,14 @@ class Observation:
             HookRegistry.register(scheduler + "process_batch_result", self.process_result, HookType.AROUND)
         if self.mode == "host-timing":
             HookRegistry.register(scheduler + "get_next_batch_to_run", self.prepare, HookType.AROUND)
-        elif self.mode == "detailed":
-            HookRegistry.register("sglang.srt.model_executor.model_runner.ModelRunner.load_model",
-                                  self.load_model, HookType.AROUND)
+        HookRegistry.register("sglang.srt.model_executor.model_runner.ModelRunner.load_model",
+                              self.load_model, HookType.AROUND)
         if self.parallel is not None:
             self.parallel.install()
         if self.pipeline is not None:
             self.pipeline.install()
+        if self.experts is not None:
+            self.experts.install()
 
 
 def install():
@@ -252,8 +270,13 @@ def install():
         document = json.loads(path.read_text(encoding="utf-8"))
         placement = document["parallel_placement"]
         pipeline = document["pp"] > 1
+        experts = document.get("experts")
         if placement == "single_device":
             from prologue.integrations.frameworks.sglang.ascend.shards import StagedTransport
 
-            StagedTransport(path.parent / ".device.lock").install(pipeline)
-        Observation(path.parent, document["requests"], document["mode"], placement is not None, pipeline).install()
+            StagedTransport(path.parent / ".device.lock").install(
+                pipeline, experts is not None and experts["width"] > 1,
+            )
+        Observation(
+            path.parent, document["requests"], document["mode"], placement is not None, pipeline, experts,
+        ).install()

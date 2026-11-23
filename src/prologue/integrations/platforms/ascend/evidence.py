@@ -6,6 +6,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from decimal import Decimal
 
+from prologue.acquisition.observation.calls import Calls
+
 
 @dataclass(frozen=True, slots=True)
 class Span:
@@ -105,10 +107,11 @@ class AscendEvidence:
 
     def document(self):
         scopes = self.markers()
-        owners = self.submissions(scopes)
+        submissions = self.submissions(scopes)
+        calls, identities, omitted, waits = Calls.project(self.calls)
         children = defaultdict(list)
         for call in self.calls:
-            if call["parent"] is not None:
+            if call["parent"] is not None and call["id"] in identities:
                 children[call["parent"]].append(scopes[call["id"]].end)
 
         pending = []
@@ -126,7 +129,7 @@ class AscendEvidence:
             stream = int(details["Physic Stream Id"])
             previous_end, previous_work = physical_predecessor.get(stream, (None, None))
             physical_predecessor[stream] = (span.end, None)
-            possible = owners.get(details.get("connection_id"), ())
+            possible = submissions.get(details.get("connection_id"), ())
             if len(possible) != 1:
                 reason = "multiple_submissions" if possible else "missing_submission"
                 unbound[reason][details["Task Type"]] += 1
@@ -135,11 +138,18 @@ class AscendEvidence:
             if owner is None:
                 unbound["outside_calls"][details["Task Type"]] += 1
                 continue
+            if owner in omitted:
+                unbound["capture_auxiliary"][details["Task Type"]] += 1
+                continue
+
+            # The submit and completed native wait jointly own the physical collective gate.
+            owner = waits.get(owner, owner)
 
             lane = lanes.setdefault(stream, len(lanes))
             index = len(work)
             work.append({
-                "id": index, "owner": owner, "slot": bisect_right(children[owner], submission), "lane": lane,
+                "id": index, "owner": identities[owner], "slot": bisect_right(children[owner], submission),
+                "lane": lane,
                 "kind": details["Task Type"], "name": span.row["name"],
                 "submitted_ns": submission, "begin_ns": span.begin, "end_ns": span.end,
                 "api_begin_ns": api_begin, "api_end_ns": api_end,
@@ -154,9 +164,9 @@ class AscendEvidence:
             raise ValueError("the trace contains no unambiguously owned device work")
         return {
             "domain": {key: self.manifest[key] for key in ("framework_revision", "model", "configuration")},
-            "calls": self.calls, "work": work, "stream_order": order,
-            "profile_scope_begins_ns": [scopes[call["id"]].begin for call in self.calls],
-            "profile_scope_ends_ns": [scopes[call["id"]].end for call in self.calls],
+            "calls": calls, "work": work, "stream_order": order,
+            "profile_scope_begins_ns": [scopes[identity].begin for identity in identities],
+            "profile_scope_ends_ns": [scopes[identity].end for identity in identities],
             "evidence": {"clock": "ascend_profiler_ns", "unbound_device_records": dict(unbound)},
         }
 

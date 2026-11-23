@@ -2,6 +2,7 @@
 
 import fcntl
 import inspect
+import os
 from contextlib import contextmanager
 from functools import partial
 
@@ -32,11 +33,12 @@ class SingleDeviceEngine(Engine):
 
 
 class StagedWork:
-    def __init__(self, transport, work, buffer, target):
+    def __init__(self, transport, work, source, target, output):
         self.transport = transport
         self.work = work
-        self.buffer = buffer
+        self.source = source
         self.target = target
+        self.output = output
 
     def wait(self, *args, **kwargs):
         if self.work is None:
@@ -48,8 +50,8 @@ class StagedWork:
 
         # A receive makes the original device tensor available at the native wait.
         if self.target is not None:
-            self.transport.compute(self.target.copy_, self.buffer)
-        self.work = self.buffer = self.target = None
+            self.transport.compute(self.target.copy_, self.output)
+        self.work = self.source = self.target = self.output = None
         return completed
 
 
@@ -92,9 +94,6 @@ class StagedTransport:
         if source.device.type == "cpu":
             with self.rendezvous():
                 return original(*args, **kwargs)
-        if values.get("async_op"):
-            raise ValueError("single-device TP uses blocking tensor collectives")
-
         target = values[target_name]
         host = self.compute(source.detach().cpu)
         output = host if source_name == target_name else torch.empty_like(target, device="cpu")
@@ -102,6 +101,8 @@ class StagedTransport:
         values[target_name] = output
         with self.rendezvous():
             result = original(*arguments.args, **arguments.kwargs)
+        if values.get("async_op"):
+            return StagedWork(self, result, host, target, output)
         self.compute(target.copy_, output)
         return result
 
@@ -119,16 +120,31 @@ class StagedTransport:
         arguments.arguments["tensor"] = buffer
         with self.rendezvous():
             work = original(*arguments.args, **arguments.kwargs)
-        return StagedWork(self, work, buffer, tensor if receives else None)
+        return StagedWork(self, work, buffer, tensor if receives else None, buffer)
 
-    def install(self, pipeline):
+    @staticmethod
+    def expert_buffer(buffer, group, num_nvl_bytes=0, num_rdma_bytes=0, low_latency_mode=False, **options):
+        if low_latency_mode or os.environ.get("DEEP_USE_ALLTOALL_MODE") != "1":
+            raise ValueError("single-device expert exchange requires the native normal AllToAll layout")
+
+        # The native AllToAll layout uses a process group and real row splits without an HCCL buffer.
+        buffer.group, buffer.rank, buffer.group_size = group, group.rank(), group.size()
+        buffer.low_latency_mode, buffer.alltoall_mode = False, True
+        buffer._alltoall_layout = None
+
+    def install(self, pipeline, expert):
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
-        for name, source, target in (
+        collectives = (
             ("all_reduce", "tensor", "tensor"),
             ("broadcast", "tensor", "tensor"),
             ("all_gather_into_tensor", "input_tensor", "output_tensor"),
-        ):
+            ("reduce_scatter_tensor", "input", "output"),
+        )
+        if expert:
+            collectives += (("all_to_all_single", "input", "output"),)
+            HookRegistry.register("deep_ep.Buffer.__init__", self.expert_buffer, HookType.REPLACE)
+        for name, source, target in collectives:
             hook = partial(self.exchange, inspect.signature(getattr(distributed, name)), source, target)
             HookRegistry.register(f"torch.distributed.{name}", hook, HookType.AROUND)
         if pipeline:

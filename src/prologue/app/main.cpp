@@ -71,8 +71,8 @@ private:
 };
 
 Workload read_workload(const json& source) {
-    if (!source.is_object() || source.size() != 2) {
-        throw std::invalid_argument("workload fields are id and requests");
+    if (!source.is_object() || source.size() != 2 + static_cast<std::size_t>(source.contains("expert_routes"))) {
+        throw std::invalid_argument("workload fields are id, requests and optional expert_routes");
     }
     const auto& entries = source.at("requests");
     if (!entries.is_array()) {
@@ -109,6 +109,9 @@ json normalize_workloads(const json& source) {
                                 {"prompt_tokens", request.prompt_tokens}, {"output_tokens", request.output_tokens}});
         }
         workloads.push_back({{"id", workload.id()}, {"requests", std::move(requests)}});
+        if (entry.contains("expert_routes")) {
+            workloads.back()["expert_routes"] = entry.at("expert_routes");
+        }
     }
     return workloads;
 }

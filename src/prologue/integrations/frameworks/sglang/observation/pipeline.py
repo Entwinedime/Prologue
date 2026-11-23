@@ -5,22 +5,7 @@ from functools import partial
 
 from torch import Tensor
 
-
-class ObservedWork:
-    def __init__(self, pipeline, work, post):
-        self.pipeline = pipeline
-        self.work = work
-        self.post = post
-        self.window = pipeline.window
-
-    def wait(self, *args, **kwargs):
-        if not self.pipeline.active or self.window is not self.pipeline.window:
-            return self.work.wait(*args, **kwargs)
-
-        with self.pipeline.calls.scope("transfer_wait", "Work.wait", "pipeline", {"post": self.post}) as call:
-            completed = self.work.wait(*args, **kwargs)
-            call["completed"] = completed
-            return completed
+from prologue.integrations.frameworks.sglang.observation.parallel import ObservedWork
 
 
 class PipelineObservation:
@@ -151,7 +136,7 @@ class PipelineObservation:
             call["inputs" if direction == "send" else "outputs"] = self.calls.ports(wire=tensor)
             work = original(tensor, *args, **kwargs)
             self.posts.append(call)
-            return ObservedWork(self, work, call["id"])
+            return ObservedWork(self.observation, work, "transfer_wait", "pipeline", call["id"])
 
     def install(self):
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType

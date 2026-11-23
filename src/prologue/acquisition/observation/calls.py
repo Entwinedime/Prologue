@@ -60,3 +60,37 @@ class Calls:
                 "shape": list(tensor.shape), "stride": list(tensor.stride()), "device": tensor.device.type,
             })
         return result
+
+    @staticmethod
+    def project(rows):
+        # Trace markers keep raw identities while the structural call tree keeps only materialized calls.
+        omitted = {row["id"] for row in rows if row["operation"] == "capture_auxiliary"}
+        completed = {}
+        for row in rows:
+            if row["operation"] == "collective_wait":
+                post = rows[row["parameters"]["post"]]
+                if (post["operation"] != "collective" or post["parent"] != row["parent"]
+                        or post["id"] + 1 != row["id"] or not row["completed"]):
+                    raise ValueError("a collective cut requires its immediate native completion wait")
+                completed[row["id"]] = post["id"]
+
+        retained = [row for row in rows if row["id"] not in omitted and row["id"] not in completed]
+        identities = {row["id"]: index for index, row in enumerate(retained)}
+        parameter_links = {"pipeline_prepare": "batch", "pipeline_process": "batch", "transfer_wait": "post",
+                           "signal_record": "producer", "signal_wait": "producer"}
+        projected = []
+        for row in retained:
+            parent = row["parent"]
+            operation = row["operation"]
+            call = {**row, "id": identities[row["id"]], "parent": identities[parent] if parent is not None else None}
+            parameter = parameter_links.get(operation)
+            if parameter is not None and row["parameters"][parameter] is not None:
+                call["parameters"] = {**row["parameters"], parameter: identities[row["parameters"][parameter]]}
+            if operation == "pipeline_launch":
+                call["batch"] = identities[row["batch"]]
+            if operation == "experts":
+
+                # The model-layer number identifies the invocation. The route binding carries it at the root.
+                call["parameters"] = {}
+            projected.append(call)
+        return projected, identities, omitted, completed

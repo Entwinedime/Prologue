@@ -135,6 +135,13 @@ class Session:
         specification = self.output / "observation.json"
         description = {"requests": self.aliases("source"), "mode": self.mode, "pp": self.configuration.pp,
                        "parallel_placement": self.placement if parallel else None}
+        ep = self.configuration.ep
+        if ep > 1:
+            os.environ.update(DEEP_USE_ALLTOALL_MODE="1", DEEPEP_HCCL_BUFFSIZE="1024", HCCL_BUFFSIZE="1024")
+        routes = self.configuration.route_table(self.workload)
+        if routes is not None:
+            description["experts"] = {"width": ep, "routes": routes, "requests": self.workload["requests"],
+                                      "warmup": self.aliases("warmup")}
         specification.write_text(json.dumps(description), encoding="utf-8")
         os.environ["PROLOGUE_OBSERVATION"] = str(specification)
 
