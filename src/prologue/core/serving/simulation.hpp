@@ -91,6 +91,7 @@ private:
     void require_drained() const;
     nlohmann::json capacity(Index actor) const;
     nlohmann::json cache(Index actor, const nlohmann::json& message) const;
+    void record_cache_effect(Index actor, const char* operation, const std::vector<std::int64_t>& pages);
     nlohmann::json resources(Index actor, const nlohmann::json& message);
     void require_residence(Index actor, const nlohmann::json& action) const;
     void record_publication(const nlohmann::json& message, Nanoseconds time_ns, nlohmann::json& target);
@@ -105,10 +106,12 @@ private:
     structure::Templates templates_;
     TimingSource& timing_source_;
     bool record_structure_;
+    bool prefix_cache_;
     std::unordered_map<std::string, std::int64_t> output_limits_;
     std::unordered_map<std::string, std::int64_t> output_counts_;
     std::size_t finished_ = 0;
     nlohmann::json actions_ = nlohmann::json::array();
+    nlohmann::json cache_effects_ = nlohmann::json::array();
     std::unique_ptr<Group> group_;
 };
 

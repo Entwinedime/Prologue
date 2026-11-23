@@ -24,7 +24,8 @@ const std::string& Stopped::status() const {
 Simulation::Simulation(const json& job, Workload workload, TimingSource& timing_source)
     : job_(job), workload_(std::move(workload)),
       templates_(job.at("templates"), job.at("domain"), job.at("rules").at("templates")),
-      timing_source_(timing_source), record_structure_(job.value("record_structure", false)) {
+      timing_source_(timing_source), record_structure_(job.value("record_structure", false)),
+      prefix_cache_(job.at("domain").at("configuration").value("prefix_cache", false)) {
     for (const auto& request : workload_.requests()) {
         output_limits_.emplace(request.id, request.output_tokens);
         output_counts_.emplace(request.id, 0);
@@ -69,7 +70,21 @@ bool Simulation::done() const {
 
 json Simulation::capacity(Index actor) const {
     const auto& pool = actors_.at(actor).resources;
-    return {{"slots", pool.available_slots()}, {"kv_tokens", pool.available_tokens()}};
+    json capacity{{"slots", pool.available_slots()}, {"kv_tokens", pool.available_tokens()}};
+    if (prefix_cache_) {
+        capacity["evictable_tokens"] = pool.evictable_tokens();
+        capacity["protected_tokens"] = pool.protected_tokens();
+    }
+    return capacity;
+}
+
+void Simulation::record_cache_effect(Index actor, const char* operation, const std::vector<std::int64_t>& pages) {
+    if (record_structure_ && !pages.empty()) {
+        const auto started = actions_.size() + static_cast<std::size_t>(actors_.at(actor).action.has_value());
+        auto ordered = pages;
+        std::ranges::sort(ordered);
+        cache_effects_.push_back({{"after_action", started}, {"operation", operation}, {"pages", std::move(ordered)}});
+    }
 }
 
 void Simulation::measure_arrivals(const json& sources) {
@@ -138,7 +153,8 @@ json Simulation::resources(Index actor, const json& message) {
         if (operation == "grow") {
             std::vector<KvGrowth> members;
             for (const auto& member : message.at("members")) {
-                members.push_back({member.at("request"), member.at("begin"), member.at("end")});
+                members.push_back({member.at("request"), member.at("begin"), member.at("end"),
+                    member.value("prefix_pages", std::vector<std::int64_t>{})});
             }
             return pool.grow(members);
         }
@@ -147,7 +163,20 @@ json Simulation::resources(Index actor, const json& message) {
             return nullptr;
         }
         if (operation == "release_pages") {
-            pool.release_pages(message.at("pages"));
+            record_cache_effect(actor, "evict", pool.release_pages(message.at("pages")));
+            return nullptr;
+        }
+        if (operation == "retain_prefix") {
+            const auto pages = message.at("pages").get<std::vector<std::int64_t>>();
+            pool.retain_prefix(pages);
+            record_cache_effect(actor, "store", pages);
+            return nullptr;
+        }
+        if (operation == "pin_prefix") {
+            return pool.pin_prefix(message.at("pages"), message.at("acquire"));
+        }
+        if (operation == "rebind_prefix") {
+            pool.rebind_prefix(message.at("request"), message.at("pages"));
             return nullptr;
         }
     } catch (const std::exception& error) {
@@ -170,9 +199,11 @@ void Simulation::require_residence(Index actor, const json& message) const {
 json Simulation::cache(Index actor, const json& message) const {
     auto rows = json::array();
     auto written = json::array();
+    auto prefix = json::array();
     const auto& pool = actors_.at(actor).resources;
     for (const auto& member : message.at("members")) {
-        auto locations = pool.locations(member.at("request"));
+        const auto request = member.at("request").get<std::string>();
+        auto locations = pool.locations(request);
         const auto begin = structure::batch_read_tokens(message.at("phase"), member);
         if (begin < 0 || static_cast<Index>(begin) >= locations.size()) {
             throw Stopped("resource_error", "batch KV read prefix leaves no write extent");
@@ -181,8 +212,15 @@ json Simulation::cache(Index actor, const json& message) const {
             written.push_back(locations.at(token));
         }
         rows.push_back(std::move(locations));
+        if (prefix_cache_) {
+            prefix.push_back(pool.pinned_prefix(request));
+        }
     }
-    return {{"rows", std::move(rows)}, {"written", std::move(written)}};
+    json cache{{"rows", std::move(rows)}, {"written", std::move(written)}};
+    if (prefix_cache_) {
+        cache["prefix_tokens"] = std::move(prefix);
+    }
+    return cache;
 }
 
 void Simulation::execute(Index index, const json& message) {
@@ -303,7 +341,8 @@ json Simulation::direct(Index actor, const json& message) {
 json Simulation::request(const json& message) {
     const auto operation = message.at("operation").get<std::string>();
     if (operation == "initialize") {
-        json setup{{"domain", job_.at("domain")}, {"model_config", job_.at("model_config")}};
+        json setup{{"domain", job_.at("domain")}, {"model_config", job_.at("model_config")},
+                   {"workload", job_.at("workload")}};
         if (job_.contains("expert_routes")) {
             setup["expert_routes"] = job_.at("expert_routes");
         }
@@ -329,6 +368,9 @@ json Simulation::request(const json& message) {
 json Simulation::result(std::string status, std::string reason) {
     json report{{"status", std::move(status)}, {"reason", std::move(reason)}, {"now_ns", now()},
                 {"finished_requests", finished_}, {"actions", std::move(actions_)}};
+    if (prefix_cache_ && record_structure_) {
+        report["cache_effects"] = std::move(cache_effects_);
+    }
     if (group_) {
         group_->report(report);
     }

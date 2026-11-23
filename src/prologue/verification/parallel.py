@@ -4,7 +4,7 @@ from collections import deque
 
 from prologue.acquisition.observation.batches import ObservedBatches, aligned_batches, aligned_collectives
 from prologue.integrations.platforms.ascend.collectives import PhysicalCollectives
-from prologue.verification.structure import StructureComparison
+from prologue.verification.structure import ScheduledReference
 
 
 class RecordedParallelBatch:
@@ -73,18 +73,23 @@ class RecordedParallelBatch:
         return index
 
 
-class ParallelStructureReference(StructureComparison):
+class ParallelStructureReference(ScheduledReference):
     def __init__(self, recording):
         physical = PhysicalCollectives(recording)
         publisher = recording.publication_rank()
         manifest = {**recording.manifest, "delivery": recording.delivery}
-        super().__init__(recording.domain, physical.ranks[publisher].publications, manifest)
+        owner = physical.ranks[publisher]
+        super().__init__(recording.domain, owner.publications, manifest, owner.evidence)
+
+        if any(rank.evidence.get("cache_effects") != self.cache_effects for rank in physical.ranks):
+            raise ValueError("the TP ranks disagree on cache residency effects")
 
         traces = [ObservedBatches(rank.evidence).entries for rank in physical.ranks]
         for batches in aligned_batches(traces):
             observed = RecordedParallelBatch(physical.ranks, batches, publisher)
             owner = batches[publisher]
-            if any(batch.action() != owner.action() or batch.call["resources"] != owner.call["resources"]
+            if any(batch.action() != owner.action() or batch.call.get("cache") != owner.call.get("cache")
+                   or batch.call["resources"] != owner.call["resources"]
                    or batch.call["result_processing"]["resources"] != owner.call["result_processing"]["resources"]
                    for batch in batches):
                 raise ValueError("the TP ranks disagree on replicated request and resource state")
@@ -100,4 +105,4 @@ class ParallelStructureReference(StructureComparison):
         if any(row["at_ns"] != begin_ns + measured["publications"][row["request"]]["after_start_ns"]
                for row in actual["publications"]):
             return False
-        return StructureComparison.consumed_conditions(actual, measured)
+        return ScheduledReference.consumed_conditions(actual, measured)

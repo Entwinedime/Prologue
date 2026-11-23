@@ -43,9 +43,12 @@ class Clock:
 
 
 class Inbox:
-    def __init__(self, peer, vocabulary, mode=DisaggregationMode.NULL):
+    def __init__(self, peer, vocabulary, mode=DisaggregationMode.NULL, *, content=None):
         self.peer, self.vocabulary = peer, vocabulary
         self.mode = mode
+        self.content = content
+        if content is not None and content.vocabulary > vocabulary:
+            raise ValueError("the model vocabulary cannot distinguish the declared prompt branches")
 
     def recv_requests(self):
         turn = self.peer.call("arrivals")
@@ -59,8 +62,10 @@ class Inbox:
             sampling = SamplingParams(max_new_tokens=request["output_tokens"], ignore_eos=True, temperature=0)
             sampling.normalize(None)
             sampling.verify(self.vocabulary)
+            tokens = (array("q", self.content.prompt(request["id"])) if self.content is not None else
+                      array("q", [1]) * request["prompt_tokens"])
             requests.append(TokenizedGenerateReqInput(
-                rid=request["id"], input_text=None, input_ids=array("q", [1]) * request["prompt_tokens"],
+                rid=request["id"], input_text=None, input_ids=tokens,
                 input_embeds=None, mm_inputs=None, token_type_ids=None, sampling_params=sampling,
                 return_logprob=False, logprob_start_len=-1, top_logprobs_num=0, token_ids_logprob=None,
                 stream=True, time_stats=APIServerReqTimeStats(disagg_mode=self.mode),
@@ -82,8 +87,9 @@ class Publications:
 
 
 class NativeScheduler(Scheduler):
-    def __init__(self, peer, model_directory, domain, stage=0, *, expert_routes=None, runtime=None):
+    def __init__(self, peer, model_directory, domain, stage=0, *, expert_routes=None, runtime=None, content=None):
         self.peer = peer
+        self.content = content
         config = domain["configuration"]
         args = ServerArgs(
             model_path=str(model_directory), dtype=domain["model"]["dtype"], device="cpu",
@@ -110,7 +116,7 @@ class NativeScheduler(Scheduler):
             model_runner.ModelRunner = original_runner
             native_scheduler.create_scheduler_watchdog = original_watchdog
 
-        self.request_receiver = Inbox(peer, self.model_config.vocab_size, self.disaggregation_mode)
+        self.request_receiver = Inbox(peer, self.model_config.vocab_size, self.disaggregation_mode, content=content)
         self.expert_alignment = config["tp"] if config.get("ep", 1) > 1 else 1
         self.experts = None
         if expert_routes is not None:
@@ -121,6 +127,10 @@ class NativeScheduler(Scheduler):
             self.publications = Publications(peer if self.disaggregation_mode != DisaggregationMode.PREFILL else None)
             self.output_streamer.send_to_detokenizer = self.publications
         self.model_worker.forward_batch_generation = self.model_result
+        if config.get("prefix_cache", False):
+            from prologue.integrations.frameworks.sglang.control.residency import PrefixResidency
+
+            PrefixResidency(peer, self.tree_cache).install()
         PageView.install()
 
     @staticmethod
@@ -128,11 +138,12 @@ class NativeScheduler(Scheduler):
         # The enclosing task owns the wall-clock watchdog for this blocking process.
         return None
 
-    @staticmethod
-    def model_result(batch, **kwargs):
+    def model_result(self, batch, **kwargs):
+        tokens = (torch.tensor([self.content.outputs[request.rid] for request in batch.reqs], dtype=torch.int64)
+                  if self.content is not None else torch.ones(batch.batch_size(), dtype=torch.int64))
         return GenerationBatchResult(
             logits_output=LogitsProcessorOutput(next_token_logits=None),
-            next_token_ids=torch.ones(batch.batch_size(), dtype=torch.int64),
+            next_token_ids=tokens,
         )
 
     def run_batch(self, batch, pp_proxy_tensors=None):

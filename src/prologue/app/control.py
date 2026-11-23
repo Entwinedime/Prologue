@@ -57,9 +57,11 @@ def main():
             else:
                 CpuDeclarations.install(kernel_python)
 
+                from prologue.integrations.frameworks.sglang.content import PromptContent
                 from prologue.integrations.frameworks.sglang.control.scheduler import NativeScheduler
 
-                NativeScheduler(peer, model, domain, expert_routes=setup.get("expert_routes")).drive()
+                content = PromptContent.declared(setup["workload"], config.get("prefix_cache", False))
+                NativeScheduler(peer, model, domain, expert_routes=setup.get("expert_routes"), content=content).drive()
 
 
 if __name__ == "__main__":

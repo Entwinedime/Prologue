@@ -1,5 +1,7 @@
 """Prepare measured time conditions and compare the result to native structure evidence."""
 
+from collections import deque
+
 from prologue.acquisition.observation.batches import ObservedBatches, action_identity
 from prologue.verification.reference import validate_reference
 
@@ -126,40 +128,63 @@ class StructureComparison:
         return report
 
 
-class StructureReference(StructureComparison):
-    def __init__(self, evidence, publications, manifest):
-        super().__init__(evidence["domain"], publications, manifest)
-        origin = manifest["delivery"]["origin_raw_ns"]
+class ScheduledReference(StructureComparison):
+    def __init__(self, domain, publications, manifest, evidence):
+        super().__init__(domain, publications, manifest)
+        self.origin = manifest["delivery"]["origin_raw_ns"]
         self.starts = {}
+        self.resident = {}
+        self.page_size = domain["configuration"]["page_size"]
+        self.cache_effects = evidence.get("cache_effects")
+        self.pending_effects = deque(self.cache_effects or ())
+        self.cached_pages = set()
         if "ingress" in evidence:
             observed = evidence["ingress"]
             if observed.keys() != self.arrivals.keys():
                 raise ValueError("native ingress must cover the full observed workload")
-            self.arrivals = {request: read - origin for request, read in observed.items()}
+            self.arrivals = {request: read - self.origin for request, read in observed.items()}
             self.ingress = {"arrivals": [self.arrivals]}
-        self.observed = ObservedBatches(evidence).entries
-        resident = {}
-        for batch in self.observed:
-            call = batch.call
-            action = batch.action()
-            result = call["result_processing"]
-            self.record(action, batch.graph, call, batch.measurements(), call["begin_ns"], result["end_ns"])
-            if self.ingress is not None:
-                self.starts[action_identity(action)] = call["begin_ns"] - origin
-                self.check_state(action, call, resident)
+        if domain["configuration"].get("prefix_cache") and (self.ingress is None or self.cache_effects is None):
+            raise ValueError("a cached schedule requires both measured ingress and cache effects")
 
-    def check_state(self, action, call, resident):
+    def record(self, action, graph, call, work, begin_ns, end_ns, *, outputs=None):
+        super().record(action, graph, call, work, begin_ns, end_ns, outputs=outputs)
+        if self.ingress is not None:
+            self.starts[action_identity(action)] = begin_ns - self.origin
+            self.apply_cache_effects(len(self.actions) - 1)
+            self.check_state(action, call)
+
+    def apply_cache_effects(self, after_action):
+        while self.pending_effects and self.pending_effects[0]["after_action"] == after_action:
+            event = self.pending_effects.popleft()
+            pages = set(event["pages"])
+            if not pages or len(pages) != len(event["pages"]) or min(pages) < 0:
+                raise ValueError("a native cache effect must name distinct physical pages")
+            if event["operation"] == "store" and pages.isdisjoint(self.cached_pages):
+                self.cached_pages.update(pages)
+            elif event["operation"] == "evict" and pages <= self.cached_pages:
+                self.cached_pages.difference_update(pages)
+            else:
+                raise ValueError(f"native cache effect disagrees with current residency: {event}")
+
+    def check_state(self, action, call):
         phase = action["phase"]
         processing = call["result_processing"]
         cache = call["cache"]
+        prefixes = cache.get("prefix_tokens", (0,) * len(action["members"]))
         written = []
-        for member, row in zip(action["members"], cache["rows"], strict=True):
+        for member, row, protected in zip(action["members"], cache["rows"], prefixes, strict=True):
             request = member["request"]
             extent = member["kv_committed_tokens"]
             begin = member.get("read_tokens", extent - 1 if phase == "decode" else 0)
-            if len(row) != extent or not 0 <= begin < extent or row[:begin] != resident.get(request, [])[:begin]:
+            previous = self.resident.get(request, [])
+            if (len(row) != extent or not 0 <= protected <= begin < extent or protected % self.page_size
+                    or row[protected:begin] != previous[protected:begin]):
                 raise ValueError(f"observed KV prefix changed during {phase} for {request}")
-            resident[request] = row
+            pages = {index // self.page_size - 1 for index in row[:protected:self.page_size]}
+            if not pages <= self.cached_pages or len(pages) * self.page_size != protected:
+                raise ValueError(f"observed cache binding is not resident for {request}")
+            self.resident[request] = row
             written.extend(row[begin:])
 
             count = member["output_tokens"] + 1
@@ -170,10 +195,15 @@ class StructureReference(StructureComparison):
         if written != cache["written"]:
             raise ValueError("native writes do not cover the batch's declared token intervals")
 
-        page_size = self.domain["configuration"]["page_size"]
+        if self.cache_effects is not None:
+            available = call["resources"]
+            if len(self.cached_pages) * self.page_size != available["evictable_tokens"] + available["protected_tokens"]:
+                raise ValueError("observed cache effects disagree with native token capacity")
+
         self.actions[-1]["cache"] = {
-            "rows": [[index - page_size for index in row] for row in cache["rows"]],
-            "written": [index - page_size for index in written],
+            **cache,
+            "rows": [[index - self.page_size for index in row] for row in cache["rows"]],
+            "written": [index - self.page_size for index in written],
         }
 
     def conditions(self, query):
@@ -183,3 +213,32 @@ class StructureReference(StructureComparison):
         action = query["action"]
         start = self.starts[action_identity(action)]
         return {**timing, "prepare_ns": max(0, start - action["clock_ns"])}
+
+    def compare(self, result):
+        report = super().compare(result)
+        if self.cache_effects is None or report["status"] != "matched":
+            return report
+
+        self.apply_cache_effects(len(self.actions))
+        if self.pending_effects:
+            raise ValueError("native cache effects extend past the recorded actions")
+        actual = result["cache_effects"]
+        if self.cache_effects != actual:
+            matched = 0
+            for expected, observed in zip(self.cache_effects, actual, strict=False):
+                if expected != observed:
+                    break
+                matched += 1
+            return {**report, "status": "structure_mismatch", "field": "cache_effects", "matched_effects": matched}
+        return {**report, "matched_cache_effects": len(actual),
+                "evicted_pages": sum(len(event["pages"]) for event in actual if event["operation"] == "evict")}
+
+
+class StructureReference(ScheduledReference):
+    def __init__(self, evidence, publications, manifest):
+        super().__init__(evidence["domain"], publications, manifest, evidence)
+        self.observed = ObservedBatches(evidence).entries
+        for batch in self.observed:
+            call = batch.call
+            self.record(batch.action(), batch.graph, call, batch.measurements(), call["begin_ns"],
+                        call["result_processing"]["end_ns"])
