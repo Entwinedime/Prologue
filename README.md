@@ -48,7 +48,7 @@ docker run --rm --runtime runc --network none \
   prologue-app:ubuntu24.04 compile /source > "$run/templates.json"
 ```
 
-Use `--mode light` and a separate output directory for scheduler publication times without a profiler. Each observation records inputs, concrete call bindings and the native revision. Compiled sources carry reusable definitions and their exact root queries. Device records with unresolved ownership are counted separately.
+Use `--mode light` and a separate output directory for scheduler publication times without a profiler. Each observation records inputs, concrete call bindings and the native revision. Compiled sources carry model metadata, reusable definitions and their exact root queries. Supply `compile --model-config` with the original model configuration when the recording lacks it. Device records with unresolved ownership are counted separately.
 
 ## Fit and publish shared assets
 
@@ -57,7 +57,6 @@ Capture a separate training observation as `host-training` with `--mode host-tim
 ```bash
 store="$PWD/data/libraries"
 mkdir -p "$store"
-cp /models/Qwen3-8B/config.json "$run/model-config.json"
 
 docker run --rm --runtime runc --network none \
   --mount type=bind,src="$run",dst=/case,readonly \
@@ -66,20 +65,34 @@ docker run --rm --runtime runc --network none \
   --mount type=bind,src="$run",dst=/case,readonly \
   --mount type=bind,src="$store",dst=/library \
   prologue-app:ubuntu24.04 publish --store /library --library /case/templates.json \
-  --costs /case/costs.json --model-config /case/model-config.json
+  --costs /case/costs.json
 ```
 
 The release records the template, performance and rule objects together. `show-release` displays their identifiers. For a template update, repeat `--library` with the full set of desired sources. Omitted asset families use the base release. Pass `--base <release UUID>` when an update is prepared against a specific release.
 
-`query-structure` uses the same selection and expansion as prediction. Pass a JSON document with the published `domain` and `targets`, an array of `{ "target": "case-id", "query": { "phase": "decode", "sequence_lengths": [9] } }` entries. `--candidate` previews an additional source and `--graph` includes the expanded graph. The report distinguishes a missing parent, a missing child and conflicting candidates. Use `publish --add-library ... --require-structure queries.json` to keep the base sources and require the original queries to resolve before changing the current release.
+`query-structure` uses the same selection and expansion as prediction. Pass a JSON document with the target `domain` and `targets`, an array of `{ "target": "case-id", "query": { "phase": "decode", "sequence_lengths": [9] } }` entries. `--candidate` previews an additional source and `--graph` includes the expanded graph and a definition ID for each call in graph order. The report distinguishes an unobserved domain, a missing parent, a missing child and conflicting candidates. Use `publish --add-library ... --require-structure queries.json` to add sources for the original query domain and resolve those queries before changing the release.
+
+### Review a template sharing rule
+
+A release can contain native roots from several models and configurations. Each root needs evidence from its own domain. Selected leaf definitions with observed device work can share storage across those domains when their complete bodies and native framework revision agree. The cost asset keeps its own physical domain.
+
+Copy the [default rules](src/prologue/rules/defaults.json) and set `templates.shared_operations` to the operations supported by your evidence. In `cases.json`, provide a `cases` array. Each case has an `id`, `left` and `right` witnesses, and the expected `shared` Boolean. Each witness supplies the compiled source's `domain`, an observed root `query`, the relative child-slot `path`, and the source's `origin_raw_ns`. For each added operation, provide both a sharing case and a distinct-body case.
+
+```bash
+prologue publish --store /library --base "$base_release" --rules proposed.json --rule-cases cases.json --preview
+prologue publish --store /library --base "$base_release" --rules proposed.json --rule-cases cases.json
+```
+
+Set `base_release` to the current release UUID. Preview reports the case results and affected root queries. A successful publication keeps the report on the new immutable release. Full source replacement with `--library` checks any proposed sharing against an isolated build of the same sources. To rebuild an older asset, compile its original observations with the current command and publish the full source set with a current rules document.
 
 ### Compile a native Decode page-table cut
 
 For a native SGLang Prefill/Decode pair, enable the Prologue plugin on Decode and set `PROLOGUE_PD_CUT` to a JSON file in a fresh output directory. Set `configuration_id`, `detail_requests` and `parent_requests`. Use native request IDs for both lists. Run the profiler around `detail_requests` with output under `profile/` in the same directory. Submit `parent_requests` with the profiler stopped. The observer records the effective domain, KV handover and admitted page-table slices.
 
 ```bash
-prologue compile copy-observation --pd-scope copy > page-copy.json
-prologue compile assembly-observation --pd-scope assembly --for-queries queries.json > page-assembly.json
+prologue compile copy-observation --pd-scope copy --model-config model-config.json > page-copy.json
+prologue compile assembly-observation --pd-scope assembly --model-config model-config.json \
+  --for-queries queries.json > page-assembly.json
 prologue publish --store data/pd-library --add-library page-assembly.json --require-structure queries.json
 ```
 
