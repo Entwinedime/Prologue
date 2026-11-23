@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import re
 from datetime import datetime, timedelta
 from itertools import islice
 from pathlib import Path
@@ -10,29 +11,47 @@ from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.configuration import ServingInput
 
 
+def trace_time(value: str) -> tuple[datetime, int]:
+    seconds, dot, tail = value.partition(".")
+    if not dot:
+        return datetime.fromisoformat(seconds), 0
+
+    # Keep Azure's seventh fractional digit without rounding through datetime.
+    fraction = re.match(r"[0-9]{1,9}(?![0-9])", tail)
+    if fraction is None:
+        raise ValueError("trace timestamp requires one to nine fractional digits")
+    instant = datetime.fromisoformat(seconds + tail[fraction.end():])
+    return instant, int(fraction[0].ljust(9, "0"))
+
+
 def convert(path: Path, first_row: int, count: int) -> dict:
     requests = []
-    origin = previous = None
+    origin = None
+    previous_ns = 0
     with path.open(encoding="utf-8", newline="") as stream:
         rows = csv.DictReader(stream)
         if rows.fieldnames != ["TIMESTAMP", "ContextTokens", "GeneratedTokens"]:
             raise ValueError("expected the Azure 2024 inference trace columns")
 
         for index, row in enumerate(islice(rows, first_row - 1, first_row - 1 + count), first_row):
-            arrival = datetime.fromisoformat(row["TIMESTAMP"])
-            if arrival.utcoffset() is None or (previous is not None and arrival < previous):
-                raise ValueError(f"Azure row {index} has an unordered or timezone-free timestamp")
-
-            # Integer arithmetic preserves the trace's microsecond precision and tied arrivals.
+            arrival, fraction_ns = trace_time(row["TIMESTAMP"])
             if origin is None:
-                origin = arrival
+                origin = arrival, fraction_ns
+            start, start_fraction_ns = origin
+            if (arrival.utcoffset() is None) != (start.utcoffset() is None):
+                raise ValueError(f"Azure row {index} changes timestamp timezone convention")
+
+            # A timezone-free trace shares one wall-clock basis. Replay uses elapsed nanoseconds.
+            elapsed_ns = ((arrival - start) // timedelta(microseconds=1)) * 1000 + fraction_ns - start_fraction_ns
+            if elapsed_ns < previous_ns:
+                raise ValueError(f"Azure row {index} has an unordered timestamp")
             requests.append({
                 "id": f"azure-{index}",
-                "arrival_ns": ((arrival - origin) // timedelta(microseconds=1)) * 1000,
+                "arrival_ns": elapsed_ns,
                 "prompt_tokens": int(row["ContextTokens"]),
                 "output_tokens": int(row["GeneratedTokens"]),
             })
-            previous = arrival
+            previous_ns = elapsed_ns
 
     if len(requests) != count:
         raise ValueError(f"the trace has fewer than {count} rows starting at {first_row}")
