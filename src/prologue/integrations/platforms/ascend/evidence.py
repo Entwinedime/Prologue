@@ -200,9 +200,9 @@ class AscendRecording:
         return {key: self.manifest[key] for key in ("framework_revision", "model", "configuration")}
 
     def bindings(self):
-        ranks = range(self.manifest["configuration"]["tp"])
+        workers = self.manifest["workers"]
+        ranks = range(len(workers))
         if self.manifest["placement"] == "single_device":
-            workers = self.manifest["workers"]
             bindings = [workers[str(rank)]["representative"] for rank in ranks]
         else:
             bindings = list(ranks)

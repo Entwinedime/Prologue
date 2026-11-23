@@ -25,6 +25,8 @@ class Configuration:
     max_running_requests: int
     max_total_tokens: int
     max_prefill_tokens: int
+    pp: int = 1
+    microbatch_requests: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id:
@@ -32,7 +34,11 @@ class Configuration:
         if not isinstance(self.attention_backend, str) or not self.attention_backend:
             raise ValueError(f"{self.id} needs an attention backend")
 
-        limits = ("tp", "page_size", "max_running_requests", "max_total_tokens", "max_prefill_tokens")
+        limits = ("tp", "pp", "page_size", "max_running_requests", "max_total_tokens", "max_prefill_tokens")
+        if self.microbatch_requests is not None:
+            if self.pp == 1:
+                raise ValueError(f"{self.id} microbatch_requests requires pipeline parallelism")
+            limits += ("microbatch_requests",)
         for field in limits:
             value = getattr(self, field)
             if type(value) is not int or not 0 < value < 1 << 63:
@@ -40,11 +46,26 @@ class Configuration:
         if self.max_total_tokens < self.page_size:
             raise ValueError(f"{self.id} KV capacity must hold one page")
 
+    @property
+    def worker_count(self):
+        return self.tp * self.pp
+
+    def document(self):
+        fields = asdict(self)
+        if self.pp == 1:
+            del fields["pp"]
+        if self.microbatch_requests is None:
+            del fields["microbatch_requests"]
+        return fields
+
 
 def native_options(model, configuration):
-    config = asdict(configuration)
+    config = configuration.document()
     del config["id"]
     config["tp_size"] = config.pop("tp")
+    config["pp_size"] = config.pop("pp", 1)
+    if "microbatch_requests" in config:
+        config["pp_max_micro_batch_size"] = config.pop("microbatch_requests")
     weights = asdict(model)
     weights["model_path"] = weights.pop("path")
     return {

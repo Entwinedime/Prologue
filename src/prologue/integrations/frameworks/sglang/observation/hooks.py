@@ -12,7 +12,7 @@ from prologue.integrations.frameworks.sglang.observation.parallel import RankPro
 
 
 class Observation:
-    def __init__(self, output, requests, mode, parallel):
+    def __init__(self, output, requests, mode, parallel, pipeline):
         self.output = output
         self.requests = requests
         self.publications = {native: [] for native in requests}
@@ -20,7 +20,8 @@ class Observation:
         self.mode = mode
         self.capture_calls = mode == "detailed" and not parallel
         self.parallel = RankProfiles(self) if parallel else None
-        self.active_batch = None
+        self.pending_batches = {}
+        self.result_batch = None
         self.result_cpu_started = None
         self.host_work = []
         self.prepare_cpu_ns = 0
@@ -28,6 +29,11 @@ class Observation:
             from torch.autograd.profiler import record_function
 
             self.calls = Calls(record_function)
+        self.pipeline = None
+        if pipeline:
+            from prologue.integrations.frameworks.sglang.observation.pipeline import PipelineObservation
+
+            self.pipeline = PipelineObservation(self)
 
     def begin_window(self, output, requests, capture_calls):
         self.output = output
@@ -36,6 +42,8 @@ class Observation:
         self.finished.clear()
         self.capture_calls = capture_calls
         self.calls.reset()
+        if self.pipeline is not None:
+            self.pipeline.reset()
 
     def flush(self, original, scheduler, empty_cache=True):
         # Drain logical KV state while preserving warmed device allocator workspaces.
@@ -60,7 +68,7 @@ class Observation:
                 rows.append({"count": count, "raw_ns": now})
                 if self.result_cpu_started is not None:
                     elapsed = thread_time_ns() - self.result_cpu_started
-                    self.active_batch["publication_cpu_ns"][self.requests[rid]] = elapsed
+                    self.result_batch["publication_cpu_ns"][self.requests[rid]] = elapsed
             if finished is not None:
                 self.finished.add(rid)
         return result
@@ -68,6 +76,8 @@ class Observation:
     def save(self):
         document = {"publications": {self.requests[rid]: rows for rid, rows in self.publications.items()}}
         if self.capture_calls:
+            if self.pending_batches:
+                raise ValueError("the native observation closed before every captured batch finished")
             document["calls"] = self.calls.rows
         elif self.mode == "host-timing":
             document["host_work"] = self.host_work
@@ -85,13 +95,13 @@ class Observation:
         self.prepare_cpu_ns = thread_time_ns() - began
         return batch
 
-    def batch(self, original, scheduler, batch, *args, **kwargs):
+    def batch(self, original, scheduler, batch, pp_proxy_tensors=None):
         if self.mode == "detailed" and not self.capture_calls:
-            return original(scheduler, batch, *args, **kwargs)
+            return original(scheduler, batch, pp_proxy_tensors)
 
         requests = [self.requests.get(request.rid) for request in batch.reqs]
         if not any(request is not None for request in requests):
-            return original(scheduler, batch, *args, **kwargs)
+            return original(scheduler, batch, pp_proxy_tensors)
         if any(request is None for request in requests):
             raise ValueError("warmup and observed requests occupied the same batch")
 
@@ -107,19 +117,27 @@ class Observation:
             for identity, request in zip(requests, batch.reqs, strict=True)
         ]
         if self.mode == "host-timing":
-            self.active_batch = {"phase": phase, "members": members, "prepare_cpu_ns": self.prepare_cpu_ns,
-                                 "publication_cpu_ns": {}}
+            call = {"phase": phase, "members": members, "prepare_cpu_ns": self.prepare_cpu_ns,
+                    "publication_cpu_ns": {}}
+            self.pending_batches[id(batch)] = call
             began = thread_time_ns()
-            value = original(scheduler, batch, *args, **kwargs)
-            self.active_batch["forward_cpu_ns"] = thread_time_ns() - began
+            value = original(scheduler, batch, pp_proxy_tensors)
+            call["forward_cpu_ns"] = thread_time_ns() - began
             return value
 
         parameters = {"phase": phase, "members": len(requests)}
         with self.calls.scope("batch", "Scheduler.run_batch", "scheduler", parameters) as call:
-            self.active_batch = call
+            self.pending_batches[id(batch)] = call
             call["members"] = members
             call["resources"] = self.resources(scheduler)
-            return original(scheduler, batch, *args, **kwargs)
+            if pp_proxy_tensors is not None:
+                call["inputs"] = self.pipeline.ports(pp_proxy_tensors.tensors)
+            result = original(scheduler, batch, pp_proxy_tensors)
+            if self.pipeline is not None:
+                proxy = result.pp_hidden_states_proxy_tensors
+                call["outputs"] = (self.pipeline.ports(proxy.tensors) if proxy is not None else
+                                   self.calls.ports(next_token_ids=result.next_token_ids))
+            return result
 
     @staticmethod
     def resources(scheduler):
@@ -129,11 +147,12 @@ class Observation:
         }
 
     def process_result(self, original, scheduler, batch, result):
-        if self.active_batch is None:
+        call = self.pending_batches.pop(id(batch), None)
+        if call is None:
             return original(scheduler, batch, result)
 
-        call = self.active_batch
         if self.mode == "host-timing":
+            self.result_batch = call
             self.result_cpu_started = thread_time_ns()
             try:
                 value = original(scheduler, batch, result)
@@ -142,9 +161,11 @@ class Observation:
                 return value
             finally:
                 self.result_cpu_started = None
-                self.active_batch = None
+                self.result_batch = None
 
-        self.active_batch = None
+        if self.pipeline is not None:
+            return self.pipeline.process(original, scheduler, batch, result, call)
+
         begin = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
         value = original(scheduler, batch, result)
         call["result_processing"] = {
@@ -177,7 +198,9 @@ class Observation:
         from sglang.srt.layers.radix_attention import RadixAttention
 
         result = original(runner)
-        for index, layer in enumerate(runner.model.model.layers):
+        body = runner.model.model
+        for index in range(body.start_layer, body.end_layer):
+            layer = body.layers[index]
             site = f"layers.{index}"
             layer.forward = partial(self.layer, layer.forward, layer, site)
             self_attention = layer.self_attn
@@ -210,6 +233,8 @@ class Observation:
                                   self.load_model, HookType.AROUND)
         if self.parallel is not None:
             self.parallel.install()
+        if self.pipeline is not None:
+            self.pipeline.install()
 
 
 def install():
@@ -226,8 +251,9 @@ def install():
         path = Path(path)
         document = json.loads(path.read_text(encoding="utf-8"))
         placement = document["parallel_placement"]
+        pipeline = document["pp"] > 1
         if placement == "single_device":
-            from prologue.integrations.frameworks.sglang.ascend.shards import StagedCollectives
+            from prologue.integrations.frameworks.sglang.ascend.shards import StagedTransport
 
-            StagedCollectives(path.parent / ".device.lock").install()
-        Observation(path.parent, document["requests"], document["mode"], placement is not None).install()
+            StagedTransport(path.parent / ".device.lock").install(pipeline)
+        Observation(path.parent, document["requests"], document["mode"], placement is not None, pipeline).install()

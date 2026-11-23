@@ -29,7 +29,7 @@ class Plan:
     def document(self) -> dict:
         return {
             "model": asdict(self.model),
-            "configurations": [asdict(configuration) for configuration in self.configurations],
+            "configurations": [configuration.document() for configuration in self.configurations],
             "workloads": self.workloads,
             "targets": [
                 {"configuration": configuration.id, "workload": workload["id"]}

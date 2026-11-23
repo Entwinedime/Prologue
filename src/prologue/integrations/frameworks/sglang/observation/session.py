@@ -5,7 +5,7 @@ import json
 import os
 from dataclasses import asdict
 from pathlib import Path
-from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
+from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns, monotonic, sleep
 
 from prologue.integrations.frameworks.sglang.configuration import Configuration, Model, native_options
 from prologue.integrations.frameworks.sglang.observation.parallel import RankPlan
@@ -20,8 +20,8 @@ class Session:
         self.output = output.resolve()
         self.mode = mode
         self.placement = placement
-        if self.configuration.tp > 1 and mode != "detailed":
-            raise ValueError("native TP groups currently require detailed observation")
+        if self.configuration.worker_count > 1 and mode != "detailed":
+            raise ValueError("parallel workers currently require detailed observation")
 
     @staticmethod
     async def request(engine, native, request):
@@ -58,6 +58,21 @@ class Session:
     def aliases(self, phase):
         return {f"{phase}/{index}": request["id"] for index, request in enumerate(self.workload["requests"])}
 
+    def await_profiles(self, engine, directory, marker):
+        if self.configuration.worker_count == 1:
+            return
+
+        # The tokenizer receives one reply even when the native pipeline propagates the request farther.
+        missing = {directory / f"rank-{rank}" / marker for rank in range(self.configuration.worker_count)}
+        deadline = monotonic() + engine.server_args.watchdog_timeout
+        while missing:
+            missing = {path for path in missing if not path.is_file()}
+            if missing:
+                if monotonic() >= deadline:
+                    ranks = ", ".join(sorted(path.parent.name for path in missing))
+                    raise TimeoutError(f"native profile {marker} missing acknowledgments from {ranks}")
+                sleep(0.02)
+
     def record(self, engine, directory, phase):
         detail = self.mode == "detailed"
         started = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
@@ -66,12 +81,15 @@ class Session:
             engine.start_profile(output_dir=str(directory), activities=["CPU", "GPU"],
                                  with_stack=False, record_shapes=False)
         try:
+            if detail:
+                self.await_profiles(engine, directory, "started")
             delivery = engine.loop.run_until_complete(self.dispatch(engine, phase))
             self.drain(engine)
             observed = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
         finally:
             if detail:
                 engine.stop_profile()
+                self.await_profiles(engine, directory, "stopped")
         record = {"delivery": delivery, "observation_ns": observed - started}
         if detail:
             record["profile_export_ns"] = clock_gettime_ns(CLOCK_MONOTONIC_RAW) - observed
@@ -85,7 +103,7 @@ class Session:
                 raise ValueError(f"incomplete native publication evidence for {request['id']}")
 
     def record_workers(self, engine):
-        if self.configuration.tp == 1:
+        if self.configuration.worker_count == 1:
             recorded = self.record(engine, self.output / "profile", "source")
             self.check_publications(self.output)
             if self.mode == "detailed":
@@ -93,7 +111,7 @@ class Session:
                 recorded["trace"] = str(trace.relative_to(self.output))
             return recorded
 
-        plan = RankPlan(self.output, self.configuration.tp, self.placement)
+        plan = RankPlan(self.output, self.configuration, self.placement)
         windows = []
         for index, ranks in enumerate(plan.windows):
             directory = self.output / f"window-{index}"
@@ -102,7 +120,7 @@ class Session:
             selection = {"ranks": ranks, "requests": self.aliases(phase)}
             (directory / "selection.json").write_text(json.dumps(selection), encoding="utf-8")
             record = self.record(engine, directory, phase)
-            self.check_publications(directory / "rank-0")
+            self.check_publications(directory / f"rank-{plan.publisher}")
 
             traces = {}
             for rank in ranks:
@@ -113,9 +131,9 @@ class Session:
 
     def run(self):
         self.output.mkdir()
-        parallel = self.configuration.tp > 1
+        parallel = self.configuration.worker_count > 1
         specification = self.output / "observation.json"
-        description = {"requests": self.aliases("source"), "mode": self.mode,
+        description = {"requests": self.aliases("source"), "mode": self.mode, "pp": self.configuration.pp,
                        "parallel_placement": self.placement if parallel else None}
         specification.write_text(json.dumps(description), encoding="utf-8")
         os.environ["PROLOGUE_OBSERVATION"] = str(specification)
@@ -135,7 +153,7 @@ class Session:
 
         manifest = {
             "mode": self.mode, "framework_revision": os.environ["PROLOGUE_SGLANG_REVISION"],
-            "model": asdict(self.model), "configuration": asdict(self.configuration), "workload": self.workload,
+            "model": asdict(self.model), "configuration": self.configuration.document(), "workload": self.workload,
             "initial_state": {"kv": "empty", "workspace": "warmed"}, "placement": self.placement,
             "clock": "monotonic_raw_ns", **recorded,
             "initialization_ns": initialized - started, "warmup_ns": warmed - initialized,

@@ -1,4 +1,4 @@
-"""Place native tensor-parallel workers on one visible Ascend device."""
+"""Place native parallel workers on one visible Ascend device."""
 
 import fcntl
 import inspect
@@ -17,12 +17,13 @@ class SingleDeviceEngine(Engine):
     def run_scheduler_process_func(server_args, port_args, gpu_id, tp_rank, attn_cp_rank, moe_dp_rank,
                                    moe_ep_rank, pp_rank, dp_rank, pipe_writer):
         if torch.npu.device_count() != 1:
-            raise ValueError("tensor-parallel shard acquisition requires one visible Ascend device")
+            raise ValueError("shard acquisition requires one visible Ascend device")
         torch.npu.set_device(0)
 
         # The native model builds its original groups and shards from this host world.
         parallel_state.init_distributed_environment(
-            world_size=server_args.tp_size, rank=tp_rank, local_rank=0, backend="gloo",
+            world_size=server_args.tp_size * server_args.pp_size,
+            rank=pp_rank * server_args.tp_size + tp_rank, local_rank=0, backend="gloo",
             distributed_init_method=f"tcp://127.0.0.1:{port_args.nccl_port}",
             timeout=server_args.dist_timeout,
         )
@@ -30,7 +31,29 @@ class SingleDeviceEngine(Engine):
                               moe_ep_rank, pp_rank, dp_rank, pipe_writer)
 
 
-class StagedCollectives:
+class StagedWork:
+    def __init__(self, transport, work, buffer, target):
+        self.transport = transport
+        self.work = work
+        self.buffer = buffer
+        self.target = target
+
+    def wait(self, *args, **kwargs):
+        if self.work is None:
+            return True
+        with self.transport.rendezvous():
+            completed = self.work.wait(*args, **kwargs)
+        if not completed:
+            return completed
+
+        # A receive makes the original device tensor available at the native wait.
+        if self.target is not None:
+            self.transport.compute(self.target.copy_, self.buffer)
+        self.work = self.buffer = self.target = None
+        return completed
+
+
+class StagedTransport:
     def __init__(self, lease_path):
         self.lease_path = lease_path
         self.lease = None
@@ -82,7 +105,23 @@ class StagedCollectives:
         self.compute(target.copy_, output)
         return result
 
-    def install(self):
+    def post(self, receives, signature, original, *args, **kwargs):
+        arguments = signature.bind(*args, **kwargs)
+        tensor = arguments.arguments["tensor"]
+        if tensor.device.type == "cpu":
+            with self.rendezvous():
+                return original(*args, **kwargs)
+
+        if receives:
+            buffer = torch.empty_like(tensor, device="cpu", memory_format=torch.contiguous_format)
+        else:
+            buffer = self.compute(tensor.detach().to, device="cpu", memory_format=torch.contiguous_format)
+        arguments.arguments["tensor"] = buffer
+        with self.rendezvous():
+            work = original(*arguments.args, **arguments.kwargs)
+        return StagedWork(self, work, buffer, tensor if receives else None)
+
+    def install(self, pipeline):
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
         for name, source, target in (
@@ -92,6 +131,11 @@ class StagedCollectives:
         ):
             hook = partial(self.exchange, inspect.signature(getattr(distributed, name)), source, target)
             HookRegistry.register(f"torch.distributed.{name}", hook, HookType.AROUND)
+        if pipeline:
+            for name in ("isend", "irecv"):
+                hook = partial(self.post, name == "irecv", inspect.signature(getattr(distributed, name)))
+                HookRegistry.register(f"torch.distributed.{name}", hook, HookType.AROUND)
+
         runner = "sglang.srt.model_executor.model_runner.ModelRunner."
         for method in ("forward", "sample"):
             HookRegistry.register(runner + method, self.compute, HookType.AROUND)
