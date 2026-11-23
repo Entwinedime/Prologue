@@ -58,6 +58,12 @@ For a physical reference, expose the devices for the target topology and use `--
 
 The current ranked path covers synchronous dense TP with one observed compute stream per rank. It preserves the native publication owner's timing and the other ranks' result dependencies.
 
+### Observe a pipeline target
+
+Set `pp` to the number of pipeline stages and optionally set `microbatch_requests` to the native microbatch limit. Tensor parallelism within each stage still uses `tp`. With `--placement single_device`, the observer places the native shards on one visible device and collects the necessary stage and rank roles in consecutive windows. Use `--placement full` for a simultaneous physical reference.
+
+Compile the single-device observation and use the separate full recording with `verify-structure`. The native control image runs one scheduler loop per pipeline stage. For the qualified PP3 and TP2 × PP3 targets, each stage's original control rank makes the shared batching decisions while the core tracks device work and transfer readiness for each physical rank. Autonomous pipeline prediction reports a cost gap pending qualified cut and transport timing models.
+
 ## Fit and publish shared assets
 
 Capture a separate training observation as `host-training` with `--mode host-timing`. Use detailed training observations for device tasks, and reserve separate observations for evaluation.
