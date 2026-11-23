@@ -1,6 +1,6 @@
 # Prologue
 
-Prologue models serving for one model across multiple configurations and request workloads. The current commands plan tasks, observe native SGLang serving on one Ascend card, build hierarchical execution templates, and verify their expansion under native scheduling.
+Prologue models serving for one model across multiple configurations and request workloads. The current commands plan tasks, observe native SGLang serving on one Ascend card, build hierarchical execution templates, and predict or verify covered TP1 targets.
 
 ## Build and plan a task
 
@@ -77,6 +77,23 @@ docker run --rm --runtime runc --network none \
 ```
 
 This verification path currently covers synchronous TP1 actions whose batch shapes have source templates. Repeat `--library` to load additional observations collected in the same domain. The report includes the first missing condition or disagreement and the matched action count.
+
+## Fit costs and predict
+
+Collect a separate observation on the source deployment with `--mode host-timing` for scheduler thread time. Use detailed training observations for device tasks. Keep the detailed evaluation target and lightweight scoring run separate from training.
+
+```bash
+prologue fit-costs --device detailed --host host-training > costs.json
+prologue predict task.json --configuration tp1-page16 --workload short \
+  --library templates.json --model-config model-config.json \
+  --costs costs.json --hardware hardware.json --socket control/control.sock > prediction.json
+prologue verify-performance reference --costs costs.json
+prologue score prediction.json light-reference
+```
+
+Run these commands inside the application image. Start the CPU scheduler for `predict` using the same socket procedure as structure verification. Declare the target deployment with a hardware descriptor matching the fields in `costs.json` under `domain.hardware`. The current estimator covers observed joint feature coordinates in that deployment. Use `quote-costs` to check a set of coordinates before running a target.
+
+Fixed-graph verification first replays the recorded work and checks its endpoints. It then replaces device service durations and reports changes before publication and after restoring each device work kind. Autonomous scoring uses a separate lightweight reference for TTFT, TPOT, and throughput.
 
 ## License
 
