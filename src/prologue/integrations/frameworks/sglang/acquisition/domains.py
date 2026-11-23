@@ -99,7 +99,7 @@ class SourceDomain:
                             observed.add("prefill/multiple/unit_queries")
                     elif members == 1:
                         observed.add(f"{family}/single")
-                        if family == "prefill" and (shape := LifecycleProbes.prefill_shape_witness(parameters)):
+                        if family in {"prefill", "decode"} and (shape := LifecycleProbes.model_shape_witness(family, parameters)):
                             observed.add(shape)
             missing = set(required) - observed
             if missing:

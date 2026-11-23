@@ -12,6 +12,7 @@ from prologue.integrations.frameworks.sglang.configuration import NativeConfigur
 
 class LifecycleProbes:
     def __init__(self, instances, topologies):
+        self.instances = instances
         self.page_size = instances[0].configuration.values["page_size"]
         self.chunks = {instance.configuration.values["prefill_chunk_tokens"] for instance in instances}
         self.prefix_cache = any(instance.configuration.values["prefix_cache"] for instance in instances)
@@ -126,53 +127,95 @@ class LifecycleProbes:
         return [request for identity, request in content.requests.items() if identity in shared and request["prompt_tokens"] > page_size]
 
     @staticmethod
-    def prefill_shape_witness(parameters):
-        shape = "prefill/single"
+    def model_shape_witness(phase, parameters):
+        singleton = f"{phase}/single"
+        shape = singleton
         if "block_table_strided" in parameters:
             shape += f"/block_table_strided/{parameters['block_table_strided']}"
         if parameters["model_tokens"] > parameters["input_tokens"]:
             shape += "/padded"
-        return None if shape == "prefill/single" else shape
+        return None if shape == singleton else shape
+
+    @staticmethod
+    def cold_model_spans(instance, request):
+        tokens = request["prompt_tokens"]
+        config = instance.configuration.values
+        page = config["page_size"]
+        capacity = config["max_total_tokens"] // page * page
+        if tokens > capacity:
+            return
+
+        if instance.mode != "decode":
+
+            # A cold singleton can exercise different layouts in its first, interior and last chunks.
+            chunk = config["prefill_chunk_tokens"] or tokens
+            tail = (tokens - 1) // chunk * chunk
+            yield "prefill", 0, min(tokens, chunk)
+            if tail > chunk:
+                yield "prefill", chunk, chunk
+            if tail:
+                yield "prefill", tail, tokens - tail
+
+        # Prefill yields the first output. Later Decode calls extend the same one-token model input.
+        last = min(tokens + request["output_tokens"] - 2, capacity - 1)
+        if instance.mode != "prefill" and last >= tokens:
+            for context in {tokens, last}:
+                yield "decode", context, 1
 
     @classmethod
-    def prefill_shape(cls, configuration, request):
-        tokens = request["prompt_tokens"]
+    def model_shapes(cls, instance, request):
+        configuration = instance.configuration
         config = configuration.values
-        page = config["page_size"]
-        if (tokens + page - 1) // page > config["max_total_tokens"] // page:
-            return None
-        parameters = {"page_size": page, "model_members": 1, "input_tokens": tokens,
-                      "model_tokens": BatchTensors.align_model_tokens(tokens, configuration.model_token_alignment())}
-        parameters.update(BatchTensors.attention_layout(config["attention_backend"], parameters,
-                                                       [{"context_tokens": 0, "new_tokens": tokens}]))
-        return cls.prefill_shape_witness(parameters)
-
-    def isolated_prefill(self, workload, groups, seeds, minimum_output):
-        configuration = self.prefill.configuration
         alignment = configuration.model_token_alignment()
+        shapes = set()
+        for phase, context, length in cls.cold_model_spans(instance, request):
+            model_tokens = BatchTensors.align_model_tokens(length, alignment)
+            parameters = {"page_size": config["page_size"], "input_tokens": length, "model_tokens": model_tokens,
+                          "model_members": model_tokens if phase == "decode" else 1}
+            parameters.update(BatchTensors.attention_layout(config["attention_backend"], parameters,
+                                                           [{"context_tokens": context, "new_tokens": length}]))
+            if shape := cls.model_shape_witness(phase, parameters):
+                shapes.add(shape)
+        return shapes
+
+    def request_shapes(self, request):
+        return {(instance.mode, shape) for instance in self.instances for shape in self.model_shapes(instance, request)}
+
+    def isolated_model_shapes(self, workload, groups, seeds, minimum_output):
+        alignment = self.prefill.configuration.model_token_alignment()
         candidates = {}
         for request in sorted(seeds, key=lambda row: (
             row["output_tokens"] < minimum_output, row["prompt_tokens"] + row["output_tokens"], row["id"],
         )):
-            if shape := self.prefill_shape(configuration, request):
-                candidates.setdefault(shape, (request, None))
-            if alignment == 1:
-                continue
+            variants = [(None, request)]
 
             # Shorten within the available route assignments to witness the other padding branch.
-            tokens = request["prompt_tokens"]
-            aligned = tokens - tokens % alignment
-            alternate = aligned - 1 if tokens == aligned else aligned
-            if alternate > 0 and (shape := self.prefill_shape(configuration, {**request, "prompt_tokens": alternate})):
-                candidates.setdefault(shape, (request, alternate))
-        requests = {request["id"]: request for request in workload["requests"]}
-        isolated = {self.prefill_shape(configuration, requests[group[0]]) for group in groups if len(group) == 1}
+            if alignment > 1:
+                tokens = request["prompt_tokens"]
+                aligned = tokens - tokens % alignment
+                alternate = aligned - 1 if tokens == aligned else aligned
+                if alternate > 0:
+                    variants.append((alternate, {**request, "prompt_tokens": alternate}))
+            for prompt, candidate in variants:
+                shapes = self.request_shapes(candidate)
+                for shape in shapes:
+                    candidates.setdefault(shape, (request, prompt, shapes))
 
-        # A native singleton must exercise its attention layout together with its padding branch.
-        for shape in sorted(candidates.keys() - isolated):
-            source, prompt = candidates[shape]
-            self.append(workload, groups, source, f"isolated_prefill/{shape}", prompts=(prompt,))
-        return sorted(candidates)
+        requests = {request["id"]: request for request in workload["requests"]}
+        isolated = {shape for group in groups if len(group) == 1
+                    for shape in self.request_shapes(requests[group[0]])}
+
+        coverage = {}
+        for mode, shape in sorted(candidates):
+            coverage.setdefault(mode, []).append(shape)
+            if (mode, shape) in isolated:
+                continue
+
+            # One real request can supply both phase layouts and need only be submitted once.
+            source, prompt, shapes = candidates[mode, shape]
+            self.append(workload, groups, source, f"isolated/{mode}/{shape}", prompts=(prompt,))
+            isolated.update(shapes)
+        return coverage
 
     def extend(self, workload, groups, *, model_phases, service_evidence):
         seeds = tuple(workload["requests"])
@@ -192,8 +235,8 @@ class LifecycleProbes:
                     self.append(workload, groups, source, "cache_seed")
                 self.append(workload, groups, source, "cache_reuse")
         minimum_output = 2 if "decode" in model_phases else 3
-        if shapes := self.isolated_prefill(workload, groups, seeds, minimum_output):
-            coverage.setdefault(self.prefill.mode, []).extend(shapes)
+        for mode, shapes in self.isolated_model_shapes(workload, groups, seeds, minimum_output).items():
+            coverage.setdefault(mode, []).extend(shapes)
         candidates = [request for request in workload["requests"] if request["output_tokens"] >= minimum_output]
         if not candidates and model_phases:
             candidates = workload["requests"]
@@ -228,8 +271,10 @@ class LifecycleProbes:
             return []
 
         # The compact pair's first Decode reuses both prompt pages, independently of later page growth.
-        unit_pair = joint and self.page_probe_capacity(pool_pages, unit_output) >= 2
-        coverage = ["allocation/decode_tail/members/2", "prefill/multiple/unit_queries"] if unit_pair else []
+        unit_pair = joint and self.decode_page_capacity(pool_pages, unit_output) >= 2
+        coverage = ["allocation/decode_tail/members/2"] if unit_pair else []
+        if unit_pair and self.paired_prefill_fits():
+            coverage.append("prefill/multiple/unit_queries")
         page_cases = []
         for identity, request in decodable.items():
             prompt = min(request["prompt_tokens"], self.page_size)
@@ -241,13 +286,13 @@ class LifecycleProbes:
 
         crossing, _, prompt, identity = min(page_cases)
         source = decodable[identity]
-        widest = min(requested_width, self.page_probe_capacity(pool_pages, crossing))
+        widest = min(requested_width, self.decode_page_capacity(pool_pages, crossing))
         if widest < 1:
             return coverage
 
         # Keep a further Decode step when it fits the same width.
         output = crossing
-        if source["output_tokens"] > crossing and self.page_probe_capacity(pool_pages, crossing + 1) >= widest:
+        if source["output_tokens"] > crossing and self.decode_page_capacity(pool_pages, crossing + 1) >= widest:
             output += 1
         widths = {1, widest}
         if widest > 1:
@@ -270,27 +315,29 @@ class LifecycleProbes:
         coverage.extend(f"allocation/decode_pages/members/{width}" for width in sorted(widths))
         return coverage
 
-    def page_probe_capacity(self, pool_pages, output):
+    def paired_prefill_fits(self):
+        configuration, page = self.ordinary_configuration, self.page_size
+        chunk = configuration["prefill_chunk_tokens"]
+        input_floor = (2 if configuration["prefix_cache"] else 1) * page
+        return configuration["max_prefill_tokens"] > input_floor and (not chunk or chunk >= 2 * page)
+
+    def decode_page_capacity(self, pool_pages, output):
         configuration, page = self.ordinary_configuration, self.page_size
         slots = NativeConfiguration.batch_capacity(configuration)
-        input_tokens = configuration["max_prefill_tokens"]
-        chunk = configuration["prefill_chunk_tokens"]
         pool_tokens = pool_pages * page
 
         # PrefillAdder reserves another page for each cold one-page input.
         reservation = 2 * page + output
         if configuration["prefix_cache"]:
-            input_slots = max(1, (input_tokens - 1) // page)
             pool_slots = (pool_tokens - 1) // reservation
         else:
 
             # Ignore-EOS admission deducts the last page reserve after admitting the request.
-            input_slots = (input_tokens + page - 1) // page
             pool_slots = (pool_tokens + page - 1) // (reservation + 1)
-        if chunk:
-            input_slots = min(input_slots, max(1, chunk // page))
+
+        # Requests admitted in separate Prefill rounds can join the same Decode batch.
         peer_pages = (output + page - 1) // page
-        return min(slots, input_slots, pool_slots, 1 + (pool_pages - 2) // peer_pages)
+        return min(slots, pool_slots, 1 + (pool_pages - 2) // peer_pages)
 
     def append(self, workload, groups, source, purpose, *, prompts=(None,), output_tokens=None):
         identities = []

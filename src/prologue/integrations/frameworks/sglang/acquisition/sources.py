@@ -1,7 +1,8 @@
 """Choose a finite SGLang source workload from declared input opportunities."""
 
 import json
-from collections import Counter
+from collections import defaultdict
+from heapq import nlargest
 
 from prologue.integrations.frameworks.sglang.allocation import AllocationABI
 from prologue.integrations.frameworks.sglang.configuration import NativeConfiguration, ServingInput
@@ -90,11 +91,8 @@ class RepresentativeSources:
             # PD defers returned pages even without caching; sharing and admission still decide actual pressure.
             if (config["prefix_cache"] or instance.mode != "null") and max(pages) <= config["max_total_tokens"] // page_size < sum(pages):
                 conditions.add(prefix + "aggregate_kv_demand_exceeds_pool")
+            conditions.update(prefix + shape for request in requests for shape in LifecycleProbes.model_shapes(instance, request))
             if instance.mode != "decode":
-
-                # Preserve native singleton variants as well as opportunities to combine requests.
-                conditions.update(prefix + shape for request in requests
-                                  if (shape := LifecycleProbes.prefill_shape(instance.configuration, request)))
                 bound, repeated = RepresentativeSources.prefill_page_bounds(config, requests, pages)
                 if repeated:
                     conditions.add(prefix + "multiple_prefill_inputs")
@@ -128,22 +126,61 @@ class RepresentativeSources:
         return pages
 
     @staticmethod
-    def service_inputs(instances, workload):
+    def service_batches(instance, arrivals):
+        mode, configuration = instance.mode, instance.configuration.values
+        capacity = NativeConfiguration.batch_capacity(configuration)
+        pool_tokens = configuration["max_total_tokens"]
+        axes = defaultdict(set)
+        for cohort in arrivals.values():
+            if mode != "decode":
+                axes["prefill_members"].add(min(capacity, len(cohort)))
+
+            if mode != "prefill":
+                contexts = nlargest(capacity, (r["prompt_tokens"] + r["output_tokens"] - 2
+                                               for r in cohort if r["output_tokens"] > 1))
+                width, context_tokens = len(contexts), sum(contexts)
+                if contexts:
+                    axes["decode_members"].add(width)
+                if width > 1 and context_tokens + width <= pool_tokens:
+                    axes[f"decode_context_total/{width}"].add(context_tokens)
+
+            # Equal output lengths can complete together. Inspect the combined cold release opportunity.
+            if mode == "null" and not configuration["prefix_cache"]:
+                lengths = defaultdict(list)
+                for request in cohort:
+                    output = request["output_tokens"]
+                    lengths[output].append(request["prompt_tokens"] + output - 1)
+                for group in lengths.values():
+                    completed = nlargest(capacity, group)
+                    release_tokens = sum(completed)
+                    if len(completed) > 1 and release_tokens <= pool_tokens:
+                        axes[f"release_tokens_total/{len(completed)}"].add(release_tokens)
+        return axes
+
+    @classmethod
+    def service_inputs(cls, instances, workload):
         requests = workload["requests"]
         inputs = {
             "prompt": {request["prompt_tokens"] for request in requests},
             "decode_context": {request["prompt_tokens"] + request["output_tokens"] - 2
                                for request in requests if request["output_tokens"] > 1},
         }
-        arrivals = {"prefill": Counter(request["arrival_ns"] for request in requests),
-                    "decode": Counter(request["arrival_ns"] for request in requests if request["output_tokens"] > 1)}
+        arrivals = defaultdict(list)
+        for request in requests:
+            arrivals[request["arrival_ns"]].append(request)
         for instance in instances:
-            capacity = NativeConfiguration.batch_capacity(instance.configuration.values)
-            for phase, groups in arrivals.items():
-                if instance.mode in ("null", phase):
+            axes = cls.service_batches(instance, arrivals)
 
-                    # Preserve possible concurrent inputs. Native admission can still split the cohort.
-                    inputs[f"{instance.mode}/{phase}_members"] = {min(capacity, size) for size in groups.values()}
+            # Keep the shortest continuation query at its largest eligible context, separately from the first chunk.
+            if instance.mode != "decode" and instance.configuration.values["prefill_chunk_tokens"]:
+                for request in requests:
+                    for phase, context, query in LifecycleProbes.cold_model_spans(instance, request):
+                        if phase == "prefill":
+                            axes["prefill_query_tokens"].add(query)
+                            axes["prefill_context_tokens"].add(context)
+                            if context:
+                                axes["prefill_query_with_prefix"].add((query, -context))
+            inputs.update({f"{instance.mode}/{axis}": values for axis, values in axes.items()})
         return inputs
 
     @classmethod
@@ -151,7 +188,8 @@ class RepresentativeSources:
         if not bounds:
             return set()
         inputs = cls.service_inputs(instances, workload)
-        return {f"service_input/{axis}/{point}" for axis, points in bounds.items() for point in inputs[axis] & points}
+        return {f"service_input/{axis}/{point}" for axis in inputs.keys() & bounds.keys()
+                for point in inputs[axis] & bounds[axis]}
 
     def reduce_requests(self, instances, workload, required, bounds):
         reduced = workload
@@ -296,12 +334,11 @@ class RepresentativeSources:
         geometry = {}
         if service_evidence:
             for (configuration, padding), remaining in groups.items():
-                inputs = [self.service_inputs(instances[configuration], self.workloads[item["name"]]) for item in remaining]
-                bounds = {}
-                for axis in inputs[0]:
-                    points = set().union(*(row[axis] for row in inputs))
-                    if points:
-                        bounds[axis] = {min(points), max(points)}
+                inputs = defaultdict(set)
+                for item in remaining:
+                    for axis, points in self.service_inputs(instances[configuration], self.workloads[item["name"]]).items():
+                        inputs[axis].update(points)
+                bounds = {axis: {min(points), max(points)} for axis, points in inputs.items() if points}
                 geometry[configuration, padding] = bounds
                 for item in remaining:
                     item["conditions"].update(self.service_input_evidence(instances[configuration], self.workloads[item["name"]], bounds))

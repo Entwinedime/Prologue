@@ -14,7 +14,7 @@ class PlanningProcess:
         write_json(output / "input.json", planner.source, indent=2, replace=False)
         (output / "sources").mkdir()
         workload_basis = (
-            "Performance sources retain length endpoints and batching opportunities."
+            "Performance sources retain request lengths, Prefill chunk inputs and batching opportunities."
             if self.service_evidence else "Structure sources shorten requests where possible and include the required lifecycle cases."
         )
         lines = [
