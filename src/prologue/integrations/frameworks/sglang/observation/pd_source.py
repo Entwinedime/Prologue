@@ -3,13 +3,11 @@
 import json
 from decimal import Decimal
 
+from prologue.integrations.frameworks.sglang.page_table import PageTable
 from prologue.integrations.platforms.ascend.evidence import AscendEvidence
 
 
 class PDSource:
-    copy_purpose = "pd_page_copy"
-    assembly_purpose = "pd_page_table_assembly"
-
     def __init__(self, directory):
         self.directory = directory
         self.domain = json.loads((directory / "pd-domain.json").read_text(encoding="utf-8"))
@@ -59,12 +57,6 @@ class PDSource:
         if cursor != batch["output_size"]:
             raise ValueError("page-table copies do not cover the native output")
 
-    @classmethod
-    def geometry(cls, copy):
-        begin, end = copy["source"]
-        fields = ("source_dtype", "target_dtype", "source_device", "target_device")
-        return {"phase": cls.copy_purpose, "length": end - begin, **{field: copy[field] for field in fields}}
-
     @staticmethod
     def port(name, copy, side):
         return {"name": name, "shape": [copy["length"]], "dtype": copy[f"{side}_dtype"],
@@ -77,9 +69,9 @@ class PDSource:
                 identity = copy["marker"]
                 if identity != len(calls):
                     raise ValueError("profiled copy markers must identify each observed call once")
-                query = self.geometry(copy)
+                query = PageTable.copy(copy)
                 calls.append({
-                    "id": identity, "parent": None, "query": query, "operation": self.copy_purpose,
+                    "id": identity, "parent": None, "query": query, "operation": PageTable.copy_operation,
                     "implementation": "sglang.prebuilt.page_table_assignment", "parameters": query,
                     "inputs": [{**self.port("source", query, "source"), "tensor": 0}],
                     "outputs": [{**self.port("destination", query, "target"), "tensor": 1}],
@@ -91,24 +83,23 @@ class PDSource:
         for batch in batches:
             root = len(calls)
             copies = batch["copies"]
-            output = {**self.port("out_cache_loc", self.geometry(copies[0]), "target"),
+            query = PageTable.assembly(copies)
+            output = {**self.port("out_cache_loc", query["members"][0]["copy"], "target"),
                       "shape": [batch["output_size"]], "views": []}
-            query = {"phase": self.assembly_purpose, "members": []}
             inputs = []
             calls.append({
-                "id": root, "parent": None, "query": query, "operation": self.assembly_purpose,
+                "id": root, "parent": None, "query": query, "operation": PageTable.assembly_operation,
                 "implementation": "sglang.prebuilt.page_table_assembly",
                 "parameters": {"sequence_lengths": batch["sequence_lengths"]}, "inputs": inputs, "outputs": [output],
             })
 
             # Copy operands carry local identities. The parent output projects their actual destination slices.
-            for ordinal, copy in enumerate(copies):
-                geometry = self.geometry(copy)
+            for ordinal, (copy, member) in enumerate(zip(copies, query["members"], strict=True)):
+                geometry = member["copy"]
                 source = {**self.port("source", geometry, "source"), "tensor": 2 * ordinal}
                 target = {**self.port("destination", geometry, "target"), "tensor": 2 * ordinal + 1}
                 inputs.append({**source, "name": f"member_{ordinal}_pages"})
                 output["views"].append({"tensor": target["tensor"], "interval": copy["target"]})
-                query["members"].append({"begin": copy["source"][0], "copy": geometry})
                 calls.append({"id": len(calls), "parent": root, "template_query": geometry,
                               "inputs": [source], "outputs": [target]})
         return calls
@@ -124,7 +115,7 @@ class PDSource:
         if not batches:
             raise ValueError(f"no observed PD {scope} batches")
 
-        purpose, mode = (self.copy_purpose, "detailed") if detail else (self.assembly_purpose, "boundary")
+        purpose, mode = (PageTable.copy_operation, "detailed") if detail else (PageTable.assembly_operation, "boundary")
         source = {"purpose": purpose, "mode": mode, "origin_raw_ns": batches[0]["begin_ns"]}
         if detail:
             calls = self.copy_calls(batches)

@@ -77,6 +77,63 @@ class Configuration:
         return fields
 
 
+class Disaggregation:
+    roles = ("prefill", "decode")
+
+    def __init__(self, id, attention_backend, page_size, disaggregation):
+        if not isinstance(disaggregation, dict) or disaggregation.keys() != set(self.roles):
+            raise ValueError("disaggregation requires distinct prefill and decode configurations")
+        self.id = id
+        self.instances = {}
+        for role in self.roles:
+            settings = disaggregation[role]
+            if not isinstance(settings, dict) or settings.keys() != {
+                "tp", "max_running_requests", "max_total_tokens", "max_prefill_tokens",
+            }:
+                raise ValueError(f"{id}/{role} requires tp and independent request, KV and prefill limits")
+            self.instances[role] = Configuration(
+                id, attention_backend=attention_backend, page_size=page_size, **settings,
+            )
+        if self.instances["prefill"].tp != 1:
+            raise ValueError(f"{id} PD handoff evidence currently requires Prefill TP1")
+
+    def route_table(self, workload):
+        if "expert_routes" in workload:
+            raise ValueError(f"{self.id} requires a workload for independently placed dense workers")
+        return None
+
+    @staticmethod
+    def native_policy(role):
+        return {
+            "disaggregation_mode": role, "disaggregation_transfer_backend": "ascend",
+            "num_reserved_decode_tokens": 32, "disaggregation_decode_polling_interval": 8,
+            "disaggregation_decode_extra_slots": 4,
+        }
+
+    def resource_pools(self):
+        return [
+            {"slots": configuration.max_running_requests + (
+                self.native_policy(role)["disaggregation_decode_extra_slots"] if role == "decode" else 0),
+             "kv_tokens": configuration.max_total_tokens, "sort_released_pages": True}
+            for role, configuration in self.instances.items()
+        ]
+
+    def document(self):
+        options = {role: configuration.document() for role, configuration in self.instances.items()}
+        shared = {"id", "attention_backend", "page_size"}
+        return {
+            **{key: options["prefill"][key] for key in shared},
+            "disaggregation": {role: {key: value for key, value in fields.items() if key not in shared}
+                               for role, fields in options.items()},
+        }
+
+
+def configuration_from(document):
+    if "disaggregation" in document:
+        return Disaggregation(**document)
+    return Configuration(**document)
+
+
 def native_options(model, configuration):
     config = configuration.document()
     del config["id"]

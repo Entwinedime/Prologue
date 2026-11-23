@@ -238,10 +238,6 @@ std::vector<Root> compile_calls(const json& observation, const std::unordered_se
             selected_roots.push_back({index, std::move(query)});
         }
     }
-    if (selected_roots.empty()) {
-        throw std::invalid_argument("source observations did not cover the required root queries");
-    }
-
     const auto selected = Calls(calls, observation.at("work"), included).compile(definitions);
     for (auto& root : selected_roots) {
         root.definition = selected.at(root.call);
@@ -363,6 +359,20 @@ json program_roots(const json& observation, const std::unordered_set<std::string
     return roots;
 }
 
+json compile_roots(const json& observation, const std::unordered_set<std::string>& wanted, Definitions& definitions) {
+    auto roots = json::array();
+    if (observation.contains("programs")) {
+        return program_roots(observation, wanted, definitions);
+    }
+    if (observation.contains("workers")) {
+        return parallel_roots(observation, wanted, definitions);
+    }
+    for (auto& root : compile_calls(observation, wanted, definitions)) {
+        roots.push_back({{"query", std::move(root.query)}, {"definition", root.definition}});
+    }
+    return roots;
+}
+
 }
 
 nlohmann::json Compiler::compile(const nlohmann::json& observation) const {
@@ -374,14 +384,17 @@ nlohmann::json Compiler::compile(const nlohmann::json& observation) const {
     }
     Definitions definitions;
     auto roots = json::array();
-    if (observation.contains("programs")) {
-        roots = program_roots(observation, wanted, definitions);
-    } else if (observation.contains("workers")) {
-        roots = parallel_roots(observation, wanted, definitions);
-    } else {
-        for (auto& root : compile_calls(observation, wanted, definitions)) {
-            roots.push_back({{"query", std::move(root.query)}, {"definition", root.definition}});
+    if (const auto partitions = observation.find("partitions"); partitions != observation.end()) {
+        for (const auto& partition : *partitions) {
+            for (auto& root : compile_roots(partition, wanted, definitions)) {
+                roots.push_back(std::move(root));
+            }
         }
+    } else {
+        roots = compile_roots(observation, wanted, definitions);
+    }
+    if (roots.empty()) {
+        throw std::invalid_argument("source observations did not cover the required root queries");
     }
     return {
         {"domain", observation.at("domain")}, {"definitions", definitions.take()},

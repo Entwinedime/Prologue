@@ -26,6 +26,8 @@ def template_document(recording, projections=None):
         return recording.read().document()
 
     bindings = recording.bindings()
+    if len(bindings) == 1:
+        return recording.read(bindings[0]).document() if projections is None else projections[bindings[0]]
     workers = []
     evidence = {}
     for rank in sorted(recording.profiles):
@@ -52,14 +54,17 @@ def compile_source(args):
         document, source = PDSource(args.observation).document(args.pd_scope)
     else:
         recording = AscendRecording(args.observation)
-        document = template_document(recording)
-        model_config = recording.manifest.get("model_config")
-        source = {"purpose": "template_source", "mode": recording.mode,
-                  "origin_raw_ns": recording.delivery["origin_raw_ns"]}
-        if recording.windows is not None:
-            source["placement"] = recording.manifest["placement"]
-            source["observed_ranks"] = sorted(recording.profiles)
-            source["rank_bindings"] = document["rank_bindings"]
+        if "roles" in recording.manifest:
+            document, source, model_config = pd_template_document(recording)
+        else:
+            document = template_document(recording)
+            model_config = recording.manifest.get("model_config")
+            source = {"purpose": "template_source", "mode": recording.mode,
+                      "origin_raw_ns": recording.delivery["origin_raw_ns"]}
+            if recording.windows is not None:
+                source["placement"] = recording.manifest["placement"]
+                source["observed_ranks"] = sorted(recording.profiles)
+                source["rank_bindings"] = recording.bindings()
 
     if args.model_config:
         supplied = read_document(args.model_config)
@@ -81,6 +86,27 @@ def compile_source(args):
     asset["source"] = source
     asset["model_config"] = model_config
     return asset
+
+
+def pd_template_document(recording):
+    from prologue.integrations.frameworks.sglang.observation.pd_recording import PDRecording
+
+    pair = PDRecording(recording.directory, recording.manifest)
+    windows = pair.qualify()
+    decode = {rank: pair.qualify_decode(rank, pair.decode.read(rank).document()) for rank in pair.decode.profiles}
+    partitions = [
+        template_document(pair.prefill),
+        template_document(pair.decode, decode),
+        pair.transport_document(windows),
+    ]
+    document = {"domain": pair.domain, "partitions": partitions, "evidence": {
+        "windows": len(windows), "requests": len(windows[0]["handoffs"]),
+        "admission_sizes": [[len(batch) for batch in window["admissions"]] for window in windows],
+    }}
+    source = {"purpose": "template_source", "mode": recording.mode, "placement": recording.manifest["placement"],
+              "origin_raw_ns": windows[0]["origin_raw_ns"],
+              "ranks": {"prefill": pair.prefill.bindings(), "decode": pair.decode.bindings()}}
+    return document, source, pair.model_config
 
 
 def detailed_reference(recording):

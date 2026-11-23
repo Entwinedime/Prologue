@@ -79,7 +79,7 @@ class RankProfiles:
             # The scheduler forwards the original request to the next stage after this hook.
             request = copy(request)
             request.output_dir = str(self.window / "profile")
-        elif self.selected or self.publication_owner:
+        elif self.selected or self.publication_owner or self.observation.pd is not None:
             self.observation.save()
 
         if self.selected:

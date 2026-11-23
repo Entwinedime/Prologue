@@ -5,7 +5,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from prologue.app.core import run_core
-from prologue.integrations.frameworks.sglang.configuration import Configuration, Model
+from prologue.integrations.frameworks.sglang.configuration import Model, configuration_from
 
 
 class Plan:
@@ -19,7 +19,7 @@ class Plan:
         if not isinstance(configurations, list) or not configurations:
             raise ValueError("at least one configuration is required")
 
-        self.configurations = [Configuration(**entry) for entry in configurations]
+        self.configurations = [configuration_from(entry) for entry in configurations]
         if len({configuration.id for configuration in self.configurations}) != len(self.configurations):
             raise ValueError("configuration IDs must be unique")
 

@@ -13,7 +13,7 @@ from prologue.integrations.frameworks.sglang.observation.parallel import RankPro
 
 
 class Observation:
-    def __init__(self, output, requests, mode, parallel, pipeline, experts):
+    def __init__(self, output, requests, mode, parallel, pipeline, experts, disaggregation, stream_handoff=False):
         self.output = output
         self.requests = requests
         self.publications = {native: [] for native in requests}
@@ -41,6 +41,11 @@ class Observation:
             from prologue.integrations.frameworks.sglang.observation.experts import ExpertObservation
 
             self.experts = ExpertObservation(self, experts)
+        self.pd = None
+        if disaggregation is not None:
+            from prologue.integrations.frameworks.sglang.observation.handoff import PDHandoff
+
+            self.pd = PDHandoff(self, disaggregation, stream_handoff)
 
     def begin_window(self, output, requests, capture_calls):
         self.output = output
@@ -51,6 +56,8 @@ class Observation:
         self.calls.reset()
         if self.pipeline is not None:
             self.pipeline.reset()
+        if self.pd is not None:
+            self.pd.reset()
 
     def flush(self, original, scheduler, empty_cache=True):
         # Drain logical KV state while preserving warmed device allocator workspaces.
@@ -88,6 +95,8 @@ class Observation:
             document["calls"] = self.calls.rows
         elif self.mode == "host-timing":
             document["host_work"] = self.host_work
+        if self.pd is not None:
+            document["pd_events"] = self.pd.events
 
         # Each selected worker writes its own calls. Only the publication owner has token records.
         self.output.mkdir(exist_ok=True)
@@ -137,6 +146,8 @@ class Observation:
             self.pending_batches[id(batch)] = call
             call["members"] = members
             call["resources"] = self.resources(scheduler)
+            if self.pd is not None:
+                self.pd.batch_ports(scheduler, batch, call)
             if pp_proxy_tensors is not None:
                 call["inputs"] = self.pipeline.ports(pp_proxy_tensors.tensors)
             result = original(scheduler, batch, pp_proxy_tensors)
@@ -253,6 +264,8 @@ class Observation:
             self.pipeline.install()
         if self.experts is not None:
             self.experts.install()
+        if self.pd is not None:
+            self.pd.install()
 
 
 def install():
@@ -274,9 +287,10 @@ def install():
         if placement == "single_device":
             from prologue.integrations.frameworks.sglang.ascend.shards import StagedTransport
 
-            StagedTransport(path.parent / ".device.lock").install(
+            StagedTransport(Path(document.get("device_lock", path.parent / ".device.lock"))).install(
                 pipeline, experts is not None and experts["width"] > 1,
             )
         Observation(
             path.parent, document["requests"], document["mode"], placement is not None, pipeline, experts,
+            document.get("disaggregation"), document.get("stream_handoff", False),
         ).install()

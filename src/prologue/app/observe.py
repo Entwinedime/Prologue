@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from prologue.integrations.frameworks.sglang.configuration import Disaggregation, Model, configuration_from
 from prologue.integrations.frameworks.sglang.observation.session import Session
 
 
@@ -21,7 +22,17 @@ def main():
     wanted = {"configuration": args.configuration, "workload": args.workload}
     if wanted not in receipt["targets"]:
         parser.error("the requested configuration and workload are not a planned target")
-    Session(receipt, args.configuration, args.workload, args.output, args.mode, args.placement).run()
+    model = Model(**receipt["model"])
+    configured = next(row for row in receipt["configurations"] if row["id"] == args.configuration)
+    configuration = configuration_from(configured)
+    workload = next(row for row in receipt["workloads"] if row["id"] == args.workload)
+    if isinstance(configuration, Disaggregation):
+        from prologue.integrations.frameworks.sglang.observation.disaggregation import DisaggregatedSession
+
+        session = DisaggregatedSession(model, configuration, workload, args.output, args.mode, args.placement)
+    else:
+        session = Session(model, configuration, workload, args.output, args.mode, args.placement)
+    session.run()
 
 
 if __name__ == "__main__":

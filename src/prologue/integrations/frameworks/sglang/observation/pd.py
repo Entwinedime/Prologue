@@ -12,10 +12,9 @@ from torch.overrides import TorchFunctionMode
 
 
 class PageCopies(TorchFunctionMode):
-    def __init__(self, batch, markers, detailed):
+    def __init__(self, batch, observe):
         self.pool = batch.req_to_token_pool.req_to_token
-        self.markers = markers
-        self.detailed = detailed
+        self.observe = observe
         self.rows = {}
         self.sources = {}
         self.targets = []
@@ -46,17 +45,15 @@ class PageCopies(TorchFunctionMode):
     def copy(self, operation, arguments, keywords):
         target, index, operand = arguments
         _, slot, source = self.sources[id(operand)]
-        marker = next(self.markers) if self.detailed else None
-        context = nullcontext() if marker is None else record_function(f"prologue.scope.{marker}")
-        with context:
-            value = operation(*arguments, **keywords)
-
-        self.targets.append(target)
-        self.records.append({
+        row = {
             "slot": slot, "source": source, "target": self.extent(target, index),
             "source_dtype": str(operand.dtype), "target_dtype": str(target.dtype),
-            "source_device": operand.device.type, "target_device": target.device.type, "marker": marker,
-        })
+            "source_device": operand.device.type, "target_device": target.device.type,
+        }
+        with self.observe(row, operand, target):
+            value = operation(*arguments, **keywords)
+        self.targets.append(target)
+        self.records.append(row)
         return value
 
 
@@ -134,7 +131,12 @@ class PDObservation:
             "request": request.rid, "slot": request.req_pool_idx, "committed": request.kv_committed_len,
             "prefix": len(request.prefix_indices), "length": request.extend_range.length,
         } for request in batch.reqs]
-        copies = PageCopies(batch, self.markers, not self.detail.isdisjoint(identities))
+        def observe(row, operand, target):
+            marker = next(self.markers) if not self.detail.isdisjoint(identities) else None
+            row["marker"] = marker
+            return nullcontext() if marker is None else record_function(f"prologue.scope.{marker}")
+
+        copies = PageCopies(batch, observe)
         began = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
         with copies:
             result = original(batch)

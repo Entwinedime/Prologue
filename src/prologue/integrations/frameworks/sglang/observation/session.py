@@ -7,20 +7,20 @@ from dataclasses import asdict
 from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns, monotonic, sleep
 
-from prologue.integrations.frameworks.sglang.configuration import Configuration, Model, native_options
+from prologue.integrations.frameworks.sglang.configuration import native_options
 from prologue.integrations.frameworks.sglang.observation.parallel import RankPlan
 
 
 class Session:
-    def __init__(self, receipt, configuration, workload, output, mode, placement):
-        self.model = Model(**receipt["model"])
-        configured = next(row for row in receipt["configurations"] if row["id"] == configuration)
-        self.configuration = Configuration(**configured)
-        self.workload = next(row for row in receipt["workloads"] if row["id"] == workload)
+    def __init__(self, model, configuration, workload, output, mode, placement):
+        self.model = model
+        self.configuration = configuration
+        self.workload = workload
         self.output = output.resolve()
         self.mode = mode
         self.placement = placement
-        if self.configuration.worker_count > 1 and mode != "detailed":
+        self.ranked = configuration.worker_count > 1
+        if self.ranked and mode != "detailed":
             raise ValueError("parallel workers currently require detailed observation")
 
     @staticmethod
@@ -59,7 +59,7 @@ class Session:
         return {f"{phase}/{index}": request["id"] for index, request in enumerate(self.workload["requests"])}
 
     def await_profiles(self, engine, directory, marker):
-        if self.configuration.worker_count == 1:
+        if not self.ranked:
             return
 
         # The tokenizer receives one reply even when the native pipeline propagates the request farther.
@@ -103,7 +103,7 @@ class Session:
                 raise ValueError(f"incomplete native publication evidence for {request['id']}")
 
     def record_workers(self, engine):
-        if self.configuration.worker_count == 1:
+        if not self.ranked:
             recorded = self.record(engine, self.output / "profile", "source")
             self.check_publications(self.output)
             if self.mode == "detailed":
@@ -114,27 +114,29 @@ class Session:
         plan = RankPlan(self.output, self.configuration, self.placement)
         windows = []
         for index, ranks in enumerate(plan.windows):
-            directory = self.output / f"window-{index}"
-            directory.mkdir()
-            phase = f"source-{index}"
-            selection = {"ranks": ranks, "requests": self.aliases(phase)}
-            (directory / "selection.json").write_text(json.dumps(selection), encoding="utf-8")
-            record = self.record(engine, directory, phase)
-            self.check_publications(directory / f"rank-{plan.publisher}")
-
-            traces = {}
-            for rank in ranks:
-                trace, = (directory / f"rank-{rank}" / "profile").rglob("trace_view.json")
-                traces[rank] = str(trace.relative_to(self.output))
-            windows.append({**record, "directory": directory.name, "traces": traces})
+            windows.append(self.record_ranks(engine, index, ranks, plan.publisher))
         return {"workers": plan.workers, "windows": windows}
 
-    def run(self):
+    def record_ranks(self, engine, index, ranks, publisher):
+        directory = self.output / f"window-{index}"
+        directory.mkdir()
+        phase = f"source-{index}"
+        selection = {"ranks": ranks, "requests": self.aliases(phase)}
+        (directory / "selection.json").write_text(json.dumps(selection), encoding="utf-8")
+        record = self.record(engine, directory, phase)
+        self.check_publications(directory / f"rank-{publisher}")
+
+        traces = {}
+        for rank in ranks:
+            trace, = (directory / f"rank-{rank}" / "profile").rglob("trace_view.json")
+            traces[rank] = str(trace.relative_to(self.output))
+        return {**record, "directory": directory.name, "traces": traces}
+
+    def prepare(self, **details):
         self.output.mkdir()
-        parallel = self.configuration.worker_count > 1
         specification = self.output / "observation.json"
         description = {"requests": self.aliases("source"), "mode": self.mode, "pp": self.configuration.pp,
-                       "parallel_placement": self.placement if parallel else None}
+                       "parallel_placement": self.placement if self.ranked else None, **details}
         ep = self.configuration.ep
         if ep > 1:
             os.environ.update(DEEP_USE_ALLTOALL_MODE="1", DEEPEP_HCCL_BUFFSIZE="1024", HCCL_BUFFSIZE="1024")
@@ -145,11 +147,15 @@ class Session:
         specification.write_text(json.dumps(description), encoding="utf-8")
         os.environ["PROLOGUE_OBSERVATION"] = str(specification)
 
-        if parallel and self.placement == "single_device":
+        if self.ranked and self.placement == "single_device":
             from prologue.integrations.frameworks.sglang.ascend.shards import SingleDeviceEngine as Engine
         else:
             from sglang import Engine
 
+        return Engine
+
+    def run(self):
+        Engine = self.prepare()
         started = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
         with Engine(**native_options(self.model, self.configuration)) as engine:
             initialized = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
@@ -157,7 +163,9 @@ class Session:
             self.drain(engine)
             warmed = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
             recorded = self.record_workers(engine)
+        self.save(started, initialized, warmed, recorded)
 
+    def save(self, started, initialized, warmed, recorded):
         manifest = {
             "mode": self.mode, "framework_revision": os.environ["PROLOGUE_SGLANG_REVISION"],
             "model": asdict(self.model), "configuration": self.configuration.document(), "workload": self.workload,
