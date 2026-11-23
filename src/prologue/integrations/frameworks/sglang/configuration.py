@@ -28,6 +28,8 @@ class Configuration:
     pp: int = 1
     microbatch_requests: int | None = None
     ep: int = 1
+    prefill_chunk_tokens: int = 0
+    mixed_batches: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id:
@@ -48,6 +50,11 @@ class Configuration:
             raise ValueError(f"{self.id} KV capacity must hold one page")
         if self.ep not in (1, self.tp):
             raise ValueError(f"{self.id} native DeepEP requires expert width equal to tensor width")
+        chunk = self.prefill_chunk_tokens
+        if type(chunk) is not int or not 0 <= chunk < 1 << 63 or chunk % self.page_size:
+            raise ValueError(f"{self.id} prefill_chunk_tokens must be a nonnegative multiple of page_size")
+        if type(self.mixed_batches) is not bool or (self.mixed_batches and chunk == 0):
+            raise ValueError(f"{self.id} mixed_batches requires a positive Prefill chunk size")
 
     @property
     def worker_count(self):
@@ -74,7 +81,16 @@ class Configuration:
             del fields["microbatch_requests"]
         if self.ep == 1:
             del fields["ep"]
+        if not self.prefill_chunk_tokens:
+            del fields["prefill_chunk_tokens"]
+        if not self.mixed_batches:
+            del fields["mixed_batches"]
         return fields
+
+
+def scheduling_options(configuration):
+    return {"chunked_prefill_size": configuration.get("prefill_chunk_tokens", 0) or -1,
+            "enable_mixed_chunk": configuration.get("mixed_batches", False), "disable_radix_cache": True}
 
 
 class Disaggregation:
@@ -137,6 +153,9 @@ def configuration_from(document):
 def native_options(model, configuration):
     config = configuration.document()
     del config["id"]
+    schedule = scheduling_options(config)
+    config.pop("prefill_chunk_tokens", None)
+    config.pop("mixed_batches", None)
     config["tp_size"] = config.pop("tp")
     config["pp_size"] = config.pop("pp", 1)
     if "microbatch_requests" in config:
@@ -146,8 +165,7 @@ def native_options(model, configuration):
     weights = asdict(model)
     weights["model_path"] = weights.pop("path")
     return {
-        **weights, **config, "device": "npu", "skip_tokenizer_init": True,
+        **weights, **config, **schedule, "device": "npu", "skip_tokenizer_init": True,
         "disable_overlap_schedule": True, "disable_cuda_graph": True,
-        "disable_radix_cache": True, "chunked_prefill_size": -1, "stream_interval": 1,
-        "mem_fraction_static": 0.8, "log_level": "warning",
+        "stream_interval": 1, "mem_fraction_static": 0.8, "log_level": "warning",
     }

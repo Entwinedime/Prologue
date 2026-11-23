@@ -5,7 +5,8 @@ from dataclasses import dataclass
 
 
 def action_identity(action):
-    return action["phase"], tuple((row["request"], row["kv_committed_tokens"], row["output_tokens"])
+    return action["phase"], tuple((row["request"], row["kv_committed_tokens"], row["output_tokens"],
+                                  row.get("read_tokens"), row.get("kind"))
                                   for row in action["members"])
 
 

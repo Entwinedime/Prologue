@@ -136,6 +136,7 @@ class Session:
         self.output.mkdir()
         specification = self.output / "observation.json"
         description = {"requests": self.aliases("source"), "mode": self.mode, "pp": self.configuration.pp,
+                       "scheduled": bool(self.configuration.prefill_chunk_tokens),
                        "parallel_placement": self.placement if self.ranked else None, **details}
         ep = self.configuration.ep
         if ep > 1:

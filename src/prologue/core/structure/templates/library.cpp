@@ -165,12 +165,35 @@ private:
     std::vector<std::string> active_;
 };
 
+std::int64_t batch_read_tokens(const json& phase, const json& member) {
+    if (phase == "decode") {
+        return member.at("kv_committed_tokens").get<std::int64_t>() - 1;
+    }
+    return phase == "mixed" ? member.at("read_tokens").get<std::int64_t>()
+                            : member.value("read_tokens", std::int64_t{0});
+}
+
 json batch_geometry(const json& phase, const json& members, const json& expert_routes) {
     auto sequence = json::array();
+    auto reads = json::array();
+    auto kinds = json::array();
+    const bool mixed = phase == "mixed";
+    bool explicit_reads = mixed;
     for (const auto& member : members) {
         sequence.push_back(member.at("kv_committed_tokens"));
+        reads.push_back(batch_read_tokens(phase, member));
+        explicit_reads = explicit_reads || member.contains("read_tokens");
+        if (mixed) {
+            kinds.push_back(member.at("kind"));
+        }
     }
     json query{{"phase", phase}, {"sequence_lengths", std::move(sequence)}};
+    if (explicit_reads) {
+        query["read_tokens"] = std::move(reads);
+    }
+    if (mixed) {
+        query["member_kinds"] = std::move(kinds);
+    }
     if (!expert_routes.is_null()) {
         query["expert_routes"] = expert_routes;
     }

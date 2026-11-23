@@ -1,5 +1,7 @@
 """Record the same native attention boundary in serving and local sampling."""
 
+from prologue.integrations.frameworks.sglang.batch import BatchWork
+
 
 def implementation(module):
     return f"{type(module).__module__}.{type(module).__qualname__}"
@@ -18,8 +20,7 @@ class AttentionCall:
             return self.forward(q, k, v, forward_batch, save_kv_cache, **kwargs)
 
         parameters = {
-            "phase": "decode" if forward_batch.forward_mode.is_decode() else "prefill",
-            "seq_lens": forward_batch.seq_lens_cpu.tolist(),
+            **BatchWork.attention(forward_batch),
             "query_heads": self.module.tp_q_head_num,
             "key_heads": self.module.tp_k_head_num,
             "value_heads": self.module.tp_v_head_num,

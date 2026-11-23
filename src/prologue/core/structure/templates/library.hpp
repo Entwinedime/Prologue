@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -12,6 +13,7 @@ namespace prologue::structure {
 
 nlohmann::json batch_geometry(const nlohmann::json& phase, const nlohmann::json& members,
                              const nlohmann::json& expert_routes = nullptr);
+std::int64_t batch_read_tokens(const nlohmann::json& phase, const nlohmann::json& member);
 
 class TemplateGap final : public std::runtime_error {
 public:

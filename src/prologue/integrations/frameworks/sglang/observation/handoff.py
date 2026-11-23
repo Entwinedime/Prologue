@@ -187,16 +187,6 @@ class PDHandoff:
         self.event(kind)
         return result
 
-    def batch_ports(self, scheduler, batch, call):
-        cache = scheduler.req_to_token_pool.req_to_token
-        phase = call["parameters"]["phase"]
-        with self.calls.scope("capture_auxiliary", "PageTable.snapshot", phase, {}):
-            entries = cache[batch.req_pool_indices, :max(batch.seq_lens_cpu.tolist())].detach().cpu().tolist()
-            written = batch.out_cache_loc.detach().cpu().tolist()
-
-        call["cache"] = {"rows": [row[:member["kv_committed_tokens"]] for row, member in
-                                 zip(entries, call["members"], strict=True)], "written": written}
-
     def read(self, original, backend, *args, **kwargs):
         if self.calls.stack:
             root = self.calls.rows[self.calls.stack[0]]

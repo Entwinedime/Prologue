@@ -62,6 +62,7 @@ class AscendEvidence:
         self.manifest = manifest
         self.publications = worker["publications"]
         self.calls = worker["calls"]
+        self.ingress = worker.get("ingress")
         self.rows = [row for row in rows if row.get("ph") == "X"]
 
     def markers(self):
@@ -162,13 +163,16 @@ class AscendEvidence:
 
         if not work:
             raise ValueError("the trace contains no unambiguously owned device work")
-        return {
+        document = {
             "domain": {key: self.manifest[key] for key in ("framework_revision", "model", "configuration")},
             "calls": calls, "work": work, "stream_order": order,
             "profile_scope_begins_ns": [scopes[identity].begin for identity in identities],
             "profile_scope_ends_ns": [scopes[identity].end for identity in identities],
             "evidence": {"clock": "ascend_profiler_ns", "unbound_device_records": dict(unbound)},
         }
+        if self.ingress is not None:
+            document["ingress"] = self.ingress
+        return document
 
     @staticmethod
     def hardware(directory):

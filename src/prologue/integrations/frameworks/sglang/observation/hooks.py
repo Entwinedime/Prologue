@@ -7,13 +7,14 @@ from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns, thread_time_ns
 
 from prologue.acquisition.observation.calls import Calls
+from prologue.integrations.frameworks.sglang.batch import BatchWork
 from prologue.integrations.frameworks.sglang.expert_routes import ExpertRoutes
 from prologue.integrations.frameworks.sglang.observation.attention import AttentionCall, implementation
 from prologue.integrations.frameworks.sglang.observation.parallel import RankProfiles
 
 
 class Observation:
-    def __init__(self, output, requests, mode, parallel, pipeline, experts, disaggregation, stream_handoff=False):
+    def __init__(self, output, requests, mode, parallel, pipeline, experts, disaggregation, stream_handoff, scheduled):
         self.output = output
         self.requests = requests
         self.publications = {native: [] for native in requests}
@@ -26,6 +27,9 @@ class Observation:
         self.result_cpu_started = None
         self.host_work = []
         self.prepare_cpu_ns = 0
+        self.scheduled = scheduled and mode == "detailed"
+        self.ingress = {}
+        self.awaiting_read = None
         self.calls = None
         if mode == "detailed":
             from torch.autograd.profiler import record_function
@@ -52,6 +56,8 @@ class Observation:
         self.requests = requests
         self.publications = {native: [] for native in requests}
         self.finished.clear()
+        self.ingress.clear()
+        self.awaiting_read = None
         self.capture_calls = capture_calls
         self.calls.reset()
         if self.pipeline is not None:
@@ -93,6 +99,8 @@ class Observation:
             if self.pending_batches:
                 raise ValueError("the native observation closed before every captured batch finished")
             document["calls"] = self.calls.rows
+            if self.scheduled:
+                document["ingress"] = self.ingress
         elif self.mode == "host-timing":
             document["host_work"] = self.host_work
         if self.pd is not None:
@@ -111,6 +119,20 @@ class Observation:
         self.prepare_cpu_ns = thread_time_ns() - began
         return batch
 
+    def receive(self, original, receiver):
+        inputs = original(receiver)
+        if not self.capture_calls:
+            return inputs
+        read = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+        if self.awaiting_read is not None:
+            self.awaiting_read["next_read_ns"] = read
+            self.awaiting_read = None
+        for item in inputs:
+            identity = self.requests.get(getattr(item, "rid", None))
+            if identity is not None:
+                self.ingress[identity] = read
+        return inputs
+
     def batch(self, original, scheduler, batch, pp_proxy_tensors=None):
         if self.mode == "detailed" and not self.capture_calls:
             return original(scheduler, batch, pp_proxy_tensors)
@@ -121,17 +143,8 @@ class Observation:
         if any(request is None for request in requests):
             raise ValueError("warmup and observed requests occupied the same batch")
 
-        if batch.forward_mode.is_decode():
-            phase = "decode"
-        elif batch.forward_mode.is_extend():
-            phase = "prefill"
-        else:
-            raise ValueError(f"unsupported observed forward mode: {batch.forward_mode}")
-        members = [
-            {"request": identity, "slot": int(request.req_pool_idx), "kv_committed_tokens": request.kv_committed_len,
-             "kv_reserved_tokens": request.kv_allocated_len, "output_tokens": len(request.output_ids)}
-            for identity, request in zip(requests, batch.reqs, strict=True)
-        ]
+        phase = BatchWork.phase(batch.forward_mode)
+        members = BatchWork.members(batch, requests)
         if self.mode == "host-timing":
             call = {"phase": phase, "members": members, "prepare_cpu_ns": self.prepare_cpu_ns,
                     "publication_cpu_ns": {}}
@@ -146,8 +159,9 @@ class Observation:
             self.pending_batches[id(batch)] = call
             call["members"] = members
             call["resources"] = self.resources(scheduler)
-            if self.pd is not None:
-                self.pd.batch_ports(scheduler, batch, call)
+            if self.pd is not None or self.scheduled:
+                with self.calls.scope("capture_auxiliary", "PageTable.snapshot", phase, {}):
+                    call["cache"] = BatchWork.cache(batch, members)
             if pp_proxy_tensors is not None:
                 call["inputs"] = self.pipeline.ports(pp_proxy_tensors.tensors)
             result = original(scheduler, batch, pp_proxy_tensors)
@@ -192,6 +206,8 @@ class Observation:
             "begin_ns": begin, "end_ns": clock_gettime_ns(CLOCK_MONOTONIC_RAW),
             "resources": self.resources(scheduler),
         }
+        if self.scheduled:
+            self.awaiting_read = call["result_processing"]
         return value
 
     def layer(self, original, module, site, positions, hidden_states, forward_batch, residual, *args, **kwargs):
@@ -256,6 +272,9 @@ class Observation:
             HookRegistry.register(scheduler + "process_batch_result", self.process_result, HookType.AROUND)
         if self.mode == "host-timing":
             HookRegistry.register(scheduler + "get_next_batch_to_run", self.prepare, HookType.AROUND)
+        if self.scheduled:
+            receiver = "sglang.srt.managers.scheduler_components.request_receiver.SchedulerRequestReceiver."
+            HookRegistry.register(receiver + "recv_requests", self.receive, HookType.AROUND)
         HookRegistry.register("sglang.srt.model_executor.model_runner.ModelRunner.load_model",
                               self.load_model, HookType.AROUND)
         if self.parallel is not None:
@@ -292,5 +311,5 @@ def install():
             )
         Observation(
             path.parent, document["requests"], document["mode"], placement is not None, pipeline, experts,
-            document.get("disaggregation"), document.get("stream_handoff", False),
+            document.get("disaggregation"), document.get("stream_handoff", False), document.get("scheduled", False),
         ).install()
