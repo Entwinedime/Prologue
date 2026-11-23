@@ -54,12 +54,15 @@ class ServingRole(Session):
         self.submissions += 1
         return await self.dispatch_at(engine, phase, self.clock.origin.value, rooms)
 
-    def check_publications(self, directory):
+    def check_publications(self, engine, directory):
         if self.role == "decode":
-            super().check_publications(directory)
+            super().check_publications(engine, directory)
 
     def record_workers(self, engine):
         self.barrier.wait()
+        if not self.profile_ranks:
+            return super().record_workers(engine)
+
         plans = {role: RankPlan(self.pair.output / role, configuration, self.placement)
                  for role, configuration in self.pair.configuration.instances.items()}
         plan = plans[self.role]
@@ -95,12 +98,13 @@ class ServingRole(Session):
                 engine.tokenizer_manager.bootstrap_server.close()
         self.save(started, initialized, warmed, recorded)
 
+
 class DisaggregatedSession:
     role_class = ServingRole
 
     def __init__(self, model, configuration, workload, output, mode, placement):
-        if mode != "detailed":
-            raise ValueError("disaggregated capture currently requires detailed observation")
+        if mode == "host-timing" or (mode == "light" and placement != "full"):
+            raise ValueError("PD observation requires detailed capture or full physical publication timing")
         configuration.route_table(workload)
         self.model, self.configuration, self.workload = model, configuration, workload
         self.output, self.mode, self.placement = output.resolve(), mode, placement
@@ -170,4 +174,19 @@ class DisaggregatedSession:
         document = {"framework_revision": os.environ["PROLOGUE_SGLANG_REVISION"], "model": asdict(self.model),
                     "configuration": self.configuration.document(), "workload": self.workload,
                     "placement": self.placement, "mode": self.mode, "roles": list(self.configuration.roles)}
+        if self.mode == "light":
+            document.update(self.publication_window())
         (self.output / "manifest.json").write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    def publication_window(self):
+        prefill, decode = (
+            json.loads((self.output / role / "manifest.json").read_text(encoding="utf-8"))
+            for role in ("prefill", "decode")
+        )
+        if (prefill["delivery"]["origin_raw_ns"] != decode["delivery"]["origin_raw_ns"]
+                or any(prefill[key] != decode[key] for key in ("initial_state", "clock"))):
+            raise ValueError("PD publication timing requires one workload clock and initial state")
+
+        # Request timing starts at Prefill submission, while only Decode publishes generated tokens.
+        (self.output / "decode" / "worker.json").replace(self.output / "worker.json")
+        return {key: prefill[key] for key in ("initial_state", "clock", "delivery")}

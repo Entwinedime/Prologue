@@ -123,15 +123,18 @@ class ExpertObservation:
         return result
 
     def install(self):
-        from inspect import signature
-
-        import torch.distributed as distributed
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
         HookRegistry.register("sglang.srt.managers.scheduler.Scheduler.run_batch", self.batch, HookType.AROUND)
-        if self.width > 1:
-            for method, phase in (("get_dispatch_layout", "layout"), ("dispatch", "dispatch"), ("combine", "combine")):
-                HookRegistry.register(f"deep_ep.Buffer.{method}", partial(self.buffer, phase), HookType.AROUND)
-            for name in ("all_gather_into_tensor", "all_to_all_single"):
-                hook = partial(self.collective, name, signature(getattr(distributed, name)))
-                HookRegistry.register(f"torch.distributed.{name}", hook, HookType.AROUND)
+        if self.width == 1 or self.observation.mode != "detailed":
+            return
+
+        from inspect import signature
+
+        import torch.distributed as distributed
+
+        for method, phase in (("get_dispatch_layout", "layout"), ("dispatch", "dispatch"), ("combine", "combine")):
+            HookRegistry.register(f"deep_ep.Buffer.{method}", partial(self.buffer, phase), HookType.AROUND)
+        for name in ("all_gather_into_tensor", "all_to_all_single"):
+            hook = partial(self.collective, name, signature(getattr(distributed, name)))
+            HookRegistry.register(f"torch.distributed.{name}", hook, HookType.AROUND)

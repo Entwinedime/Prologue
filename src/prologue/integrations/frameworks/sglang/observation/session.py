@@ -23,8 +23,14 @@ class Session:
         self.placement = placement
         self.content = PromptContent.declared(workload, configuration.prefix_cache)
         self.ranked = configuration.worker_count > 1
-        if self.ranked and mode != "detailed":
-            raise ValueError("parallel workers currently require detailed observation")
+        if self.ranked and mode == "host-timing":
+            raise ValueError("host timing requires one native worker")
+        if self.ranked and mode == "light" and placement != "full":
+            raise ValueError("parallel publication timing requires full physical placement")
+
+    @property
+    def profile_ranks(self):
+        return self.ranked and self.mode == "detailed"
 
     def output_count(self, request):
         return request["output_tokens"]
@@ -79,14 +85,19 @@ class Session:
             return
 
         # The tokenizer receives one reply even when the native pipeline propagates the request farther.
-        missing = {directory / f"rank-{rank}" / marker for rank in range(self.configuration.worker_count)}
-        deadline = monotonic() + engine.server_args.watchdog_timeout
+        paths = [directory / f"rank-{rank}" / marker for rank in range(self.configuration.worker_count)]
+        self.await_files(paths, engine.server_args.watchdog_timeout)
+
+    @staticmethod
+    def await_files(paths, timeout):
+        missing = set(paths)
+        deadline = monotonic() + timeout
         while missing:
             missing = {path for path in missing if not path.is_file()}
             if missing:
                 if monotonic() >= deadline:
-                    ranks = ", ".join(sorted(path.parent.name for path in missing))
-                    raise TimeoutError(f"native profile {marker} missing acknowledgments from {ranks}")
+                    names = ", ".join(sorted(str(path) for path in missing))
+                    raise TimeoutError(f"native observation did not publish {names}")
                 sleep(0.02)
 
     def record(self, engine, directory, phase):
@@ -111,17 +122,20 @@ class Session:
             record["profile_export_ns"] = clock_gettime_ns(CLOCK_MONOTONIC_RAW) - observed
         return record
 
-    def check_publications(self, directory):
-        worker = json.loads((directory / "worker.json").read_text(encoding="utf-8"))
+    def check_publications(self, engine, directory):
+        path = directory / "worker.json"
+        if self.ranked and self.mode == "light":
+            self.await_files([path], engine.server_args.watchdog_timeout)
+        worker = json.loads(path.read_text(encoding="utf-8"))
         for request in self.workload["requests"]:
             rows = worker["publications"][request["id"]]
             if not rows or rows[-1]["count"] != request["output_tokens"]:
                 raise ValueError(f"incomplete native publication evidence for {request['id']}")
 
     def record_workers(self, engine):
-        if not self.ranked:
+        if not self.profile_ranks:
             recorded = self.record(engine, self.output / "profile", "source")
-            self.check_publications(self.output)
+            self.check_publications(engine, self.output)
             if self.mode == "detailed":
                 trace, = (self.output / "profile").rglob("trace_view.json")
                 recorded["trace"] = str(trace.relative_to(self.output))
@@ -140,7 +154,7 @@ class Session:
         selection = {"ranks": ranks, "requests": self.aliases(phase)}
         (directory / "selection.json").write_text(json.dumps(selection), encoding="utf-8")
         record = self.record(engine, directory, phase)
-        self.check_publications(directory / f"rank-{publisher}")
+        self.check_publications(engine, directory / f"rank-{publisher}")
 
         traces = {}
         for rank in ranks:
@@ -155,7 +169,7 @@ class Session:
         description = {"requests": self.aliases("source"), "mode": self.mode, "pp": config.pp,
                        "snapshot_cache": bool(config.prefill_chunk_tokens or config.prefix_cache),
                        "prefix_cache": config.prefix_cache,
-                       "parallel_placement": self.placement if self.ranked else None, **details}
+                       "parallel_placement": self.placement if self.profile_ranks else None, **details}
         if self.content is not None:
             description["synthetic_sampling"] = {"outputs": self.content.outputs, "warmup": self.aliases("warmup"),
                                                  "vocabulary": self.content.vocabulary}

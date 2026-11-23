@@ -42,7 +42,7 @@ class Observation:
 
             self.calls = Calls(record_function)
         self.pipeline = None
-        if document["pp"] > 1:
+        if mode == "detailed" and document["pp"] > 1:
             from prologue.integrations.frameworks.sglang.observation.pipeline import PipelineObservation
 
             self.pipeline = PipelineObservation(self)
@@ -52,7 +52,7 @@ class Observation:
 
             self.experts = ExpertObservation(self, experts)
         self.pd = None
-        if disaggregation := document.get("disaggregation"):
+        if mode == "detailed" and (disaggregation := document.get("disaggregation")):
             from prologue.integrations.frameworks.sglang.observation.handoff import PDHandoff
 
             self.pd = PDHandoff(self, disaggregation, document.get("stream_handoff", False))
