@@ -29,9 +29,9 @@ class ActionComparison:
         "native_tail_unexecuted",
     })
 
-    def __init__(self, reference, execution, output, details, *, realization=None):
+    def __init__(self, reference, execution, output, details, *, realization=None, peer_handoffs=False):
         self.reference, self.execution, self.output, self.details = reference, execution, output, details
-        self.realization = realization
+        self.realization, self.peer_handoffs = realization, peer_handoffs
         self.capture, self.graphs = reference.capture, reference.graphs
         self.counts, self.findings = Counter(), []
 
@@ -88,6 +88,7 @@ class ActionComparison:
         reads = report["resource_effects"]["reads"]
         streams = report["stream_synchronization"]
         order = report["action_order"]
+        wire = report["cpu_protocol"]["wire_payloads"]
         outside_flow = sum(value["input_reads"]["outside_flow"] for value in report["request_ingress"].values() if "input_reads" in value)
         rows = [
             "# Independent Execution Structure Comparison", "",
@@ -102,6 +103,12 @@ class ActionComparison:
                         f"and {checks['predicted_occurrences'] - value['checked']} remain unchecked. "
                         "Shared content checks establish coverage at the template level. |")
 
+        if wire["witnessed"]:
+            rows.append(f"| CPU wire payloads | {wire['checked']} of {wire['witnessed']} witnessed messages | "
+                        f"{wire['matched']} matched in dtype and byte geometry. |")
+        if transfers := connections["device_transfer_payloads"]:
+            rows.append(f"| Device transfer payloads | {connections['device_transfer_payloads_compared']} of {transfers} native endpoints | "
+                        f"{connections['device_transfer_payloads_matched']} matched in direction, dtype and shape. |")
         rows.extend([
             f"| Production and consumption | {connections['predicted_data_inputs_checked']} nonempty external data inputs and "
             f"{connections['predicted_signal_inputs_checked']} completion waits | "
@@ -186,7 +193,7 @@ class ActionComparison:
         ordering = ActionOrderComparison(keys, self.details)
         predicted_dependencies = {rank: CausalGraph() for rank in sources}
         native_evidence = native_case.report(self.details)
-        condition_inputs = ConsumedInputs(native_case, ingress, self.realization)
+        condition_inputs = ConsumedInputs(native_case, ingress, self.realization, peer_handoffs=self.peer_handoffs)
 
         # Compare contents independently of occurrence pairing, after native remote pools have their actual owners.
         contents = {key: source.snapshot(index, identity["group"]) for key, (source, index, identity) in expected.items()}
@@ -244,7 +251,7 @@ class ActionComparison:
                 if row["kind"] == "resources":
                     bindings.initialized(row)
                     effects.requests = [request["id"] for request in row["requests"]]
-                elif row["kind"] == "notification_declared" or (row["kind"] == "native_protocol" and row["record"]["phase"] == "wire"):
+                elif row["kind"] == "notification_declared" or (row["kind"] == "native_protocol" and row["record"]["phase"] == "readiness"):
                     group = row["identity"]["group"] if row["kind"] == "notification_declared" else row["group"]
                     event = row["event"] if row["kind"] == "notification_declared" else row["record"]["event"]
                     rank, = [rank for rank, owner in groups.items() if owner == group]
@@ -403,6 +410,10 @@ class ActionComparison:
         connections.check_predicted_readiness(predicted_graph, event_ranks)
         connections.compare_values(predicted_graph, pairs)
         cpu_scope = cpu_protocol.report()
+        wire, wire_differences = cpu_protocol.compare_wire_payloads(condition_inputs.cpu_messages)
+        cpu_scope["wire_payloads"] = wire
+        for detail in wire_differences:
+            self.finding("cpu_wire_payload", {}, detail)
         order_ready = (connections.counts["native_communication_protocol_complete"]
                        and connections.counts["predicted_communication_protocol_complete"] and cpu_scope["complete"])
         if order_ready:
@@ -521,7 +532,7 @@ class ActionComparison:
         incomplete = (payload_incomplete or any(unpaired_calls.values()) or input_incomplete or metadata_incomplete or admission_incomplete
                       or connections_incomplete or batch_sync_incomplete or bindings_incomplete or queries_incomplete
                       or bool(effects.counts["state_slots"]["unobserved_native"]) or bool(unverified_cross_rank)
-                      or not cpu_scope["complete"] or not ordering.qualified or condition_scope["status"] == "partial")
+                      or not cpu_scope["complete"] or wire["unresolved"] or not ordering.qualified or condition_scope["status"] == "partial")
         report = {
             **self.outcome(incomplete),
             "inputs": {"capture": str(self.capture.resolve()), "graphs": str(self.graphs.resolve()),
@@ -574,12 +585,15 @@ class ActionComparison:
                                 "dependencies_checked": dependency_checks[key], "dependencies_matched": dependency_matches[key]}
                                for key in repeated],
             "cross_rank_dependencies": {"protocol_checked_edges": dict(checked_cross_rank), "unverified_edges": dict(unverified_cross_rank),
-                                        "scope": "Run-local edges owned by complete model/CPU protocols or independently checked PD notifications. Cross-run named-action causality is checked separately; private CPU messages are not paired."},
+                                        "scope": "Run-local edges owned by complete model/CPU protocols or independently checked PD notifications. Named-action causality and witnessed CPU payloads have their own cross-run checks."},
             "not_checked": [detail for missing, detail in (
                 (queries_incomplete, "unpaired query outcomes"), (input_incomplete, "unpaired external input reads"),
+                (cpu_scope.get("native_messages", 0) and not wire["witnessed"], "CPU payloads without paired post witnesses"),
+                (wire["unresolved"], "witnessed CPU payloads without both posts in each run"),
                 (bool(unverified_cross_rank), "cross-rank causality outside verified communication and notification protocols"),
                 (any(unpaired_calls.values()), "per-occurrence correspondence of calls without an independently checked witness"),
                 (bool(condition_inputs.counts["bound_invocations"]), "autonomous prediction of explicitly supplied native invocation bindings"),
+                (self.peer_handoffs, "timing outside the matched layouts and shared handoff boundaries"),
             ) if missing] + ["exact PD notification arrival times", "unnamed internal event topology",
                             "private intra-call resource mutations and tensor hazards; native in-flight resource reuse outside observed cases",
                             "PD unused padding and unsupported multimodal/logprob/speculative values; controller output values outside recorded progress and publication fields"],
@@ -596,9 +610,11 @@ def main():
     parser.add_argument("--execution", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--details", action="store_true", help="retain every observed difference")
+    parser.add_argument("--peer-handoffs", action="store_true", help="check a trace timed through staged peer handoffs")
     arguments = parser.parse_args()
     reference = NativeCase.read(arguments.capture, arguments.graphs)
-    report = ActionComparison(reference, arguments.execution, arguments.output, arguments.details).run()
+    report = ActionComparison(reference, arguments.execution, arguments.output, arguments.details,
+                              peer_handoffs=arguments.peer_handoffs).run()
     raise SystemExit(0 if report["status"] == "actions_matched" else 1)
 
 

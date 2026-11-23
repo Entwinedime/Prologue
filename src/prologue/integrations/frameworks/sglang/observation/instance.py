@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from prologue.integrations.frameworks.sglang.configuration import CaptureInput, InstanceConfiguration, NativeConfiguration
+from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
 from prologue.integrations.frameworks.sglang.observation.submissions import EngineSubmissions
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
@@ -43,7 +44,7 @@ class NativeServingInstance:
         self.delivery = {}
 
     def generate(self, engine: Any, phase: str, submissions: EngineSubmissions, clock: Any, barrier: Any) -> None:
-        submissions.content.check_vocabulary(engine.tokenizer_manager.model_config.vocab_size)
+        submissions.ingress.content.check_vocabulary(engine.tokenizer_manager.model_config.vocab_size)
         print(f"prologue: native {phase} begin", flush=True)
         try:
             engine.loop.run_until_complete(submissions.run(engine, clock, barrier, self.output, self.roles))
@@ -129,7 +130,7 @@ class NativeServingInstance:
 
         # PD bootstrap rooms must stay distinct across the drain and logical cache reset.
         for ordinal, (phase, submissions) in enumerate(passes.items()):
-            submissions.prepare("capture" if phase == "source" else phase, bootstrap, 1 + ordinal * count)
+            submissions.prepare(RequestSubmissions.observed if phase == "source" else phase, bootstrap, 1 + ordinal * count)
         session = {
             "output": str(self.output), "instance_directory": str(self.directory), "mode": mode,
             "rendezvous": {"host": rendezvous["MASTER_ADDR"], "port": int(rendezvous["MASTER_PORT"])},
@@ -141,7 +142,7 @@ class NativeServingInstance:
             "latency_only": self.latency_only,
             "host_timing": self.host_timing,
             "service_reference": self.service_reference,
-            **{f"{phase}_requests": [f"{submissions.prefix}/{index}" for index in range(count)]
+            **{f"{phase}_requests": [RequestSubmissions.native_id(submissions.prefix, index) for index in range(count)]
                for phase, submissions in passes.items()},
             "representative_warmup": True,
             "protocol_requests": capture.protocol_requests,
@@ -230,14 +231,6 @@ class NativeServingInstance:
                 # Engine stops its workers but leaves the Prefill bootstrap thread to its owner.
                 if engine.tokenizer_manager.bootstrap_server is not None:
                     engine.tokenizer_manager.bootstrap_server.close()
-        if self.host_timing and self.pp > 1:
-            from prologue.integrations.runtimes.pytorch.gloo_samples import GlooSamples
-
-            records = {int(rank): json.loads((self.output / path).read_text())["protocol"]
-                       for rank, path in metrics["host_samples"].items()}
-            output = self.directory / "cpu-transports.json"
-            GlooSamples.run(records, output)
-            metrics["cpu_transports"] = str(output.relative_to(self.output))
         return {
             "id": self.instance.identity, "mode": mode, "rank_offset": self.rank_offset, "observed_roles": selected,
             "native_participants": self.roles, **({"placement": "single_device"} if self.local_shards else {}),

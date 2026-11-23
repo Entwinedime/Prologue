@@ -37,6 +37,18 @@ nlohmann::json WorkFeatures::transport_operand(const GraphScope & scope) {
     };
     const auto local = scope.info.bindings.find("local_implementation");
     if (local != scope.info.bindings.end()) identity["local_implementation"] = *local;
+    if (group.peer_rows) {
+        auto names = nlohmann::json::array();
+        for (std::size_t peer = 0; peer < group.members.size(); ++peer) {
+            const auto prefix = "collective.peer." + std::to_string(group.members[peer]);
+            const auto send = prefix + ".send_rows", receive = prefix + ".receive_rows";
+            axes_.emplace(send, group.peer_rows->send[peer]);
+            axes_.emplace(receive, group.peer_rows->receive[peer]);
+            names.push_back(send);
+            names.push_back(receive);
+        }
+        identity["row_axes"] = std::move(names);
+    }
     return identity;
 }
 

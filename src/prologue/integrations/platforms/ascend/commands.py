@@ -66,7 +66,6 @@ class StreamCommands:
         self.effects: dict[int, list[StreamCommand]] = {}
         self.order_commands()
         self.payload = [command for command in self.commands if isinstance(command.source, DeviceTask)]
-        self.submission_frontiers()
 
     def task(self, task: DeviceTask) -> StreamCommand:
         return self.physical[task.stream, task.begin]
@@ -216,15 +215,17 @@ class StreamCommands:
                 command.post = trace.queues.release(arguments)
         return api, command.post
 
-    def submission_frontiers(self) -> None:
+    def submission_frontiers(self, staged_boundaries) -> None:
         trace = self.trace
         groups = {}
         for command in self.commands:
             source = command.source
             if isinstance(source, DeviceTask):
                 connection = source.record["args"]["connection_id"]
-                if (source.service is not None or connection not in trace.apis or connection in trace.observer_connections
-                        or trace.auxiliary(source) or trace.outside_window(source)):
+                if source.service is not None or connection not in trace.apis or trace.outside_window(source):
+                    continue
+                observing = connection in trace.observer_connections or trace.auxiliary(source)
+                if observing and (command.stream, command.end) not in staged_boundaries:
                     continue
             _, post = self.posting(command)
             groups[command.stream, post.thread, post.begin] = command
@@ -303,12 +304,12 @@ class StreamCommands:
             clocks[command.stream, command.end] = interval.end if interval else None
 
         external = {span["resource"] for span in spans
-                    if "protocol_operand" in span and not resources[span["resource"]]["serial"]}
+                    if "protocol_operand" in span and resources[span["resource"]]["kind"] == "service"}
         coordinates, device_services = [], []
         for resource, orders in enumerate(positions):
             if resource in external:
 
-                # A local Work handle proves readiness and consumption. Its staging clock cannot measure target transport.
+                # Staging proves the protocol boundaries. Only physical transport can measure its service.
                 coordinates.extend({"resource": resource, "order": order, "time_ns": None} for order in sorted(orders))
                 continue
             descriptor = resources[resource]

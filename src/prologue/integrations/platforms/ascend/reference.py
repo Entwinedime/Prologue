@@ -7,6 +7,7 @@ import json
 
 from prologue.integrations.platforms.ascend.clock import AscendClock, HostCounter
 from prologue.integrations.platforms.ascend.queues import NativeQueues
+from prologue.integrations.platforms.ascend.services import uses_peer_service
 from prologue.integrations.platforms.ascend.trace import AscendTrace, Interval, ThreadIntervals
 
 from .reference_streams import SdkStreams
@@ -205,8 +206,8 @@ class NativeEffectEvidence:
             if self.excluded.enclosing(self.enqueues[identity]) is not None:
                 observer.append(row)
 
-        waits = [(row["thread"], row["begin_raw_ns"], row["end_raw_ns"]) for row in self.runtime
-                 if row["api"] in AscendTrace.host_waits or (row["api"] == "aclrtMemcpy" and row["bytes"])]
+        repeated = {tuple(identity) for identity in self.facts["measurements"].get("repeated_host_waits", ())}
+        waits = list(AscendTrace.reserved_host_intervals(self.runtime, repeated))
         for lane, begin, end in self.wait_intervals:
             resource = self.facts["resources"][lane]
             if resource["kind"] == "thread":
@@ -214,18 +215,17 @@ class NativeEffectEvidence:
                 waits.append((int(identity.split("/")[1]), self.host_measurements[identity, begin], self.host_measurements[identity, end]))
         return observer, dequeues, waits
 
-    def inspect_measurements(self):
+    def inspect_measurements(self, external):
         checked = 0
         unmeasured = set()
-        peer_points = {point for producer, wait in self.staged_waits.items()
-                       for call in self.native["scopes"][producer]["local_exchanges"] for point in (call["begin"], wait)}
-        found_peers = set()
+        observed = defaultdict(set)
         for point in self.facts["measurements"]["coordinates"]:
             resource = self.facts["resources"][point["resource"]]
-            if resource["identity"] == "service/peer":
-                self.require(point["time_ns"] is None and not resource["serial"] and resource["role"] == "peer_transport",
-                             "single-device operand staging claims target transport time or serial order")
-                found_peers.add(point["order"])
+            lane = resource["identity"], resource["role"], resource["serial"]
+            if lane in external:
+                self.require(resource["kind"] == "service" and point["time_ns"] is None,
+                             "single-device operand staging claims target transport time")
+                observed[lane].add(point["order"])
                 continue
             if resource["kind"] == "stream":
                 if point["time_ns"] is None:
@@ -240,10 +240,11 @@ class NativeEffectEvidence:
         native_only = {(effect["resource"], command[side])
                        for effect in self.facts["native_effects"] for command in effect["commands"]
                        if command["sdk"] is None for side in ("begin", "end")}
-        self.require(found_peers == peer_points, "external transfer boundaries differ from original posts and waits")
+        self.require(observed == external, "external service boundaries differ from original posts and waits")
         self.require(unmeasured <= native_only, "device boundary loses a recorded timestamp or lacks an observed native command")
         logical = self.logical_coordinates.keys()
-        return {"checked_host_measurements": checked, "external_transfer_endpoints": len(found_peers), "unmeasured_device_endpoints": len(unmeasured - logical),
+        return {"checked_host_measurements": checked, "external_transport_endpoints": sum(map(len, observed.values())),
+                "unmeasured_device_endpoints": len(unmeasured - logical),
                 "logical_wait_boundaries": len(unmeasured & logical)}
 
     def device_intervals(self):
@@ -282,9 +283,8 @@ class NativeEffectEvidence:
             self.require(begin["thread"] == thread, f"scope {index} changes its native caller thread")
             ports = {port["name"]: port for port in scope["ports"]}
             kind = "wait" if "service" in raw else "boundary" if raw.get("envelope", False) else "host"
-            exchange = raw.get("communication")
-            if exchange is not None and "device_entry" not in raw:
-                kind = "collective" if exchange["required"] == exchange["members"] else "communication"
+            if "communication" in raw and "device_entry" not in raw:
+                kind = "collective" if uses_peer_service(raw) else "communication"
             host = resources["thread", f"thread/{thread}"]
             if origin in self.queries:
                 self.require(spans[index, host, begin["begin_counter"], end["end_counter"], "boundary"] == 1,
@@ -396,7 +396,8 @@ class NativeEffectEvidence:
 
     def supplied_protocols(self, graph):
         expected = Counter()
-        posts = set()
+        posts, handoffs = set(), set()
+        external, ordered_posts = defaultdict(set), defaultdict(list)
         for scope in self.native["scopes"]:
             for call in scope.get("local_exchanges", ()):
                 endpoints = []
@@ -409,8 +410,12 @@ class NativeEffectEvidence:
                 self.require(first[0] == last[0] and first[1] < last[1], "protocol markers disagree on stream order")
                 begin, end = self.sdk.span(first)[1], self.sdk.span(last)[1]
                 exchange = scope["communication"]
-                kind = "collective" if exchange["members"] == exchange["required"] else "communication"
+                kind = "collective" if uses_peer_service(scope) else "communication"
                 lane = f"stream/{first[0]}"
+                operand = lane, begin
+                submitted = operand
+                caller = self.points[call["begin"]]
+                posting = f"thread/{caller.thread}", caller.begin
                 if scope.get("asynchronous"):
                     self.require(scope["id"] in self.staged_waits, "staged peer operand has no original consuming Work.wait")
                     payload, = [p for p in scope["ports"] if p["name"] == "payload"]
@@ -419,11 +424,25 @@ class NativeEffectEvidence:
                                  and payload["direction"] == ("input" if sends else "output")
                                  and call["dtype"] == payload["tensor"]["dtype"], "staged operand differs from the native transfer port")
                     lane, begin, end = "service/peer", call["begin"], self.staged_waits[scope["id"]]
+                    external[lane, "peer_transport", False].update((begin, end))
+                elif kind == "collective":
+                    service = f"service/{exchange['channel']}"
+                    handoffs.add(("signal", service, call["end"], lane, end))
+                    handoffs.add(("control", *posting, *operand))
+                    submitted = lane, end
+                    lane, begin, end = service, call["begin"], call["end"]
+                    external[lane, "peer_collective", True].update((begin, end))
+                    ordered_posts[lane].append((begin, caller.thread, caller.begin))
                 expected[self.source_scopes[scope["id"]], kind, lane, begin, end,
                          call["operation"], call["dtype"], call["bytes"]] += 1
-                caller = self.points[call["begin"]]
-                posts.add((f"thread/{caller.thread}", caller.begin, lane, begin))
+                posts.add((*posting, *submitted))
+                if lane != operand[0]:
+                    handoffs.add(("data", *operand, lane, begin))
 
+        for lane, entries in ordered_posts.items():
+            starts = [start for _, _, start in sorted(entries)]
+            self.require(len({thread for _, thread, _ in entries}) == 1 and all(a < b for a, b in zip(starts, starts[1:])),
+                         f"collective service has no single native posting order on {lane}")
         projected = Counter()
         for span in self.facts["spans"]:
             if operand := span.get("protocol_operand"):
@@ -432,7 +451,17 @@ class NativeEffectEvidence:
                           operand["operation"], operand["dtype"], operand["bytes"]] += 1
         self.require(projected == expected, "projected protocol work differs from the original operand and stream markers")
         self.require(len(posts) == expected.total(), "supplied operands repeat a native handoff")
-        return posts
+        if handoffs:
+            retained = set()
+            for edge in self.facts["dependencies"]:
+                if edge["kind"] not in {"data", "signal", "control"}:
+                    continue
+                source, target = edge["source"], edge["target"]
+                resources = (self.facts["spans"][point["span"]]["resource"] for point in (source, target))
+                origin, device = (self.facts["resources"][lane]["identity"] for lane in resources)
+                retained.add((edge["kind"], origin, source["order"], device, target["order"]))
+            self.require(handoffs <= retained, "staged service loses its caller-stream handoff")
+        return posts, external
 
     def inspect_payload(self, graph, private_streams, device_intervals, submissions, launches=None, payload_times=None):
         expected, counts = defaultdict(list), Counter()
@@ -455,10 +484,12 @@ class NativeEffectEvidence:
             interval = Interval(begin, end, stream, {})
             if api is not None:
                 origin = self.origin(api)
-                if (origin.end <= self.window.begin or self.window.end <= origin.begin
-                        or self.excluded.enclosing(origin) is not None):
+                observer = self.excluded.enclosing(origin) is not None
+                if observer or origin.end <= self.window.begin or self.window.end <= origin.begin:
 
-                    # Only original observer exclusions and the observed window remove SDK payload.
+                    # Fixed replay may need an excluded command's physical release and completion.
+                    if observer and launches is not None:
+                        self.sdk.observer_payload.add(identity)
                     counts["outside_scope_tasks"] += 1
                     continue
             if owner is None:
@@ -530,9 +561,8 @@ class NativeEffectEvidence:
             if launches is not None and task_kind in {"EVENT_WAIT", "EVENT_RECORD"}:
                 identity, = self.sdk.connections[task["args"]["connection_id"]]
 
-                # A recorded signal may retain only its completion. A stream wait also has its measured entry.
-                order = self.sdk.span(identity)[0] if task_kind == "EVENT_WAIT" else target["order"]
-                launches[identity] = post, order
+                # Retain the exact endpoint of the graph's submission edge.
+                launches[identity] = post, target["order"]
             counts["driver_boundaries"] += 1
         self.require(protocol_posts <= links, "supplied protocol work lacks its original caller handoff")
         counts["supplied_protocol_operands"] = len(protocol_posts)
@@ -672,8 +702,14 @@ class NativeEffectEvidence:
                                      "staged Work publishes a different completion from its transfer")
                         producers[identity].add(event)
                     else:
+                        entry = ports["device.enter", "input"]["event"]
                         self.require(event == ports["device.complete", "output"]["event"],
                                      "staged Work is consumed before the receiver's continuation")
+                        self.check_device_end(graph, entry, self.point_connection(raw["device_entry"]))
+                        self.check_device_end(graph, event, self.point_connection(raw["device_return"]))
+                        self.require(entry != event and dependencies.reaches(entry, event)
+                                     and dependencies.reaches(ports["call.enter", "input"]["event"], event),
+                                     "staged wait completion loses its entry or caller prerequisite")
                         consumers.append((identity, event))
                     counts["staged_work_signals"] += 1
                     continue

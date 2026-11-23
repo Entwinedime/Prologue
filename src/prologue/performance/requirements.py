@@ -61,11 +61,15 @@ class CostRequirements:
         return point
 
     def graph(self, target, catalog):
+        for _ in self.observe_graph(target, catalog):
+            pass
+
+    def observe_graph(self, target, catalog):
         self.targets[target] = "observed_graph"
         domain = self.intern(self.domains, catalog.domain)
         identities = [self.intern(self.definitions, value) for value in catalog.definitions]
-        return {self.add(target, domain, identities[definition], interval, features)
-                for _, definition, interval, features in catalog}
+        for work, definition, interval, features in catalog:
+            yield work, self.add(target, domain, identities[definition], interval, features)
 
     def external(self, target, domain, identity, kind, features):
         domain = self.intern(self.domains, domain)

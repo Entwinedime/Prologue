@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <map>
 #include <optional>
@@ -26,7 +27,7 @@ struct InvocationInput {
     InputPosition position;
     const nlohmann::json * layouts;
 
-    const nlohmann::json & bindings() const;
+    const nlohmann::json * bindings() const;
     GraphTiming timing(const CoarseGraph & graph, ExecutionObserver * observer = nullptr) const;
 };
 
@@ -41,7 +42,7 @@ public:
     InvocationInput invocation(const std::string & group, const std::string & operation, const nlohmann::json & identity);
     std::optional<TimeWindow> input(const std::string & group, const nlohmann::json & identity, bool in_flow);
     TimeWindow notification(const nlohmann::json & identity);
-    EventTiming transfer(std::span<const InputPosition> posts);
+    std::array<TimeWindow, 2> transfer(std::span<const InputPosition> posts);
     nlohmann::json finish() const;
 
 private:
@@ -67,6 +68,7 @@ private:
     std::size_t graph_count_ = 0;
     std::size_t input_count_ = 0;
     bool has_cpu_steps_ = false;
+    bool has_port_actions_ = false;
 };
 
 } // namespace prologue

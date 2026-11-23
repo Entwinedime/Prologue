@@ -6,7 +6,6 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from prologue.artifacts import write_json
-from prologue.integrations.runtimes.pytorch.protocol_work import CpuTransfer
 
 from .actions import ActionIdentity
 from .context_values import ContextValues
@@ -17,11 +16,12 @@ from .source_clock import ClockRealization
 
 
 class NativeInputs:
-    def __init__(self, capture, graphs, output, layouts=None):
+    def __init__(self, capture, graphs, output, layouts=None, *, peer_handoffs=False):
         self.capture, self.graphs, self.output = capture, graphs, output
-        self.layouts = layouts
+        self.layouts, self.peer_handoffs = layouts, peer_handoffs
         self.steps = defaultdict(list)
-        self.cpu_posts = defaultdict(dict)
+        self.cpu_positions = {}
+        self.cpu_consumers = set()
         self.origins, self.ingress = {}, {}
         self.counts = Counter()
         self.contexts = ContextValues()
@@ -90,23 +90,35 @@ class NativeInputs:
                     record["endpoints"].append([event, time_ns])
                 self.counts["measured_work"] += len(layout["identity"][-1])
                 self.counts["isolated_observed_services"] += len(record["services"])
-                self.steps[group].append((begin, record, None))
-                continue
 
-            boundaries = []
-            for boundary in case.completion_boundaries(rank, index):
-                measured = clock.window(boundary["event"])
-                if measured is None:
-                    self.counts["unmeasured_boundaries"] += 1
-                    continue
-                selected = realization.timestamp(rank, boundary["event"])
-                condition = self.window(selected, selected, origin)
-                self.counts["measured_boundaries"] += 1
-                self.counts["calibrated_boundary_ranges"] += measured[0] != measured[1]
-                boundaries.append({"at": boundary["at"], "window": condition})
-            bindings = source.invocation_bindings(index, group)
-            self.counts["bound_invocations"] += bool(bindings)
-            record.update(bindings=bindings, service_ns=None, boundaries=boundaries)
+            if layouts is None or self.peer_handoffs:
+                boundaries = []
+                for boundary in case.completion_boundaries(rank, index, peer_handoffs=self.peer_handoffs):
+                    event = boundary["event"]
+                    measured = clock.window(event)
+                    if measured is None:
+                        self.counts["unmeasured_boundaries"] += 1
+                        continue
+                    selected = realization.timestamp(rank, event)
+                    condition = self.window(selected, selected, origin)
+                    if layouts is None:
+                        self.counts["measured_boundaries"] += 1
+                        self.counts["calibrated_boundary_ranges"] += measured[0] != measured[1]
+                    else:
+                        self.counts["common_port_conditions"] += 1
+                    boundaries.append({"at": boundary["at"], "window": condition})
+                bindings = source.invocation_bindings(index, group)
+                if bindings:
+                    record["bindings"] = bindings
+                    self.counts["bound_invocations"] += 1
+                record.update(service_ns=None, boundaries=boundaries)
+                if layouts is not None:
+                    record["host_tails"] = []
+                    for tail in layout["host_tails"]:
+                        if clock.window(tail["event"]) is None:
+                            continue
+                        selected = realization.timestamp(rank, tail["event"])
+                        record["host_tails"].append({**tail, "window": self.window(selected, selected, origin)})
             self.steps[group].append((begin, record, None))
 
     def input_reads(self, instance, rank, raw, submitted):
@@ -126,49 +138,54 @@ class NativeInputs:
                 "window": {"begin_ns": read["time_ns"], "end_ns": read["time_ns"]},
             }, None))
 
-    def cpu(self, instance, rank, origin):
-        group = f"{instance['id']}/{rank}"
-        document = self.read(self.capture / "protocol" / f"rank-{rank}.json")
-        for post in document["posts"]:
-            key = tuple(post["key"])
-            if rank in self.cpu_posts[key]:
-                raise ValueError("native CPU input repeats a local post")
-            self.cpu_posts[key][rank] = {"post": post, "group": group, "origin": origin, "position": None}
-            intervals = [(post["interval"], (key, rank))]
-            if post["operation"] in {"isend", "irecv"} and post["consumed"] is not None:
-                intervals.append((post["consumed"], None))
-            for interval, position in intervals:
-                execution = interval["execution"]
-                if not execution["in_flow"]:
-                    continue
-                work = execution["work"]
-                context = work["context"]
-                work = {**work, "context": {**context, "cpu_transfer": CpuTransfer.identity(context["cpu_transfer"])}}
-                begin, end = interval["begin_raw_ns"], interval["end_raw_ns"]
-                self.steps[group].append((begin, {
-                    "operation": "cpu", "identity": self.contexts.encode({
-                        "operation": execution["operation"], "work": ActionIdentity.work_identity(work),
-                    }), "source": {"post": list(key), "phase": "post" if position is not None else "wait"}, "service_ns": None, "boundaries": [
-                        self.port("call.enter", "input", self.window(begin, begin, origin)),
-                        self.port("call.return", "output", self.window(end, end, origin)),
-                    ],
-                }, position))
+    def cpu(self, evidence, rank, origin):
+        group = evidence.groups[rank]
+        for call in evidence.cpu.native_calls[rank]:
+            if not call.execution["in_flow"]:
+                continue
+            begin, end = (evidence.cpu.native_times[point] for point in (call.entered, call.returned))
+            position = (call.key, rank) if call.phase == "post" else None
+            boundaries = [
+                self.port("call.enter", "input", self.window(begin, begin, origin)),
+                self.port("call.return", "output", self.window(end, end, origin)),
+            ]
+            if position is not None:
+                if call.posted is None:
+                    raise ValueError(f"serving CPU post {call.key} at rank {rank} lacks an actual transport boundary")
+                posted = evidence.cpu.native_times[call.posted]
+                boundaries.append(self.port("transport.post", "output", self.window(posted, posted, origin)))
+            if call.phase == "wait" or call.execution["operation"] in {"send", "recv"}:
+                self.cpu_consumers.add((call.key, rank))
+            self.steps[group].append((begin, {
+                "operation": "cpu", "identity": self.contexts.encode(call.identity()), "source": call.source(),
+                "service_ns": None, "boundaries": boundaries,
+            }, position))
 
-    def transfers(self):
+    def transfers(self, evidence):
         result = []
-        for peers in self.cpu_posts.values():
-            if len(peers) != 2:
+        for key, peers in evidence.cpu.messages["native"].items():
+            positions = [self.cpu_positions[key, rank] for rank in peers if (key, rank) in self.cpu_positions]
+            consumers = [rank for rank in peers if (key, rank) in self.cpu_consumers]
+            if not positions and not consumers:
                 continue
-            consumed = [peer["post"]["consumed"]["end_raw_ns"] for peer in peers.values() if peer["post"]["consumed"] is not None]
-            positions = sorted((peer["position"] for peer in peers.values() if peer["position"] is not None), key=lambda row: (row["group"], row["step"]))
-            if not consumed or not positions:
-                continue
-            origins = {peer["origin"] for peer in peers.values()}
+            origins = {self.origins[evidence.groups[rank]] for rank in peers}
             if len(origins) != 1:
                 raise ValueError("native CPU message crosses unrelated workload clocks")
             origin, = origins
-            begin = max(peer["post"]["interval"]["begin_raw_ns"] for peer in peers.values())
-            result.append({"posts": positions, "service_ns": None, "window": self.window(begin, min(consumed), origin)})
+            timing = evidence.cpu.native_readiness(peers)
+            if timing is None or None in timing[1].values():
+                raise ValueError(f"CPU transfer {key} lacks independent readiness on both endpoints")
+            _, windows = timing
+            if not positions:
+                if any(windows[rank][1] > origin for rank in consumers):
+                    raise ValueError(f"CPU transfer {key} becomes ready during serving without a timed post")
+                continue
+
+            # The pairing uses already checked posting conditions, before a consumer can advance.
+            posts = sorted(positions, key=lambda row: (row["group"], row["step"]))
+            result.append({"posts": posts, "ready": {
+                side: self.window(*windows[rank], origin) for side, rank in zip(("send", "receive"), key[1:3], strict=True)
+            }})
         return result
 
     def run(self, reference=None):
@@ -176,6 +193,8 @@ class NativeInputs:
         report = {"capture": str(self.capture.resolve()), "graphs": str(self.graphs.resolve()), "status": "unverified"}
         try:
             evidence = NativeCase.read(self.capture, self.graphs) if reference is None else reference
+            if self.peer_handoffs and not any(source[0] != target[0] for source, target, _ in evidence.links):
+                raise ValueError("peer handoff timing requires a verified cross-worker dependency")
             for instance, session, submitted in zip(evidence.manifest["instances"], evidence.sessions, evidence.submissions, strict=True):
                 if set(instance["observed_roles"]) != set(session["native_participants"]):
                     raise ValueError("native input needs every actual participant")
@@ -185,7 +204,7 @@ class NativeInputs:
                     self.origins[group] = origin
                     _, raw, _ = evidence.sources[rank]
                     self.input_reads(instance, rank, raw, submitted)
-                    self.cpu(instance, rank, origin)
+                    self.cpu(evidence, rank, origin)
                 if instance["id"] not in self.ingress:
                     raise ValueError("native case omits external ingress")
             if len(set(self.origins.values())) != 1:
@@ -194,7 +213,7 @@ class NativeInputs:
             report["native_evidence"] = native_report
             if evidence.graph is None or native_report["status"] == "differences":
                 raise ValueError("native source has no consistent causal graph")
-            self.realization = ClockRealization(evidence.clocks, evidence.graph).solve()
+            self.realization = ClockRealization(evidence.clocks, evidence.graph, evidence.cpu.native_times).solve()
             for rank in evidence.sources:
                 group = evidence.groups[rank]
                 self.actions(evidence, rank, self.realization, self.origins[group])
@@ -206,8 +225,7 @@ class NativeInputs:
                 actors[group] = {"steps": [step for _, step, _ in ordered]}
                 for position, (_, _, post) in enumerate(ordered):
                     if post is not None:
-                        key, rank = post
-                        self.cpu_posts[key][rank]["position"] = {"group": group, "step": position}
+                        self.cpu_positions[post] = {"group": group, "step": position}
             notifications = [
                 {"identity": {"group": row["group"], "name": name, "work": {"request": row["request"]}},
                  "window": self.window(row[field]["begin_raw_ns"], row[field]["end_raw_ns"], self.origins[row["group"]])}
@@ -223,7 +241,7 @@ class NativeInputs:
                     "window": self.window(time, time, self.origins[group]),
                 })
             document = {"context_values": self.contexts.values, "actors": actors, "ingress": self.ingress,
-                        "notifications": notifications, "transfers": self.transfers()}
+                        "notifications": notifications, "transfers": self.transfers(evidence)}
             if self.layouts is not None:
                 document["layouts"] = self.layout_values.values
             report.update(status="partial" if self.counts["unmeasured_boundaries"] or self.counts["unmeasured_work_finishes"]
@@ -234,6 +252,7 @@ class NativeInputs:
                 write_json(self.output / "execution-inputs.json", document, replace=False)
         except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
             report.update(status="unverified", error=str(error))
+        report["timing_scope"] = "peer_handoffs" if self.peer_handoffs else "observed_execution"
         report["scope"] = "Measured endpoints use one feasible device-clock realization rounded upward to integer nanoseconds. Independently verified elided waits supply causal witnesses without time constraints. Original calibration uncertainty and CPU wire and notification bounds remain."
         (self.output / "execution-inputs-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
         return report
@@ -242,13 +261,15 @@ class NativeInputs:
 class ConsumedInputs:
     """Prove consumed prefixes from native observations, independently of the supplied condition file."""
 
-    def __init__(self, case, ingress, realization):
-        self.capture, self.groups, self.ingress = case.capture, case.groups, ingress
+    def __init__(self, case, ingress, realization, *, peer_handoffs=False):
+        self.groups, self.ingress = case.groups, ingress
         self.case = case
+        self.peer_handoffs = peer_handoffs
         self.service_pairs = {}
         self.ranks = {group: rank for rank, group in case.groups.items()}
         self.origin_ns = ingress.origin_ns
-        self.ports, self.cpu_times = {}, {}
+        self.ports, self.cpu_calls = {}, {}
+        self.cpu_messages = {}
         self.bindings = {}
         self.boundaries = defaultdict(dict)
         self.realization = realization
@@ -269,7 +290,7 @@ class ConsumedInputs:
                     for row in raw["host_observation"]["intervals"] if row["name"].startswith("prologue.scope/")}
             host.update({query["scope"]: query["begin_raw_ns"] for query in raw["state_queries"]})
             for index, identity in identities.items():
-                self.ports[group, index] = self.case.completion_boundaries(rank, index)
+                self.ports[group, index] = tuple(self.case.completion_boundaries(rank, index, peer_handoffs=self.peer_handoffs))
                 if bindings := source.invocation_bindings(index, group):
                     self.bindings[group, index] = bindings
                 origins = source.graph["scopes"][index]["bindings"]["source_scopes"]
@@ -278,19 +299,14 @@ class ConsumedInputs:
                 ordered[group].append((begin, {"operation": "action", "identity": {key: identity[key] for key in ("action", "parameters", "work")},
                                               "source": {"scope": index}}))
 
-            protocol = json.loads((self.capture / f"protocol/rank-{rank}.json").read_text())
-            for post in protocol["posts"]:
-                for phase, interval in (("post", post["interval"]), ("wait", post["consumed"])):
-                    if interval is None or not interval["execution"]["in_flow"] or (phase == "wait" and post["operation"] not in {"isend", "irecv"}):
-                        continue
-                    execution = interval["execution"]
-                    self.cpu_times[group, tuple(post["key"]), phase] = interval["begin_raw_ns"], interval["end_raw_ns"]
-                    work = execution["work"]
-                    work = {**work, "context": {**work["context"], "cpu_transfer": CpuTransfer.identity(work["context"]["cpu_transfer"])}}
-                    ordered[group].append((interval["begin_raw_ns"], {
-                        "operation": "cpu", "identity": {"operation": execution["operation"], "work": ActionIdentity.work_identity(work)},
-                        "source": {"post": post["key"], "phase": phase},
-                    }))
+            for call in self.case.cpu.native_calls[rank]:
+                if not call.execution["in_flow"]:
+                    continue
+                begin, end = (self.case.cpu.native_times[point] for point in (call.entered, call.returned))
+                self.cpu_calls[group, call.key, call.phase] = call
+                ordered[group].append((begin, {
+                    "operation": "cpu", "identity": call.identity(), "source": call.source(),
+                }))
 
             if raw["request_ingress"]:
                 instance = group.rsplit("/", 1)[0]
@@ -322,14 +338,17 @@ class ConsumedInputs:
                 matches[target_event] = source_event, time_ns
             elif kind != "boundary_time":
                 if matches:
-                    self.check_measured_graph(rank, root, target, event_ids, matches, durations)
+                    if self.peer_handoffs and len(matches) < len(event_ids):
+                        self.check_host_tails(rank, root, target, event_ids, matches)
+                    else:
+                        self.check_measured_graph(rank, root, target, event_ids, matches, durations)
                 self.measured_graph = None
 
         if kind == "condition_used":
             if self.expected is None:
                 self.prepare()
                 if self.realization is None:
-                    self.realization = ClockRealization(self.case.clocks, self.case.graph)
+                    self.realization = ClockRealization(self.case.clocks, self.case.graph, self.case.cpu.native_times)
             group = row["group"]
             position = self.positions[group]
             if (row.keys() != {"kind", "group", "step", "operation", "source"} or type(row["step"]) is not int
@@ -375,6 +394,16 @@ class ConsumedInputs:
                 elif declared != raw_ns:
                     raise ValueError(f"rank {rank} event {event} completes outside its declared native timestamp")
                 self.counts["timed_boundaries"] += 1
+        elif kind == "native_protocol" and row["record"]["phase"] == "ready":
+            record = row["record"]
+            predicted = tuple(record["key"])
+            if record["event"] is not None and predicted in self.cpu_messages:
+                native = self.cpu_messages[predicted]
+                _, windows = self.case.cpu.native_readiness(self.case.cpu.messages["native"][native])
+                begin, end = windows[self.ranks[row["group"]]]
+                if not begin <= row["time_ns"] + self.origin_ns <= end:
+                    raise ValueError("CPU readiness differs from the original transport callback")
+                self.counts["cpu_readiness_endpoints"] += 1
 
     def matched_invocation(self, group, root):
         record = self.pending.get(group)
@@ -404,16 +433,44 @@ class ConsumedInputs:
             if root["work"]["bindings"] != bindings or contents.invocation_bindings(0, group) != bindings:
                 raise ValueError("instantiated graph changes its native invocation binding")
             self.counts["bound_invocations"] += bool(bindings)
+            self.counts["action_graphs"] += 1
             for boundary in self.ports[group, scope]:
-                event = row["event_ids"][contents.boundary_event(0, boundary["at"])]
+                target = contents.boundary_event(0, boundary["at"])
+                if target is None:
+                    raise ValueError(f"required native resource tail is absent at {group}, scope {scope}: {boundary['at']}")
+                event = row["event_ids"][target]
                 self.boundaries[event][self.ranks[group], boundary["event"]] = None
             self.measured_graph = (self.ranks[group], scope, contents, row["event_ids"], {}, row["work_ns"])
             return scope
 
-        begin, end = self.cpu_times[group, tuple(record["source"]["post"]), record["source"]["phase"]]
-        self.boundaries[ports["call.enter", "input"]][None, begin] = None
-        self.boundaries[ports["call.return", "output"]][None, end] = None
+        call = self.cpu_calls[group, tuple(record["source"]["post"]), record["source"]["phase"]]
+        stamps = self.case.cpu.native_times
+        self.boundaries[ports["call.enter", "input"]][None, stamps[call.entered]] = None
+        self.boundaries[ports["call.return", "output"]][None, stamps[call.returned]] = None
+        if call.posted is not None:
+            predicted = tuple(root["bindings"]["cpu_protocol"]["key"])
+            if self.cpu_messages.setdefault(predicted, call.key) != call.key:
+                raise ValueError("CPU message pairs posts that belong to different native transfers")
+            self.boundaries[ports["transport.post", "output"]][None, stamps[call.posted]] = None
         return None
+
+    def check_host_tails(self, rank, root, target, event_ids, matches):
+        source, _, _ = self.case.sources[rank]
+        native = source.host_tails(root)
+        predicted = {event_ids[event]: identity for event, identity in target.host_tails(0).items()}
+        native_counts = Counter(native.values())
+        predicted_counts = Counter(predicted.values())
+        for event, (source_event, time_ns) in matches.items():
+            identity = native.get(source_event)
+            if (identity is None or identity != predicted.get(event)
+                    or native_counts[identity] != 1 or predicted_counts[identity] != 1 or time_ns is None):
+                raise ValueError(f"rank {rank} action {root} consumes an unmatched host completion")
+            if source_event in self.case.logical[rank]:
+                raise ValueError(f"rank {rank} action {root} times an unmeasured host completion")
+            declared = time_ns + self.origin_ns
+            self.realization.condition(rank, source_event, declared)
+            self.boundaries[event][rank, source_event] = declared
+            self.counts["matched_host_tails"] += 1
 
     def check_measured_graph(self, rank, root, target, event_ids, matches, durations):
         source, raw, _ = self.case.sources[rank]
@@ -461,9 +518,12 @@ class ConsumedInputs:
                     "scope": "No consumed-condition witness; ordinary logical pairing only."}
         remaining = sum(len(records) - self.positions[group] for group, records in self.expected.items())
         complete = not remaining and not self.pending and not self.reads and not self.boundaries
+        full = complete and not self.peer_handoffs and not self.counts["cpu"] and 0 < self.counts["full_graphs"] == self.counts["action"]
+        if self.peer_handoffs:
+            self.counts["shared_boundary_graphs"] = self.counts["action_graphs"] - self.counts["full_graphs"]
         clock = self.realization.solve()
         return {"status": "complete" if complete else "partial", "verified_prefix": True,
-                "full_node_coverage": complete and 0 < self.counts["full_graphs"] == self.counts["action"] and not self.counts["cpu"],
+                "full_node_coverage": full,
                 "checked": dict(self.counts), "unconsumed": remaining, "unbound_graphs": len(self.pending), "unreturned_reads": len(self.reads),
                 "unfinished_boundaries": len(self.boundaries), "clock_realization": clock.report(),
                 "scope": "Consumed native identities follow measured CPU order. Timed conditions use original measurements and one joint clock; logical witnesses leave completion to actual dependencies."}

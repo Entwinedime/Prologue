@@ -214,8 +214,9 @@ class ActionScopes:
         for index, scope in enumerate(self.graph["scopes"]):
             origins = scope["bindings"]["source_scopes"]
             observed = raw["scopes"][origins[0]]
+            communication = observed.get("communication")
             if "required_peers" in observed["bindings"]:
-                group, counts = observed["communication"], observed["peer_rows"]
+                group, counts = communication, observed["peer_rows"]
                 sent, received = counts["send"], counts["receive"]
                 if (len(sent) != len(group["members"]) or len(received) != len(sent)
                         or any(type(value) is not int or value < 0 for value in sent + received)):
@@ -231,13 +232,14 @@ class ActionScopes:
                 geometry = {"dispatch": (before * topk, after), "combine": (before, after * topk)}
                 if group["required"] != required or (sum(sent), sum(received)) != geometry[group["operation"]]:
                     raise ValueError("native expert exchange prerequisites disagree with its observed traffic")
+                communication = {**group, "peer_rows": counts}
 
             bindings = dict(observed["bindings"])
             bindings.update({name: observed[name] for name in ("effects", "publication") if name in observed})
             bindings["source_scopes"] = origins
             parent = None if observed["parent"] is None else self.source_ids[observed["parent"]]
             if (not observed["complete"] or scope["bindings"] != bindings or scope["parent"] != parent
-                    or scope.get("communication") != observed.get("communication")
+                    or scope.get("communication") != communication
                     or any(scope[field] != observed[field] for field in ("role", "site", "implementation", "parameters", "constants", "work"))
                     or self.declaration_expressions(scope) != self.declaration_expressions(observed)):
                 raise ValueError(f"graph scope {index} differs from its native recording")

@@ -3,11 +3,13 @@
 import argparse
 import json
 from collections import Counter, defaultdict
+from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from prologue.artifacts import write_json
 from prologue.integrations.runtimes.docker import ModelingProcess
+from prologue.performance.requirements import CostRequirements
 
 from .fixed_reference import FixedReference
 from .latency_metrics import compare_request_metrics
@@ -27,25 +29,50 @@ class FixedPerformance:
         return status == "compared"
 
     def estimate(self, reference, model, scratch):
-        estimates, first_gaps = {}, {}
+        estimates, domains, first_gaps = {}, {}, {}
         for rank, (contents, _, _) in reference.case.sources.items():
             output = scratch / f"{rank}-costs.json"
             model.run_model("work-costs", output, reference.case.graphs / f"{rank}-graph.json", self.arguments.costs)
             result = json.loads(output.read_text())
             estimates[rank] = result["work_ns"]
+            domains[rank] = result["domain"]
             if len(estimates[rank]) != len(contents.graph["work"]):
                 raise ValueError("fixed cost response changes the observed work set")
             if result["first_cost_gap"] is not None:
                 first_gaps[rank] = result["first_cost_gap"]
         self.report["first_cost_gaps"] = first_gaps
-        return [estimates[interval.rank][interval.index] for interval in reference.intervals]
+
+        requirements = CostRequirements()
+        points = {}
+        for index, interval in enumerate(reference.intervals):
+            if external := reference.external_cost(interval):
+                rank, identity, features = external
+                points[index] = requirements.external("fixed_protocol", domains[rank], identity, interval.kind, features)
+        costs = {}
+        if points:
+            asset = json.loads(self.arguments.costs.read_text())["domains"]
+            costs = requirements.query(model, asset, scratch, nullcontext, None)
+
+        result, first_protocol_gap = [], None
+        for index, interval in enumerate(reference.intervals):
+            if index in points:
+                point = points[index]
+                status, value = costs[point]
+                if value is None and first_protocol_gap is None:
+                    first_protocol_gap = {**reference.detail(interval), "status": status, "features": point.features()}
+                result.append(value)
+            else:
+                result.append(estimates[interval.rank][interval.index])
+        if first_protocol_gap is not None:
+            self.report["first_protocol_cost_gap"] = first_protocol_gap
+        return result
 
     def assess(self, reference, estimates):
         coverage = defaultdict(lambda: {"work": 0, "measured": 0, "modeled": 0, "paired": 0,
                                         "signed_error_ns": 0, "absolute_error_ns": 0})
         first_missing = None
         for interval, estimate in zip(reference.intervals, estimates, strict=True):
-            row = coverage[interval.piece["kind"]]
+            row = coverage[interval.kind]
             duration = interval.service_ns
             row["work"] += 1
             row["measured"] += duration is not None
@@ -94,7 +121,7 @@ class FixedPerformance:
         return {**first, "baseline_ns": baseline[target], "tight_predecessor": predecessor}
 
     def measured_baseline(self, reference, model, scratch, measured):
-        if None in measured or "unqualified_host_service_partitions" in reference.gaps:
+        if None in measured or "unqualified_work_service_partitions" in reference.gaps:
             self.report["baseline"] = {"status": "incomplete_measured_services", "missing_services": measured.count(None)}
             return None
 
@@ -109,10 +136,12 @@ class FixedPerformance:
         times = json.loads(output.read_text())["event_times_ns"]["measured"]
         baseline = self.report["baseline"] = reference.check_baseline(times)
         publications = baseline["publications"] = reference.publications.compare(times)
+        transport = baseline["cpu_transport"] = reference.transport_baseline(times)
+        inputs = baseline["active_input_reads"] = reference.compare_active_input_reads(times, measured=True)
         if baseline["first_difference"] is not None:
             baseline["status"] = "baseline_difference"
             baseline["local_unexplained_waits"] = reference.local_unexplained_waits(plan, measured_steps)
-        elif publications["different_tokens"]:
+        elif publications["different_tokens"] or transport["different"] or inputs["different"]:
             baseline["status"] = "baseline_difference"
         elif "incomplete_publication_boundaries" in reference.gaps:
             baseline["status"] = "incomplete_publication_boundaries"
@@ -136,11 +165,7 @@ class FixedPerformance:
         # Membership comes from the native graph even when a cost estimate is missing.
         members = {name: [] for name in groups}
         for index, interval in enumerate(reference.intervals):
-            piece = interval.piece
-            scope = reference.case.sources[interval.rank][0].graph["scopes"][piece["scope"]]
-            copy = piece.get("copy", {})
-            fields = {"kind": piece["kind"], "scope": scope["role"], "site": scope["site"], "phase": scope["work"].get("phase"),
-                      "direction": copy.get("direction"), "caller": copy.get("caller")}
+            fields = reference.work_fields(interval)
             for name, selector in groups.items():
                 if all(fields[key] == value for key, value in selector.items()):
                     members[name].append(index)
@@ -166,13 +191,13 @@ class FixedPerformance:
         return scenarios
 
     def scenarios(self, reference, model, scratch, estimates, measured, plan, times, scenarios):
-        if None not in estimates:
+        if not reference.gaps and None not in estimates:
             scenarios["modeled"] = estimates
             for kind in sorted(self.report["service_coverage"]):
-                scenarios[f"restore_{kind}"] = [observed if interval.piece["kind"] == kind else estimate
+                scenarios[f"restore_{kind}"] = [observed if interval.kind == kind else estimate
                                                  for interval, estimate, observed in zip(reference.intervals, estimates, measured, strict=True)]
         if not scenarios:
-            return
+            return True
         scenarios = {name: reference.replay_services(durations) for name, durations in scenarios.items()}
         services = scratch / "scenarios.json"
         write_json(services, scenarios, replace=False)
@@ -181,10 +206,17 @@ class FixedPerformance:
         replayed = json.loads(output.read_text())["event_times_ns"]
         outcomes = {}
         for name, stamps in replayed.items():
+            inputs = reference.compare_active_input_reads(stamps)
+            outcome = outcomes[name] = {"active_input_reads": inputs,
+                                       "first_timing_difference": self.first_drift(reference, plan, scenarios[name], times, stamps)}
+            if inputs["different"]:
+                outcome["status"] = "input_readiness_unverified"
+                continue
+
             metrics = reference.publications.metrics(stamps)
-            outcomes[name] = {"request_metrics": metrics, **compare_request_metrics(self.report["baseline"]["request_metrics"], metrics),
-                              "first_timing_difference": self.first_drift(reference, plan, scenarios[name], times, stamps)}
+            outcome.update(request_metrics=metrics, **compare_request_metrics(self.report["baseline"]["request_metrics"], metrics))
         self.report["scenarios"] = outcomes
+        return outcomes.get("modeled", {}).get("status") != "input_readiness_unverified"
 
     def run(self):
         args = self.arguments
@@ -207,6 +239,12 @@ class FixedPerformance:
 
         reference = FixedReference(case)
         self.report["reference_gaps"] = reference.gaps
+        if reference.cpu_calls:
+            self.report["cpu_protocol"] = {
+                "host_calls": len(reference.cpu_calls), "measured_endpoints": len(reference.cpu_points),
+                "measured_transport_endpoints": len(reference.cpu_transfers),
+                "initial_transport_conditions": len(reference.cpu_initial_readiness),
+            }
         self.report["specialization_loads"] = reference.specialization_loads
         self.report["external_releases"] = [{"rank": rank, "event": event, "time_ns": stamp}
                                             for (rank, event), stamp in reference.entries.items()]
@@ -219,6 +257,10 @@ class FixedPerformance:
         for row in reference.host_conditions.values():
             conditions.update(row)
         self.report["fixed_host_conditions"] = {"steps": len(reference.host_conditions), **conditions}
+        if reference.cross_worker_wakes:
+            self.report["cross_worker_wakes"] = reference.cross_worker_wakes
+        if reference.post_graph_host_wakes:
+            self.report["post_graph_host_wakes"] = reference.post_graph_host_wakes
         self.report["fixed_host_fences"] = reference.fence_evidence
         self.report["fixed_device_dispatch"] = reference.device_dispatch
         model = ModelingProcess(args.binary, args.modeling_image, args.timeout)
@@ -236,13 +278,17 @@ class FixedPerformance:
                 return self.finish("reference_timing_incomplete")
             if self.report["baseline"]["status"] == "baseline_difference":
                 return self.finish("baseline_difference")
-            if reference.gaps:
+            if reference.gaps.keys() - {"unmeasured_cpu_transport"}:
                 return self.finish("reference_timing_incomplete")
             if None in reference.specialization_loads.values():
                 return self.finish("reference_specializations_unobserved")
             if any(reference.specialization_loads.values()):
                 return self.finish("reference_loaded_specializations")
-            self.scenarios(reference, model, scratch, estimated, measured, *replay, scoped)
+            if reference.gaps and scoped:
+                self.report["scoped_scenario_basis"] = "hold_observed_host_wakes_and_wire_dependencies"
+            input_ready = self.scenarios(reference, model, scratch, estimated, measured, *replay, scoped)
+            if reference.gaps or not input_ready:
+                return self.finish("reference_timing_incomplete")
             return self.finish("cost_gap" if None in estimated else "compared")
 
 

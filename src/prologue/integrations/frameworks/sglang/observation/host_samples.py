@@ -38,6 +38,7 @@ class NativeHostSamples(ServingCuts):
         if description["pp_size"] > 1:
             self.protocol = CpuProtocol(
                 description["native_participants"], self.communicating, self.parent, self.protocol_service,
+                transport_timing=True,
             )
             self.pipeline = HostPipelineScopes(self)
 
@@ -103,7 +104,7 @@ class NativeHostSamples(ServingCuts):
 
     def observe_exchange(self, original, role, group, root_rank, operand, run):
         work, parameters, bindings = None, None, None
-        if operand is not None:
+        if operand is not None and operand.output is None:
             parameters = PipelineABI.tensor_parameters(operand.tensor)
         if role == "gather":
             group_role = self.groups.name(group)

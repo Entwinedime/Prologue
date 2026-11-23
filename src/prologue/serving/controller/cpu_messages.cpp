@@ -23,11 +23,32 @@ void CpuMessages::observe(const nlohmann::json & key, const Endpoint & endpoint,
     observer_->native_protocol(endpoint.group, record, timeline_.now_ns());
 }
 
-void CpuMessages::ensure_wire(const nlohmann::json & key, Message & message, const Endpoint & endpoint) {
-    if (message.wire || message.ready || priming_) return;
-    message.wire = timeline_.defer();
-    completions_[*message.wire].push_back({ Phase::Wire, key, endpoint.descriptor.at("receiving").get<bool>() ? 1U : 0U, {} });
-    observe(key, endpoint, {{ "phase", "wire" }, { "event", *message.wire }});
+std::vector<std::size_t> CpuMessages::Message::posts() const {
+    std::vector<std::size_t> result;
+    for (const auto & endpoint : endpoints) {
+        if (endpoint->posted) result.push_back(*endpoint->posted);
+    }
+    return result;
+}
+
+void CpuMessages::declare_ready(const nlohmann::json & key, Endpoint & endpoint, std::size_t side) {
+    if (endpoint.ready_event || endpoint.ready) return;
+    endpoint.ready_event = timeline_.defer();
+    completions_[*endpoint.ready_event].push_back({ Phase::Ready, key, side, {} });
+    observe(key, endpoint, {{ "phase", "readiness" }, { "event", *endpoint.ready_event }});
+}
+
+void CpuMessages::publish_ready(const nlohmann::json & key, Endpoint & endpoint, std::span<const std::size_t> prerequisites) {
+    endpoint.ready = true;
+    ++ready_count_;
+    const auto service = endpoint.readiness.service_ns;
+    observe(key, endpoint, {
+        { "phase", "ready" },
+        { "event", endpoint.ready_event ? nlohmann::json(*endpoint.ready_event) : nlohmann::json(nullptr) },
+        { "prerequisites", std::vector<std::size_t>(prerequisites.begin(), prerequisites.end()) },
+        { "service_ns", service ? nlohmann::json(*service) : nlohmann::json(nullptr) }
+    });
+    if (endpoint.wait_call && !endpoint.wait_return) consume(key, endpoint);
 }
 
 ServiceDuration CpuMessages::estimate(const Endpoint & owner, const nlohmann::json & execution, std::string_view operation, WorkKind kind) {
@@ -48,23 +69,28 @@ ServiceDuration CpuMessages::estimate(const Endpoint & owner, const nlohmann::js
 }
 
 CpuMessages::Service CpuMessages::service(const nlohmann::json & key, const Endpoint & endpoint,
-                                         const nlohmann::json & execution, std::optional<std::size_t> prerequisite) {
+                                         const nlohmann::json & execution, bool posting, std::optional<std::size_t> prerequisite) {
     const auto & resource = actors_.at(endpoint.group).control;
     ScopeInfo info{ {}, "cpu_service", "cpu_protocol", "cpu_protocol", {}, {}, {}, execution.at("work"),
                     {{ "cpu_protocol", {{ "key", key }, { "descriptor", endpoint.descriptor }, { "execution", execution }} }}, {} };
     CoarseGraph graph;
     graph.environment = nlohmann::json::object();
     graph.resources.push_back(resource);
+    const auto finish = posting ? 2U : 1U;
     graph.scopes.push_back({ std::move(info), {
         { "call.enter", Direction::Input, PortUse::Control, Relation::Control, 0, {} },
-        { "call.return", Direction::Output, PortUse::Control, Relation::Control, 1, {} }
+        { "call.return", Direction::Output, PortUse::Control, Relation::Control, finish, {} }
     }});
-    graph.events = {{ 0, 0 }, { 0, 0 }};
+    graph.events.resize(finish + 1, GraphEvent{ 0, 0 });
     graph.work = {{ 0, 0, WorkKind::Host, 0, 1 }};
+    if (posting) {
+        graph.scopes.front().ports.push_back({ "transport.post", Direction::Output, PortUse::Control, Relation::Control, 1, {} });
+        graph.work.push_back({ 0, 0, WorkKind::Host, 1, 2 });
+    }
     std::vector<ExecutionInput> inputs;
 
-    // Blocking API time includes its wait, but only the local CPU service receives a duration.
-    if (prerequisite) inputs.push_back({ *prerequisite, 1, Relation::Communication });
+    // A local Work becomes consumable only after its own transport readiness.
+    if (prerequisite) inputs.push_back({ *prerequisite, finish, Relation::Communication });
     GraphTiming timing;
     std::optional<InputPosition> position;
     if (auto * observed = times_.conditions()) {
@@ -74,15 +100,21 @@ CpuMessages::Service CpuMessages::service(const nlohmann::json & key, const Endp
         timing = supplied.timing(graph);
         position = std::move(supplied.position);
     } else {
-        timing.work_ns.push_back(estimate(endpoint, execution, execution.at("operation").get_ref<const std::string &>(), WorkKind::Host));
+        const auto & operation = execution.at("operation").get_ref<const std::string &>();
+        if (posting) {
+            timing.work_ns.push_back(estimate(endpoint, execution, operation + "_before_post", WorkKind::Host));
+            timing.work_ns.push_back(estimate(endpoint, execution, operation + "_after_post", WorkKind::Host));
+        } else {
+            timing.work_ns.push_back(estimate(endpoint, execution, operation, WorkKind::Host));
+        }
     }
     const auto events = timeline_.insert(graph, timing, inputs);
-    ++service_count_;
-    return { events[0], events[1], std::move(position) };
+    service_count_ += graph.work.size();
+    return { events.front(), posting ? std::optional(events[1]) : std::nullopt, events.back(), std::move(position) };
 }
 
 void CpuMessages::resolve(const nlohmann::json & key, Message & message) {
-    if (message.resolved || !message.endpoints[0] || !message.endpoints[1]) return;
+    if (!message.endpoints[0] || !message.endpoints[1]) return;
     auto & sender = *message.endpoints[0];
     const auto & receiver = *message.endpoints[1];
     if (sender.descriptor.at("dtype") != receiver.descriptor.at("dtype")
@@ -90,40 +122,44 @@ void CpuMessages::resolve(const nlohmann::json & key, Message & message) {
         || sender.descriptor.at("element_bytes") != receiver.descriptor.at("element_bytes"))
         throw std::invalid_argument("CPU protocol endpoints disagree on wire geometry");
 
-    // Unconsumed async tails expose no completion; materialize readiness when an actual consumer needs it.
-    if (!priming_ && !message.wire && !sender.wait_call && !receiver.wait_call) return;
+    const auto prerequisites = message.posts();
+    if (prerequisites.empty()) {
 
-    message.resolved = true;
-    if (priming_) {
-
-        // Empty native startup establishes initial transport state, outside the modeled serving interval.
-        message.ready = true;
-        ++ready_count_;
-        observe(key, sender, {{ "phase", "ready" }, { "event", nullptr }, { "prerequisites", nlohmann::json::array() }, { "service_ns", 0 }});
+        // Untimed native traffic establishes broker state outside the modeled serving flow.
         for (auto & endpoint : message.endpoints) {
-            if (endpoint->wait_call) consume(key, *endpoint);
+            endpoint->readiness = { 0, {} };
+            if (endpoint->ready_event) {
+                timeline_.resolve(*endpoint->ready_event, prerequisites, Relation::Communication, {}, 0);
+            } else {
+                publish_ready(key, *endpoint, prerequisites);
+            }
         }
         return;
     }
-    ensure_wire(key, message, sender);
-    std::vector<std::size_t> prerequisites;
-    for (const auto & endpoint : message.endpoints) {
-        if (endpoint->entered) prerequisites.push_back(*endpoint->entered);
-    }
-    const bool in_flow = sender.execution.at("in_flow").get<bool>() || receiver.execution.at("in_flow").get<bool>();
-    if (!in_flow) {
-        message.timing = { 0, {} };
-    } else if (auto * observed = times_.conditions()) {
+
+    std::optional<std::array<TimeWindow, 2>> measured;
+    if (auto * observed = times_.conditions()) {
         std::vector<InputPosition> positions;
         for (const auto & endpoint : message.endpoints) {
             if (endpoint->input) positions.push_back(*endpoint->input);
         }
-        message.timing = observed->transfer(positions);
-    } else {
-        const auto & execution = sender.execution.at("in_flow").get<bool>() ? sender.execution : receiver.execution;
-        message.timing = { estimate(sender, execution, "cpu_transport", WorkKind::Transfer), {} };
+        measured = observed->transfer(positions);
     }
-    timeline_.resolve(*message.wire, prerequisites, Relation::Communication, message.timing.window, message.timing.service_ns);
+
+    // Readiness is scheduled once both posts exist; it can complete before either Work.wait is called.
+    for (std::size_t side = 0; side < message.endpoints.size(); ++side) {
+        auto & endpoint = *message.endpoints[side];
+        declare_ready(key, endpoint, side);
+        if (measured) {
+            endpoint.readiness = { {}, (*measured)[side] };
+        } else {
+            const auto & execution = endpoint.posted ? endpoint.execution : message.endpoints[1 - side]->execution;
+            const auto operation = side == 0 ? "cpu_send_ready" : "cpu_receive_ready";
+            endpoint.readiness = { estimate(endpoint, execution, operation, WorkKind::Transfer), {} };
+        }
+        timeline_.resolve(*endpoint.ready_event, prerequisites, Relation::Communication,
+                          endpoint.readiness.window, endpoint.readiness.service_ns);
+    }
 }
 
 void CpuMessages::post(std::size_t call, const std::string & group, const nlohmann::json & request) {
@@ -147,16 +183,20 @@ void CpuMessages::post(std::size_t call, const std::string & group, const nlohma
         throw std::invalid_argument("CPU post crosses native worlds or changes its actor");
     auto & message = messages_[key];
     if (message.endpoints[side]) throw std::invalid_argument("CPU post repeats a live endpoint");
-    auto & endpoint = message.endpoints[side].emplace(Endpoint{
-        group, key[receiving ? 2 : 1].get<std::size_t>(), descriptor, execution, {}, {}, {}, {}, nullptr, {}, false
-    });
+    auto & endpoint = message.endpoints[side].emplace();
+    endpoint.group = group;
+    endpoint.actor = key[receiving ? 2 : 1].get<std::size_t>();
+    endpoint.descriptor = descriptor;
+    endpoint.execution = execution;
     const bool in_flow = execution.at("in_flow").get<bool>();
     if (priming_ && in_flow) throw std::invalid_argument("native CPU startup cannot submit serving work");
     const bool blocking = operation == "send" || operation == "recv";
     if (in_flow) {
-        if (blocking) ensure_wire(key, message, endpoint);
-        const auto [entered, returned, position] = service(key, endpoint, execution, blocking ? message.wire : std::nullopt);
+        if (blocking) declare_ready(key, endpoint, side);
+        const auto [entered, posted, returned, position] =
+            service(key, endpoint, execution, true, blocking ? endpoint.ready_event : std::nullopt);
         endpoint.entered = entered;
+        endpoint.posted = posted;
         endpoint.returned = returned;
         endpoint.input = position;
         completions_[entered].push_back({ Phase::Post, key, side, blocking ? std::optional(call) : std::nullopt });
@@ -195,15 +235,15 @@ void CpuMessages::wait(std::size_t call, const std::string & group, const nlohma
     endpoint.wait_execution = execution;
     const bool in_flow = execution.at("in_flow").get<bool>();
     if (in_flow) {
-        ensure_wire(key, message, endpoint);
+        const auto side = static_cast<std::size_t>(endpoint_it - message.endpoints.begin());
+        if (!message.endpoints[1 - side]) declare_ready(key, endpoint, side);
         if (blocking) endpoint.wait_return = endpoint.returned;
-        else endpoint.wait_return = service(key, endpoint, execution, message.wire).returned;
+        else endpoint.wait_return = service(key, endpoint, execution, false, endpoint.ready_event).returned;
         if (!endpoint.wait_return) throw std::invalid_argument("blocking CPU service lost its entering execution interval");
         if (timeline_.completed(*endpoint.wait_return)) consume(key, endpoint);
         else completions_[*endpoint.wait_return].push_back({ Phase::Consume, key, static_cast<std::size_t>(endpoint_it - message.endpoints.begin()), {} });
     }
-    resolve(key, message);
-    if (!in_flow && message.ready && endpoint.wait_call) consume(key, endpoint);
+    if (!in_flow && endpoint.ready) consume(key, endpoint);
 }
 
 void CpuMessages::call(std::size_t call, const std::string & group, const nlohmann::json & message) {
@@ -219,19 +259,7 @@ void CpuMessages::notify(std::size_t event) {
         auto & endpoint = *message.endpoints[completion.endpoint];
         if (completion.phase == Phase::Post)
             observe(completion.key, endpoint, {{ "phase", "post" }, { "event", event }, { "descriptor", endpoint.descriptor }, { "execution", endpoint.execution }});
-        else if (completion.phase == Phase::Wire) {
-            message.ready = true;
-            ++ready_count_;
-            std::vector<std::size_t> prerequisites;
-            for (auto & peer : message.endpoints) {
-                if (peer->entered) prerequisites.push_back(*peer->entered);
-            }
-            observe(completion.key, endpoint, {{ "phase", "ready" }, { "event", event }, { "prerequisites", prerequisites },
-                                              { "service_ns", message.timing.service_ns ? nlohmann::json(*message.timing.service_ns) : nlohmann::json(nullptr) }});
-            for (auto & peer : message.endpoints) {
-                if (peer->wait_call && !peer->wait_return) consume(completion.key, *peer);
-            }
-        }
+        else if (completion.phase == Phase::Ready) publish_ready(completion.key, endpoint, message.posts());
         else if (completion.phase == Phase::Consume) consume(completion.key, endpoint);
         if (completion.call) replies_.emplace_back(*completion.call, nlohmann::json{{ "key", completion.key }});
     }
@@ -251,10 +279,9 @@ std::vector<std::pair<std::size_t, nlohmann::json>> CpuMessages::take_replies() 
 std::set<std::size_t> CpuMessages::retained_events() const {
     std::set<std::size_t> events;
     for (const auto & [_, message] : messages_) {
-        if (message.wire) events.insert(*message.wire);
         for (const auto & endpoint : message.endpoints) {
             if (!endpoint) continue;
-            for (const auto event : { endpoint->entered, endpoint->returned, endpoint->wait_return }) {
+            for (const auto event : { endpoint->entered, endpoint->posted, endpoint->returned, endpoint->wait_return, endpoint->ready_event }) {
                 if (event) events.insert(*event);
             }
         }
@@ -275,7 +302,7 @@ bool CpuMessages::shutdown_ready() const {
 nlohmann::json CpuMessages::summary() const {
     const auto basis = times_.conditions() ? "checked_execution_inputs"
         : times_.modeled() ? "independent_service_costs_outside_native_startup" : "given_service_duration_outside_native_startup";
-    return {{ "cpu_protocol", {{ "service_intervals", service_count_ }, { "ready_messages", ready_count_ }, { "consumptions", consumed_count_ },
+    return {{ "cpu_protocol", {{ "service_intervals", service_count_ }, { "ready_endpoints", ready_count_ }, { "consumptions", consumed_count_ },
                                { "timing_basis", basis }} }};
 }
 

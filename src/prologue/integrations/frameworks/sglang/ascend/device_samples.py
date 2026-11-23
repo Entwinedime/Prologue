@@ -32,7 +32,7 @@ class CostSamples:
         self.work = root / "work"
         self.joint = workers.joint_execution
         self.facts = {}
-        self.collectives = {}
+        self.collectives = None
         self.notifications = None
         self.peer_measurements = False
         if not self.joint:
@@ -48,7 +48,7 @@ class CostSamples:
         if self.peer_measurements:
             self.facts.update((rank, self.read_facts(rank)) for rank in observed if rank not in self.facts)
         if collective:
-            self.collectives = CollectiveServices(self.facts, self.recording.source, ranks).samples
+            self.collectives = CollectiveServices(self.facts, self.recording.source, ranks)
         if pd_protocol:
             protocol = {rank: body["measurements"]["pd_protocol"] for rank, body in self.facts.items()}
             self.notifications = PdNotificationSamples(protocol)
@@ -72,15 +72,39 @@ class CostSamples:
     def measure(self, rank, catalog, *, transport_only=False):
         observation = {"production": str(self.production), "rank": rank}
         facts = self.facts[rank] if self.joint else self.read_facts(rank)
-        services = ObservedServices(catalog.graph, facts, self.collectives.get(rank, {}), physical_peers=self.joint)
-        recordings = [self.recording.attempt_id]
+        collective_services = self.collectives.samples[rank] if self.collectives is not None else {}
+        services = ObservedServices(catalog.graph, facts, collective_services, physical_peers=self.joint)
+        notifications = list(self.notifications.intervals(rank)) if self.notifications is not None else []
         if transport_only:
             if not self.peer_measurements:
                 raise ValueError("a transport profile requires a joint physical observation of the peer group")
             profile = AscendTransportProfile(self.recording.source, self.facts, self.work / f"{rank}-sdk/trace.json",
-                                             observation, self.recording.inputs["image"])
-            return {**profile.samples(catalog, services), "native_recordings": recordings}
+                                             observation, self.recording.inputs["image"], self.recording.inputs["deployment"])
+            if notifications and "state_transfer_protocol" not in profile.qualification:
+                raise ValueError("physical notification samples require their measured transport protocol")
+            samples, absent = profile.samples(catalog, services)
+            provenance = {"transport_profile": profile.qualification}
+        else:
+            samples, absent = self.local_samples(catalog, services)
+            provenance = {"observation": observation}
 
+        for measured in notifications:
+            span = measured["duration_bounds_ns"]
+            if span is None:
+                absent["notification"] += 1
+                continue
+            features = {"phase": "", "axes": {"parameter.dependencies": measured["dependencies"]}}
+            samples.add_external({"operation": measured["operation"]}, "transfer", features, sum(span) // 2)
+
+        report = {**samples.document(absent), **provenance, "native_recordings": [self.recording.attempt_id]}
+        if notifications:
+            report["notification_measurements"] = notifications
+        if self.collectives is not None and (conflicts := self.collectives.notification_conflicts[rank]):
+            report["collective_notification_conflicts"] = conflicts
+        return report
+
+    @staticmethod
+    def local_samples(catalog, services):
         samples, absent = ServiceSamples(catalog.domain, catalog.definitions), Counter()
         for piece, definition, interval, features in catalog:
             duration_ns, copy, collective = services.service(piece)
@@ -97,18 +121,4 @@ class CostSamples:
 
             # Source request and physical resource IDs locate the observation only.
             samples.add(definition, interval, features, duration_ns, copy, collective)
-        notifications = list(self.notifications.intervals(rank)) if self.notifications is not None else []
-        for measured in notifications:
-            span = measured["duration_bounds_ns"]
-            if span is None:
-                absent["notification"] += 1
-                continue
-            features = {"phase": "", "axes": {"parameter.dependencies": measured["dependencies"]}}
-            samples.add_external({"operation": measured["operation"]}, "transfer", features, sum(span) // 2)
-
-        report = samples.document(absent)
-        report["observation"] = observation
-        report["native_recordings"] = recordings
-        if notifications:
-            report["notification_measurements"] = notifications
-        return report
+        return samples, absent

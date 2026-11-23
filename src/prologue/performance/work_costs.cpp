@@ -1,5 +1,6 @@
 #include "prologue/performance/work_costs.hpp"
 
+#include <algorithm>
 #include <ranges>
 #include <utility>
 
@@ -115,6 +116,14 @@ WorkCosts::Estimate WorkCosts::estimate(std::optional<std::size_t> definition, s
     const auto & phases = models_[*definition].at(interval);
     const auto match = phases.find(phase);
     if (match == phases.end()) return {};
+
+    // Variable traffic requires training coverage of the reported row split, including zero-row peers.
+    if (const auto * operand = features.transport()) {
+        const auto axes = operand->find("row_axes");
+        if (axes != operand->end() && std::ranges::any_of(*axes, [&](const auto & axis) {
+            return !match->second->bounds.contains(axis.template get_ref<const std::string &>());
+        })) return { match->second.get(), std::nullopt };
+    }
     return { match->second.get(), match->second->estimate(features) };
 }
 

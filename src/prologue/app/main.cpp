@@ -133,6 +133,7 @@ nlohmann::json work_costs(const prologue::sglang::TemplateDeclarations & source,
     nlohmann::json missing;
     const prologue::WorkCosts service(observed.domain, observed.definitions, costs);
     auto result = prologue::service_estimates(service.timing(source.graph, observed.origins, &missing, bindings));
+    result["domain"] = observed.domain;
     result["first_cost_gap"] = std::move(missing);
     return result;
 }
@@ -282,9 +283,14 @@ int main(int argc, char ** argv) {
             output = nlohmann::json::object();
             for (const auto & entry : source.entries) {
                 std::vector<std::size_t> origins;
-                auto layout = extraction.extract(entry.scope, &origins).action_layout();
+                const auto action = extraction.extract(entry.scope, &origins);
+                auto layout = action.action_layout();
                 for (auto & event : layout.events) event = origins[event];
-                output[std::to_string(entry.scope)] = {{"identity", std::move(layout.identity)}, {"events", std::move(layout.events)}};
+                auto tails = nlohmann::json::array();
+                for (auto & tail : action.action_host_tails())
+                    tails.push_back({{"identity", std::move(tail.identity)}, {"event", origins[tail.event]}});
+                output[std::to_string(entry.scope)] = {{"identity", std::move(layout.identity)},
+                    {"events", std::move(layout.events)}, {"host_tails", std::move(tails)}};
             }
         }
         else if (command == "link-templates" && argc == 4) {

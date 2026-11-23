@@ -57,7 +57,11 @@ public:
 
     void build() {
         for (const auto & implementation : library_.implementations) implementations_[implementation.contract].push_back(&implementation);
-        for (const auto & entry : library_.entries) index_.roots_[{entry.action, entry.condition}].insert(add(entry, entry.frame));
+        for (const auto & entry : library_.entries) {
+            auto & roots = index_.roots_[{ entry.action, entry.condition }];
+            auto & families = entry.observations.empty() ? roots.imported : roots.observed;
+            families.insert(add(entry, entry.frame));
+        }
         for (const auto & [site, callers] : sites_) {
             if (callers.size() > 1) share_observed_bodies(callers);
         }
@@ -87,7 +91,9 @@ private:
             const auto & call = library_.definitions[*caller].children[position.back()];
             for (const auto & [name, expression] : call.arguments) local["arguments"][name] = expression.document();
         }
-        auto & callers = sites_[{entry.action, entry.condition, space, std::move(local)}];
+
+        // An imported root has no observations in this library and cannot supply bodies to observed callers.
+        auto & callers = sites_[{ entry.action, entry.condition, space, std::move(local), entry.observations.empty() }];
         const auto [found, inserted] = callers.try_emplace(caller, index_.families_.size());
         if (inserted) index_.families_.emplace_back();
         auto & family = index_.families_[found->second];
@@ -195,7 +201,7 @@ private:
     TemplateSelection & index_;
     const TemplateLibrary & library_;
     std::map<nlohmann::json, std::vector<const LocalImplementation *>> implementations_;
-    std::map<std::tuple<std::string, nlohmann::json, std::string, nlohmann::json>, Callers> sites_;
+    std::map<std::tuple<std::string, nlohmann::json, std::string, nlohmann::json, bool>, Callers> sites_;
     std::map<std::size_t, nlohmann::json> binding_contracts_;
 };
 
@@ -325,7 +331,12 @@ TemplateEntry TemplateSelection::select(std::string_view action, const nlohmann:
     FrameChoice chosen;
     if (roots != roots_.end()) {
         FrameSelection selection(*this, state_inputs);
-        for (const auto family : roots->second) chosen.merge(selection.resolve(families_[family], parameters), action);
+        for (const auto family : roots->second.observed) chosen.merge(selection.resolve(families_[family], parameters), action);
+
+        // Closed imports extend coverage without changing the interpretation of an applicable source observation.
+        if (!chosen.frame && !chosen.ambiguity) {
+            for (const auto family : roots->second.imported) chosen.merge(selection.resolve(families_[family], parameters), action);
+        }
     }
     if (!chosen.frame) {
         const auto status = roots == roots_.end() ? "no_declared_candidates"

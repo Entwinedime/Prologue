@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from prologue.integrations.frameworks.sglang.acquisition.probes import LifecycleProbes
 from prologue.integrations.frameworks.sglang.configuration import InstanceConfiguration, NativeConfiguration, ServingInput
 
 
@@ -98,6 +99,8 @@ class SourceDomain:
                             observed.add("prefill/multiple/unit_queries")
                     elif members == 1:
                         observed.add(f"{family}/single")
+                        if family == "prefill" and (shape := LifecycleProbes.prefill_shape_witness(parameters)):
+                            observed.add(shape)
             missing = set(required) - observed
             if missing:
                 rank = library["resources"][0]["rank"]

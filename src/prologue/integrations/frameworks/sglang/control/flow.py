@@ -7,6 +7,7 @@ from prologue.integrations.frameworks.sglang.clocks import DecisionClocks
 from prologue.integrations.frameworks.sglang.disaggregated_calls import DisaggregatedCalls
 from prologue.integrations.frameworks.sglang.groups import ParallelGroups
 from prologue.integrations.frameworks.sglang.host_reads import HostReads
+from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from prologue.integrations.frameworks.sglang.metadata_collectives import MetadataCollectives
 from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
 from prologue.integrations.frameworks.sglang.resources import ResourceCalls
@@ -28,7 +29,7 @@ class PublishedRequests:
                 return
             frame.outputs = [
                 {
-                    "request": int(request), "generated_tokens": tokens,
+                    "request": RequestSubmissions.index(request), "generated_tokens": tokens,
                     "finished": reason is not None, "emits_output": True,
                 }
                 for request, tokens, reason in zip(output.rids, output.completion_tokens, output.finished_reasons, strict=True)
@@ -40,7 +41,7 @@ class FlowExecution(CallSegments):
         super().__init__()
         self.scheduler = scheduler
         self.started = False
-        self.pending_inputs = {str(index) for index in range(len(scheduler.request_input.requests))}
+        self.pending_inputs = set(range(len(scheduler.request_input.submissions.requests)))
         self.request_state = scheduler.request_state
         self.groups = ParallelGroups()
         self.clocks = DecisionClocks(self)
@@ -64,7 +65,7 @@ class FlowExecution(CallSegments):
         return self.started
 
     def input(self, request):
-        self.pending_inputs.remove(request.rid)
+        self.pending_inputs.remove(RequestSubmissions.index(request.rid))
         self.started = True
 
     def drained(self):
@@ -74,7 +75,7 @@ class FlowExecution(CallSegments):
             self.started = False
 
     def request_id(self, native_id):
-        return self.scheduler.request_input.requests[int(native_id)]["id"]
+        return self.scheduler.request_input.request_id(native_id)
 
     def work(self, batch, members=None, *, phase="prefill"):
         scheduler = self.scheduler
@@ -91,7 +92,8 @@ class FlowExecution(CallSegments):
     @staticmethod
     def completed(requests):
         return [
-            {"request": int(req.rid), "generated_tokens": len(req.output_ids), "finished": req.finished(), "emits_output": False}
+            {"request": RequestSubmissions.index(req.rid), "generated_tokens": len(req.output_ids),
+             "finished": req.finished(), "emits_output": False}
             for req in requests
         ]
 

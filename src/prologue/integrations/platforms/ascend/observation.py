@@ -10,8 +10,8 @@ from typing import Any
 
 from prologue.integrations.platforms.ascend.commands import NativeStreamCall, StreamCommand, StreamCommands
 from prologue.integrations.platforms.ascend.host_alignment import ThreadService
-from prologue.integrations.platforms.ascend.services import SynchronousCopy
-from prologue.integrations.platforms.ascend.trace import AscendTrace, Interval, ThreadIntervals
+from prologue.integrations.platforms.ascend.services import SynchronousCopy, uses_peer_service
+from prologue.integrations.platforms.ascend.trace import AscendTrace, DevicePoint, Interval, ThreadIntervals
 from prologue.acquisition.observation.observation import ObservationReferences
 
 
@@ -43,9 +43,11 @@ class AscendObservation:
         self.collectives = {}
         self.collective_notifications = {}
         self.host_copies = []
+        self.repeated_host_waits = set()
         self.signal_inputs = {}
         self.work_completions = {}
         self.peer_services = {}
+        self.staged_boundaries: dict[tuple[int, int], dict[str, int]] = {}
         self.waited_work = {
             scope["id"]: port["producer"] for scope in raw["scopes"] for port in scope["ports"]
             if port["use"] == "signal" and port["direction"] == "input" and "producer" in port
@@ -68,6 +70,8 @@ class AscendObservation:
             info["bindings"]["source_scopes"] = [identity]
             if "communication" in scope:
                 info["communication"] = scope["communication"]
+                if "peer_rows" in scope:
+                    info["communication"] = {**info["communication"], "peer_rows": scope["peer_rows"]}
             info["ports"] = []
             info["kv_accesses"] = []
             info["slot_accesses"] = []
@@ -162,11 +166,8 @@ class AscendObservation:
             resource = self.resource("thread", interval.thread, "native")
             raw = self.raw["scopes"][scope]
             kind = "wait" if "service" in raw else "boundary" if raw.get("envelope", False) else "host"
-            exchange = raw.get("communication")
-            if exchange is not None and "device_entry" not in raw:
-
-                # Charge all-peer service after rendezvous; asymmetric calls retain their own completion rules.
-                kind = "collective" if exchange["required"] == exchange["members"] else "communication"
+            if "communication" in raw and "device_entry" not in raw:
+                kind = "collective" if uses_peer_service(raw) else "communication"
                 if interval.begin < interval.end:
                     self.resources[resource]["payload"].append([interval.begin, interval.end])
             self.host[scope] = self.span(scope, resource, interval.begin, interval.end, kind)
@@ -338,10 +339,9 @@ class AscendObservation:
             if scope is None:
                 continue
             raw = self.raw["scopes"][scope]
-            exchange = raw.get("communication")
-            if not exchange or (exchange["required"] != exchange["members"] and "peer_rows" not in raw):
+            if not uses_peer_service(raw):
                 continue
-            if raw.get("asynchronous", False) and exchange["operation"] != "transfer":
+            if raw.get("asynchronous", False) and raw["communication"]["operation"] != "transfer":
                 continue
             groups[scope].setdefault(queue.record["args"]["correlation_id"], []).append(task)
 
@@ -358,8 +358,7 @@ class AscendObservation:
         for scope, raw in enumerate(self.raw["scopes"]):
             if "local_exchanges" not in raw:
                 continue
-            exchange = raw["communication"]
-            kind = "collective" if exchange["required"] == exchange["members"] else "communication"
+            kind = "collective" if uses_peer_service(raw) else "communication"
             resource = self.spans[self.device[scope]]["resource"]
             for span in spans[scope]:
                 span["kind"] = "device"
@@ -367,6 +366,8 @@ class AscendObservation:
                 first, last = (self.trace.device_points[call[key]] for key in ("begin", "end"))
                 if first.stream != last.stream or self.resource("stream", first.stream, "execution") != resource:
                     raise ValueError("a local protocol cut must keep its caller stream")
+                posted = self.host_anchor(first.host)
+                command = None
                 if raw.get("asynchronous"):
                     if scope not in first_wait or scope in self.peer_services:
                         raise ValueError(f"staged Work {scope} needs one posted operand and a consuming wait")
@@ -375,14 +376,31 @@ class AscendObservation:
                     peer = self.resource("service", "peer", "peer_transport", serial=False)
                     service = self.span(scope, peer, call["begin"], first_wait[scope], kind)
                     self.peer_services[scope] = service
-                    self.edge(self.task_anchor(self.streams.task(first.task)), self.endpoint(service, "begin"), "data")
+                elif kind == "collective":
+
+                    # HCCL uses the process group's queue for synchronous peer services, including exchanges with unequal splits.
+                    lane = raw["communication"]["channel"]
+                    peer = self.resource("service", lane, "peer_collective")
+                    service = self.span(scope, peer, call["begin"], call["end"], kind)
+                    command = self.staged_boundary(scope, last)
+                    self.edge(self.endpoint(service, "end"), command, "signal")
                 else:
                     begin, end = self.streams.task(first.task).end, self.streams.task(last.task).end
                     service = self.span(scope, resource, begin, end, kind)
                 self.spans[service]["protocol_operand"] = {key: call[key] for key in ("operation", "bytes", "dtype")}
 
-                # The native caller has presented this operand. Peers and the external transport still gate completion.
-                self.edge(self.host_anchor(first.host), self.endpoint(service, "begin"), "submission")
+                ready = self.endpoint(service, "begin")
+                if self.spans[service]["resource"] != resource:
+                    operand = self.staged_boundary(scope, first)
+                    self.edge(operand, ready, "data")
+                    ready = operand
+
+                # One synchronous stream command is accepted at its caller cut and retires with the result.
+                if command is not None:
+                    self.edge(posted, ready, "control")
+                    self.edge(posted, command, "submission")
+                else:
+                    self.edge(posted, ready, "submission")
         for scope, calls in groups.items():
             if len(calls) != 1:
                 continue
@@ -483,6 +501,15 @@ class AscendObservation:
             return self.endpoint(self.peer_services[producer], "end")
         return self.task_anchor(self.work_completions[producer])
 
+    def staged_boundary(self, scope: int, point: DevicePoint) -> dict[str, int]:
+
+        # Retain the observed marker without charging a device operation.
+        position = self.streams.task(point.task).end
+        stream = self.resource("stream", point.stream, "execution")
+        boundary = self.at(self.span(scope, stream, position, position, "boundary"), position)
+        self.staged_boundaries[point.stream, position] = boundary
+        return boundary
+
     def call_ports(self) -> None:
         observed = []
         for scope, raw in enumerate(self.raw["scopes"]):
@@ -534,7 +561,12 @@ class AscendObservation:
                         completed = self.work_end(producer)
                         at = completed
                         if port["direction"] == "input":
-                            at = self.endpoint(self.device[scope], "end")
+                            entered, returned = (self.trace.device_points[raw[f"device_{side}"]] for side in ("entry", "return"))
+
+                            # The entry marker is submitted before the measured host call. Only completion joins it.
+                            self.staged_boundary(scope, entered)
+                            at = self.staged_boundary(scope, returned)
+                            self.edge(self.endpoint(host, "begin"), at, "control")
                             self.edge(completed, at, "signal")
                         ports.append({"name": port["name"], "direction": port["direction"], "use": "signal",
                                       "relation": "signal", "signal": f"work/{producer}", "at": at})
@@ -598,6 +630,8 @@ class AscendObservation:
     def task_anchor(self, task: StreamCommand, side: str = "end") -> dict[str, int]:
         stream = task.stream
         position = getattr(task, side)
+        if staged := self.staged_boundaries.get((stream, position)):
+            return staged
         boundary = self.device_index.enclosing(Interval(position, position, stream, {}))
         if boundary is None:
             raise ValueError(f"required device endpoint has no semantic coverage: stream {stream} at {position}")
@@ -673,6 +707,7 @@ class AscendObservation:
 
     def synchronization(self) -> None:
         syncs, waits = self.trace.host_waits, self.trace.stream_waits
+        self.streams.submission_frontiers(self.staged_boundaries)
         for api in self.trace.apis.values():
             if api.record["args"]["id"] not in syncs | waits:
                 continue
@@ -735,6 +770,7 @@ class AscendObservation:
                 region = bisect_right(regions[resource], native.begin), bisect_right(regions[caller_resource], origin.begin)
                 key = owner, completion["span"], caller["span"], stream, region, frontier
                 if key == previous_wait:
+                    self.repeated_host_waits.add((native.thread, native.begin))
                     continue
                 previous_wait = key
 
@@ -843,10 +879,7 @@ class AscendObservation:
             return interval.thread, trace.host_times[identity, interval.begin], trace.host_times[identity, interval.end]
 
         excluded = [wall_interval(interval) for interval in trace.excluded]
-        for interval in trace.runtime:
-            call = interval.record
-            if call["api"] in trace.host_waits or (call["api"] == "aclrtMemcpy" and call["bytes"]):
-                excluded.append(wall_interval(interval))
+        excluded.extend(trace.reserved_host_intervals((interval.record for interval in trace.runtime), self.repeated_host_waits))
         dequeues = []
         for correlation, dequeue in trace.dequeue.items():
             enqueue = trace.enqueue[correlation]
@@ -915,17 +948,22 @@ class AscendObservation:
         self.normalize_device_spans(result)
         if self.evidence:
             result["measurements"] = self.streams.measurements(result)
+            if self.repeated_host_waits:
+                result["measurements"]["repeated_host_waits"] = sorted(self.repeated_host_waits)
             if self.activity_path is not None:
                 result["measurements"]["host_service_positions"] = self.host_service_positions(result["measurements"]["coordinates"])
             payloads = self.trace.collective_payloads({scope: row[-1] for scope, row in self.collectives.items()})
-            result["measurements"]["collectives"] = [
-                [scope, resource, begin, end, payloads.get(scope)]
-                for scope, (resource, begin, end, _) in self.collectives.items()
-            ]
-            result["measurements"]["collective_peer_rows"] = {
-                scope: self.raw["scopes"][scope]["peer_rows"] for scope in self.collectives
-                if "peer_rows" in self.raw["scopes"][scope]
-            }
+            collectives = []
+            for scope, (resource, begin, end, _) in self.collectives.items():
+                payload = payloads.get(scope)
+
+                # An observed variable exchange can report zero sent elements and still complete a peer service.
+                if payload is not None and not payload[2]:
+                    rows = self.scopes[scope]["communication"].get("peer_rows")
+                    if rows is None or any(rows["send"]):
+                        payload = None
+                collectives.append([scope, resource, begin, end, payload])
+            result["measurements"]["collectives"] = collectives
             if self.collective_notifications:
                 result["measurements"]["collective_notifications"] = self.collective_notifications
             result["measurements"]["synchronous_transfers"] = self.transfer_times()

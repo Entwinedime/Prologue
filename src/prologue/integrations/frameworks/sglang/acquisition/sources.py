@@ -53,6 +53,7 @@ class RepresentativeSources:
         for request in requests:
             if request["output_tokens"] > 1:
                 decode_cohorts.setdefault(request["arrival_ns"], []).append(request["output_tokens"])
+        decode_requests = sum(map(len, decode_cohorts.values()))
         conditions = {"prefill"}
         if any(request["output_tokens"] == 1 for request in requests):
             conditions.add("prefill_completion")
@@ -75,7 +76,9 @@ class RepresentativeSources:
                 conditions.add(prefix + "multiple_requests")
                 if len({request["output_tokens"] for request in requests}) > 1:
                     conditions.add(prefix + "unequal_output_lengths")
-                if any(len(lengths) > 1 for lengths in decode_cohorts.values()):
+
+                # Requests arriving at different times can still share Decode once both are active.
+                if decode_requests > 1:
                     conditions.add(prefix + "concurrent_decode_inputs")
                 if any(len(set(lengths)) > 1 for lengths in decode_cohorts.values()):
                     conditions.add(prefix + "decode_turnover_inputs")
@@ -89,7 +92,9 @@ class RepresentativeSources:
                 conditions.add(prefix + "aggregate_kv_demand_exceeds_pool")
             if instance.mode != "decode":
 
-                # A cold-input bound preserves the allocator path opportunity; native admission may still split it.
+                # Preserve native singleton variants as well as opportunities to combine requests.
+                conditions.update(prefix + shape for request in requests
+                                  if (shape := LifecycleProbes.prefill_shape(instance.configuration, request)))
                 bound, repeated = RepresentativeSources.prefill_page_bounds(config, requests, pages)
                 if repeated:
                     conditions.add(prefix + "multiple_prefill_inputs")
@@ -363,8 +368,8 @@ class RepresentativeSources:
                             for mode, values in phases.items() if values}
 
             witnesses = probes.extend(workload, submissions, model_phases=set().union(*phases.values()), service_evidence=service_evidence)
-            if witnesses:
-                requirements.setdefault("null", []).extend(witnesses)
+            for mode, shapes in witnesses.items():
+                requirements.setdefault(mode, []).extend(shapes)
             cost = self.cost(workload, instances[configuration])
             cost.pop("last_arrival_ns")
             requests = {request["id"]: request for request in workload["requests"]}

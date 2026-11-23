@@ -29,6 +29,19 @@ template <class Kind, std::size_t Size> Kind read_kind(std::string_view name, co
     return static_cast<Kind>(found - names.begin());
 }
 
+std::vector<std::int64_t> communicating_peers(const CommunicationGroup & group, const PeerRows & rows) {
+    if (rows.send.size() != group.members.size() || rows.receive.size() != group.members.size())
+        throw std::invalid_argument("peer rows must cover the declared communication group");
+
+    std::vector<std::int64_t> result;
+    for (std::size_t peer = 0; peer < group.members.size(); ++peer) {
+        const auto sent = rows.send[peer], received = rows.receive[peer];
+        if (sent < 0 || received < 0) throw std::invalid_argument("peer rows must be nonnegative");
+        if (group.members[peer] == group.rank || sent || received) result.push_back(group.members[peer]);
+    }
+    return result;
+}
+
 } // namespace
 
 ResourceKind resource_kind(std::string_view name) { return read_kind<ResourceKind>(name, resource_names); }
@@ -210,6 +223,19 @@ nlohmann::json ScopeInfo::document() const {
     };
 }
 
+PeerRows PeerRows::read(const nlohmann::json & source) {
+    auto rows = [&](std::string_view name) {
+        std::vector<std::int64_t> result;
+        for (const auto & value : source.at(name).get_ref<const nlohmann::json::array_t &>()) result.push_back(integer(value));
+        return result;
+    };
+    return { rows("send"), rows("receive") };
+}
+
+nlohmann::json PeerRows::document() const {
+    return {{ "send", send }, { "receive", receive }};
+}
+
 CommunicationGroup CommunicationGroup::read(const nlohmann::json & source) {
     const auto ordinal = integer(source.at("order"));
     if (ordinal < 0) throw std::invalid_argument("communication order must be nonnegative");
@@ -224,6 +250,8 @@ CommunicationGroup CommunicationGroup::read(const nlohmann::json & source) {
             result.agreements.push_back({ field.at("port").get<std::string>(), direction_kind(field.at("direction").get<std::string>()),
                                           field.at("shape").get<bool>() });
     }
+    result.ordered_service = source.value("ordered_service", false);
+    if (const auto rows = source.find("peer_rows"); rows != source.end()) result.peer_rows = PeerRows::read(*rows);
     result.validate();
     return result;
 }
@@ -242,7 +270,14 @@ nlohmann::json CommunicationGroup::document() const {
         for (const auto & field : agreements)
             result["agreements"].push_back({ { "port", field.port }, { "direction", direction_name(field.direction) }, { "shape", field.shape } });
     }
+    if (ordered_service) result["ordered_service"] = true;
+    if (peer_rows) result["peer_rows"] = peer_rows->document();
     return result;
+}
+
+void CommunicationGroup::bind_rows(PeerRows rows) {
+    required = communicating_peers(*this, rows);
+    peer_rows = std::move(rows);
 }
 
 void CommunicationGroup::validate() const {
@@ -251,6 +286,10 @@ void CommunicationGroup::validate() const {
     if (channel.empty() || operation.empty() || participants.empty() || participants.size() != members.size() || *participants.begin() < 0
         || !participants.contains(rank) || dependencies.size() != required.size() || !std::ranges::includes(participants, dependencies))
         throw std::invalid_argument("invalid communication participant contract");
+    if (peer_rows && required != communicating_peers(*this, *peer_rows))
+        throw std::invalid_argument("communication prerequisites differ from the declared peer rows");
+    if (ordered_service && operation != "transfer")
+        throw std::invalid_argument("ordered peer service requires a transfer");
     std::set<std::pair<Direction, std::string>> fields;
     for (const auto & field : agreements) {
         if (field.port.empty() || !fields.emplace(field.direction, field.port).second)

@@ -244,6 +244,34 @@ ActionLayout CoarseGraph::action_layout() const {
     return result;
 }
 
+std::vector<HostTail> CoarseGraph::action_host_tails() const {
+    const auto & root = scopes.front();
+    std::set<std::size_t> host_finishes;
+    for (const auto & piece : work) {
+        if (piece.scope == 0 && piece.kind == WorkKind::Host) host_finishes.insert(piece.finish);
+    }
+
+    std::set<std::size_t> named;
+    for (const auto & port : root.ports) {
+        if (!port.name.starts_with("resource.enter/") && !port.name.starts_with("resource.exit/"))
+            named.insert(port.event);
+    }
+
+    std::vector<HostTail> tails;
+    for (const auto & port : root.ports) {
+        if (!port.name.starts_with("resource.exit/")) continue;
+        const auto lane = events[port.event].resource;
+        const auto & resource = resources[lane];
+        if (resource.kind != ResourceKind::Thread || named.contains(port.event)
+            || !host_finishes.contains(port.event))
+            continue;
+
+        // The role's release is a boundary of the action even when its internal submissions differ.
+        tails.push_back({ { root.info.role, root.info.site, root.info.implementation, resource.role }, port.event });
+    }
+    return tails;
+}
+
 std::size_t CoarseGraph::common_scope(std::size_t left, std::size_t right) const {
     while (left != right) {
         if (left > right) left = *scopes[left].info.parent;
@@ -274,6 +302,8 @@ void CoarseGraph::validate() const {
 
         if (scopes[scope].communication) {
             scopes[scope].communication->validate();
+            if (scopes[scope].communication->ordered_service && scope != 0)
+                throw std::invalid_argument("ordered peer service requires its own invocation");
             for (const auto & field : scopes[scope].communication->agreements) {
                 const auto & port = scopes[scope].port(field.port, field.direction);
                 if ((port.use != PortUse::Data && port.use != PortUse::Metadata) || !port.tensor)
@@ -364,14 +394,17 @@ void CoarseGraph::validate() const {
         if (piece.kind == WorkKind::Collective) {
             const auto & group = scopes[piece.scope].communication;
             if (!group || std::ranges::find(group->required, group->rank) == group->required.end()
-                || (resources[piece.resource].kind == ResourceKind::Service && resources[piece.resource].serial)
                 || resources[piece.resource].rank != group->rank || !collective_scopes.insert(piece.scope).second)
-                throw std::invalid_argument("collective work requires one interval on a participating thread, stream or concurrent service");
+                throw std::invalid_argument("collective work requires one interval on its participating rank's resource");
+            if (group->ordered_service && resources[piece.resource].kind != ResourceKind::Service)
+                throw std::invalid_argument("ordered peer service requires a staged transport interval");
         }
         if (work_finish[piece.start]) throw std::invalid_argument("coarse work is charged twice at one entry boundary");
         work_finish[piece.start] = piece.finish;
         successors[piece.start].insert(piece.finish);
     }
+    if (scopes.front().communication && scopes.front().communication->ordered_service && !collective_scopes.contains(0))
+        throw std::invalid_argument("ordered peer service requires a collective interval");
     for (const auto & edge : edges) {
         if (edge.source >= events.size() || edge.target >= events.size() || edge.source == edge.target)
             throw std::invalid_argument("invalid coarse dependency endpoint");

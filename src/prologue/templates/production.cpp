@@ -239,6 +239,9 @@ private:
         }
         frame.site = observed.info.site;
         frame.communication = observed.communication;
+
+        // A template retains the binding site; observed row counts belong to a concrete invocation.
+        if (frame.communication) frame.communication->peer_rows.reset();
         frame.bindings = observed.info.bindings;
         if (frame.bindings.contains("state_input")) {
             frame.state_input = frame.bindings.at("state_input").get<std::string>();

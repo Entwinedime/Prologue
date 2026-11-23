@@ -126,6 +126,7 @@ class SourcePlanning:
                        "selected mixed-batch workloads preserve their arriving requests for performance sampling; actual mixing still requires observation",
                        "representative lengths preserve prefix, page/chunk remainders and route transitions; padding is unchanged",
                        "model batch sizes are checked by role and phase; page-growth probes check exact Decode widths",
+                       "singleton Prefill checks the native attention table layout and padding together",
                        "cached local output1/2 pairs shorten Prefill below one page when possible; request routes shift at the Prefill/Decode boundary",
                        "fixed arrival gaps keep original lengths; other shortening must preserve declared input conditions",
                        "allocator path opportunities use a cold-input page bound, not predicted batches or branch coverage",

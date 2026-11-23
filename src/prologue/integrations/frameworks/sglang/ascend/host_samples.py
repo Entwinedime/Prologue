@@ -1,16 +1,16 @@
 """Match independently timed native CPU fragments to complete coarse work intervals."""
 
-from collections import Counter, defaultdict
 import json
+from collections import Counter, defaultdict
 
 from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.acquisition.recording import PublishedCapture
 from prologue.artifacts import write_json
+from prologue.integrations.frameworks.sglang.acquisition.host_scopes import NativeHostCalls
 from prologue.integrations.frameworks.sglang.ascend.launch import SGLangAscendLaunch
-from prologue.integrations.runtimes.pytorch.protocol_work import CpuProtocolWork
 from prologue.integrations.platforms.ascend.host_alignment import AscendHostAlignment
 from prologue.integrations.platforms.ascend.trace import AscendTrace
-from prologue.integrations.frameworks.sglang.acquisition.host_scopes import NativeHostCalls
+from prologue.integrations.runtimes.pytorch.protocol_work import CpuProtocolWork
 from prologue.performance.samples import ServiceSamples, WorkCatalog
 
 
@@ -89,18 +89,20 @@ class HostCostSamples:
                 records = {rank: cls.read(directory / f"rank-{rank}.json") for rank in participants}
                 for rank in window.observed:
                     demands[rank] = [(identity, "host", features)
-                                     for identity, features, _ in CpuProtocolWork.local(records[rank])]
+                                     for identity, features, _, _ in CpuProtocolWork.local(records[rank])]
 
                 # Both endpoints of a message must come from the very same native request execution.
-                for identity, features in CpuProtocolWork(records).wires():
-                    if identity["source"] in window.observed:
-                        demands[identity["source"]].append((identity, "transfer", features))
+                for rank, identity, features, _ in CpuProtocolWork(records).transfers():
+                    if rank in window.observed:
+                        demands[rank].append((identity, "transfer", features))
         return demands
 
     @staticmethod
     def cpu_services(samples, protocol, service):
-        for identity, features, interval in CpuProtocolWork.local(protocol):
-            duration = service.duration(interval["thread"], interval["begin_raw_ns"], interval["end_raw_ns"], False)
+        for identity, features, thread, bounds in CpuProtocolWork.local(protocol):
+            if bounds is None:
+                continue
+            duration = service.duration(thread, *bounds, False)
             if duration is not None:
 
                 # The waiting thread can sleep while the transport progresses. Count its actual CPU service only.
@@ -132,9 +134,9 @@ class HostCostSamples:
         if (facts["measurements"]["window_ns"] != catalog.window
                 or facts["environment"] != graph["environment"] or original["environment"] != graph["environment"]):
             raise ValueError("host measurement uses a graph from a different native capture")
-        if not host["host_timing"] or any(record["rank"] != actor or record["clock"] != "monotonic_raw_ns"
-                                          for actor, record in records.items()):
-            raise ValueError("host samples do not match their declared measurement")
+        if (not host["host_timing"] or "profile_windows" in instance or set(records) != set(instance["native_participants"])
+                or any(record["rank"] != actor or record["clock"] != "monotonic_raw_ns" for actor, record in records.items())):
+            raise ValueError("host timing requires all CPU participants from one run on the common RAW clock")
 
         excluded = self.cold_scopes(probe)
         source_calls = NativeHostCalls(original["scopes"])
@@ -142,7 +144,9 @@ class HostCostSamples:
         pairs, unmatched = source_calls.exact_pairs(observed_calls)
         self.qualification["unmatched_calls"] += unmatched
         local_pairs = source_calls.local_pairs(observed_calls, pairs)
-        collectives = self.collectives(records, rank) if CapturedWorkers([instance]).joint_execution else {}
+
+        # A host-only window runs all CPU ranks together even when device shards share a card.
+        collectives = self.collectives(records, rank)
         timing = probe["timing"]
         directory = path.parent
         queues = self.read(directory / timing["queues"])
@@ -188,10 +192,10 @@ class HostCostSamples:
 
         if "protocol" in probe:
             self.cpu_services(samples, probe["protocol"], alignment.service)
-            for row in self.read(host_root / instance["cpu_transports"]):
-                if row["identity"]["source"] == rank:
-                    for duration in row["observations_ns"]:
-                        samples.add_external(row["identity"], "transfer", row["features"], duration)
+            protocols = {actor: record["protocol"] for actor, record in records.items()}
+            for actor, identity, features, duration in CpuProtocolWork(protocols).transfers():
+                if actor == rank and duration is not None:
+                    samples.add_external(identity, "transfer", features, duration)
         report = samples.document({"host": sum(missing.values())})
         report["observation"] = {"detailed": str(detailed.resolve()), "host": str(lightweight.resolve()), "rank": rank}
         report["native_recordings"] = [source_recording.attempt_id, host_recording.attempt_id]

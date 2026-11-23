@@ -78,11 +78,17 @@ struct ActionLayout {
     std::vector<std::size_t> events;
 };
 
+struct HostTail {
+    nlohmann::json identity;
+    std::size_t event;
+};
+
 class CoarseGraph {
 public:
     static CoarseGraph read(const nlohmann::json & source);
     nlohmann::json document(bool include_environment = true) const;
     ActionLayout action_layout() const;
+    std::vector<HostTail> action_host_tails() const;
     void validate() const;
 
     // Parent scopes precede their children; shared boundaries belong to their common scope.

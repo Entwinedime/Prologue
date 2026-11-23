@@ -55,15 +55,14 @@ class ExpertBatch:
         if model_tokens % self.size:
             raise ValueError("DeepEP input must be padded before splitting tokens across its group")
 
-        peers = {}
+        traffic = {}
         for layer, key in self.layer_parameters.items():
             sent, received = self.combine_counts(members, model_tokens, layer)
 
             # Combine sends back one row for every expert selected on this worker.
             parameters[key] = sum(sent)
-            peers[key] = [peer for peer, (outgoing, incoming) in enumerate(zip(sent, received, strict=True))
-                          if peer == self.rank or outgoing or incoming]
-        return {"expert_peers": peers}
+            traffic[key] = {"send": sent, "receive": received}
+        return {"expert_traffic": traffic}
 
     def combine_counts(self, members, model_tokens, layer):
         width = self.routes.layers[layer]["experts"] // self.size

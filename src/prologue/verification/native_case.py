@@ -132,15 +132,20 @@ class NativeCase:
                 self.control_declarations[source.control_key(index, identity)].add(source.declared_control(index))
             identities[index] = identity
 
-        self.cpu.native_graph(rank, graph)
+        if self.joint_execution:
+            self.cpu.native_graph(rank, graph)
         self.protocol.observe(raw, self.groups[rank])
         self.dependencies[rank] = dependencies
         self.sources[rank] = source, raw, identities
         return source
 
-    def completion_boundaries(self, rank, scope):
-        return [boundary for boundary in self.sources[rank][0].completion_boundaries(scope)
-                if boundary["event"] not in self.logical[rank]]
+    def completion_boundaries(self, rank, scope, *, peer_handoffs=False):
+        source, _, _ = self.sources[rank]
+
+        # The shared handoff uses named ports. Serial tails come from the physical implementation under comparison.
+        for boundary in source.completion_boundaries(scope, named_only=peer_handoffs):
+            if boundary["event"] not in self.logical[rank]:
+                yield boundary
 
     def measured_service_pairs(self, rank, graph, raw, *, resources=None):
         if resources is None:

@@ -127,7 +127,7 @@ class GraphContents(ActionScopes):
                 pending.append(scope)
         return paths
 
-    def completion_boundaries(self, root):
+    def serial_tails(self, root):
         graph = self.graph
         scopes = [root]
         for scope in scopes:
@@ -145,9 +145,6 @@ class GraphContents(ActionScopes):
             for access in graph["scopes"][scope]["kv_accesses"] + graph["scopes"][scope]["slot_accesses"]:
                 retained.update((access["start"], access["finish"]))
 
-        ports = graph["scopes"][root]["ports"]
-        named_resources = {graph["events"][port["event"]]["resource"] for port in ports}
-        result = [{"at": {"port": port["name"], "direction": port["direction"]}, "event": port["event"]} for port in ports]
         tails = {}
         for event in retained:
             resource = graph["events"][event]["resource"]
@@ -156,6 +153,17 @@ class GraphContents(ActionScopes):
             previous = tails.get(resource)
             if previous is None or graph["evidence"]["events"][event]["order"] > graph["evidence"]["events"][previous]["order"]:
                 tails[resource] = event
+        return tails
+
+    def completion_boundaries(self, root, *, named_only=False):
+        graph = self.graph
+        ports = graph["scopes"][root]["ports"]
+        result = [{"at": {"port": port["name"], "direction": port["direction"]}, "event": port["event"]} for port in ports]
+        if named_only:
+            return result
+
+        named_resources = {graph["events"][port["event"]]["resource"] for port in ports}
+        tails = self.serial_tails(root)
         for resource, event in sorted(tails.items()):
             names = sorted((port["name"], port["direction"]) for port in ports
                            if graph["events"][port["event"]]["resource"] == resource)
@@ -172,6 +180,25 @@ class GraphContents(ActionScopes):
             # A semantic resource identity selects a tail; native thread/stream IDs never cross the run boundary.
             result.append({"at": {"resource": identity}, "event": event})
         return result
+
+    def host_tails(self, root):
+        graph = self.graph
+        ports = graph["scopes"][root]["ports"]
+        if "evidence" in graph:
+            tails = self.serial_tails(root)
+        else:
+            tails = {graph["events"][port["event"]]["resource"]: port["event"] for port in ports
+                     if port["name"].startswith("resource.exit/")}
+        named = {port["event"] for port in ports
+                 if not port["name"].startswith(("resource.enter/", "resource.exit/"))}
+        host_finishes = {piece["finish"] for piece in self.work[root] if piece["kind"] == "host"}
+        scope = tuple(graph["scopes"][root][field] for field in ("role", "site", "implementation"))
+        identities = {}
+        for lane, tail in tails.items():
+            resource = graph["resources"][lane]
+            if resource["kind"] == "thread" and tail not in named and tail in host_finishes:
+                identities[tail] = (*scope, resource["role"])
+        return identities
 
     def boundary_event(self, root, selector):
         ports = self.graph["scopes"][root]["ports"]
@@ -190,8 +217,9 @@ class GraphContents(ActionScopes):
                           and self.graph["events"][port["event"]]["resource"] not in named_resources
                           and all(self.graph["resources"][self.graph["events"][port["event"]]["resource"]][key] == value
                                   for key, value in identity.items())]
-        boundary, = candidates
-        return boundary["event"]
+        if len(candidates) > 1:
+            raise ValueError("execution resource tail has an ambiguous semantic interface")
+        return candidates[0]["event"] if candidates else None
 
     def snapshot(self, root, group):
         graph, paths = self.graph, self.paths(root)
@@ -256,8 +284,8 @@ class GraphContents(ActionScopes):
             communication = scope.get("communication")
             if communication:
 
-                # Agreement rules are template declarations; native geometry is compared through the tensor ports above.
-                communication = {name: value for name, value in communication.items() if name != "agreements"}
+                # Tensor ports and execution edges supply the evidence for agreements and service order.
+                communication = {name: value for name, value in communication.items() if name not in {"agreements", "ordered_service"}}
                 channel = communication["channel"]
                 channels.setdefault(channel, len(channels))
                 communication = {**communication, "channel": channels[channel], "order": communication["order"] - channel_origins[channel]}

@@ -47,23 +47,24 @@ private:
         nlohmann::json descriptor;
         nlohmann::json execution;
         std::optional<std::size_t> entered;
+        std::optional<std::size_t> posted;
         std::optional<std::size_t> returned;
         std::optional<std::size_t> wait_call;
         std::optional<std::size_t> wait_return;
+        std::optional<std::size_t> ready_event;
         nlohmann::json wait_execution;
         std::optional<InputPosition> input;
+        EventTiming readiness;
+        bool ready = false;
         bool consumed = false;
     };
 
     struct Message {
         std::array<std::optional<Endpoint>, 2> endpoints;
-        std::optional<std::size_t> wire;
-        bool resolved = false;
-        bool ready = false;
-        EventTiming timing{ 0, {} };
+        std::vector<std::size_t> posts() const;
     };
 
-    enum class Phase { Post, Return, Wire, Consume };
+    enum class Phase { Post, Return, Ready, Consume };
     struct Completion {
         Phase phase;
         nlohmann::json key;
@@ -73,16 +74,18 @@ private:
 
     struct Service {
         std::size_t entered;
+        std::optional<std::size_t> posted;
         std::size_t returned;
         std::optional<InputPosition> input;
     };
 
     void observe(const nlohmann::json & key, const Endpoint & endpoint, const nlohmann::json & fields);
-    void ensure_wire(const nlohmann::json & key, Message & message, const Endpoint & endpoint);
+    void declare_ready(const nlohmann::json & key, Endpoint & endpoint, std::size_t side);
+    void publish_ready(const nlohmann::json & key, Endpoint & endpoint, std::span<const std::size_t> prerequisites);
     void resolve(const nlohmann::json & key, Message & message);
     ServiceDuration estimate(const Endpoint & owner, const nlohmann::json & execution, std::string_view operation, WorkKind kind);
     Service service(const nlohmann::json & key, const Endpoint & endpoint,
-                    const nlohmann::json & execution, std::optional<std::size_t> prerequisite);
+                    const nlohmann::json & execution, bool posting, std::optional<std::size_t> prerequisite);
     void consume(const nlohmann::json & key, Endpoint & endpoint);
     void post(std::size_t call, const std::string & group, const nlohmann::json & message);
     void wait(std::size_t call, const std::string & group, const nlohmann::json & message);

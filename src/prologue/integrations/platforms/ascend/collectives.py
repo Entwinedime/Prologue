@@ -57,10 +57,25 @@ class CollectiveClock:
             if post.elapsed is not None:
                 self.constrain((rank, "ready"), (rank, "finish"), post.elapsed[1])
                 self.constrain((rank, "finish"), (rank, "ready"), -post.elapsed[0])
+        if not self.close():
+            raise ValueError("measured collective endpoints contradict their calibrated elapsed times")
 
-        for sender, receiver in permutations(peers, 2):
-            for record, wait in NotifyProgress.pairs(peers[sender].notifications, peers[receiver].notifications):
-                self.notification(sender, receiver, record, wait)
+    def refine(self, peers):
+        signals = [(sender, receiver, record, wait) for sender, receiver in permutations(peers, 2)
+                   for record, wait in NotifyProgress.pairs(peers[sender].notifications, peers[receiver].notifications)]
+        if not signals:
+            return True
+
+        measured = self.upper
+        self.upper = [row.copy() for row in measured]
+        for sender, receiver, record, wait in signals:
+            self.notification(sender, receiver, record, wait)
+        if self.close():
+            return True
+        self.upper = measured
+        return False
+
+    def close(self):
 
         # Compose calibrated and causal bounds through every observed post in this collective.
         for via, relay in enumerate(self.upper):
@@ -70,8 +85,7 @@ class CollectiveClock:
                     bound = to_relay + relay[target]
                     if bound < current:
                         row[target] = bound
-        if any(row[index] < 0 for index, row in enumerate(self.upper)):
-            raise ValueError("HCCL notification order contradicts the calibrated worker clocks")
+        return all(row[index] >= 0 for index, row in enumerate(self.upper))
 
     def constrain(self, before, after, bound):
         row, index = self.upper[self.positions[before]], self.positions[after]
@@ -107,47 +121,68 @@ class CollectiveServices:
             measurements[actor] = self.intervals(document, DeviceCalibration(native["device_clock"]))
 
         self.samples = {rank: {} for rank in ranks}
-        for actors in channels.values():
+        self.notification_conflicts = {rank: {} for rank in ranks}
+        for channel, actors in channels.items():
             selected = [rank for rank in ranks if rank in actors]
             if not selected:
                 continue
             operations = [(operation, members) for _, operation, members in actors[selected[0]]]
-            members = operations[0][1]
-            if actors.keys() != set(members) or any(
+            if any(actors.keys() != set(members) for _, members in operations) or any(
                 [(operation, group) for _, operation, group in posts] != operations for posts in actors.values()
             ):
                 continue
+            self.channel_samples(channel, actors, operations, measurements, selected)
 
-            # Align complete native post sequences before qualifying the evidence for each round.
-            for ordinal, (operation, _) in enumerate(operations):
-                peers = {actor: measurements[actor].get(actors[actor][ordinal][0]) for actor in members}
-                if None in peers.values():
-                    continue
-                clock = None
-                for rank in selected:
-                    own = peers[rank]
-                    if not own.compatible(peers, members, operation, rank):
-                        continue
-                    service = None
-                    if own.elapsed is not None and all(peers[actor].ready is not None for actor in own.required):
-                        if clock is None:
-                            clock = CollectiveClock(peers)
-                        service = clock.service(rank, own.required)
-                    self.samples[rank][own.position] = service, own.payload
+    def channel_samples(self, channel, actors, operations, measurements, selected):
+        refined = {rank: {} for rank in selected}
+        conflict = None
+
+        # A reused notification register can invalidate the channel's round pairing as a whole.
+        for ordinal, (operation, members) in enumerate(operations):
+            scopes = {rank: actors[rank][ordinal][0] for rank in members}
+            peers = {rank: measurements[rank].get(scope) for rank, scope in scopes.items()}
+            if None in peers.values():
+                continue
+            aligned = {rank: post for rank, post in peers.items() if post.compatible(peers, members, operation, rank)}
+            posts = {rank: aligned[rank] for rank in selected if rank in aligned}
+            if not posts:
+                continue
+            clock = CollectiveClock(peers)
+            measurable = {rank: post for rank, post in posts.items()
+                          if post.elapsed is not None and all(peers[actor].ready is not None for actor in post.required)}
+            for rank, post in posts.items():
+                service = clock.service(rank, post.required) if rank in measurable else None
+                self.samples[rank][post.position] = service, post.payload
+            if conflict is not None or len(aligned) != len(peers):
+                continue
+            if not clock.refine(peers):
+                conflict = {"round": ordinal, "operation": operation, "source_scopes": scopes}
+                continue
+            for rank, post in measurable.items():
+                service = clock.service(rank, post.required)
+                if (service, post.payload) != self.samples[rank][post.position]:
+                    refined[rank][post.position] = service, post.payload
+
+        # Publish only measurements from the independent clock bounds when pairing contradicts those bounds.
+        for rank in selected:
+            if conflict is None:
+                self.samples[rank].update(refined[rank])
+            else:
+                self.notification_conflicts[rank][channel] = conflict
 
     @staticmethod
     def intervals(document, clock):
         measurement = document["measurements"]
         points = {(row["resource"], row["order"]): row["time_ns"] for row in measurement["coordinates"]}
-        peer_rows = measurement.get("collective_peer_rows", {})
         notifications = measurement.get("collective_notifications", {})
         intervals = {}
         for scope, resource, begin, end, payload in measurement["collectives"]:
             if payload is None:
                 continue
             start, finish = points[resource, begin], points[resource, end]
+            group = document["scopes"][scope]["communication"]
             intervals[scope] = CollectivePost(
-                (resource, begin, end), payload, document["scopes"][scope]["communication"]["required"], peer_rows.get(str(scope)),
+                (resource, begin, end), payload, group["required"], group.get("peer_rows"),
                 clock.bounds(start) if start is not None else None, clock.bounds(finish) if finish is not None else None,
                 clock.elapsed_bounds(start, finish) if start is not None and finish is not None else None,
                 NotifyProgress.within(notifications.get(str(scope), ()), start, finish, clock)

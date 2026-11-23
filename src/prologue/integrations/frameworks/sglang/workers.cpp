@@ -109,10 +109,17 @@ void WorkerBindings::bind(TemplateFrame & frame, const std::string & instance, n
         communication->channel = transfer.at("channel").get<std::string>();
         communication->members = transfer.at("members").get<std::vector<std::int64_t>>();
         communication->required = communication->members;
+        const auto & body = library_.definitions.at(frame.definition);
+
+        // The staged Ascend operand uses the native peer stream order for its bound route.
+        communication->ordered_service = std::ranges::any_of(body.work, [&](const auto & interval) {
+            const auto & lane = body.resources.at(interval.resource);
+            return interval.kind == WorkKind::Collective && lane.kind == ResourceKind::Service && lane.role == "peer_transport";
+        });
     }
 
-    // The bound communication ports now own their peers; child scopes need only the remaining work.
-    work.erase("expert_peers");
+    // Concrete communication scopes own the invocation's traffic after binding.
+    work.erase("expert_traffic");
 }
 
 void WorkerBindings::bind_worker(TemplateFrame & frame, const std::string & instance, const nlohmann::json & work) const {
@@ -141,12 +148,12 @@ void WorkerBindings::bind_worker(TemplateFrame & frame, const std::string & inst
             communication.members = members;
             communication.channel = instance + "/" + target.at("channel").get<std::string>();
             if (frame.bindings.contains("required_peers")) {
-
-                // Source-declared peer slots bind to this invocation, never to the representative's old traffic.
-                communication.required.clear();
                 const auto & key = frame.bindings.at("required_peers").get_ref<const std::string &>();
-                for (const auto peer : work.at("expert_peers").at(key).get<std::vector<std::size_t>>())
-                    communication.required.push_back(members.at(peer));
+                auto rows = PeerRows::read(work.at("expert_traffic").at(key));
+
+                // Dispatch and combine traverse the same row split in opposite directions.
+                if (communication.operation == "dispatch") std::swap(rows.send, rows.receive);
+                communication.bind_rows(std::move(rows));
             }
         }
     }

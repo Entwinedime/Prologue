@@ -23,6 +23,7 @@ class NativeProfiles:
         self.protocol = CpuProtocol(
             observation.description["native_participants"], observation.calls.communicating,
             capture.current, capture.runtime.service_scope,
+            transport_timing=observation.description["service_reference"],
         )
 
     @staticmethod

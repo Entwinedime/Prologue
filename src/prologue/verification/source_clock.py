@@ -182,10 +182,10 @@ class ClockConstraints(DeviceCalibration):
 class ClockRealization:
     """Certify one shared clock whose only knots are actual independent snapshots."""
 
-    def __init__(self, clocks, graph):
+    def __init__(self, clocks, graph, host_protocol):
         if graph is None or any(clock.conflict for clock in clocks.values()):
             raise ValueError("joint clock realization requires the complete measured native causal graph")
-        self.clocks = clocks
+        self.clocks, self.host_protocol = clocks, host_protocol
         self.columns, self.origins, self.vertices = {}, {}, {}
         self.size = 0
         for rank, clock in clocks.items():
@@ -231,16 +231,20 @@ class ClockRealization:
 
         anchors = [(rank, event) for rank, clock in clocks.items()
                    for event, point in enumerate(clock.points) if point is not None]
+        anchors.extend(host_protocol)
         causal = graph.projected(anchors)
         for source, targets in causal.next.items():
             for target in targets:
                 self.constrain_order(anchors[source], anchors[target])
 
+    def point(self, rank, event):
+        return self.clocks[rank].points[event] if event >= 0 else self.host_protocol[rank, event]
+
     def constrain_order(self, source, target):
         rank, event = source
         peer, endpoint = target
-        begin = self.clocks[rank].points[event]
-        end = self.clocks[peer].points[endpoint]
+        begin = self.point(rank, event)
+        end = self.point(peer, endpoint)
         self.measured += 1
 
         # Neither a RAW edge nor two ordered ticks inside one positive-slope segment need a constraint.
@@ -395,7 +399,7 @@ class ClockRealization:
                    for (rank, _), samples in self.samples.items() for event, raw_ns in samples)
 
     def timestamp(self, rank, event):
-        return self.raw_time(rank, self.clocks[rank].points[event])
+        return self.raw_time(rank, self.point(rank, event))
 
     def device_duration(self, rank, begin, end):
         clock = self.clocks[rank]

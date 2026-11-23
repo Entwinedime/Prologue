@@ -10,6 +10,7 @@ from prologue.artifacts import write_json
 from prologue.integrations.runtimes.docker import ModelingProcess
 from prologue.performance.fitting import FittedCosts
 from prologue.performance.requirements import CostRequirements
+from prologue.performance.samples import ServiceSamples
 from prologue.performance.samples import WorkCatalog
 
 
@@ -18,13 +19,28 @@ class TransportSamples:
 
     def __init__(self, paths):
         self.sources, self.selection = {}, {}
+        protocols = {}
         for path in dict.fromkeys(p.resolve(strict=True) for p in paths):
             content = path.read_bytes()
             source = json.loads(content)
-            if "transport_profile" not in source or any(
-                    "external" not in definition or definition["work"] != [{"kind": "collective"}]
-                    for definition in source["definitions"]):
+            if "transport_profile" not in source:
                 raise ValueError(f"expected a physical peer service profile at {path}")
+            protocol = source["transport_profile"].get("state_transfer_protocol")
+            notices = {(row["operation"], row["dependencies"]) for row in source.get("notification_measurements", ())
+                       if row["duration_bounds_ns"] is not None}
+            for row in source["samples"]:
+                definition = source["definitions"][row["definition"]]
+                interval = row["interval"]
+                if "external" in definition and definition["work"] == [{"kind": "collective"}]:
+                    continue
+                axes = row["features"]["axes"]
+                notification = (definition["work"] == [{"kind": "transfer"}] and axes.keys() == {"parameter.dependencies"}
+                                and (definition.get("external", {}).get("operation"), axes["parameter.dependencies"]) in notices)
+                if not protocol or not (notification or ServiceSamples.state_transfer(definition, interval)):
+                    raise ValueError(f"physical peer profile contains unrelated work at {path}")
+                domain = json.dumps(source["domain"], sort_keys=True)
+                if protocols.setdefault(domain, protocol) != protocol:
+                    raise ValueError(f"physical state transfer protocols differ in one cost domain at {path}")
             self.sources[path] = source
             self.selection[str(path)] = hashlib.sha256(content).hexdigest()
 

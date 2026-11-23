@@ -19,9 +19,10 @@
 
 namespace prologue {
 
-// Ordered communication channels are independent of native control-message transport.
+// Match device exchanges and retain the service frontier of ordered peer routes.
 class CommunicationLinks {
 public:
+    std::optional<ExecutionInput> preceding_service(const CoarseGraph & graph) const;
     void insert(const CoarseGraph & graph, std::span<const std::size_t> events,
                 std::span<const ServiceDuration> durations, Timeline & timeline);
     bool empty() const;
@@ -29,6 +30,10 @@ public:
     nlohmann::json payload_coverage() const;
 
 private:
+    struct ChannelPosition {
+        std::size_t next = 0;
+        std::optional<std::size_t> tail;
+    };
     struct Collective {
         std::size_t ready;
         std::size_t finish;
@@ -49,7 +54,7 @@ private:
         std::map<std::int64_t, Endpoint> endpoints;
     };
 
-    std::map<std::pair<std::string, std::int64_t>, std::size_t> positions_;
+    std::map<std::pair<std::string, std::int64_t>, ChannelPosition> channels_;
     std::map<std::pair<std::string, std::size_t>, Exchange> pending_;
     std::size_t payload_endpoints_ = 0;
     std::size_t unknown_endpoints_ = 0;

@@ -4,10 +4,12 @@ from array import array
 import sys
 
 import zmq
+from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
-from prologue.contracts.workload import WorkloadContent
 from prologue.contracts.workload.routing import RoutedContent
-from sglang.srt.managers.io_struct import TokenizedGenerateReqInput
+from sglang.srt.disaggregation.utils import DisaggregationMode
+from sglang.srt.managers.io_struct import BatchTokenizedGenerateReqInput, TokenizedGenerateReqInput
+from sglang.srt.observability.req_time_stats import APIServerReqTimeStats
 from sglang.srt.sampling.sampling_params import SamplingParams
 
 
@@ -17,16 +19,15 @@ class RequestInput:
     ) -> None:
         self.peer = peer
         self.vocab_size = vocab_size
-        self.mode = mode
+        self.mode = DisaggregationMode(mode)
         self.arrivals = None
         self.waiting = False
         self.poll_deadline_ns = None
         self.context = None
         self.in_flow = False
-        self.requests = workload["requests"]
-        self.content = WorkloadContent(self.requests, workload["prefixes"])
-        self.content.check_vocabulary(vocab_size)
-        self.routing = RoutedContent(self.content, routes["assignments"], expert_layers) if routes is not None else None
+        self.submissions = RequestSubmissions(workload)
+        self.submissions.content.check_vocabulary(vocab_size)
+        self.routing = RoutedContent(self.submissions.content, routes["assignments"], expert_layers) if routes is not None else None
         if self.routing is not None:
             from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
@@ -44,24 +45,28 @@ class RequestInput:
                                      context=self.context, in_flow=self.in_flow)
             if advance["kind"] != "advance":
                 raise ValueError("Native control expected an advance boundary")
-            self.arrivals = iter(advance["arrivals"])
+            # One socket receive may read several dispatches. Each keeps its own tokenizer envelope.
+            self.arrivals = iter(self.submissions.cohorts(advance["arrivals"]))
 
-        request = next(self.arrivals, None)
+        cohort = next(self.arrivals, None)
 
         # End this native receive poll; the next poll waits for core progress.
-        if request is None:
+        if cohort is None:
             self.arrivals = None
             raise zmq.Again()
 
-        identity = request
-        request = self.requests[identity]
-        parameters = SamplingParams(max_new_tokens=request["output_tokens"], ignore_eos=True, temperature=0)
+        _, indices = cohort
+        return BatchTokenizedGenerateReqInput(batch=[self.tokenize(index) for index in indices])
+
+    def tokenize(self, index):
+        request = self.submissions.requests[index]
+        parameters = SamplingParams(**self.submissions.sampling(index))
         parameters.normalize(None)
         parameters.verify(self.vocab_size)
         return TokenizedGenerateReqInput(
-            rid=str(identity),
-            input_text="",
-            input_ids=array("q", self.content.prompt(request["id"])),
+            rid=self.submissions.native_id(self.submissions.observed, index),
+            input_text=None,
+            input_ids=array("q", self.submissions.content.prompt(request["id"])),
             input_embeds=None,
             mm_inputs=None,
             token_type_ids=None,
@@ -72,12 +77,16 @@ class RequestInput:
             token_ids_logprob=None,
             stream=True,
             extra_key=request["id"] if self.routing is not None else None,
-            bootstrap_host="prologue-prefill" if self.mode != "null" else None,
-            bootstrap_room=identity + 1 if self.mode != "null" else None,
+            bootstrap_host="prologue-prefill" if self.mode != DisaggregationMode.NULL else None,
+            bootstrap_room=index + 1 if self.mode != DisaggregationMode.NULL else None,
+            time_stats=APIServerReqTimeStats(disagg_mode=self.mode),
         )
 
+    def request_id(self, identity):
+        return self.submissions.requests[self.submissions.index(identity)]["id"]
+
     def output_token(self, identity: str) -> int:
-        return self.content.output_token(self.requests[int(identity)]["id"])
+        return self.submissions.content.output_token(self.request_id(identity))
 
 
 class NativeRequestReceiver:

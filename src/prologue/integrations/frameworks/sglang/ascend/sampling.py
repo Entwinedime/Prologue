@@ -16,9 +16,9 @@ from prologue.performance.samples import ServiceSamples
 
 
 class HostWindow:
-    def __init__(self, owner, name, job):
+    def __init__(self, owner, name, job, points):
         self.owner, self.name, self.job = owner, name, job
-        self.points = owner.host_points
+        self.points = points
         self.ready = cost_identity(job) not in owner.measured_host
 
     def collect(self, arguments, requested, limit):
@@ -138,25 +138,45 @@ class SGLangSampling:
     def __init__(self, launch, source):
         self.launch, self.source = launch, source
         self.host_points, self.copies = set(), {}
+        self.single_request_host_points = set()
+        self.protocol_services = set()
         self.attention = DecodeSampling(self)
         self.measured_host = set()
         self.external = HostCostSamples.external_work(source.recording.source)
+
+    @staticmethod
+    def cohort_widths(scopes):
+        widths = []
+        for scope in scopes:
+            work = scope["work"]
+            context = work.get("context") or {}
+            width = max(len(work.get("members", ())), len(context.get("poll_requests", ())))
+            parent = scope["parent"]
+
+            # A nested call can have local cost features and still require its enclosing native batch to be present.
+            widths.append(width if parent is None else max(width, widths[parent]))
+        return widths
 
     def observe(self, rank, target, catalog, demand):
         self.attention.observe(rank, catalog)
         platform = self.launch.platform
         card = platform.devices[0 if platform.single_device else rank]
-        for point in demand.graph(target, catalog):
+        widths = self.cohort_widths(catalog.graph["scopes"])
+        for work, point in demand.observe_graph(target, catalog):
             definition = demand.definitions[point.definition]
             interval = definition["work"][point.interval]
             if HostCostSamples.supports(interval, definition["resources"][interval["resource"]]):
                 self.host_points.add(point)
+                if widths[work["scope"]] <= 1:
+                    self.single_request_host_points.add(point)
             elif operand := LocalCopyWindow.operand(point, definition):
                 if card not in self.copies:
                     self.copies[card] = LocalCopyWindow(self, card, catalog.domain)
                 self.copies[card].observe(rank, catalog.domain, point, operand)
         for identity, kind, features in self.external[rank]:
-            self.host_points.add(demand.external(target, catalog.domain, identity, kind, features))
+            point = demand.external(target, catalog.domain, identity, kind, features)
+            self.host_points.add(point)
+            self.protocol_services.add((point.domain, point.definition, point.interval, point.phase))
 
     def windows(self, demand, samples):
         receipts = set()
@@ -176,8 +196,16 @@ class SGLangSampling:
                 yield window
         yield from self.attention.windows(demand)
         job, serving = self.launch.job, self.launch.serving
-        yield HostWindow(self, "observed-submission", job)
-        if any(len(group) != 1 for group in serving.submission_groups):
+        yield HostWindow(self, "observed-submission", job, self.host_points)
+        if self.single_request_host_points and any(len(group) != 1 for group in serving.submission_groups):
             groups = [[request["id"]] for request in serving.workload["requests"]]
             separate = {**job, "submission_groups": groups}
-            yield HostWindow(self, "individual-requests", separate)
+            yield HostWindow(self, "individual-requests", separate, self.single_request_host_points)
+        if len(serving.submission_groups) > 1:
+
+            # A training split can hide the larger envelopes created by the normal serving ingress.
+            unseen = {point for point in demand.points if point not in self.host_points
+                      and (point.domain, point.definition, point.interval, point.phase) in self.protocol_services}
+            if unseen:
+                normal = {key: value for key, value in job.items() if key != "submission_groups"}
+                yield HostWindow(self, "default-cohorts", normal, unseen)

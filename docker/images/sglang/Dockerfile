@@ -31,7 +31,13 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh \
     && cp /tmp/prologue-ascend/libprologue_ascend_{observer,weights}.so /opt/prologue/lib/ \
     && rm -rf /tmp/prologue-ascend
 
-ENV LD_PRELOAD=/opt/prologue/lib/libprologue_ascend_observer.so
+COPY src/prologue/integrations/runtimes/pytorch/native /opt/prologue/native/pytorch
+RUN cmake -S /opt/prologue/native/pytorch -B /tmp/prologue-gloo -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build /tmp/prologue-gloo --parallel \
+    && cp /tmp/prologue-gloo/libprologue_gloo.so /opt/prologue/lib/ \
+    && rm -rf /tmp/prologue-gloo
+
+ENV LD_PRELOAD=/opt/prologue/lib/libprologue_ascend_observer.so:/opt/prologue/lib/libprologue_gloo.so
 
 COPY --chmod=755 src/prologue/integrations/platforms/ascend/export.sh /opt/prologue/export-profile.sh
 COPY --chmod=755 src/prologue/integrations/platforms/ascend/capture.sh /opt/prologue/capture.sh

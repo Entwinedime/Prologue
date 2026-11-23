@@ -23,7 +23,7 @@ class SourceEvidence:
         self.findings = []
         external = {event for event, point in enumerate(self.evidence["events"])
                     if "protocol_operand" in facts["spans"][point["span"]]
-                    and not graph["resources"][graph["events"][event]["resource"]]["serial"]}
+                    and graph["resources"][graph["events"][event]["resource"]]["kind"] == "service"}
         self.unmeasured_boundaries = logical | external
         self.maximum_inversion_ns = 0
         self.coverage = {}
@@ -266,15 +266,15 @@ class ProductionEvidence:
         host_fences = native_evidence.inspect_host_fences(graph)
         effects["host_fences"] = len(host_fences)
         contents = native_case.observe(rank, graph, native, logical_coordinates=native_evidence.logical_coordinates)
-        measurements = native_evidence.inspect_measurements()
-        if native_case.joint_execution and measurements["external_transfer_endpoints"]:
-            raise ValueError("a physical reference cannot substitute single-device Work bounds for transport measurements")
+        protocol_posts, external = native_evidence.supplied_protocols(graph)
+        measurements = native_evidence.inspect_measurements(external)
+        if native_case.joint_execution and measurements["external_transport_endpoints"]:
+            raise ValueError("a physical reference cannot substitute single-device staging for transport measurements")
         measurements["checked_device_measurements"] = effects["device_measurements"]
         device_intervals = native_evidence.device_intervals()
         boundaries = native_evidence.inspect_boundaries(graph, device_intervals)
         services, private_streams = native_evidence.inspect_services()
         launches = {} if retain_measurements else None
-        protocol_posts = native_evidence.supplied_protocols(graph)
         submissions, links = native_evidence.inspect_submissions(protocol_posts, launches)
         payload_times = defaultdict(list) if retain_measurements else None
         payload = native_evidence.inspect_payload(graph, private_streams, device_intervals, links, launches, payload_times)
@@ -305,8 +305,14 @@ class ProductionEvidence:
                 graph, launches, native_evidence.queues, native_case.clocks[rank], records["observer_joins"]
             )
             omitted = {record for release in releases.values() for record in release.omitted}
-            context = FixedHostContext(self.capture, rank, native_evidence)
-            delays, waits, idle_inputs, posts, queues = context.project(graph, host_fences, omitted, self.details)
+            owner = native_case.ranks[rank]
+            deliveries = zip(native_case.manifest["instances"], native_case.submissions, strict=True)
+            delivery = next(submitted for instance, submitted in deliveries if instance["id"] == owner)
+            context = FixedHostContext(self.capture, rank, native_evidence, delivery)
+            calls = native_case.cpu.native_calls[rank]
+            measured = context.project(native_evidence, graph, host_fences, omitted, self.details, calls, native_case.cpu.native_times)
+            delays, waits, idle_inputs, posts, queues, protocol = measured
+            records["fixed_cpu_calls"] = protocol
             report["native_host_queues"] = queues
             records["fixed_host_delays"] = delays
             records["fixed_idle_inputs"] = idle_inputs
@@ -315,7 +321,8 @@ class ProductionEvidence:
             records["device_releases"] = releases
             records["device_payload_times"] = payload_times
             records["fixed_host_waits"] = waits
-            records["kernel_threads"] = tuple(context.active.kernel_threads.values())
+            records["fixed_host_context"] = context
+            records["kernel_threads"] = context.active.kernel_threads
             records["unbound_queue_notifications"] = queues["queue_completion_notifications"] - queues["bound_to_fixed_work"]
 
             native_case.measurements[rank] = records
@@ -411,7 +418,7 @@ class ProductionEvidence:
                     f"{measurements['checked_device_measurements']} device endpoints against raw records. "
                     f"{measurements['unmeasured_device_endpoints']} stream boundaries lack measurements, and "
                     f"{measurements['logical_wait_boundaries']} logical wait boundaries have no device submission. "
-                    f"{measurements['external_transfer_endpoints']} posted transfer boundaries require external timing. "
+                    f"{measurements['external_transport_endpoints']} transport boundaries require external timing. "
                     "Synchronous transfers retain the driver's host timestamps, and device return fences retain SDK timestamps.", "",
                     f"Checked {streams['named_streams']} named streams, {payload.get('retained_payload_tasks', 0)} retained SDK payload tasks, "
                     f"and {payload.get('opaque_service_tasks', 0)} tasks in private service queues. "

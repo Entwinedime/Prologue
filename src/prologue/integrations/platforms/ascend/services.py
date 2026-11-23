@@ -5,6 +5,13 @@ from itertools import chain
 from math import prod
 
 
+def uses_peer_service(scope):
+    exchange = scope.get("communication")
+
+    # Variable row exchanges keep their transport service as the active peers change.
+    return exchange is not None and ("peer_rows" in scope or exchange["required"] == exchange["members"])
+
+
 class SynchronousCopy:
     directions = {"host_to_device": 1, "device_to_host": 2}  # aclrtMemcpyKind
 

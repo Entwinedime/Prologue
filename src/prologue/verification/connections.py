@@ -37,6 +37,14 @@ class Connections:
         port = next(port for port in contents.graph["scopes"][index]["ports"] if "rendezvous" in port)
         return port["rendezvous"], port["event"]
 
+    @staticmethod
+    def transfer_payload(scope):
+        if scope["communication"]["operation"] != "transfer":
+            return None
+        port, = (port for port in scope["ports"] if port["use"] in {"data", "metadata"})
+        tensor = port["tensor"]
+        return port["direction"], tensor["dtype"], tensor["shape"]
+
     def native(self, contents, raw, rank, instance, dependencies, identities):
         graph, owners = contents.graph, {}
         endpoints = []
@@ -140,10 +148,8 @@ class Connections:
                     "ready": ready, "complete": complete,
                     "metadata": scope["role"] == "metadata_collective", "values": metadata.get(index),
                     "elements": scope["parameters"].get("elements"), "group_role": scope["bindings"].get("collective_group"),
+                    "payload": self.transfer_payload(scope),
                 }
-                if "required_peers" in scope["bindings"]:
-                    origin, = scope["bindings"]["source_scopes"]
-                    endpoint["peer_rows"] = raw["scopes"][origin]["peer_rows"]
                 self.channels[instance, communication["channel"]][rank].append(endpoint)
                 endpoints.append(endpoint)
 
@@ -190,6 +196,7 @@ class Connections:
                     **communication, "entered": events[entered], "scope": (key, path), "work": identity,
                     "metadata": scope["role"] == "metadata_collective", "values": None,
                     "elements": scope["parameters"].get("elements"), "group_role": scope["bindings"].get("collective_group"),
+                    "payload": self.transfer_payload(scope),
                 }
                 self.endpoints[endpoint["scope"]] = endpoint
                 self.predicted_channels[communication["channel"]][rank].append(endpoint)
@@ -486,6 +493,11 @@ class Connections:
                 continue
             exchanges += 1
             self.check_metadata(endpoints, "native")
+            if endpoints[0]["operation"] == "transfer":
+                send, receive = (endpoint["payload"] for endpoint in endpoints)
+                if (send[0], receive[0]) != ("input", "output") or send[1:] != receive[1:]:
+                    complete = False
+                    self.finding("communication_payload", endpoints[0]["work"], origin="native", send=send, receive=receive)
             peers = {endpoint["rank"]: endpoint for endpoint in endpoints}
             for endpoint in endpoints:
 
@@ -509,6 +521,7 @@ class Connections:
 
     def compare_communication(self, pairs):
         expected, unresolved, unpaired = set(), False, 0
+        payloads, payloads_compared, payloads_matched = 0, 0, 0
         for endpoints in self.native_rounds:
             if endpoints is None:
                 unresolved = True
@@ -517,16 +530,22 @@ class Connections:
             for endpoint in endpoints:
                 destination_scope = self.mapped(endpoint["scope"], pairs)
                 destination = self.complete.get(destination_scope)
-                if endpoint["metadata"] and endpoint["values"] is not None and destination_scope in self.endpoints:
-                    target = self.endpoints[destination_scope]
-                    if target["values"] is not None:
+                target = self.endpoints.get(destination_scope)
+                if endpoint["payload"] is not None:
+                    payloads += 1
+                    if target is not None:
+                        payloads_compared += 1
+                        if endpoint["payload"] == target["payload"]:
+                            payloads_matched += 1
+                        else:
+                            self.finding("communication_payload", endpoint["work"], native=endpoint["payload"], predicted=target["payload"])
+                if target is not None:
+                    if endpoint["metadata"] and endpoint["values"] is not None and target["values"] is not None:
                         field = "metadata_operands_compared"
                         self.counts[field] = self.counts.get(field, 0) + 1
                         if endpoint["values"] != target["values"]:
                             self.finding("metadata_operands", endpoint["work"], native=endpoint["values"], predicted=target["values"])
-                if "batch_sync" in endpoint and destination_scope in self.endpoints:
-                    target = self.endpoints[destination_scope]
-                    if "batch_sync" in target:
+                    if "batch_sync" in endpoint and "batch_sync" in target:
                         self.batch_sync.counts["endpoints_compared"] += 1
                         if endpoint["batch_sync"] != target["batch_sync"]:
                             self.finding("batch_sync_operands", endpoint["work"], native=endpoint["batch_sync"], predicted=target["batch_sync"])
@@ -552,4 +571,5 @@ class Connections:
             self.finding("communication_dependency", {}, extra=len(extra), examples=self.edge_details(extra))
         self.counts.update(communication_edges_expected=len(expected), communication_edges_observed=len(self.communication_edges),
                            communication_edges_matched=len(expected & self.communication_edges), communication_edges_unpaired=unpaired,
-                           communication_evidence_complete=not unresolved)
+                           communication_evidence_complete=not unresolved, device_transfer_payloads=payloads,
+                           device_transfer_payloads_compared=payloads_compared, device_transfer_payloads_matched=payloads_matched)

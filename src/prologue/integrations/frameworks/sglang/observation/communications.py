@@ -20,6 +20,7 @@ class CollectiveOperand:
     coordinator: Any
     tensor: Any
     gather_dim: int | None = None
+    output: Any | None = None
 
     def implementation(self):
         communicator = self.coordinator.npu_communicator
@@ -59,6 +60,8 @@ class DeviceCollectiveCuts:
                 role = "gather"
         elif original.__name__ == "all_reduce" and not self.scopes.collective_at_root:
             operand = CollectiveOperand(group, arguments.arguments["input_"])
+        elif original.__name__ in {"all_gather_into_tensor", "reduce_scatter_tensor"}:
+            operand = CollectiveOperand(group, arguments.arguments["input"], output=arguments.arguments["output"])
         with self.outer():
             return self.scopes.observe_exchange(
                 original, role, group.device_group, root_rank, operand, partial(original, group, *args, **kwargs),
@@ -85,9 +88,12 @@ class DeviceCollectiveCuts:
         root_rank = arguments.arguments.get("src")
         if arguments.arguments.get("group_src") is not None:
             root_rank = distributed.get_global_rank(group, arguments.arguments["group_src"])
+        operand = None
+        if original.__name__ == "all_gather_into_tensor":
+            operand = CollectiveOperand(None, arguments.arguments["input_tensor"], output=arguments.arguments["output_tensor"])
         with self.outer():
             return self.scopes.observe_exchange(
-                original, "communication", group, root_rank, None, partial(original, *args, **kwargs),
+                original, "communication", group, root_rank, operand, partial(original, *args, **kwargs),
             )
 
     @contextmanager
@@ -158,6 +164,8 @@ class NativeCommunications:
         if operand is None:
             with self.exchange(original, group, root_rank=root_rank, role=role):
                 return run()
+        if operand.output is not None:
+            return self.buffer_exchange(original, group, operand, run)
         if operand.gather_dim is None:
             return self.reduce(original, group, operand, run)
 
@@ -191,6 +199,43 @@ class NativeCommunications:
                 parent_output[dim] = ["mul", peers, parent_shape[dim]]
                 owner.tensors.declare_shape(result, parent_output, scope=call.identity if standalone else call.record["parent"])
             return result
+
+    def buffer_exchange(self, original, group, operand, run):
+        owner = self.observation
+        parent = owner.capture.scopes[owner.capture.current.get()]
+        with self.exchange(original, group) as call:
+            with owner.tensors.metadata():
+                peers = len(call.record["communication"]["members"])
+                shapes = self.buffer_shapes(parent, original.__name__, operand, peers)
+                if shapes is not None:
+                    source = owner.tensors.observe(operand.tensor, None)
+                    call.port("input.layout", "input", {**source, "shape_rule": shapes[0]}, use="metadata")
+            result = run()
+            if shapes is not None:
+                target = owner.tensors.observe(operand.output, None)
+                call.port("output.layout", "output", {**target, "shape_rule": shapes[1]}, use="metadata")
+            return result
+
+    @staticmethod
+    def buffer_shapes(parent, operation, operand, peers):
+        source, target = list(operand.tensor.shape), list(operand.output.shape)
+        if parent["role"] == "layer":
+
+            # TP scatter and gather exchange the same hidden width across whole or sharded batch rows.
+            full = parent["parameters"]["model_tokens"]
+            local = full // peers
+            scatter = operation == "reduce_scatter_tensor"
+            wide, narrow = (source, target) if scatter else (target, source)
+            if full % peers != 0 or wide[0] != full or narrow[0] != local or wide[1:] != narrow[1:]:
+                raise ValueError("collective buffer differs from the declared TP row layout")
+            wide[0], narrow[0] = "model_tokens", ["floor_div", "model_tokens", peers]
+            return source, target
+
+        # Scheduler metadata and the native expert histogram have a fixed ABI for this domain.
+        if (parent["implementation"] == "sglang.srt.managers.scheduler_components.dp_attn.MLPSyncBatchInfo.all_gather"
+                or parent.get("communication", {}).get("operation") == "dispatch"):
+            return source, target
+        return None
 
     def reduce(self, original, group, operand, run):
         tensors = self.observation.tensors

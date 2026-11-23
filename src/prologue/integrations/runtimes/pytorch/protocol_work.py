@@ -44,34 +44,99 @@ class CpuProtocolWork:
         axes = {f"parameter.{name}": descriptor[name] for name in ("elements", "element_bytes")}
         return identity, {"phase": "", "axes": axes}
 
+    @staticmethod
+    def readiness_operation(descriptor):
+        return "cpu_receive_ready" if descriptor["receiving"] else "cpu_send_ready"
+
+    @staticmethod
+    def post_operations(operation):
+        return operation + "_before_post", operation + "_after_post"
+
+    @staticmethod
+    def transport(post):
+        transport = post.get("transport")
+        if transport is None:
+            return None
+        stamp, completion = transport["post_raw_ns"], transport["completion_raw_ns"]
+        interval = post["interval"]
+        if (any(type(transport[name]) is not int or transport[name] < 0 for name in ("slot", "peer", "post_raw_ns"))
+                or not interval["begin_raw_ns"] <= stamp <= interval["end_raw_ns"]):
+            raise ValueError("Gloo transport post lies outside its native point-to-point call")
+        if completion is not None:
+            begin, end = completion
+            thread = transport["completion_thread"]
+            if (type(begin) is not int or type(end) is not int or type(thread) is not int or thread <= 0
+                    or not stamp <= begin <= end
+                    or post["consumed"] is not None and begin > post["consumed"]["end_raw_ns"]):
+                raise ValueError("Gloo completion contradicts its native post or successful consumption")
+        return transport
+
+    @staticmethod
+    def ready_window(transport, last_post, consumed):
+        if (completion := transport["completion_raw_ns"]) is None:
+            return None
+        begin, end = completion
+        begin = max(begin, last_post)
+        if consumed is not None:
+            end = min(end, consumed)
+        return (begin, end) if begin <= end else None
+
     @classmethod
     def local(cls, record):
         for post in record["posts"]:
-            intervals = [post["interval"]]
-            if post["operation"] in {"isend", "irecv"} and post["consumed"] is not None:
-                intervals.append(post["consumed"])
-            for interval in intervals:
-                execution = interval["execution"]
-                if execution["in_flow"]:
-                    identity, features = cls.service(post["descriptor"], execution, execution["operation"])
-                    yield identity, features, interval
+            descriptor = post["descriptor"]
+            interval = post["interval"]
+            execution = interval["execution"]
+            if execution["in_flow"]:
+                transport = cls.transport(post)
+                before, after = cls.post_operations(execution["operation"])
+                begin, end = interval["begin_raw_ns"], interval["end_raw_ns"]
+                stamp = transport["post_raw_ns"] if transport is not None else None
+                for operation, bounds in ((before, (begin, stamp)), (after, (stamp, end))):
+                    identity, features = cls.service(descriptor, execution, operation)
+                    yield identity, features, interval["thread"], bounds if stamp is not None else None
 
-    def wires(self):
+            consumed = post["consumed"]
+            if post["operation"] in {"isend", "irecv"} and consumed is not None and consumed["execution"]["in_flow"]:
+                execution = consumed["execution"]
+                identity, features = cls.service(descriptor, execution, execution["operation"])
+                yield identity, features, consumed["thread"], (consumed["begin_raw_ns"], consumed["end_raw_ns"])
+
+    def transfers(self):
         messages = defaultdict(dict)
-        for record in self.records.values():
+        for rank, record in self.records.items():
+            if record.get("transport_clock", "monotonic_raw_ns") != "monotonic_raw_ns":
+                raise ValueError("CPU transport requires a shared RAW clock")
             for post in record["posts"]:
-                messages[tuple(post["key"])][post["descriptor"]["receiving"]] = post
+                roles = messages[tuple(post["key"])]
+                if rank in roles:
+                    raise ValueError("CPU transport repeats an observed endpoint")
+                roles[rank] = post
         for peers in messages.values():
             if len(peers) != 2:
                 continue
-            sender, receiver = peers[False], peers[True]
-            if sender["consumed"] is None and receiver["consumed"] is None:
+            active = [post["interval"]["execution"] for post in peers.values() if post["interval"]["execution"]["in_flow"]]
+            if not active:
                 continue
-            sent, received = (post["descriptor"] for post in (sender, receiver))
-            if any(sent[name] != received[name] for name in ("dtype", "elements", "element_bytes")):
+            geometry = {tuple(post["descriptor"][name] for name in ("dtype", "elements", "element_bytes"))
+                        for post in peers.values()}
+            if len(geometry) != 1:
                 raise ValueError("native CPU message endpoints disagree on transfer geometry")
-            for post in (sender, receiver):
+            measured = {rank: self.transport(post) for rank, post in peers.items()}
+            last_post = None
+            if None not in measured.values():
+                if len({row["slot"] for row in measured.values()}) != 1:
+                    raise ValueError("CPU transport pairs different native slots")
+                last_post = max(row["post_raw_ns"] for row in measured.values())
+            for rank, post in peers.items():
+                descriptor = post["descriptor"]
                 execution = post["interval"]["execution"]
-                if execution["in_flow"]:
-                    yield self.service(sent, execution, "cpu_transport")
-                    break
+                identity, features = self.service(descriptor, execution if execution["in_flow"] else active[0],
+                                                  self.readiness_operation(descriptor))
+                consumed = post["consumed"]
+                duration = None
+                if last_post is not None:
+                    bound = self.ready_window(measured[rank], last_post, None if consumed is None else consumed["end_raw_ns"])
+                    if bound is not None:
+                        duration = bound[0] - last_post
+                yield rank, identity, features, duration

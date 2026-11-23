@@ -1,6 +1,7 @@
 """Native request bookkeeping over the core's content index and page ownership."""
 
 import torch
+from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from sglang.srt.mem_cache.base_prefix_cache import (
     DecLockRefResult,
     EvictResult,
@@ -105,7 +106,7 @@ class PrefixCache(RadixCache):
     def cache_unfinished_req(self, req, chunked=False):
         super().cache_unfinished_req(req, chunked=chunked)
         if not self.disable:
-            self.peer.call("bind_prefix", request=int(req.rid), node=req.last_node, tokens=len(req.prefix_indices))
+            self.peer.call("bind_prefix", request=RequestSubmissions.index(req.rid), node=req.last_node, tokens=len(req.prefix_indices))
 
     def evictable_size(self):
         return 0 if self.disable else self.peer.call("capacity", resource="evictable_tokens")

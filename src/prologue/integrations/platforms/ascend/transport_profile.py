@@ -1,4 +1,4 @@
-"""Publish portable HCCL service measurements for an explicitly selected physical placement."""
+"""Publish physical peer service measurements for explicitly selected placements."""
 
 import json
 from collections import Counter, defaultdict
@@ -13,7 +13,7 @@ class AscendTransportProfile:
     uniform = {"all_reduce", "all_gather", "all_gather_into_tensor", "reduce_scatter", "reduce_scatter_tensor",
                "broadcast", "transfer"}
 
-    def __init__(self, capture, peers, trace, observation, image):
+    def __init__(self, capture, peers, trace, observation, image, deployment):
         self.qualification = {"observation": observation, "source_image": image}
         placement = {}
         for actor in peers:
@@ -34,13 +34,44 @@ class AscendTransportProfile:
             if link and link not in {"ON_CHIP", "INVALID_TYPE"}:
                 links.add((link, args["transport type"]))
         self.qualification["observed_links"] = sorted(links)
+        if "transfer_protocol" in deployment:
+            self.qualification["state_transfer_protocol"] = deployment["transfer_protocol"]
+
+    @staticmethod
+    def state_transfer(catalog, services, piece):
+        scope = catalog.graph["scopes"][piece["scope"]]
+        accesses = scope["kv_accesses"] + scope["slot_accesses"]
+        pools = defaultdict(set)
+        for access in accesses:
+            if (access["start"], access["finish"]) == (piece["start"], piece["finish"]):
+                pools[access["access"]].add(access["pool"])
+        if pools["read"] != {"local"} or len(pools["write"]) != 1 or "local" in pools["write"]:
+            raise ValueError("physical state transfer requires one remote destination")
+
+        duration, copy, _ = services.service(piece)
+        if copy is not None and copy[0] != scope["parameters"]["transfer_bytes"]:
+            raise ValueError("measured state transfer changes payload bytes")
+        return duration, copy
 
     def samples(self, catalog, services):
         source = ServiceSamples(catalog.domain)
         absent = Counter()
         receipts = defaultdict(lambda: defaultdict(list))
-        coordinates = {}
-        for piece, _, _, features in catalog:
+        coordinates, definitions = {}, {}
+        for piece, definition, interval, features in catalog:
+            native = catalog.definitions[definition]
+            if ServiceSamples.state_transfer(native, interval):
+                if "state_transfer_protocol" not in self.qualification:
+                    raise ValueError("a physical state transfer profile requires its measured protocol")
+                duration, copy = self.state_transfer(catalog, services, piece)
+                if duration is None:
+                    absent["unmeasured_state_transfer"] += 1
+                    continue
+                if definition not in definitions:
+                    definitions[definition] = len(source.definitions)
+                    source.definitions.append(native)
+                source.add(definitions[definition], interval, features, duration, copy)
+                continue
             if piece["kind"] != "collective":
                 continue
             duration, _, payload = services.service(piece)
@@ -53,7 +84,8 @@ class AscendTransportProfile:
                 absent["undeclared_operand_geometry"] += 1
                 continue
             operation = identity["operation"]
-            if operation not in self.uniform:
+            row_axes = identity.get("row_axes", ())
+            if operation not in self.uniform and not row_axes:
                 absent["requires_peer_payload_distribution"] += 1
                 continue
 
@@ -64,11 +96,19 @@ class AscendTransportProfile:
             dtype, _, elements = payload
             axes = features["axes"]
             operands = {(port["dtype"], axes[port["elements_axis"]]) for port in ports}
-            if not (0 <= dtype < len(self.dtypes) and operands == {(f"torch.{self.dtypes[dtype]}", elements)}):
+            if not 0 <= dtype < len(self.dtypes):
+                absent["sdk_operand_mismatch"] += 1
+                continue
+            native_dtype = f"torch.{self.dtypes[dtype]}"
+
+            # For variable exchanges the scalar SDK count cannot identify the payload split.
+            compatible = {name for name, _ in operands} == {native_dtype} if row_axes else operands == {(native_dtype, elements)}
+            if not compatible:
                 absent["sdk_operand_mismatch"] += 1
                 continue
             payload_axes = {port["elements_axis"]: axes[port["elements_axis"]]
                             for ports in identity["ports"].values() for port in ports.values()}
+            payload_axes.update((axis, axes[axis]) for axis in row_axes)
             key = json.dumps((identity, payload_axes), sort_keys=True)
             coordinates[key] = identity, {"phase": "", "axes": payload_axes}
             receipts[key][tuple(payload)].append(duration)
@@ -82,4 +122,4 @@ class AscendTransportProfile:
             for duration in durations:
                 source.add_external(identity, "collective", features, duration, collective=payload)
 
-        return {**source.document(absent), "transport_profile": self.qualification}
+        return source, absent

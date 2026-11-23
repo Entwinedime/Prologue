@@ -21,8 +21,8 @@ class DeviceRelease:
     previous: int | None
     preceding_window_ns: tuple[int | None, int] | None
     first_command: bool
-    stream_wait: bool
-    wait_finish: int | None
+    submitted_at_completion: bool
+    completion: int | None
     omitted: tuple[OmittedRecord, ...]
 
 
@@ -37,6 +37,7 @@ class SdkStreams:
         self.counts = Counter()
         self.logical_gaps = {}
         self.logical_slots = {}
+        self.observer_payload = set()
         streams = defaultdict(list)
         for row in rows:
             args = row.get("args", {})
@@ -82,20 +83,20 @@ class SdkStreams:
     def omitted_records(self, stream, ordinal, coordinates, queues, observer_joins):
         records = []
         resource = f"stream/{stream}"
-        boundary = self.span((stream, ordinal))[0]
+
+        # Elided waits add logical slots. Physical order still follows consecutive SDK records.
         for previous in range(ordinal - 1, -1, -1):
             identity = stream, previous
-            begin, end = self.span(identity)
-            if end + 1 != boundary:
-                break
+            _, end = self.span(identity)
             retained = coordinates.get((resource, end))
             if retained is not None and retained not in observer_joins:
                 return retained, tuple(reversed(records))
 
-            # A projected observer join may still have recorded on the physical stream.
+            # Excluded observation work can still occupy the physical stream before modeled work.
             task = self.records[identity]
             args = task["args"]
-            if args["Task Type"] != "EVENT_RECORD" or args["connection_id"] not in queues.apis:
+            if (args["Task Type"] != "EVENT_RECORD" and identity not in self.observer_payload
+                    or args["connection_id"] not in queues.apis):
                 break
             completed = self.clock.interval(task)[1]
             if not self.clock.begin_ns <= completed <= self.clock.end_ns:
@@ -105,7 +106,6 @@ class SdkStreams:
             except ValueError:
                 break
             records.append(OmittedRecord(post.thread, post.begin, post.record["begin_raw_ns"], completed))
-            boundary = begin
         return None, ()
 
     def release_evidence(self, graph, launches, queues, calibration, observer_joins):
@@ -114,9 +114,18 @@ class SdkStreams:
         releases = {}
         for identity, (post, order) in launches.items():
             stream, ordinal = identity
-            wait = self.records[identity]["args"]["Task Type"] == "EVENT_WAIT"
-            target = coordinates[f"stream/{stream}", order]
-            wait_finish = coordinates.get((f"stream/{stream}", self.span(identity)[1])) if wait else None
+            resource = f"stream/{stream}"
+            recorded = coordinates[resource, order]
+            target, completion = recorded, None
+            kind = self.records[identity]["args"]["Task Type"]
+            if kind in {"EVENT_RECORD", "EVENT_WAIT"}:
+                begin, end = self.span(identity)
+
+                # A signal can keep only its completion, or retain both physical command boundaries.
+                target = coordinates.get((resource, begin), recorded)
+                returned = coordinates.get((resource, end))
+                if returned != target:
+                    completion = returned
             submitted = coordinates[f"thread/{post.thread}", post.begin]
             preceding = stream, ordinal - 1
             prior = self.records.get(preceding)
@@ -137,7 +146,8 @@ class SdkStreams:
                         seen = calibration.point_window(calibration.point(completed, True))
                         if seen[1] > entered and (previous is None or previous in observer_joins):
                             previous, omitted = self.omitted_records(stream, ordinal, coordinates, queues, observer_joins)
-            releases[target] = DeviceRelease(submitted, previous, seen, ordinal == 0, wait, wait_finish, omitted)
+            releases[target] = DeviceRelease(submitted, previous, seen, ordinal == 0, recorded == completion,
+                                             completion, omitted)
         return releases
 
     def inspect_coordinates(self, facts, apis, commands):

@@ -39,13 +39,19 @@ private:
         const TemplateGuard * guard;
     };
     using Family = std::vector<Candidate>;
+
+    struct ActionFamilies {
+        std::set<std::size_t> observed;
+        std::set<std::size_t> imported;
+    };
+
     class FamilyIndex;
     class FrameSelection;
 
     const TemplateLibrary & library_;
     std::vector<Family> families_;
     std::map<const TemplateFrame *, std::size_t> membership_;
-    std::map<std::pair<std::string, nlohmann::json>, std::set<std::size_t>> roots_;
+    std::map<std::pair<std::string, nlohmann::json>, ActionFamilies> roots_;
 };
 
 } // namespace prologue

@@ -1,12 +1,15 @@
 """Bind same-run service evidence and request boundaries to observed execution."""
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import chain
 
 from prologue.integrations.platforms.ascend.services import ObservedServices
+from prologue.integrations.runtimes.pytorch.protocol_work import CpuProtocolWork
 
-from .fixed_context import ExternalWake, HostProgress
+from .cpu_protocol import NativeCpuCall
+from .fixed_context import CpuReadinessWake, ExternalWake, KernelWake, LocalCallWake, WorkProgress
+from .ingress import IngressEvidence
 from .publications import FixedPublications
 from .source_clock import ClockRealization, CounterPoint
 
@@ -14,16 +17,34 @@ from .source_clock import ClockRealization, CounterPoint
 @dataclass(frozen=True, slots=True)
 class ServiceInterval:
     rank: int
-    index: int
-    piece: dict
+    index: int | None
+    start: int
+    finish: int
+    kind: str
     service_ns: int | None
     basis: str
-    cuts: tuple[HostProgress, ...]
+    cuts: tuple[WorkProgress, ...]
+    cpu_call: NativeCpuCall | None = None
+    cpu_operation: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CpuTransportInterval:
+    post: NativeCpuCall
+    consumer: tuple[int, int] | None
+    posts: tuple[tuple[int, int], ...]
+    execution: dict
+    window_ns: tuple[int, int]
+    service_ns: int
+
+    kind = "transfer"
+    basis = "observed_cpu_transport_readiness"
+    cuts = ()
 
 
 @dataclass(frozen=True, slots=True)
 class FixedDeviceRecord:
-    post: int | HostProgress
+    post: int | WorkProgress
     duration_ns: int
     finished_ns: int
 
@@ -34,10 +55,16 @@ class FixedTimeline:
         self.indices = reference.case.graph.positions
         self.releases = [reference.entries.get(event, 0) for event in self.indices]
         self.dependencies, self.work = [], []
+        self.protocol = {}
+        for post, (consumer, ready) in reference.cpu_initial_readiness.items():
+            endpoint = self.protocol[post] = self.event(max(0, ready - reference.origin_ns))
+            self.dependencies.append((endpoint, self.indices[consumer], 0))
+        self.protocol.update((interval.post.posted, self.event()) for interval in reference.cpu_transfers)
+        self.post_frontiers = {}
         take_releases = {(rank, wait.take_entry): wait.take_entry.observed_ns - reference.origin_ns
                          for (rank, _), wait in reference.host_waits.items() if wait.take_entry is not None}
         self.progress = {(rank, cut): self.event(max(0, take_releases.get((rank, cut), 0)))
-                         for (rank, _, _), cuts in reference.host_cuts.items() for cut in cuts}
+                         for (rank, _, _), cuts in reference.progress_cuts.items() for cut in cuts}
 
     def event(self, release_ns=0):
         position = len(self.releases)
@@ -53,10 +80,32 @@ class FixedTimeline:
         if isinstance(waker, ExternalWake):
             ready = waker.raw_ns - self.reference.origin_ns + wait.delay_ns
             self.releases[resumed] = max(self.releases[resumed], ready)
+            return resumed
+        if isinstance(waker, CpuReadinessWake):
+            source = self.protocol[rank, waker.post]
+        elif isinstance(waker, WorkProgress):
+            source = self.progress[waker.rank, waker]
+        elif isinstance(waker, LocalCallWake):
+            source = self.event()
+            entered = self.indices[waker.rank, waker.start]
+            returned = self.indices[waker.rank, waker.finish]
+
+            # The local wake follows call entry and precedes return, independently of peer readiness.
+            self.dependencies.extend(((entered, source, waker.elapsed_ns), (source, returned, 0)))
         else:
-            source = self.progress[rank, waker] if isinstance(waker, HostProgress) else self.indices[rank, waker]
-            self.dependencies.append((source, resumed, wait.delay_ns))
+            source = self.indices[waker]
+        self.dependencies.append((source, resumed, wait.delay_ns))
         return resumed
+
+    def transport(self, interval):
+        frontier = self.post_frontiers.get(interval.posts)
+        if frontier is None:
+            frontier = self.post_frontiers[interval.posts] = self.event()
+            self.dependencies.extend((self.indices[post], frontier, 0) for post in interval.posts)
+        ready = self.protocol[interval.post.posted]
+        self.work.append((frontier, ready, 0))
+        if interval.consumer is not None:
+            self.dependencies.append((ready, self.indices[interval.consumer], 0))
 
     def path(self, rank, start, finish, delay, cuts, *, modeled):
         edges = self.work if modeled else self.dependencies
@@ -81,28 +130,40 @@ class FixedReference:
             self.peers.setdefault(target, set()).add(source)
         self.gaps = {}
         self.input_releases = {}
+        self.active_input_reads = {}
         self.requests = self.align_requests()
+        self.cpu_calls = [call for calls in case.cpu.native_calls.values() for call in calls if call.execution["in_flow"]]
+        self.cpu_points = {point: call for call in self.cpu_calls
+                           for point in (call.entered, call.posted, call.returned) if point is not None}
+        self.external_cpu_points = case.cpu.native_times.keys() - self.cpu_points.keys()
         self.specialization_loads = {rank: raw.get("specialization_loads") for rank, (_, raw, _) in case.sources.items()}
 
         dispatches = {(rank, start): dispatch for rank, record in case.measurements.items()
                       for start, dispatch in record["device_releases"].items()}
-        self.clock = ClockRealization(case.clocks, case.graph)
+        self.clock = ClockRealization(case.clocks, case.graph, case.cpu.native_times)
         for target, dispatch in dispatches.items():
             submitted = target[0], dispatch.submitted
 
-            # The verified driver submission also precedes a measured wait's entry.
-            if dispatch.stream_wait and target not in case.graph.next[submitted]:
+            # A native signal's driver submission precedes the physical command entry.
+            if dispatch.submitted_at_completion and target not in case.graph.next[submitted]:
                 self.clock.constrain_order(submitted, target)
         self.clock.solve()
-        self.host_waits = self.qualified_host_waits()
+        self.host_waits = dict(self.input_releases)
+        self.host_waits.update(((rank, wait.stopped), wait) for rank, record in case.measurements.items()
+                               for wait in record["fixed_host_waits"])
+
+        # Match measured protocol readiness before assigning the remaining wakes to their producer lanes.
+        self.cpu_initial_readiness = {}
+        self.cpu_transfers = self.bind_cpu_transfers()
+        self.bind_thread_wakes()
         self.observer_joins = {(rank, event) for rank, record in case.measurements.items()
                                for event in record["observer_joins"]}
         self.elided_waits = {(rank, event) for rank, events in case.logical.items() for event in events}
         fences = [(rank, source, target) for rank, record in case.measurements.items()
                   for source, target in sorted(record["host_fences"])]
-        stream_waits = [(rank, start, row.wait_finish) for (rank, start), row in dispatches.items()
-                        if row.wait_finish is not None and (rank, row.wait_finish) not in self.observer_joins]
-        completions = {(rank, target) for rank, _, target in chain(fences, stream_waits)}
+        signals = [(rank, start, row.completion) for (rank, start), row in dispatches.items()
+                        if row.completion is not None and (rank, row.completion) not in self.observer_joins]
+        completions = {(rank, target) for rank, _, target in chain(fences, signals)}
         joins = self.observer_joins | self.elided_waits
         predecessors = self.predecessors(joins | dispatches.keys() | completions)
         self.event_windows = self.completion_windows(predecessors)
@@ -115,48 +176,148 @@ class FixedReference:
             fences, predecessors, "host_fence_timing_unqualified"
         )
         self.device_records = {}
-        self.device_conditions, self.wait_submissions, self.device_dispatch = self.bind_device_dispatches(
+        self.device_conditions, self.signal_submissions, self.device_dispatch = self.bind_device_dispatches(
             dispatches, predecessors, joins
         )
-        wait_conditions, self.device_dispatch["wait_completions"] = self.bind_completions(
-            stream_waits, predecessors, "stream_wait_timing_unqualified"
+        signal_conditions, self.device_dispatch["signal_completions"] = self.bind_completions(
+            signals, predecessors, "stream_signal_timing_unqualified"
         )
-        self.device_conditions.update(wait_conditions)
-        self.host_cuts = self.host_progress_cuts()
-        self.intervals = list(self.services())
+        self.device_conditions.update(signal_conditions)
+        self.progress_cuts = self.collect_progress_cuts()
+        self.intervals = [*self.services(), *self.cpu_transfers]
         self.entries = self.entry_releases()
         unbound = {rank: record["unbound_queue_notifications"] for rank, record in case.measurements.items()
                    if record["unbound_queue_notifications"]}
         if unbound:
             self.gaps["unbound_queue_notifications"] = unbound
-        protocol = sum(event < 0 for _, event in case.graph.positions)
-        if protocol:
-            self.gaps["external_protocol_endpoints"] = protocol
 
-    def qualified_host_waits(self):
-        owners = {thread: rank for rank, record in self.case.measurements.items() for thread in record["kernel_threads"]}
-        waits = dict(self.input_releases)
-        for rank, record in self.case.measurements.items():
-            for wait in record["fixed_host_waits"]:
-                if isinstance(wait.source, ExternalWake) and wait.source.kernel_thread in owners:
+    def bind_thread_wakes(self):
+        owners = {kernel: (rank, thread) for rank, record in self.case.measurements.items()
+                  for thread, kernel in record["kernel_threads"].items()}
+        self.cross_worker_wakes = 0
+        self.post_graph_host_wakes = 0
+        for (rank, stopped), wait in tuple(self.host_waits.items()):
+            witness = wait.source
+            if not isinstance(witness, KernelWake):
+                continue
+            location = (rank, witness.local_thread) if witness.local_thread is not None else owners.get(witness.kernel_thread)
+            if location is None:
+                self.host_waits[rank, stopped] = replace(wait, source=ExternalWake(witness.raw_ns))
+                continue
 
-                    # A wake from another projected worker needs a causal edge, never an absolute release.
-                    owner = owners[wait.source.kernel_thread]
-                    self.gaps.setdefault("unbound_worker_wakes", []).append([rank, wait.stopped.start, wait.stopped.finish, owner])
-                    continue
-                waits[rank, wait.stopped] = wait
-        return waits
+            owner, thread = location
+            context = self.case.measurements[owner]["fixed_host_context"]
+            call = context.call_at(thread, witness.raw_ns)
+            if call is None:
+                anchor, tail = context.serial_wake_anchor(thread, witness.raw_ns)
+            else:
+                anchor, tail = self.call_wake(context, call, witness.raw_ns), 0
+            if anchor is None or (isinstance(anchor, (WorkProgress, LocalCallWake))
+                                  and (owner, anchor.finish) not in self.case.graph.next[owner, anchor.start]):
+                self.gaps.setdefault("unbound_worker_wakes", []).append([rank, stopped.start, stopped.finish, owner])
+                del self.host_waits[rank, stopped]
+                continue
+            self.host_waits[rank, stopped] = replace(wait, source=anchor, delay_ns=wait.delay_ns + tail)
+            self.cross_worker_wakes += owner != rank and not isinstance(anchor, ExternalWake)
+            self.post_graph_host_wakes += isinstance(anchor, tuple) and tail > 0
 
-    def host_progress_cuts(self):
-        cuts = defaultdict(set)
+    def call_wake(self, context, call, stamp):
+        rank, piece = context.rank, call.record
+        start, finish = piece["start"], piece["finish"]
+        begin, end = call.begin, call.end
+        graph = self.case.sources[rank][0].graph
+        if graph["resources"][piece["resource"]]["kind"] == "thread":
+            window = self.collective_window(rank, graph, piece, ())
+            if window is None:
+                return None
+            begin, end = window
+            if stamp < begin:
+
+                # A pre-rendezvous wake follows the measured running prefix of this caller.
+                if stamp > call.begin:
+                    running = context.active.running_intervals(call.thread, call.begin, stamp)
+                    if running is None or list(running) != [(call.begin, stamp)]:
+                        return None
+                return LocalCallWake(rank, start, finish, stamp - call.begin)
+
+        return WorkProgress(rank, start, finish, stamp, stamp - begin, 0, end - begin)
+
+    def bind_cpu_transfers(self):
+        case = self.case
+        posts = {(call.key, rank): call for rank, calls in case.cpu.native_calls.items()
+                 for call in calls if call.phase == "post"}
+        consumer_waits = defaultdict(list)
         for (rank, stopped), wait in self.host_waits.items():
+            if (rank, stopped.finish) in self.cpu_points:
+                consumer_waits[rank, stopped.finish].append(wait)
+        transfers, unmeasured, unbound = [], [], []
+        for key, peers in case.cpu.messages["native"].items():
+            consumers = {rank: peer["consumed"] for rank, peer in peers.items() if peer["consumed"] in self.cpu_points}
+            calls = {rank: posts[key, rank] for rank in peers}
+            active = [call.execution for call in calls.values() if call.execution["in_flow"]]
+            if not consumers and not active:
+                continue
+            timing = case.cpu.native_readiness(peers)
+            checked = calls if active else consumers
+            if timing is None:
+                unmeasured.extend((key, rank) for rank in checked)
+                continue
+
+            posted, windows = timing
+            if not active and posted >= self.origin_ns:
+                unmeasured.extend((key, rank) for rank in checked)
+                continue
+            frontiers = tuple(call.posted for call in calls.values())
+            for rank in checked:
+                call = calls[rank]
+                native = peers[rank]["transport"]
+                if windows[rank] is None:
+                    unmeasured.append((key, rank))
+                    continue
+                first, last = windows[rank]
+                consumer = peers[rank]["consumed"]
+
+                # All wakes issued by the completion callback follow its first observed readiness.
+                kernel = case.measurements[rank]["kernel_threads"].get(native["completion_thread"])
+                sleeps = consumer_waits[consumer]
+                matches = [wait for wait in sleeps if isinstance(wait.source, KernelWake)
+                           and wait.source.kernel_thread == kernel and kernel is not None
+                           and first <= wait.source.raw_ns <= last]
+                ready = first
+                if matches:
+                    ready = min(wait.source.raw_ns for wait in matches)
+                    for wait in matches:
+                        delay = wait.source.raw_ns - ready + wait.delay_ns
+                        self.host_waits[rank, wait.stopped] = replace(wait, source=CpuReadinessWake(call.posted[1]), delay_ns=delay)
+                elif sleeps and last >= case.cpu.native_times[self.cpu_points[consumer].entered]:
+                    unbound.append((key, rank))
+
+                # An already posted message contributes initial readiness without charging pre-window transfer work.
+                if posted < self.origin_ns:
+                    if consumer in self.cpu_points:
+                        self.cpu_initial_readiness[call.posted] = consumer, ready
+                else:
+                    execution = call.execution if call.execution["in_flow"] else active[0]
+                    transfers.append(CpuTransportInterval(call, consumer, frontiers, execution, (first, last), ready - posted))
+
+        for name, missing in (("unmeasured_cpu_transport", unmeasured), ("unbound_cpu_transport_wakes", unbound)):
+            if missing:
+                key, rank = missing[0]
+                self.gaps[name] = {"count": len(missing), "first": {"key": key, "rank": rank}}
+        return transfers
+
+    def collect_progress_cuts(self):
+        cuts = defaultdict(set)
+        for cut in self.active_input_reads:
+            cuts[cut.rank, cut.start, cut.finish].add(cut)
+        for (_, stopped), wait in self.host_waits.items():
             for cut in (stopped, wait.source, wait.take_entry):
-                if isinstance(cut, HostProgress):
-                    cuts[rank, cut.start, cut.finish].add(cut)
+                if isinstance(cut, WorkProgress):
+                    cuts[cut.rank, cut.start, cut.finish].add(cut)
         for (rank, _), (_, records) in self.device_records.items():
             for record in records:
                 post = record.post
-                if isinstance(post, HostProgress):
+                if isinstance(post, WorkProgress):
                     cuts[rank, post.start, post.finish].add(post)
         return {step: tuple(sorted(points, key=lambda point: point.observed_ns)) for step, points in cuts.items()}
 
@@ -266,7 +427,7 @@ class FixedReference:
 
     def bind_device_dispatches(self, dispatches, predecessors, joins):
         positions = self.case.graph.positions
-        delays, wait_submissions, counts = {}, {}, Counter()
+        delays, signal_submissions, counts = {}, {}, Counter()
         for (rank, start), dispatch in dispatches.items():
             target = rank, start
             if target in self.observer_joins:
@@ -294,7 +455,7 @@ class FixedReference:
                 basis = "preceding_task_before_calibration" if preceding[0] is None else "preceding_task_already_complete"
             elif records := self.bind_omitted_records(rank, dispatch, parents):
                 frontier = {source, previous}
-                basis = "observed_unpublished_record"
+                basis = "observed_unpublished_command"
             else:
                 counts["stream_state_unqualified"] += 1
                 continue
@@ -304,9 +465,9 @@ class FixedReference:
                 counts["readiness_unqualified"] += 1
                 continue
 
-            # The coarse wait records its submission at completion. Replay also retains the measured SDK entry.
+            # A completion-linked post still releases the outgoing command at its physical entry.
             missing_submission = source not in parents
-            if missing_submission and not dispatch.stream_wait:
+            if missing_submission and not dispatch.submitted_at_completion:
                 counts["readiness_unqualified"] += 1
                 continue
 
@@ -320,14 +481,14 @@ class FixedReference:
                 continue
 
             if missing_submission:
-                wait_submissions[target] = source
-                counts["verified_wait_submissions"] += 1
+                signal_submissions[target] = source
+                counts["verified_signal_submissions"] += 1
 
             delays[target] = duration
             if records:
                 self.device_records[target] = (dispatch.previous, records)
             counts[basis] += 1
-        return delays, wait_submissions, {"candidates": len(dispatches), "attached": len(delays), **counts}
+        return delays, signal_submissions, {"candidates": len(dispatches), "attached": len(delays), **counts}
 
     def align_requests(self):
         case = self.case
@@ -347,21 +508,30 @@ class FixedReference:
             if not raw["request_ingress"]:
                 continue
             start, _ = contents.graph["evidence"]["window_ns"]
-            wakes = self.case.measurements[rank]["fixed_idle_inputs"]
+            host = self.case.measurements[rank]
+            wakes = host["fixed_idle_inputs"]
+            reads = {row["received_raw_ns"]: row for row in raw.get("request_input_attempts", ()) if row["requests"]}
             for read in submitted.receives(raw["request_ingress"]):
                 received = self.origin_ns + read["time_ns"]
-                stamps = [self.origin_ns + submitted.by_request[name]["submitted_ns"] for name in read["requests"]]
                 if received <= start:
                     continue
-                cut = wakes.get(received)
 
-                # Use the idle receiver's actual CPU release only for requests submitted during that wait.
-                if cut and all(cut.stopped.observed_ns <= stamp <= cut.source.raw_ns for stamp in stamps):
+                if cut := wakes.get(received):
                     self.input_releases[rank, cut.stopped] = cut
-                else:
-                    self.gaps.setdefault("unqualified_input_readiness", []).append({
-                        "rank": rank, "requests": read["requests"], "submission_raw_ns": max(stamps), "received_raw_ns": received,
-                    })
+                    continue
+
+                submission = self.origin_ns + max(submitted.by_request[name]["submitted_ns"] for name in read["requests"])
+                attempt = reads.get(received)
+                if (attempt is not None and attempt["context"] is not None
+                        and not IngressEvidence.idle(attempt["context"]) and submission <= attempt["begin_raw_ns"]):
+                    cut = host["fixed_host_context"].input_read_progress(attempt["begin_raw_ns"], received)
+                    if cut is not None:
+                        self.active_input_reads[cut] = read["requests"]
+                        continue
+
+                self.gaps.setdefault("unqualified_input_readiness", []).append({
+                    "rank": rank, "requests": read["requests"], "submission_raw_ns": submission, "received_raw_ns": received,
+                })
 
     def services(self):
         case = self.case
@@ -380,8 +550,12 @@ class FixedReference:
                     duration = services.host_service(piece)
                     basis = "observed_host_occupancy" if duration is not None else "missing"
                 elif piece["kind"] == "collective":
-                    duration = self.collective(rank, graph, piece, captured_collectives)
-                    basis = "observed_collective" if duration is not None else "missing"
+                    window = self.collective_window(rank, graph, piece, captured_collectives)
+                    duration = window[1] - window[0] if window is not None else None
+                    resource = graph["resources"][piece["resource"]]
+                    basis = "observed_host_collective" if resource["kind"] == "thread" else "observed_device_collective"
+                    if duration is None:
+                        basis = "missing"
                 else:
                     duration, _, _ = services.service(piece)
                     payload = document["device_payload_times"].get((start, finish))
@@ -392,35 +566,90 @@ class FixedReference:
                     duration = self.clock.timestamp(rank, finish) - self.clock.timestamp(rank, start)
                     basis = "isolated_observed_interval"
 
-                cuts = self.host_cuts.get((rank, start, finish), ())
+                cuts = self.progress_cuts.get((rank, start, finish), ())
                 if any(cut.service_ns != duration for cut in cuts):
-                    self.gaps.setdefault("unqualified_host_service_partitions", []).append((rank, start, finish))
-                yield ServiceInterval(rank, index, piece, duration, basis, cuts)
+                    self.gaps.setdefault("unqualified_work_service_partitions", []).append((rank, start, finish))
+                yield ServiceInterval(rank, index, start, finish, piece["kind"], duration, basis, cuts)
 
-    def collective(self, rank, graph, piece, captured):
+        for call in self.cpu_calls:
+            rank = call.entered[0]
+            for start, finish, operation in call.services():
+                duration = case.measurements[rank]["fixed_cpu_calls"][start, finish]
+                cuts = self.progress_cuts.get((rank, start, finish), ())
+                if any(cut.service_ns != duration for cut in cuts):
+                    self.gaps.setdefault("unqualified_work_service_partitions", []).append((rank, start, finish))
+                basis = "observed_cpu_protocol_occupancy" if duration is not None else "missing_cpu_protocol_occupancy"
+                yield ServiceInterval(rank, None, start, finish, "host", duration, basis, cuts, call, operation)
+
+    def collective_window(self, rank, graph, piece, captured):
         start, finish = piece["start"], piece["finish"]
-        events = graph["evidence"]["events"]
-        if (piece["resource"], events[start]["order"], events[finish]["order"]) not in captured or (rank, finish) not in self.peers:
+        destination = rank, finish
+        if destination not in self.peers:
             return None
 
-        # The reference reads its own realized clock and causal edges independently of all samples.
-        readiness = [self.clock.timestamp(*event) for event in self.peers[rank, finish] | {(rank, start)}]
-        completion = self.clock.timestamp(rank, finish)
-        return None if completion is None or None in readiness else completion - max(readiness)
+        posts = self.peers[destination] | {(rank, start)}
+        lane = piece["resource"]
+        if graph["resources"][lane]["kind"] == "thread":
+            ports = {port["name"]: port["event"] for port in graph["scopes"][piece["scope"]]["ports"]}
+            if (ports.get("call.enter"), ports.get("call.return")) != (start, finish):
+                return None
+
+            # Host participants share the RAW clock. Require real call boundaries for the full rendezvous.
+            if any(type(self.clock.point(*event)) is not int for event in posts | {destination}):
+                return None
+        else:
+            events = graph["evidence"]["events"]
+            if (lane, events[start]["order"], events[finish]["order"]) not in captured:
+                return None
+
+        readiness = [self.clock.timestamp(*event) for event in posts]
+        completion = self.clock.timestamp(*destination)
+        return None if completion is None or None in readiness else (max(readiness), completion)
+
+    def work_fields(self, interval):
+        if isinstance(interval, CpuTransportInterval):
+            descriptor = interval.post.descriptor
+            return {"kind": interval.kind, "scope": "cpu_protocol", "site": CpuProtocolWork.readiness_operation(descriptor),
+                    "phase": "", "direction": "receive" if descriptor["receiving"] else "send", "caller": None}
+        if call := interval.cpu_call:
+            return {"kind": interval.kind, "scope": "cpu_protocol", "site": interval.cpu_operation,
+                    "phase": "", "direction": "receive" if call.descriptor["receiving"] else "send", "caller": None}
+        graph = self.case.sources[interval.rank][0].graph
+        piece = graph["work"][interval.index]
+        scope = graph["scopes"][piece["scope"]]
+        copy = piece.get("copy", {})
+        return {"kind": interval.kind, "scope": scope["role"], "site": scope["site"], "phase": scope["work"].get("phase"),
+                "direction": copy.get("direction"), "caller": copy.get("caller")}
 
     def detail(self, interval):
-        piece = interval.piece
-        graph = self.case.sources[interval.rank][0].graph
-        scope = graph["scopes"][piece["scope"]]
-        return {"rank": interval.rank, "work_index": interval.index, "kind": piece["kind"],
-                "scope": scope["role"], "site": scope["site"], "start": piece["start"], "finish": piece["finish"]}
+        if isinstance(interval, CpuTransportInterval):
+            call = interval.post
+            return {"rank": call.returned[0], **self.work_fields(interval), "message": call.key,
+                    "consumer": interval.consumer, "ready_window_ns": interval.window_ns}
+        return {"rank": interval.rank, "work_index": interval.index, **self.work_fields(interval),
+                "start": interval.start, "finish": interval.finish}
+
+    def external_cost(self, interval):
+        if isinstance(interval, CpuTransportInterval):
+            call = interval.post
+            operation = CpuProtocolWork.readiness_operation(call.descriptor)
+            execution = interval.execution
+        elif call := interval.cpu_call:
+            operation, execution = interval.cpu_operation, call.execution
+        else:
+            return None
+        identity, features = CpuProtocolWork.service(call.descriptor, execution, operation)
+        return call.returned[0], identity, features
 
     def entry_releases(self):
         causal = self.case.graph
-        has_predecessor = {target for targets in causal.next.values() for target in targets}
-        entries = {}
+
+        # Prefix protocol events can constrain serving readiness without turning startup into modeled work.
+        has_predecessor = {target for source, targets in causal.next.items() if source not in self.external_cpu_points
+                           for target in targets}
+        entries = {point: max(0, self.case.cpu.native_times[point] - self.origin_ns) for point in self.external_cpu_points}
         for rank, event in causal.positions:
-            if event < 0 or (rank, event) in has_predecessor or (rank, event) in self.wait_submissions:
+            if event < 0 or (rank, event) in has_predecessor or (rank, event) in self.signal_submissions:
                 continue
             if (rank, event) in self.elided_waits:
                 continue
@@ -441,15 +670,17 @@ class FixedReference:
         indices = timeline.indices
         fixed = {(indices[source], indices[target]): sum(conditions.values())
                  for (source, target), conditions in self.host_conditions.items()}
-        order_cuts = self.host_cuts.copy()
+        order_cuts = self.progress_cuts.copy()
 
         for interval in self.intervals:
-            rank, piece = interval.rank, interval.piece
-            begin, end = piece["start"], piece["finish"]
+            if isinstance(interval, CpuTransportInterval):
+                timeline.transport(interval)
+                continue
+            rank, begin, end = interval.rank, interval.start, interval.finish
             start, finish = indices[rank, begin], indices[rank, end]
             delay = fixed.pop((start, finish), 0)
             order_cuts.pop((rank, begin, end), None)
-            if piece["kind"] == "collective":
+            if interval.kind == "collective":
                 start = timeline.event()
                 readiness = self.peers[rank, end] | {(rank, begin)}
                 timeline.dependencies.extend((indices[predecessor], start, 0) for predecessor in readiness)
@@ -461,7 +692,7 @@ class FixedReference:
             gate = timeline.event()
             timeline.dependencies.append((gate, indices[target], tail))
             gates[target] = gate
-        for target, source in self.wait_submissions.items():
+        for target, source in self.signal_submissions.items():
             timeline.dependencies.append((indices[source], gates[target], 0))
 
         # Unpublished records use their measured submission and stream predecessor on the fixed timeline.
@@ -469,7 +700,7 @@ class FixedReference:
             rank, _ = target
             predecessor = indices[rank, previous]
             for record in records:
-                post = timeline.progress[rank, record.post] if isinstance(record.post, HostProgress) else indices[rank, record.post]
+                post = timeline.progress[rank, record.post] if isinstance(record.post, WorkProgress) else indices[rank, record.post]
                 complete = timeline.event()
                 timeline.dependencies.extend(((post, complete, record.duration_ns),
                                               (predecessor, complete, record.duration_ns)))
@@ -485,7 +716,32 @@ class FixedReference:
                 timeline.path(source[0], pair[0], gates.get(target, pair[1]), delay, cuts, modeled=False)
         if fixed or order_cuts:
             raise ValueError("fixed timing condition does not belong to a verified dependency")
+        self.protocol_positions = timeline.protocol
+        self.input_positions = {cut: timeline.progress[cut.rank, cut] for cut in self.active_input_reads}
         return timeline.document()
+
+    def compare_active_input_reads(self, replayed, *, measured=False):
+        differences = []
+        for cut, position in self.input_positions.items():
+            observed = cut.observed_ns - self.origin_ns
+            actual = replayed[position]
+
+            # The earlier arrival bound is unknown. A successful unmodeled read can shift later, but not earlier.
+            if actual < observed or (measured and actual != observed):
+                differences.append({"rank": cut.rank, "requests": self.active_input_reads[cut],
+                                    "observed_ns": observed, "replayed_ns": actual})
+        return {"checked": len(self.input_positions), "different": len(differences), "differences": differences}
+
+    def transport_baseline(self, replayed):
+        report = {"checked": len(self.cpu_transfers), "initial_conditions": len(self.cpu_initial_readiness), "different": 0}
+        for interval in self.cpu_transfers:
+            stamp = self.origin_ns + replayed[self.protocol_positions[interval.post.posted]]
+            begin, end = interval.window_ns
+            if not begin <= stamp <= end:
+                if not report["different"]:
+                    report["first_difference"] = {**self.detail(interval), "replayed_raw_ns": stamp}
+                report["different"] += 1
+        return report
 
     def replay_services(self, durations):
         steps = []
@@ -505,7 +761,11 @@ class FixedReference:
         windows = {}
         for rank, event in graph.positions:
             key = rank, event
-            observed = self.case.clocks[rank].window(event) if event >= 0 else None
+            if event >= 0:
+                observed = self.case.clocks[rank].window(event)
+            else:
+                stamp = self.case.cpu.native_times[key]
+                observed = stamp, stamp
             if key not in self.observer_joins:
                 windows[key] = observed
                 continue
@@ -529,6 +789,9 @@ class FixedReference:
         evidence, differences = Counter(), Counter()
         first = None
         for (rank, event), position in self.case.graph.positions.items():
+            if (rank, event) in self.external_cpu_points:
+                evidence["external_protocol_condition"] += 1
+                continue
             bounds = self.event_windows[position]
             if bounds is None:
                 evidence["unmeasured"] += 1
@@ -538,6 +801,8 @@ class FixedReference:
             begin, end = (stamp - self.origin_ns for stamp in bounds)
             if (rank, event) in self.observer_joins:
                 evidence["derived_join"] += 1
+            elif event < 0:
+                evidence["host_protocol_raw"] += 1
             elif self.case.clocks[rank].device[event]:
                 evidence["calibrated_device"] += 1
                 max_clock_width = max(max_clock_width, end - begin)
@@ -547,7 +812,8 @@ class FixedReference:
                 continue
             differences["early" if time < begin else "late"] += 1
             if first is None or begin < first["measured_window_ns"][0]:
-                scope = self.case.sources[rank][0].graph["events"][event]["scope"]
+                call = self.cpu_points.get((rank, event))
+                scope = {"cpu_protocol": call.source()} if call else self.case.sources[rank][0].graph["events"][event]["scope"]
                 first = {"rank": rank, "event": event, "scope": scope,
                          "measured_window_ns": [begin, end], "replayed_ns": time}
         return {"checked_boundaries": checked, "observer_joins": len(self.observer_joins),
@@ -590,15 +856,18 @@ class FixedReference:
         checked, groups = 0, {}
         for (rank, event), position in self.case.graph.positions.items():
             window = self.event_windows[position]
-            if window is None or position in unknown:
+            if window is None or position in unknown or (rank, event) in self.external_cpu_points:
                 continue
             checked += 1
             gap = window[0] - self.origin_ns - incoming[position]
             if gap <= 0:
                 continue
-            graph = self.case.sources[rank][0].graph
-            resource = graph["resources"][graph["events"][event]["resource"]]
-            role = "observer_join" if (rank, event) in self.observer_joins else resource["role"]
+            if event < 0:
+                role = "cpu_protocol"
+            else:
+                graph = self.case.sources[rank][0].graph
+                resource = graph["resources"][graph["events"][event]["resource"]]
+                role = "observer_join" if (rank, event) in self.observer_joins else resource["role"]
             group = groups.setdefault(role, {"count": 0, "max_lower_ns": 0})
             group["count"] += 1
             if gap > group["max_lower_ns"]:

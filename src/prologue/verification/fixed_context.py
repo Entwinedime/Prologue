@@ -24,7 +24,8 @@ class HostStep:
 
 
 @dataclass(frozen=True, slots=True)
-class HostProgress:
+class WorkProgress:
+    rank: int
     start: int
     finish: int
     observed_ns: int
@@ -34,9 +35,21 @@ class HostProgress:
 
 
 @dataclass(frozen=True, slots=True)
+class LocalCallWake:
+    rank: int
+    start: int
+    finish: int
+    elapsed_ns: int
+
+
+@dataclass(frozen=True, slots=True)
 class ExternalWake:
     raw_ns: int
-    kernel_thread: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CpuReadinessWake:
+    post: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,10 +61,10 @@ class KernelWake:
 
 @dataclass(frozen=True, slots=True)
 class HostWait:
-    stopped: HostProgress
-    source: HostProgress | ExternalWake | int | None
+    stopped: WorkProgress
+    source: WorkProgress | LocalCallWake | ExternalWake | KernelWake | CpuReadinessWake | tuple[int, int] | None
     delay_ns: int
-    take_entry: HostProgress | None = None
+    take_entry: WorkProgress | None = None
 
 
 class FixedThreadActivity(ThreadService):
@@ -64,10 +77,10 @@ class FixedThreadActivity(ThreadService):
     def __init__(self, rows, dequeues, excluded, runtime):
         super().__init__(rows, dequeues, excluded)
         covered = [row for row in rows if row["thread"] in self.activity]
-        targeted = {row["thread"] for row in covered if "target_wakes" in row}
+        self.targeted = {row["thread"] for row in covered if "target_wakes" in row}
         self.calls = ThreadIntervals([
             Interval(row["begin_raw_ns"], row["end_raw_ns"], row["thread"], row)
-            for row in runtime if row["result"] == 0 and row["thread"] in targeted
+            for row in runtime if row["result"] == 0 and row["thread"] in self.targeted
         ])
         self.runnable, self.blocked_at, self.sleep = {}, {}, {}
         self.kernel_threads = {row["thread"]: row["kernel_thread"] for row in rows if "kernel_thread" in row}
@@ -142,7 +155,7 @@ class FixedThreadActivity(ThreadService):
                 if state == 0:
                     pauses.add((out, resume))
                 else:
-                    blocked[out] = stamp
+                    blocked[out] = on_cpu, stamp
         return sorted(pauses), blocked
 
     def waking(self, thread, begin, end):
@@ -157,14 +170,24 @@ class FixedThreadActivity(ThreadService):
 
                 # Perf can record the switch-out later than the kernel wake inside the same syscall.
                 return self.waking(thread, entered, resumed)
-        blocked = self.blocked_at[thread].get(out)
-        wakes = self.waking(thread, blocked if blocked is not None else out, resumed)
-        if wakes or blocked is None:
+        transition = self.blocked_at[thread].get(out)
+        if transition is None:
+            return self.waking(thread, out, resumed)
+        entered_cpu, blocked = transition
+        wakes = self.waking(thread, blocked, resumed)
+        if wakes:
             return wakes
 
-        # An early wake can cross sched_switch. The enclosing native call must contain exactly one sleep and one wake.
-        call = self.calls.enclosing(Interval(out, resumed, thread, {}))
         opened, closed, _ = self.activity[thread]
+        if thread in self.targeted and opened < entered_cpu:
+
+            # A targeted wake can hit the blocked task before sched_switch records it leaving the CPU.
+            early = self.waking(thread, entered_cpu, blocked)
+            if len(early) == 1:
+                return early
+
+        # A native call independently bounds a single sleep even if earlier wakes share the CPU slice.
+        call = self.calls.enclosing(Interval(out, resumed, thread, {}))
         if call is None or not opened <= call.begin < call.end <= closed:
             return ()
         if self.within(self.sleep[thread], call.begin, call.end) != [(out, resumed)]:
@@ -174,8 +197,10 @@ class FixedThreadActivity(ThreadService):
 
 
 class FixedHostContext:
-    def __init__(self, capture, rank, evidence):
+    def __init__(self, capture, rank, evidence, delivery):
+        self.rank = rank
         self.native = evidence.native
+        self.delivery = delivery
         self.control_thread = evidence.window.thread
         activity = evidence.native["host_observation"].get("activity")
         rows = []
@@ -189,7 +214,6 @@ class FixedHostContext:
         observer, dequeues, waits = evidence.replay_host_intervals()
         self.active = FixedThreadActivity(rows, dequeues, [*observer, *waits], evidence.runtime)
         self.observer = ThreadService.by_thread(observer)
-        self.queues = HostQueueEvidence(evidence, self.active)
 
     def interruptions(self, tid, begin, end):
         activity = [(max(begin, first), min(end, last))
@@ -213,39 +237,44 @@ class FixedHostContext:
         completions = {tuple(row["off_cpu_ns"]) for row in notifications}
         excluded = self.active.excluded.get(thread, ())
         window_start, window_end = graph["evidence"]["window_ns"]
-        snapshots = {"waiting", "running", "previous", "chunked"}
+        submitted_ns = {
+            native: self.delivery.origin_ns + self.delivery.by_request[request]["submitted_ns"]
+            for native, request in self.delivery.aliases.items()
+        }
         cuts = {}
 
         for prior, received in pairwise(reads):
             read_begin, read_end = received["begin_raw_ns"], received["received_raw_ns"]
             if not window_start < read_end <= window_end or prior["message_count"]:
                 continue
-            context = received["context"]
-            if context is None or not snapshots <= context.keys() or any(context.values()):
+            if not IngressEvidence.idle(received["context"]):
                 continue
             if received["message_count"] and not received["requests"]:
                 continue
 
-            # The idle receiver's wait belongs to an unmodeled serial step. The rest of the step may contain other waits.
-            slot = bisect_right(events, read_begin, key=lambda event: event[1])
+            prior_end = prior["received_raw_ns"]
+            stamps = [submitted_ns[request] for request in received["requests"]]
+            candidates = [
+                (stopped, resumed) for stopped, resumed in self.active.within(sleepers, prior_end, read_begin)
+                if prior_end <= stopped < resumed <= read_begin
+                and all(stopped <= stamp <= resumed for stamp in stamps)
+                and (stopped, resumed) not in completions
+                and not self.active.within(excluded, stopped, resumed)
+            ]
+            if len(candidates) != 1:
+                continue
+            (stopped, resumed), = candidates
+
+            # The receiver can execute other idle steps between resuming and reading the request.
+            slot = bisect_right(events, stopped, key=lambda event: event[1])
             if not 0 < slot < len(events):
                 continue
-            _, begin, source = events[slot - 1]
+            _, _, source = events[slot - 1]
             _, end, target = events[slot]
-            if read_end > end or (source, target) in work:
+            if resumed > end or (source, target) in work:
                 continue
             scope = graph["scopes"][graph["events"][source]["scope"]]
-            before = scope["work"].get("context")
-            if before is None or any(before.get(name) != [] for name in context):
-                continue
-            sleeping = [
-                (stopped, resumed) for stopped, resumed in self.active.within(sleepers, begin, end)
-                if max(begin, prior["received_raw_ns"]) <= stopped < resumed <= read_begin
-            ]
-            if len(sleeping) != 1:
-                continue
-            (stopped, resumed), = sleeping
-            if (stopped, resumed) in completions or self.active.within(excluded, stopped, resumed):
+            if not IngressEvidence.idle(scope["work"].get("context")):
                 continue
 
             cuts[source, target, stopped, resumed] = read_end, bool(received["requests"])
@@ -272,30 +301,89 @@ class FixedHostContext:
         conditions = {"observer_ns": overhead, "runnable_pause_ns": paused, "outside_work_ns": outside}
         return None if occupied is None else service, {name: value for name, value in conditions.items() if value}
 
-    def progress(self, thread, step, stamp, submissions):
+    def progress(self, thread, step, stamp):
         if step.service_ns is None or (step.modeled and not step.service_ns):
             return None
 
         service, conditions = self.host_time(thread, step.begin_ns, stamp, modeled=step.modeled,
-                                             submission=thread in submissions)
+                                             submission=thread in self.submissions)
         if service is None:
             return None
-        return HostProgress(step.start, step.finish, stamp, service, sum(conditions.values()), step.service_ns)
+        return WorkProgress(self.rank, step.start, step.finish, stamp, service, sum(conditions.values()), step.service_ns)
 
-    @staticmethod
-    def step_at(thread, stamp, steps):
-        host = steps.get(thread, ())
+    def step_at(self, thread, stamp):
+        host = self.steps.get(thread, ())
         position = bisect_right(host, stamp, key=lambda step: step.begin_ns) - 1
         if position >= 0 and stamp < host[position].end_ns:
             return host[position]
         return None
 
-    def progress_at(self, thread, stamp, steps, submissions):
-        if step := self.step_at(thread, stamp, steps):
-            return self.progress(thread, step, stamp, submissions)
+    def progress_at(self, thread, stamp):
+        if step := self.step_at(thread, stamp):
+            return self.progress(thread, step, stamp)
         return None
 
-    def kernel_wait(self, thread, blocked, stopped, steps, submissions, *, read_wake):
+    def input_read_progress(self, begin, end):
+        thread = self.control_thread
+        step = self.step_at(thread, begin)
+        if step is None or step.modeled or end > step.end_ns:
+            return None
+
+        running = self.active.running_intervals(thread, begin, end)
+        if running is None:
+            return None
+        segments = list(running)
+        if not segments or segments[0][0] != begin or segments[-1][1] != end:
+            return None
+
+        # Runnable preemptions stay in the fixed host step. A blocked pull needs its own readiness evidence.
+        pauses = self.active.within(self.active.runnable[thread], begin, end)
+        if pauses != [(left[1], right[0]) for left, right in pairwise(segments)]:
+            return None
+        return self.progress(thread, step, begin)
+
+    def synchronous_calls(self, graph, threads):
+        windows = []
+        events = graph["evidence"]["events"]
+        for piece in graph["work"]:
+            lane = piece["resource"]
+            thread = threads.get(lane)
+            if thread is not None and piece["kind"] == "collective":
+                begin, end = (events[event]["time_ns"] for event in (piece["start"], piece["finish"]))
+                if begin is not None and end is not None and begin < end:
+                    windows.append(Interval(begin, end, thread, piece))
+                continue
+
+            resource = graph["resources"][lane]
+            if resource["kind"] != "service":
+                continue
+            scope = graph["scopes"][piece["scope"]]
+            origin, = scope["bindings"]["source_scopes"]
+            native = self.native["scopes"][origin]
+            if "service" in native:
+                interval = native["host_interval"]
+                windows.append(Interval(interval["begin_raw_ns"], interval["end_raw_ns"], native["thread"], piece))
+        return ThreadIntervals(windows)
+
+    def call_at(self, thread, stamp):
+        call = self.call_windows.enclosing(Interval(stamp, stamp, thread, {}))
+        return call if call is not None and stamp < call.end else None
+
+    def serial_wake_anchor(self, thread, stamp):
+        if thread not in self.thread_bounds:
+            return ExternalWake(stamp), 0
+        first, last, event = self.thread_bounds[thread]
+        if first is None or last is None:
+            return None, 0
+        if stamp < first:
+            return ExternalWake(stamp), 0
+
+        # The graph owns the last event. A measured wake later on this serial thread follows that event.
+        if stamp >= last:
+            return (self.rank, event), stamp - last
+        return self.progress_at(thread, stamp), 0
+
+    def kernel_wait(self, thread, blocked, stopped, *, read_wake):
         out, resumed = blocked
         if self.active.within(self.active.excluded.get(thread, ()), out, resumed):
             return None
@@ -305,44 +393,68 @@ class FixedHostContext:
             if len(witnesses) != 1:
                 return None
             wake, = witnesses
-        stamp, actor = wake.raw_ns, wake.local_thread
-        if actor not in steps:
 
-            # The reference resolves unfamiliar producers against all recorded workers.
-            unowned = wake.kernel_thread if actor is None else None
-            return HostWait(stopped, ExternalWake(stamp, unowned), resumed - stamp)
-        progress = self.progress_at(actor, stamp, steps, submissions)
-        return None if progress is None else HostWait(stopped, progress, resumed - stamp)
+        kernel = self.active.kernel_threads.get(wake.local_thread, wake.kernel_thread)
+        witness = KernelWake(wake.raw_ns, wake.local_thread, kernel)
+        return HostWait(stopped, witness, resumed - wake.raw_ns)
 
-    def queue_wait(self, notice, stopped, positions, steps, submissions):
+    def queue_wait(self, notice, stopped, positions, queues):
         producer = notice["producer"]
         taken, completed = notice["dequeue_started_ns"], notice["dequeue_finished_ns"]
         resumed = notice["off_cpu_ns"][1]
         endpoint = positions.get((producer, notice["dequeue_order"]))
         if endpoint is not None:
-            return HostWait(stopped, endpoint, resumed - completed)
+            return HostWait(stopped, (self.rank, endpoint), resumed - completed)
 
-        arrival = self.queues.unowned_enqueue(notice["sdk_correlation"])
-        if arrival is None or arrival[0] in steps or producer not in submissions:
+        arrival = queues.unowned_enqueue(notice["sdk_correlation"])
+        if arrival is None or arrival[0] in self.steps or producer not in self.submissions:
             return None
 
         _, enqueued = arrival
-        step = self.step_at(producer, taken, steps)
+        step = self.step_at(producer, taken)
         if step is None or step.modeled or not enqueued <= taken < completed <= step.end_ns:
             return None
 
-        entry = self.progress(producer, step, taken, submissions)
-        retired = self.progress(producer, step, completed, submissions)
+        entry = self.progress(producer, step, taken)
+        retired = self.progress(producer, step, completed)
         if entry is None or retired.fixed_prefix_ns - entry.fixed_prefix_ns != completed - taken:
             return None
 
         # Hold the external command's observed entry and advance with measured serial service to retirement.
         return HostWait(stopped, retired, resumed - completed, take_entry=entry)
 
-    def project(self, graph, host_fences, omitted, details):
+    @staticmethod
+    def protocol_partitions(events, calls, stamps, order, work):
+        paths = defaultdict(list)
+        for call in sorted(calls, key=lambda call: call.counters):
+            first, last = call.counters
+            index = bisect_right(events, first, key=lambda event: event[0])
+            if not 0 < index < len(events):
+                continue
+            _, begin, source = events[index - 1]
+            boundary, end, target = events[index]
+            pair = source, target
+            entered, returned = stamps[call.entered], stamps[call.returned]
+
+            # Native protocol calls own their CPU service only in the unmodeled part of the actor path.
+            if (last >= boundary or pair not in order or pair in work or begin is None or end is None
+                    or not begin <= entered <= returned <= end):
+                continue
+            points = paths[pair]
+            if points and entered < points[-1][0]:
+                raise ValueError("native CPU protocol intervals overlap on one host thread")
+            points.append((entered, call.entered[1]))
+            if call.posted is not None:
+                points.append((stamps[call.posted], call.posted[1]))
+            points.append((returned, call.returned[1]))
+        return paths
+
+    def project(self, evidence, graph, host_fences, omitted, details, calls, stamps):
+        queues = HostQueueEvidence(evidence, self.active)
         work = {(row["start"], row["finish"]): row["kind"] for row in graph["work"]}
         threads = {lane: int(resource["identity"].split("/")[1]) for lane, resource in enumerate(graph["resources"])
                    if resource["kind"] == "thread" and resource["serial"]}
+        self.call_windows = self.synchronous_calls(graph, threads)
         lanes, positions = defaultdict(list), {}
         for event, (node, point) in enumerate(zip(graph["events"], graph["evidence"]["events"], strict=True)):
             lane = node["resource"]
@@ -350,46 +462,59 @@ class FixedHostContext:
                 lanes[lane].append((point["order"], point["time_ns"], event))
                 positions[threads[lane], point["order"]] = event
 
-        report, arrivals, read_wakes = self.queues.observe()
+        report, arrivals, read_wakes = queues.observe()
         report["scheduler_trace"] = self.active.report
         notifications = defaultdict(list)
         for row in report["notifications"]:
             notifications[row["consumer"]].append(row)
-        submissions = {thread for lane, thread in threads.items() if graph["resources"][lane]["role"] == "submission"}
-        delays, counts = self.queues.handoffs(graph, positions, arrivals)
+        self.submissions = {thread for lane, thread in threads.items() if graph["resources"][lane]["role"] == "submission"}
+        delays, counts = queues.handoffs(graph, positions, arrivals)
         waits, idle_inputs, idle = [], {}, {}
-        steps = {thread: [] for thread in threads.values()}
+        self.steps = {thread: [] for thread in threads.values()}
+        self.thread_bounds = {}
+        protocol, by_thread = {}, defaultdict(list)
+        for call in calls:
+            if call.execution["in_flow"]:
+                protocol.update(((start, finish), None) for start, finish, _ in call.services())
+                by_thread[call.thread].append(call)
+        order = {(edge["source"], edge["target"]) for edge in graph["edges"] if edge["kind"] == "order"} if protocol else set()
         for lane, events in lanes.items():
             events.sort()
             thread = threads[lane]
+            self.thread_bounds[thread] = events[0][1], events[-1][1], events[-1][2]
             if thread == self.control_thread:
-                idle = self.idle_waits(graph, events, work, notifications.get(thread, ()))
+                input_waits = self.idle_waits(graph, events, work, notifications.get(thread, ()))
+                idle = {(asleep, resumed): read for (_, _, asleep, resumed), read in input_waits.items()}
+            paths = self.protocol_partitions(events, by_thread[thread], stamps, order, work)
             for (_, begin, source), (_, end, target) in pairwise(events):
-                kind = work.get((source, target))
-                if begin is None or end is None or begin >= end or kind not in {None, "host"}:
+                edge = source, target
+                kind = work.get(edge)
+                if begin is None or end is None or begin >= end or kind not in {None, "host"} or edge in host_fences:
                     continue
-                if (source, target) in host_fences:
-                    continue
-
-                modeled = kind == "host"
-                service, conditions = self.host_time(thread, begin, end, modeled=modeled,
-                                                     submission=thread in submissions)
-                if conditions:
-                    delays.setdefault((source, target), {}).update(conditions)
-                steps[thread].append(HostStep(source, target, begin, end, modeled, service))
+                points = [(begin, source), *paths.get(edge, ()), (end, target)]
+                for (entered, start), (returned, finish) in pairwise(points):
+                    endpoints = start, finish
+                    modeled = kind == "host" or endpoints in protocol
+                    service, conditions = self.host_time(thread, entered, returned, modeled=modeled,
+                                                         submission=thread in self.submissions)
+                    if conditions:
+                        delays.setdefault(endpoints, {}).update(conditions)
+                    self.steps[thread].append(HostStep(start, finish, entered, returned, modeled, service))
+                    if endpoints in protocol:
+                        protocol[endpoints] = service
 
         bound, kernel, external = 0, 0, 0
-        for tid, host in steps.items():
+        for tid, host in self.steps.items():
             queue_waits = {tuple(row["off_cpu_ns"]): row for row in notifications.get(tid, ())}
             for step in host:
                 begin, end = step.begin_ns, step.end_ns
                 for asleep, resumed in self.active.within(self.active.sleep.get(tid, ()), begin, end):
                     if not begin <= asleep < resumed <= end:
                         continue
-                    stopped = self.progress(tid, step, asleep, submissions)
+                    stopped = self.progress(tid, step, asleep)
                     if stopped is None:
                         continue
-                    if read := idle.get((step.start, step.finish, asleep, resumed)):
+                    if tid == self.control_thread and (read := idle.get((asleep, resumed))):
                         read_end, delivered = read
 
                         # A delivered input binds an external release. An empty poll retains its measured wait duration.
@@ -400,18 +525,17 @@ class FixedHostContext:
                         continue
                     notification = queue_waits.get((asleep, resumed))
                     if notification is not None:
-                        wait = self.queue_wait(notification, stopped, positions, steps, submissions)
+                        wait = self.queue_wait(notification, stopped, positions, queues)
                     else:
                         blocked = asleep, resumed
-                        wait = self.kernel_wait(tid, blocked, stopped, steps, submissions,
-                                                read_wake=read_wakes.get((tid, blocked)))
+                        wait = self.kernel_wait(tid, blocked, stopped, read_wake=read_wakes.get((tid, blocked)))
                     if wait is None:
                         continue
 
                     waits.append(wait)
                     bound += notification is not None
                     kernel += notification is None
-                    external += notification is None and isinstance(wait.source, ExternalWake)
+                    external += isinstance(wait.source, KernelWake) and wait.source.local_thread not in self.steps
 
         report["bound_to_fixed_work"] = bound
         report["kernel_wakes_bound"] = kernel
@@ -423,7 +547,7 @@ class FixedHostContext:
         for record in omitted:
             boundary = positions.get((record.thread, record.order))
             if boundary is None:
-                boundary = self.progress_at(record.thread, record.posted_ns, steps, submissions)
+                boundary = self.progress_at(record.thread, record.posted_ns)
             if boundary is not None:
                 posts[record] = boundary
-        return delays, waits, idle_inputs, posts, report
+        return delays, waits, idle_inputs, posts, report, protocol

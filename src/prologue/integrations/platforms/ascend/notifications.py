@@ -60,6 +60,6 @@ class NotifyProgress:
                 continue
             matches = waited.get(("wait", remote, local, handle), ())
 
-            # Equal sequences pair each use of a register within the same native post.
+            # Equal sequences propose a pairing. The calibrated endpoints qualify it for the channel.
             if len(steps) == len(matches):
                 yield from zip(steps, matches, strict=True)

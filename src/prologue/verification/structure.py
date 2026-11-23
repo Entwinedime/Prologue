@@ -41,6 +41,8 @@ class StructureVerification:
         if difference := recording.input_difference(recording.inputs["job"], source):
             return self.finish("input_mismatch", stages | {"input_difference": difference})
         sources = PredictionProcess.sources(args.production)
+        if args.peer_handoffs and sources.deployment["acquisition_mode"] != "single_device":
+            return self.finish("peer_handoff_source_unqualified", stages)
         training = stages["training"] = recording.training(production=sources, target=source)
         if training["status"] != "separate":
             return self.finish(training["status"], stages)
@@ -67,10 +69,11 @@ class StructureVerification:
                     modeling.run_model("action-layouts", layouts / f"{rank}-layouts.json", reference.graphs / f"{rank}-graph.json")
             except (CalledProcessError, TimeoutError, TimeoutExpired, RuntimeError) as error:
                 return self.finish("action_layout_unavailable", stages | {"layout_error": str(error)})
-            inputs = NativeInputs(capture, reference.graphs, timing, layouts)
+            inputs = NativeInputs(capture, reference.graphs, timing, layouts, peer_handoffs=args.peer_handoffs)
             extracted = inputs.run(reference)
         wall_ns["timing"] = monotonic_ns() - started
         stages["timing_status"] = extracted["status"]
+        stages["timing_scope"] = extracted["timing_scope"]
         if extracted["status"] != "extracted":
             return self.finish("timing_unavailable", stages)
 
@@ -92,7 +95,7 @@ class StructureVerification:
         started = monotonic_ns()
         try:
             report = ActionComparison(reference, trace, self.output / "comparison", args.details,
-                                      realization=inputs.realization).run()
+                                      realization=inputs.realization, peer_handoffs=args.peer_handoffs).run()
         except ValueError as error:
             wall_ns["comparison"] = monotonic_ns() - started
             return self.finish("comparison_unverified", stages | {"comparison_error": str(error)})
@@ -124,6 +127,7 @@ def main():
     parser.add_argument("--control-image", default="prologue-control:ubuntu22.04")
     parser.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
     parser.add_argument("--details", action="store_true", help="retain all evidence findings")
+    parser.add_argument("--peer-handoffs", action="store_true", help="allow measured common ports when a single-device action has a different layout")
     raise SystemExit(0 if StructureVerification(parser.parse_args()).run() else 1)
 
 

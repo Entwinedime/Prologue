@@ -75,6 +75,14 @@ class IngressEvidence:
             received.update(members)
         return result
 
+    @staticmethod
+    def idle(context):
+        queues = ("waiting", "running", "previous", "chunked")
+
+        # Placement fields may remain populated even after all request progress has drained.
+        return (context is not None and all(name in context and not context[name] for name in queues)
+                and not ActionIdentity.request_progress(context))
+
     def readiness(self, instance):
         submitted = self.sources[instance].by_request
         return {request: {"submitted_ns": submitted[request]["submitted_ns"], "received_ns": read["time_ns"]}

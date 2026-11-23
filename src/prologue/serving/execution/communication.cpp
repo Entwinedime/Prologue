@@ -7,6 +7,19 @@
 
 namespace prologue {
 
+std::optional<ExecutionInput> CommunicationLinks::preceding_service(const CoarseGraph & graph) const {
+    const auto & group = graph.scopes.front().communication;
+    if (!group || !group->ordered_service) return std::nullopt;
+    const auto lane = channels_.find({ group->channel, group->rank });
+    if (lane == channels_.end() || !lane->second.tail) return std::nullopt;
+
+    // The service waits for the native route's frontier; posting can still run ahead.
+    const auto work = std::ranges::find_if(graph.work, [](const auto & piece) {
+        return piece.scope == 0 && piece.kind == WorkKind::Collective;
+    });
+    return ExecutionInput{ *lane->second.tail, work->start, Relation::Order };
+}
+
 void CommunicationLinks::insert(const CoarseGraph & graph, std::span<const std::size_t> events,
                                 std::span<const ServiceDuration> durations, Timeline & timeline) {
     std::set<std::pair<std::string, std::size_t>> orders;
@@ -59,7 +72,9 @@ void CommunicationLinks::insert(const CoarseGraph & graph, std::span<const std::
         }
 
         // The channel's native protocol orders calls; source observation or batch indices never identify target work.
-        const auto key = std::pair{ group.channel, positions_[{ group.channel, group.rank }]++ };
+        auto & lane = channels_[{ group.channel, group.rank }];
+        const auto key = std::pair{ group.channel, lane.next++ };
+        if (group.ordered_service) lane.tail = collective->finish;
         auto [position, inserted] = pending_.try_emplace(key, Exchange{ group.operation, group.members, payload, collective.has_value(), {} });
         auto & exchange = position->second;
         if (!inserted && (exchange.operation != group.operation || exchange.members != group.members || exchange.payload != payload
@@ -104,6 +119,9 @@ nlohmann::json CommunicationLinks::payload_coverage() const {
 
 std::set<std::size_t> CommunicationLinks::retained_events() const {
     std::set<std::size_t> retained;
+    for (const auto & [_, lane] : channels_) {
+        if (lane.tail) retained.insert(*lane.tail);
+    }
     for (const auto & [_, exchange] : pending_) {
         for (const auto & [rank, endpoint] : exchange.endpoints)
             retained.insert(endpoint.collective ? endpoint.collective->ready : endpoint.ready);

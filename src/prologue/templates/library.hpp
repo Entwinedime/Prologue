@@ -214,7 +214,7 @@ struct TemplateEntry {
     nlohmann::json condition;
     TemplateFrame frame;
 
-    // Distinct source parameter points qualify selection; source graphs retain individual call provenance.
+    // Distinct source parameter points qualify selection. Imported actions have no observations in this library.
     std::set<Parameters> observations;
 };
 

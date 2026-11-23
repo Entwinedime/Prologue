@@ -46,6 +46,14 @@ struct PayloadAgreement {
     bool operator==(const PayloadAgreement &) const = default;
 };
 
+struct PeerRows {
+    std::vector<std::int64_t> send;
+    std::vector<std::int64_t> receive;
+
+    static PeerRows read(const nlohmann::json & source);
+    nlohmann::json document() const;
+};
+
 // Participants declare dependencies and any observed tensor fields that must agree across peers.
 struct CommunicationGroup {
     std::string channel;
@@ -55,9 +63,12 @@ struct CommunicationGroup {
     std::int64_t rank;
     std::size_t order;
     std::vector<PayloadAgreement> agreements{};
+    bool ordered_service = false;
+    std::optional<PeerRows> peer_rows{};
 
     static CommunicationGroup read(const nlohmann::json & source);
     nlohmann::json document() const;
+    void bind_rows(PeerRows rows);
     void validate() const;
 };
 

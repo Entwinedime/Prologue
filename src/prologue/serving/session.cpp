@@ -46,12 +46,13 @@ nlohmann::json ServingSession::run() {
             }
             auto & participant = participants_.at(action->task.group);
             const auto supplied = times_.action_input(*action);
-            const auto bindings = supplied && !supplied->layouts ? supplied->bindings() : action->work.value("bindings", nlohmann::json::object());
+            const auto * native_bindings = supplied ? supplied->bindings() : nullptr;
+            const auto bindings = native_bindings ? *native_bindings : action->work.value("bindings", nlohmann::json::object());
             const auto graph = participant.graphs.build(*action, bindings, times_.modeled() ? &origins : nullptr);
 
             // Resolve all service times before this action can commit any events or dependency bindings.
             const auto timing = times_.action(action->task.group, graph, origins, supplied);
-            const auto events = participant.dependencies.insert(graph, timeline_, timing, pools);
+            const auto events = participant.dependencies.insert(graph, timeline_, timing, pools, communication.preceding_service(graph));
             communication.insert(graph, events, timing.work_ns, timeline_);
             const auto returned = events.at(graph.scopes.front().port("call.return", Direction::Output).event);
             auto caller_returned = returned;

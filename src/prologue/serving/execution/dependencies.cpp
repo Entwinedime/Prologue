@@ -91,7 +91,7 @@ void GraphDependencies::invalidate_slot(std::size_t slot, const std::string & fi
 }
 
 std::vector<std::size_t> GraphDependencies::insert(const CoarseGraph & graph, Timeline & timeline, const GraphTiming & timing,
-                                                   const std::map<std::string, GraphDependencies *> & pools) {
+                                                   const std::map<std::string, GraphDependencies *> & pools, std::optional<ExecutionInput> external_order) {
     std::set<std::string> exposed;
     for (const auto & port : graph.scopes.front().ports) {
         if (port.use == PortUse::Data && port.direction == Direction::Output) exposed.insert(port.tensor->storage);
@@ -236,6 +236,7 @@ std::vector<std::size_t> GraphDependencies::insert(const CoarseGraph & graph, Ti
         }
     }
     std::vector<ExecutionInput> inputs;
+    if (external_order) inputs.push_back(*external_order);
     for (const auto & [source, target, relation] : dependencies) inputs.push_back({ source, target, relation });
     const auto events = timeline.insert(graph, timing, inputs);
     observations_.clear();

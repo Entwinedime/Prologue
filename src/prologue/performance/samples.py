@@ -79,6 +79,19 @@ class ServiceSamples:
             self.definitions.append({"external": identity, "work": [{"kind": kind}]})
         self.add(self.external[key], 0, features, duration_ns, collective=collective)
 
+    @staticmethod
+    def state_transfer(definition, interval):
+        work = definition["work"][interval]
+        if work["kind"] != "transfer" or "resource" not in work:
+            return False
+        resource = definition["resources"][work["resource"]]
+        if resource["kind"] != "service":
+            return False
+
+        # The service owns both state accesses on the same measured interval.
+        return {row["access"] for row in definition["kv_accesses"] + definition["slot_accesses"]
+                if (row["start"], row["finish"]) == (work["start"], work["finish"])} == {"read", "write"}
+
     def document(self, unmeasured):
         return {
             "domain": self.domain, "definitions": self.definitions,

@@ -5,6 +5,7 @@ import threading
 from contextvars import ContextVar
 from functools import partial
 
+from prologue.integrations.runtimes.pytorch.gloo_timing import GlooTiming
 from prologue.integrations.runtimes.pytorch.protocol_work import CpuTransfer
 
 
@@ -26,7 +27,7 @@ class ProtocolWork:
 
 
 class CpuProtocol:
-    def __init__(self, world, context, scope, service_scope) -> None:
+    def __init__(self, world, context, scope, service_scope, *, transport_timing=False) -> None:
         self.context = context
         self.scope = scope
         self.service_scope = service_scope
@@ -35,6 +36,7 @@ class CpuProtocol:
         self.positions = {}
         self.posts = {}
         self.active = False
+        self.timing = GlooTiming() if transport_timing else None
         self.enclosing = ContextVar("cpu_protocol", default=False)
 
     def interval(self):
@@ -47,6 +49,8 @@ class CpuProtocol:
         with self.lock:
             self.start = list(self.positions.items())
             self.posts = {}
+            if self.timing is not None:
+                self.timing.begin_window()
             self.active = True
 
     def publish(self, post, consumed=None):
@@ -80,12 +84,16 @@ class CpuProtocol:
 
         # Keep preposted Work facts on its handle; a wait can cross the observation's beginning.
         previous = self.enclosing.set(True)
+        if self.timing is not None and self.active:
+            post["transport_ticket"] = self.timing.begin_post(receiving)
         try:
 
             # Blocking PyTorch send/recv delegate to isend/irecv; retain one actual protocol operation.
             with self.service_scope(post["interval"]):
                 result = original(*args, **kwargs)
         finally:
+            if "transport_ticket" in post:
+                self.timing.end_post()
             self.enclosing.reset(previous)
         asynchronous = name in {"isend", "irecv"}
         self.publish(post, None if asynchronous else post["interval"])
@@ -101,9 +109,14 @@ class CpuProtocol:
     def document(self):
         with self.lock:
             self.active = False
-            return {
+            posts = list(self.posts.values())
+            result = {
                 "backend": "gloo", "operations": ["send", "recv", "isend", "irecv"],
                 "start_positions": [{"route": route, "position": position} for route, position in self.start],
                 "end_positions": [{"route": route, "position": position} for route, position in self.positions.items()],
-                "posts": list(self.posts.values()),
+                "posts": posts,
             }
+            if self.timing is not None:
+                self.timing.document(posts)
+                result["transport_clock"] = self.timing.clock
+            return result

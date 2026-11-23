@@ -65,20 +65,31 @@ class BatchTensors:
         }
 
     @staticmethod
+    def align_model_tokens(tokens: int, alignment: int) -> int:
+        return (tokens + alignment - 1) // alignment * alignment
+
+    @staticmethod
     def model_parameters(batch: Any, tokens: int) -> dict[str, int]:
         model_tokens, model_members = tokens, len(batch.reqs)
         if batch.global_num_tokens is not None:
             from sglang.srt.runtime_context import get_parallel
-            from sglang.srt.utils.common import ceil_align
 
             # Native eager MLP-sync pads token rows and, for Decode, the model's batch metadata as well.
             parallel = get_parallel()
             if len(batch.global_num_tokens) != 1 or parallel.attn_cp_size != 1:
                 raise ValueError("model padding requires a declared DP/CP layout")
-            model_tokens = ceil_align(batch.global_num_tokens[0], parallel.attn_tp_size)
+            model_tokens = BatchTensors.align_model_tokens(batch.global_num_tokens[0], parallel.attn_tp_size)
             if batch.forward_mode.is_decode():
                 model_members = model_tokens
         return {"model_tokens": model_tokens, "model_members": model_members}
+
+    @staticmethod
+    def model_padding_guards(parameters: dict[str, int]) -> list[list[str]]:
+
+        # Padding zero rows and materializing a positive tail run different native work.
+        dimensions = (("input_tokens", "model_tokens"), ("members", "model_members"))
+        return [["eq" if parameters[actual] == parameters[padded] else "lt", actual, padded]
+                for actual, padded in dimensions]
 
     @staticmethod
     def attention_layout(backend, parameters, members):

@@ -7,6 +7,7 @@ from threading import Lock
 from prologue.integrations.frameworks.sglang.clocks import DecisionClocks
 from prologue.integrations.frameworks.sglang.control.kv_transfer import MetadataRows, PdTopology
 from prologue.integrations.frameworks.sglang.control.resources import StateSlots
+from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from sglang.srt.disaggregation.base import BaseKVManager, KVArgs, KVPoll
 from sglang.srt.disaggregation.common.conn import CommonKVManager, CommonKVReceiver
 from sglang.srt.disaggregation.mooncake.conn import MooncakeKVReceiver, MooncakeKVSender
@@ -34,17 +35,16 @@ class NativePdBackend:
             kind = value["kind"]
             if kind == "reservation":
                 self.reservations[value["room"]][source] = value
-            elif kind == "reservation_visible":
-                self.manager.update_status(value["room"], KVPoll.WaitingForInput)
-                self.senders[value["room"]].completions[KVPoll.WaitingForInput] = packet["completion"]
             elif kind == "transfer":
                 self.receivers[value["room"]].pending[source] = value
-            elif kind == "sender_visible":
-                self.manager.update_status(value["room"], KVPoll.Success)
-                self.senders[value["room"]].completions[KVPoll.Success] = packet["completion"]
-            elif kind == "receiver_visible":
-                self.receivers[value["room"]].visible = True
-                self.receivers[value["room"]].completions[KVPoll.Success] = packet["completion"]
+            elif kind in ("reservation_visible", "sender_visible", "receiver_visible"):
+                room = value["room"]
+                state = KVPoll.WaitingForInput if kind == "reservation_visible" else KVPoll.Success
+
+                # A reservation can become visible before the local scheduler creates its sender.
+                self.manager.status_events[room][state] = packet["completion"]
+                if kind != "receiver_visible":
+                    self.manager.update_status(room, state)
             elif kind == "consumed":
                 publication = self.published[value["publication"]]
                 publication["pending"].remove(source)
@@ -144,6 +144,7 @@ class NativeKvManager(BaseKVManager):
         self.is_dummy_cp_rank = False
         self.enable_all_cp_ranks_for_transfer = False
         self.request_status = {}
+        self.status_events = defaultdict(dict)
         self.addr_to_rooms_tracker = defaultdict(set)
         self.failure_records = backend.failures
         self.failure_lock = Lock()
@@ -183,10 +184,11 @@ class NativeKvPolling:
             self.poll_state = self._poll()
 
             # Record only the state actually read, not unrelated deliveries collected in the same inbox drain.
-            visible = [state for state in self.completions if state <= self.poll_state]
+            completions = self.kv_mgr.status_events.get(self.bootstrap_room, {})
+            visible = [state for state in completions if state <= self.poll_state]
             if visible:
                 self.backend.scheduler.peer.call(
-                    "observed_completion", event=self.completions[max(visible)], boundary=query["boundary"],
+                    "observed_completion", event=completions[max(visible)], boundary=query["boundary"],
                 )
             query["result"] = self.poll_state
         return self.poll_state
@@ -198,7 +200,6 @@ class NativeKvSender(NativeKvPolling, MooncakeKVSender):
         self.backend = mgr.backend
         self.signals = set()
         self.poll_state = None
-        self.completions = {}
         self.backend.senders[bootstrap_room] = self
 
     def _poll(self):
@@ -260,7 +261,7 @@ class NativeKvSender(NativeKvPolling, MooncakeKVSender):
         # Register before the call returns: background publication can finish while its enclosing CPU work is still running.
         if last:
             backend.exchange(packets, completion={
-                "request": int(req.rid),
+                "request": RequestSubmissions.index(req.rid),
                 "notification": {"group": scheduler.group, "name": "kv_success",
                                  "work": {"request": scheduler.calls.progress((req,))[0]["id"]}},
                 "signals": completion_signals, "after": [],
@@ -272,6 +273,7 @@ class NativeKvSender(NativeKvPolling, MooncakeKVSender):
 
     def clear(self):
         super().clear()
+        self.kv_mgr.status_events.pop(self.bootstrap_room, None)
         del self.backend.senders[self.bootstrap_room]
         self.backend.reservations.pop(self.bootstrap_room, None)
 
@@ -285,8 +287,6 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
         CommonKVReceiver.__init__(self, mgr, bootstrap_addr, bootstrap_room)
         self.backend = mgr.backend
         self.poll_state = None
-        self.completions = {}
-        self.visible = False
         self.pending = {}
         self.finished = set()
         self.metadata = None
@@ -320,7 +320,7 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
                     "kind": "reservation", "room": self.bootstrap_room, "pages": pages, "prefix": decode_prefix_len or 0,
                 }}
                 backend.exchange([packet], completion={
-                    "request": int(self._prologue_request.rid),
+                    "request": RequestSubmissions.index(self._prologue_request.rid),
                     "notification": backend.reservation_receipt(scheduler.group, request, target["group"]),
                     "signals": [signal], "after": [],
                 })
@@ -328,7 +328,7 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
 
                     # The destination consumes reservations in delivery order and enters readiness after the whole group.
                     backend.exchange([{"target": peer, "value": {"kind": "reservation_visible", "room": self.bootstrap_room}}], completion={
-                        "request": int(self._prologue_request.rid),
+                        "request": RequestSubmissions.index(self._prologue_request.rid),
                         "notification": {"group": target["group"], "name": "kv_ready", "work": {"request": request}},
                         "signals": [], "after": [backend.reservation_receipt(publisher, request, target["group"])
                                                   for publisher in target["publishers"]],
@@ -345,7 +345,7 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
         request = work["context"]["request"]["id"]
         self.backend.exchange(
             [{"target": self.backend.local, "value": {"kind": "receiver_visible", "room": self.bootstrap_room}}],
-            completion={"request": int(self._prologue_request.rid),
+            completion={"request": RequestSubmissions.index(self._prologue_request.rid),
                         "notification": {"group": scheduler.group, "name": "kv_success", "work": {"request": request}}, "signals": [], "after": [
                 {"group": peer["group"], "name": "kv_success", "work": {"request": request}}
                 for peer in self.backend.topology.peers.values()
@@ -368,7 +368,9 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
             self.pending.clear()
             if acknowledgements:
                 self.backend.exchange(acknowledgements)
-            if self.visible and self.finished == self.backend.topology.peers.keys():
+
+            visible = KVPoll.Success in self.kv_mgr.status_events.get(self.bootstrap_room, {})
+            if visible and self.finished == self.backend.topology.peers.keys():
                 self.kv_mgr.rows.write(self.aux_index, self.metadata)
                 self.kv_mgr.update_status(self.bootstrap_room, KVPoll.Success)
 
@@ -378,6 +380,7 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
     def clear(self):
         del self.backend.receivers[self.bootstrap_room]
         self.kv_mgr.request_status.pop(self.bootstrap_room, None)
+        self.kv_mgr.status_events.pop(self.bootstrap_room, None)
         self.kv_mgr.addr_to_rooms_tracker[self.bootstrap_addr].discard(self.bootstrap_room)
 
     def _send_abort_notification(self):

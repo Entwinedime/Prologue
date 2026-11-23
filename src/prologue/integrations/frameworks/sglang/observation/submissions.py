@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections import defaultdict
 from typing import Any
 
-from prologue.contracts.workload import WorkloadContent
+from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
 
 
@@ -15,16 +14,10 @@ class EngineSubmissions:
 
     def __init__(self, source: dict[str, Any], mode: str, groups: list[list[str]] | None = None) -> None:
         self.mode = mode
-        self.requests = source["requests"]
-        self.content = WorkloadContent(self.requests, source["prefixes"])
-        indices = {request["id"]: index for index, request in enumerate(self.requests)}
-        self.groups = []
-        for group in groups if groups is not None else [list(indices)]:
-            arrivals: dict[int, list[int]] = defaultdict(list)
-            for identity in group:
-                index = indices[identity]
-                arrivals[self.requests[index]["arrival_ns"]].append(index)
-            self.groups.append(sorted(arrivals.items()))
+        self.ingress = RequestSubmissions(source)
+        indices = {request["id"]: index for index, request in enumerate(self.ingress.requests)}
+        self.groups = [self.ingress.cohorts(indices[identity] for identity in group)
+                       for group in (groups if groups is not None else [list(indices)])]
         self.delivery: list[dict[str, Any]] = []
 
     def prepare(self, prefix: str, bootstrap: dict | None, first_room: int) -> None:
@@ -32,19 +25,13 @@ class EngineSubmissions:
         self.protocol_requests = {}
 
         # Construct prompts before observation; each group preserves its own declared arrival offsets.
-        prompts = [self.content.prompt(request["id"]) for request in self.requests]
+        requests = self.ingress.requests
+        prompts = [self.ingress.content.prompt(request["id"]) for request in requests]
         self.submissions = []
         for group, arrivals in enumerate(self.groups):
             self.submissions.append([])
             for arrival, indices in arrivals:
-                payload = {
-                    "input_ids": [prompts[index] for index in indices],
-                    "sampling_params": [
-                        {"max_new_tokens": self.requests[index]["output_tokens"], "temperature": 0, "ignore_eos": True}
-                        for index in indices
-                    ],
-                    "rid": [f"{prefix}/{index}" for index in indices], "stream": True,
-                }
+                payload = self.ingress.payload(prefix, indices, prompts)
                 if self.mode != "null":
                     payload.update(
                         bootstrap_host=[bootstrap["host"]] * len(indices),
@@ -54,7 +41,7 @@ class EngineSubmissions:
 
                     # Workers can receive remote reservations before dispatching their own copy of the request.
                     self.protocol_requests.update(
-                        (str(room), self.requests[index]["id"])
+                        (str(room), requests[index]["id"])
                         for room, index in zip(payload["bootstrap_room"], indices, strict=True)
                     )
                 self.submissions[-1].append((payload, {"group": group, "arrival_ns": arrival, "requests": indices}))
@@ -64,7 +51,7 @@ class EngineSubmissions:
 
     async def run(self, endpoint: Any, clock: Any, barrier: Any, directory, ranks) -> None:
         origin_ns = clock.origin.value
-        phase = "source" if self.prefix == "capture" else self.prefix
+        phase = "source" if self.prefix == RequestSubmissions.observed else self.prefix
 
         # A second observer replays the same declared arrivals and gets its own measured delivery times.
         groups = [[(payload, dict(record)) for payload, record in group] for group in self.submissions]
@@ -114,11 +101,11 @@ class EngineSubmissions:
 
     def check_responses(self, prefix: str, rows: list[dict], indices: list[int]) -> None:
         expected = {
-            f"{prefix}/{index}": 1 if self.mode == "prefill" else self.requests[index]["output_tokens"]
+            self.ingress.native_id(prefix, index): 1 if self.mode == "prefill" else self.ingress.requests[index]["output_tokens"]
             for index in indices
         }
         tokens = {
-            f"{prefix}/{index}": self.content.output_token(self.requests[index]["id"])
+            self.ingress.native_id(prefix, index): self.ingress.content.output_token(self.ingress.requests[index]["id"])
             for index in indices
         }
         completed = set()

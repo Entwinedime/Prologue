@@ -4,6 +4,7 @@ from contextlib import contextmanager
 
 import torch
 from prologue.integrations.frameworks.sglang.allocation import AllocationABI
+from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from prologue.integrations.frameworks.sglang.kv_layout import MhaKvLayout
 from sglang.srt.mem_cache.allocator.base import BaseTokenToKVPoolAllocator
 
@@ -23,7 +24,7 @@ class AllocationDemand:
     @contextmanager
     def demand(allocator, requests, tokens):
         allocator.demand = [
-            {"request": int(req.rid), "tokens": count}
+            {"request": RequestSubmissions.index(req.rid), "tokens": count}
             for req, count in zip(requests, tokens, strict=True)
         ]
         try:
@@ -48,12 +49,12 @@ class AllocationDemand:
         slots = queue.req_to_token_pool
 
         # Native preallocation assigns req.prefix_indices after allocating; use its call argument for slot binding.
-        slots.prefix_bindings[int(req.rid)] = {"node": req.last_node, "tokens": prefix_len} if prefix_len else None
+        slots.prefix_bindings[RequestSubmissions.index(req.rid)] = {"node": req.last_node, "tokens": prefix_len} if prefix_len else None
         try:
             with self.demand(queue.token_to_kv_pool_allocator, [req], [tokens]):
                 return original(queue, req, prefix_indices, prefix_len, total_prefix_len)
         finally:
-            del slots.prefix_bindings[int(req.rid)]
+            del slots.prefix_bindings[RequestSubmissions.index(req.rid)]
 
 
 class RequestSlots:
@@ -79,11 +80,11 @@ class RequestSlots:
     def alloc(self, reqs):
         members = []
         for req in reqs:
-            member = {"request": int(req.rid)}
+            member = {"request": RequestSubmissions.index(req.rid)}
 
             # The opaque core handle supplies cached pages; any uncached tail remains request-owned.
             prefix = self.prefix_bindings.get(
-                int(req.rid),
+                RequestSubmissions.index(req.rid),
                 {"node": req.last_node, "tokens": len(req.prefix_indices)} if req.last_node is not None else None,
             )
             if prefix is not None:
@@ -98,7 +99,7 @@ class RequestSlots:
         self.req_to_token[indices] = values
 
     def free(self, req):
-        self.peer.call("release_request", request=int(req.rid))
+        self.peer.call("release_request", request=RequestSubmissions.index(req.rid))
         req.req_pool_idx = None
 
 
@@ -118,7 +119,7 @@ class StateSlots:
         return self.call("allocate")
 
     def bind(self, request, slot):
-        self.call("bind", request=int(request.rid), slot=slot)
+        self.call("bind", request=RequestSubmissions.index(request.rid), slot=slot)
 
     def free(self, slot):
         self.call("release", slot=slot)

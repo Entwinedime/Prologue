@@ -109,6 +109,15 @@ class AscendTrace:
     })
     stream_waits = frozenset({"aclrtStreamWaitEvent", "aclrtStreamWaitEventWithTimeout"})
 
+    @classmethod
+    def reserved_host_intervals(cls, calls, repeated_host_waits):
+        for call in calls:
+            identity = call["thread"], call["begin_counter"]
+            if identity in repeated_host_waits:
+                continue
+            if call["api"] in cls.host_waits or (call["api"] == "aclrtMemcpy" and call["bytes"]):
+                yield call["thread"], call["begin_raw_ns"], call["end_raw_ns"]
+
     def __init__(self, profile: Path, runtime: Path, raw: dict, trace: Path, *, evidence=False) -> None:
         native_points = {index for index, point in enumerate(raw["points"]) if point["side"] == "signal"}
         services = [scope for scope in raw["scopes"] if "service" in scope]
@@ -269,7 +278,7 @@ class AscendTrace:
                 owner = calls.enclosing(Interval(stamp, stamp, thread, {}))
                 if owner is not None:
                     records[owner.record["scope"]].append([dtype, algorithm, count])
-        return {scope: rows[0] for scope, rows in records.items() if len(rows) == 1 and rows[0][2] > 0}
+        return {scope: rows[0] for scope, rows in records.items() if len(rows) == 1}
 
     @staticmethod
     def task_flips(profile: Path) -> set[tuple[int, int, int]]:

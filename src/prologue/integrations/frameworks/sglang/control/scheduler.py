@@ -155,7 +155,7 @@ class NativeScheduler(Scheduler):
             return {}, self.batch_names.describe(None)
         members = BatchTensors.members(batch)
         for member in members:
-            member["id"] = self.request_input.requests[int(member["id"])]["id"]
+            member["id"] = self.request_input.request_id(member["id"])
         work = {**self.batch_names.describe(batch), "phase": BatchTensors.phase(batch), "rank": self.graph_rank, "members": members}
         work["context"] = {"members": self.calls.progress(batch.reqs)}
         return BatchTensors.parameters(batch, sum(member["new_tokens"] for member in members)), work
@@ -253,7 +253,7 @@ class NativeScheduler(Scheduler):
 
     def bind_state(self, work, accesses):
         work.update({
-            name: [self.request_input.requests[int(identity)]["id"] for identity in requests]
+            name: [self.request_input.request_id(identity) for identity in requests]
             for name, requests in accesses.members.items()
         })
 

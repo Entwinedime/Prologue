@@ -292,11 +292,12 @@ class MatrixRun:
             return result | {"status": "source-prerequisite-unqualified"}
 
         output = self.results / "cases" / name
+        timing = ("--peer-handoffs",) if case.get("peer_handoffs") else ()
         command = self.commands.command(
             "prologue.verification.structure", "--capture", target["native"], "--reference", target["production"],
             "--production", source["collection"], "--input", self.root / case["prediction_input"], "--output", output,
             "--binary", self.binary, "--modeling-image", self.images["modeling"], "--control-image", self.images["control"],
-            "--timeout", self.budget["task_seconds"],
+            "--timeout", self.budget["task_seconds"], *timing,
         )
 
         # One process holds the checked native case through extraction, prediction and comparison.
