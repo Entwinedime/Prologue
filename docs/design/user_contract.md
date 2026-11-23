@@ -21,6 +21,8 @@
 
 同实例配置包含 TP、可选 PP/EP、max_running_requests、max_total_tokens、max_prefill_tokens、page_size 和 attention backend；可选择 chunked prefill、mixed 及一级 prefix cache。微批次上限与原生 PP lane 分别解释，不从总请求数直接决定实际 batch。
 
+SGLang 同实例的 `prefill_chunk_tokens` 以 token 计，取 `page_size` 的非负整数倍，零或省略表示关闭。`mixed_batches` 默认关闭，开启时需要正的分块上限。一个混合批次内的 Prefill 和 Decode 成员各有自己的 KV 读取长度、新写入范围及输出责任。
+
 PD 配置分别声明 Prefill/Decode 的拓扑、槽位和 KV 容量；两池模型、dtype、backend 和页布局一致，资源独立。chunk 由 Prefill 侧推进；两池的缓存分别服从原生支持范围和各自来源实现，不共享缓存状态或隐式沿用另一池的开关。不把同实例 serving 的来源直接当作 PD 来源。
 
 SGLang/Ascend 的 PD 任务在配置顶层给出 `id`、`attention_backend`、`page_size` 和 `disaggregation`。`disaggregation.prefill` 与 `disaggregation.decode` 分别给出 `tp`、`max_running_requests`、`max_total_tokens` 和 `max_prefill_tokens`。这条接入路径接受稠密模型和 Prefill TP1，Decode 的逻辑分片来自目标 TP。原生预分配的附加槽位由适配器声明，与准入上限分别处理。

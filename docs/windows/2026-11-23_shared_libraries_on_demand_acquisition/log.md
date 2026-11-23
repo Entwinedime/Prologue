@@ -435,3 +435,19 @@
 **验证**　常规和双成员来源分别编出 45、48 个定义，各自的单卡与三卡定义和根查询一致。独立三卡对照分别匹配 12、8 个动作，消费 9,006、6,009 项设备工作，各覆盖三条交接和 12 段物理传输工作。两组的通知最大偏移均为 0，双成员组另有两次原生页表结果处理退出边界。PP3、S07 局部模板及来源隔离核对通过。前后七次原生尝试中四次完成，累计 1,579.93 卡秒和约 678 MiB。修复虚拟唤醒只重跑离线对照，复用同一份物理记录。[普通对照](../../../data/shared-libraries-on-demand-acquisition/s13/control/ordinary-closure/result.json) · [双成员对照](../../../data/shared-libraries-on-demand-acquisition/s13/control/cohort-closure/result.json) · [共同发布](../../../data/shared-libraries-on-demand-acquisition/s13/control/default-release.json)
 
 **结论与限制**　默认发布 `c00c5c4e-daa4-4066-aa8a-3f4be284f62e` 增加 PD 结构域。应用、控制和观察镜像已重建，最终观察镜像与成功取证的版本具有相同的原生记录钩子。交付范围为已验证的稠密 P1D2 与当前 Ascend 后端。单卡暂存的传输耗时没有物理链路资格，自主性能以及更宽 Prefill 拓扑仍待各自证据。
+
+## 2026-11-24 — S14 分块与混批启动
+
+**范围**　从已推送的 `a959ea1` 接续。Qwen3-8B 和 Mistral-7B-v0.3 均使用 TP1、16 token 页和 32 token 分块。单份请求序列覆盖 31、32、33 token 的隔离输入，以及短间隔到达的 Prefill 与仍在运行的 Decode。每模型分别留来源与独立目标。
+
+**改动**　原生 `MIXED` 同时属于 Extend，必须在适配器区分整批模式与成员角色。中间块使用同一请求和已驻留 KV，结果处理只更新进度。采集与控制共享批次字段，从原生已绑定的页和 token 区间提取结构，性能资格仍单独判定。
+
+**验证安排**　使用已有本地模型和新的观察镜像。首批每模型一次来源，原生触发与数据资格通过后再做各自的独立参考。本阶段预留最多六次原生尝试、1,200 卡秒、30 分钟处理及 8 GiB，每次最多 190 秒。原生记录可被后续离线结构修正复用。
+
+## 2026-11-24 — S14 分块与混批结构交付
+
+**改动**　取证和控制共用原生批次的成员描述，模板保留续接读前缀和各成员类型，核心从实际 KV 页生成读写范围。结构对照注入实测入口和结果后首次读取的时刻，由原生控制器组批。性能查询只为发布 token 的成员生成发布边界。审查修正了公共校验初始化覆盖 PD 实测入口的问题，原有双成员 PD 参考重新匹配 8 个动作和 3 条交接。业务代码净增 240 行，示例编排零改动。[PD 回归](../../../data/shared-libraries-on-demand-acquisition/s14/qwen/pd-final/result.json)
+
+**验证**　Qwen3-8B 与 Mistral-7B-v0.3 在 Ascend TP1 各用一次建库来源和一次独立参考。各匹配 12 个动作和 5 个请求，消费 7,236 和 5,632 项设备工作。31、32 token 各用一个 Prefill；33 token 分 `[0,32)` 和 `[32,33)`，续接后才发首 token。每模型另有 3 个混批，逐批核对 KV 前缀、新写入及发布成员。四次原生运行累计 530.74 卡秒，原始观测约 347 MiB。来源当作参考的尝试被拒绝。[Qwen 对照](../../../data/shared-libraries-on-demand-acquisition/s14/qwen/structure/result.json) · [Mistral 对照](../../../data/shared-libraries-on-demand-acquisition/s14/mistral/structure/result.json) · [原生批次](../../../data/shared-libraries-on-demand-acquisition/s14/source-evidence.json)
+
+**结论与限制**　默认结构发布 `1ae7e038-5f8d-48f8-95b6-35f06e09a928` 增加两个已核对的 TP1 配置。Qwen 固定实测图重新消费原计时，发布边界最大偏差为 0。新配置的自主成本仍报告域外，结构开发证据限于当前页尺寸、两款稠密模型和单实例调度。[发布记录](../../../data/shared-libraries-on-demand-acquisition/s14/default-release.json) · [固定图基线](../../../data/shared-libraries-on-demand-acquisition/s14/qwen/fixed-final.json)
