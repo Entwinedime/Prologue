@@ -9,6 +9,9 @@ from weakref import ref
 class Calls:
     def __init__(self, annotate):
         self.annotate = annotate
+        self.reset()
+
+    def reset(self):
         self.rows = []
         self.stack = []
         self.tensors = {}

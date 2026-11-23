@@ -8,15 +8,18 @@ from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns, thread_time_ns
 
 from prologue.acquisition.observation.calls import Calls
 from prologue.integrations.frameworks.sglang.observation.attention import AttentionCall, implementation
+from prologue.integrations.frameworks.sglang.observation.parallel import RankProfiles
 
 
 class Observation:
-    def __init__(self, output, requests, mode):
+    def __init__(self, output, requests, mode, parallel):
         self.output = output
         self.requests = requests
         self.publications = {native: [] for native in requests}
         self.finished = set()
         self.mode = mode
+        self.capture_calls = mode == "detailed" and not parallel
+        self.parallel = RankProfiles(self) if parallel else None
         self.active_batch = None
         self.result_cpu_started = None
         self.host_work = []
@@ -26,10 +29,18 @@ class Observation:
 
             self.calls = Calls(record_function)
 
+    def begin_window(self, output, requests, capture_calls):
+        self.output = output
+        self.requests = requests
+        self.publications = {native: [] for native in requests}
+        self.finished.clear()
+        self.capture_calls = capture_calls
+        self.calls.reset()
+
     def flush(self, original, scheduler, empty_cache=True):
         # Drain logical KV state while preserving warmed device allocator workspaces.
         drained = original(scheduler, empty_cache=False)
-        if drained and self.finished == self.publications.keys():
+        if self.parallel is None and drained and self.finished == self.publications.keys():
             self.save()
         return drained
 
@@ -56,12 +67,13 @@ class Observation:
 
     def save(self):
         document = {"publications": {self.requests[rid]: rows for rid, rows in self.publications.items()}}
-        if self.mode == "detailed":
+        if self.capture_calls:
             document["calls"] = self.calls.rows
         elif self.mode == "host-timing":
             document["host_work"] = self.host_work
 
-        # Only the output owner writes this file, after the observed publications.
+        # Each selected worker writes its own calls. Only the publication owner has token records.
+        self.output.mkdir(exist_ok=True)
         path = self.output / "worker.json"
         pending = path.with_suffix(".tmp")
         pending.write_text(json.dumps(document, separators=(",", ":")) + "\n", encoding="utf-8")
@@ -74,6 +86,9 @@ class Observation:
         return batch
 
     def batch(self, original, scheduler, batch, *args, **kwargs):
+        if self.mode == "detailed" and not self.capture_calls:
+            return original(scheduler, batch, *args, **kwargs)
+
         requests = [self.requests.get(request.rid) for request in batch.reqs]
         if not any(request is not None for request in requests):
             return original(scheduler, batch, *args, **kwargs)
@@ -174,6 +189,8 @@ class Observation:
             projection = self_attention.o_proj
             attention.forward = AttentionCall(self.calls, attention, f"{site}.self_attn.attn", require_parent=True)
             projection.forward = partial(self.projection, projection.forward, projection, f"{site}.self_attn.o_proj")
+        if self.parallel is not None:
+            self.parallel.loaded(runner)
         return result
 
     def install(self):
@@ -191,6 +208,8 @@ class Observation:
         elif self.mode == "detailed":
             HookRegistry.register("sglang.srt.model_executor.model_runner.ModelRunner.load_model",
                                   self.load_model, HookType.AROUND)
+        if self.parallel is not None:
+            self.parallel.install()
 
 
 def install():
@@ -206,4 +225,9 @@ def install():
     if path is not None:
         path = Path(path)
         document = json.loads(path.read_text(encoding="utf-8"))
-        Observation(path.parent, document["requests"], document["mode"]).install()
+        placement = document["parallel_placement"]
+        if placement == "single_device":
+            from prologue.integrations.frameworks.sglang.ascend.shards import StagedCollectives
+
+            StagedCollectives(path.parent / ".device.lock").install()
+        Observation(path.parent, document["requests"], document["mode"], placement is not None).install()

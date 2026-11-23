@@ -8,18 +8,20 @@ from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 
 from prologue.integrations.frameworks.sglang.configuration import Configuration, Model, native_options
+from prologue.integrations.frameworks.sglang.observation.parallel import RankPlan
 
 
 class Session:
-    def __init__(self, receipt, configuration, workload, output, mode):
+    def __init__(self, receipt, configuration, workload, output, mode, placement):
         self.model = Model(**receipt["model"])
         configured = next(row for row in receipt["configurations"] if row["id"] == configuration)
         self.configuration = Configuration(**configured)
         self.workload = next(row for row in receipt["workloads"] if row["id"] == workload)
         self.output = output.resolve()
         self.mode = mode
-        if self.configuration.tp != 1:
-            raise ValueError("this observation entry supports a single native TP1 worker")
+        self.placement = placement
+        if self.configuration.tp > 1 and mode != "detailed":
+            raise ValueError("native TP groups currently require detailed observation")
 
     @staticmethod
     async def request(engine, native, request):
@@ -53,15 +55,75 @@ class Session:
         if not result.success:
             raise RuntimeError(f"native drain failed: {result.message}")
 
+    def aliases(self, phase):
+        return {f"{phase}/{index}": request["id"] for index, request in enumerate(self.workload["requests"])}
+
+    def record(self, engine, directory, phase):
+        detail = self.mode == "detailed"
+        started = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+        if detail:
+            # The semantic scopes carry call identity and tensor layout.
+            engine.start_profile(output_dir=str(directory), activities=["CPU", "GPU"],
+                                 with_stack=False, record_shapes=False)
+        try:
+            delivery = engine.loop.run_until_complete(self.dispatch(engine, phase))
+            self.drain(engine)
+            observed = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+        finally:
+            if detail:
+                engine.stop_profile()
+        record = {"delivery": delivery, "observation_ns": observed - started}
+        if detail:
+            record["profile_export_ns"] = clock_gettime_ns(CLOCK_MONOTONIC_RAW) - observed
+        return record
+
+    def check_publications(self, directory):
+        worker = json.loads((directory / "worker.json").read_text(encoding="utf-8"))
+        for request in self.workload["requests"]:
+            rows = worker["publications"][request["id"]]
+            if not rows or rows[-1]["count"] != request["output_tokens"]:
+                raise ValueError(f"incomplete native publication evidence for {request['id']}")
+
+    def record_workers(self, engine):
+        if self.configuration.tp == 1:
+            recorded = self.record(engine, self.output / "profile", "source")
+            self.check_publications(self.output)
+            if self.mode == "detailed":
+                trace, = (self.output / "profile").rglob("trace_view.json")
+                recorded["trace"] = str(trace.relative_to(self.output))
+            return recorded
+
+        plan = RankPlan(self.output, self.configuration.tp, self.placement)
+        windows = []
+        for index, ranks in enumerate(plan.windows):
+            directory = self.output / f"window-{index}"
+            directory.mkdir()
+            phase = f"source-{index}"
+            selection = {"ranks": ranks, "requests": self.aliases(phase)}
+            (directory / "selection.json").write_text(json.dumps(selection), encoding="utf-8")
+            record = self.record(engine, directory, phase)
+            self.check_publications(directory / "rank-0")
+
+            traces = {}
+            for rank in ranks:
+                trace, = (directory / f"rank-{rank}" / "profile").rglob("trace_view.json")
+                traces[rank] = str(trace.relative_to(self.output))
+            windows.append({**record, "directory": directory.name, "traces": traces})
+        return {"workers": plan.workers, "windows": windows}
+
     def run(self):
         self.output.mkdir()
-        detail = self.mode == "detailed"
+        parallel = self.configuration.tp > 1
         specification = self.output / "observation.json"
-        aliases = {f"source/{index}": request["id"] for index, request in enumerate(self.workload["requests"])}
-        specification.write_text(json.dumps({"requests": aliases, "mode": self.mode}), encoding="utf-8")
+        description = {"requests": self.aliases("source"), "mode": self.mode,
+                       "parallel_placement": self.placement if parallel else None}
+        specification.write_text(json.dumps(description), encoding="utf-8")
         os.environ["PROLOGUE_OBSERVATION"] = str(specification)
 
-        from sglang import Engine
+        if parallel and self.placement == "single_device":
+            from prologue.integrations.frameworks.sglang.ascend.shards import SingleDeviceEngine as Engine
+        else:
+            from sglang import Engine
 
         started = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
         with Engine(**native_options(self.model, self.configuration)) as engine:
@@ -69,37 +131,14 @@ class Session:
             engine.loop.run_until_complete(self.dispatch(engine, "warmup"))
             self.drain(engine)
             warmed = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
-
-            if detail:
-                # Semantic scopes already record call identity and tensor layout.
-                engine.start_profile(output_dir=str(self.output / "profile"), activities=["CPU", "GPU"],
-                                     with_stack=False, record_shapes=False)
-            try:
-                delivery = engine.loop.run_until_complete(self.dispatch(engine, "source"))
-                self.drain(engine)
-                observed = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
-            finally:
-                if detail:
-                    engine.stop_profile()
-            exported = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
-
-        worker = json.loads((self.output / "worker.json").read_text(encoding="utf-8"))
-        for request in self.workload["requests"]:
-            rows = worker["publications"][request["id"]]
-            if not rows or rows[-1]["count"] != request["output_tokens"]:
-                raise ValueError(f"incomplete native publication evidence for {request['id']}")
+            recorded = self.record_workers(engine)
 
         manifest = {
             "mode": self.mode, "framework_revision": os.environ["PROLOGUE_SGLANG_REVISION"],
             "model": asdict(self.model), "configuration": asdict(self.configuration), "workload": self.workload,
-            "initial_state": {"kv": "empty", "workspace": "warmed"},
-            "clock": "monotonic_raw_ns", "delivery": delivery,
+            "initial_state": {"kv": "empty", "workspace": "warmed"}, "placement": self.placement,
+            "clock": "monotonic_raw_ns", **recorded,
             "initialization_ns": initialized - started, "warmup_ns": warmed - initialized,
-            "observation_ns": observed - warmed,
         }
         manifest["model_config"] = json.loads((Path(self.model.path) / "config.json").read_text(encoding="utf-8"))
-        if detail:
-            trace, = (self.output / "profile").rglob("trace_view.json")
-            manifest["trace"] = str(trace.relative_to(self.output))
-            manifest["profile_export_ns"] = exported - observed
         (self.output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
