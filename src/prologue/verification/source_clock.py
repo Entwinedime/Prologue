@@ -76,7 +76,7 @@ class ClockConstraints(DeviceCalibration):
         self.device = [graph["resources"][event["resource"]]["kind"] == "stream" for event in graph["events"]]
         self.points = [self.point(measured["time_ns"], device)
                        for measured, device in zip(graph["evidence"]["events"], self.device, strict=True)]
-        self.measured, self.unknown = 0, 0
+        self.measured = 0
         self.conflict = None
 
     def point(self, timestamp, device):
@@ -97,22 +97,24 @@ class ClockConstraints(DeviceCalibration):
             return 1 - point.position, point.position, point.nominal_ns
         return 0, 0, point
 
-    def constrain(self, kind, index, source, target):
-        begin, end = self.points[source], self.points[target]
-        if begin is None or end is None:
-            self.unknown += 1
-            return
+    def constrain(self, source, target):
         self.measured += 1
         if self.conflict is not None:
             return
-        cause = {"kind": kind, "index": index, "source": source, "target": target}
-        left, right = self.form(begin), self.form(end)
+        begin, end = self.points[source], self.points[target]
+        same_clock = self.device[source] == self.device[target]
 
         # Ordered snapshot intervals make every segment positive; counter order needs no edge-specific fit.
-        if self.device[source] == self.device[target]:
-            if left[2] > right[2]:
-                self.conflict = {**cause, "witness": [cause]}
+        if same_clock:
+            first, last = (begin.nominal_ns, end.nominal_ns) if self.device[source] else (begin, end)
+            if first <= last:
+                return
+        cause = {"kind": "causal", "index": None, "source": source, "target": target}
+        if same_clock:
+            self.conflict = {**cause, "witness": [cause]}
             return
+
+        left, right = self.form(begin), self.form(end)
         point = begin if self.device[source] else end
         segment = self.segments[point.segment]
         segment.clip(left[0] - right[0], left[1] - right[1], right[2] - left[2], cause)
@@ -172,10 +174,8 @@ class ClockConstraints(DeviceCalibration):
 
     def report(self):
         return {
-            "status": "inconsistent" if self.conflict else "incomplete" if self.unknown else "compatible",
             "calibration_samples": len(self.samples), "measured_constraints": self.measured,
-            "unknown_constraints": self.unknown, "common_calibration_feasible": self.conflict is None,
-            "first_conflict": self.conflict,
+            "common_calibration_feasible": self.conflict is None, "first_conflict": self.conflict,
         }
 
 
@@ -229,13 +229,11 @@ class ClockRealization:
                                                 (after[0], after[1].at_counter(after[1].counters[0])))
                 self.restrict(row, limit)
 
-        anchors = [(rank, event) for rank, clock in clocks.items()
-                   for event, point in enumerate(clock.points) if point is not None]
-        anchors.extend(host_protocol)
-        causal = graph.projected(anchors)
-        for source, targets in causal.next.items():
-            for target in targets:
-                self.constrain_order(anchors[source], anchors[target])
+        measured = {(rank, event) for rank, clock in clocks.items()
+                    for event, point in enumerate(clock.points) if point is not None}
+        measured.update(host_protocol)
+        for source, target in graph.measured_dependencies(measured):
+            self.constrain_order(source, target)
 
     def point(self, rank, event):
         return self.clocks[rank].points[event] if event >= 0 else self.host_protocol[rank, event]

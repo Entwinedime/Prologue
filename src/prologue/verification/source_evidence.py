@@ -22,7 +22,7 @@ class SourceEvidence:
         self.counts = Counter()
         self.findings = []
         external = {event for event, point in enumerate(self.evidence["events"])
-                    if "protocol_operand" in facts["spans"][point["span"]]
+                    if point["time_ns"] is None and "protocol_operand" in facts["spans"][point["span"]]
                     and graph["resources"][graph["events"][event]["resource"]]["kind"] == "service"}
         self.unmeasured_boundaries = logical | external
         self.maximum_inversion_ns = 0
@@ -206,24 +206,24 @@ class SourceEvidence:
         return orders
 
     def timing(self, kind, index, source, target):
-        missing = {event for event in (source, target) if self.evidence["events"][event]["time_ns"] is None}
-        if missing and missing <= self.logical:
-            self.counts["logical_condition_relations"] += 1
-            return
-        self.clock.constrain(kind, index, source, target)
-        if missing and missing <= self.unmeasured_boundaries:
-
-            # Preserve the unknown constraint count and distinguish every required external duration from lost measurements.
-            self.counts["external_transport_relations"] += 1
-            return
-        begin, end = (self.evidence["events"][event]["time_ns"] for event in (source, target))
-        issue = "unknown_time" if begin is None or end is None else "time_inversion" if begin > end else None
-        if issue is None:
-            return
-        self.counts[issue] += 1
-        difference = None if issue == "unknown_time" else begin - end
-        if difference is not None:
+        begin = self.evidence["events"][source]["time_ns"]
+        end = self.evidence["events"][target]["time_ns"]
+        if begin is None or end is None:
+            missing = {event for event, time in ((source, begin), (target, end)) if time is None}
+            if missing <= self.logical:
+                self.counts["logical_condition_relations"] += 1
+                return
+            if missing <= self.unmeasured_boundaries:
+                self.counts["external_transport_relations"] += 1
+                return
+            issue, difference = "unknown_time", None
+        elif begin > end:
+            issue, difference = "time_inversion", begin - end
             self.maximum_inversion_ns = max(self.maximum_inversion_ns, difference)
+        else:
+            return
+
+        self.counts[issue] += 1
         if self.details or self.counts[issue] <= 3:
             self.findings.append({
                 "issue": issue, "kind": kind, "index": index, "source": source, "target": target,
@@ -233,14 +233,15 @@ class SourceEvidence:
     def inspect(self):
         self.validate_mapping()
 
-        # The case clock already constrains measured paths through independently verified logical gates.
+        # The case clock already fits every measured path. Report missing evidence and nominal inversions here.
         for index, edge in enumerate(self.graph["edges"]):
             self.timing(edge["kind"], index, edge["source"], edge["target"])
         for index, work in enumerate(self.graph["work"]):
             self.timing("work/" + work["kind"], index, work["start"], work["finish"])
-        timing = self.clock.report()
-        if timing["status"] == "incomplete" and timing["unknown_constraints"] == self.counts["external_transport_relations"]:
-            timing["status"] = "external_cost_required"
+        unknown = self.counts["unknown_time"]
+        external = self.counts["external_transport_relations"]
+        status = "incomplete" if unknown else "external_cost_required" if external else "compatible"
+        timing = self.clock.report() | {"status": status, "unknown_constraints": unknown + external}
         return {
             "mapping": "consistent", "timing": timing,
             "events": len(self.graph["events"]), "work": len(self.graph["work"]),

@@ -108,12 +108,11 @@ class NativeCase:
                 raise ValueError(f"elided waits at rank {rank} own measured boundaries: {sorted(invalid)}")
         dependencies = CausalGraph.observed(graph)
         clock = ClockConstraints(graph, raw["device_clock"])
-        anchors = [event for event, point in enumerate(clock.points) if point is not None]
+        measured_events = {event for event, point in enumerate(clock.points) if point is not None}
 
-        # Project across unknown nodes, retaining one shared calibration for all measured causal paths.
-        for left, targets in dependencies.projected(anchors).next.items():
-            for right in targets:
-                clock.constrain("causal", None, anchors[left], anchors[right])
+        # Clock inequalities are transitive, so this check needs no second graph.
+        for source_event, target_event in dependencies.measured_dependencies(measured_events):
+            clock.constrain(source_event, target_event)
         clock.finish()
         if clock.conflict:
             raise ValueError(f"native rank {rank} measurements have no common causal calibration: {clock.explain(graph)}")

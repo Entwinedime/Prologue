@@ -131,6 +131,21 @@ class CausalGraph:
     def projected(self, anchors):
         return GraphProjection(self, anchors).run()
 
+    def measured_dependencies(self, measured):
+        pending = {}
+        for event in self.positions:
+            predecessors = (event,) if event in measured else pending.pop(event, ())
+            if not predecessors:
+                continue
+
+            # A measured intermediate already supplies its own clock constraints.
+            for target in self.next[event]:
+                if target in measured:
+                    for source in predecessors:
+                        yield source, target
+                else:
+                    pending.setdefault(target, set()).update(predecessors)
+
     def add_events(self, events):
         for event in events:
             if event in self.next:
