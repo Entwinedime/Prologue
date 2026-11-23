@@ -451,3 +451,25 @@
 **验证**　Qwen3-8B 与 Mistral-7B-v0.3 在 Ascend TP1 各用一次建库来源和一次独立参考。各匹配 12 个动作和 5 个请求，消费 7,236 和 5,632 项设备工作。31、32 token 各用一个 Prefill；33 token 分 `[0,32)` 和 `[32,33)`，续接后才发首 token。每模型另有 3 个混批，逐批核对 KV 前缀、新写入及发布成员。四次原生运行累计 530.74 卡秒，原始观测约 347 MiB。来源当作参考的尝试被拒绝。[Qwen 对照](../../../data/shared-libraries-on-demand-acquisition/s14/qwen/structure/result.json) · [Mistral 对照](../../../data/shared-libraries-on-demand-acquisition/s14/mistral/structure/result.json) · [原生批次](../../../data/shared-libraries-on-demand-acquisition/s14/source-evidence.json)
 
 **结论与限制**　默认结构发布 `1ae7e038-5f8d-48f8-95b6-35f06e09a928` 增加两个已核对的 TP1 配置。Qwen 固定实测图重新消费原计时，发布边界最大偏差为 0。新配置的自主成本仍报告域外，结构开发证据限于当前页尺寸、两款稠密模型和单实例调度。[发布记录](../../../data/shared-libraries-on-demand-acquisition/s14/default-release.json) · [固定图基线](../../../data/shared-libraries-on-demand-acquisition/s14/qwen/fixed-final.json)
+
+## 2026-11-24 — S15 前缀缓存与调度组合启动
+
+**范围**　从 `8475683` 接续。使用现有 Qwen3-8B、16 token 页，先取 TP1 小池的首次写入、同前缀命中、另一请求造成的驱逐及同前缀重新计算。TP2 小池再同时触发分块、混批及缓存，区分单卡取得的本地模板和同窗物理参考。
+
+**边界**　保留原生 Radix 树、匹配和 LRU 次序，适配器把它选中的真实页及引用操作交给核心。核心分配物理页并核对页是否仍被借用，结束后仍可保留未锁定的缓存驻留。采集与 CPU 控制共同解释合成内容，按原生已读取的前缀生成模板参数。独立记录对照实际页的驻留、释放和读写。
+
+**验证安排**　先集中完成合同、适配和核心资源链，再统一构建。最多六次原生尝试、2,000 卡秒、30 分钟后处理及 10 GiB，新尝试须有明确尚缺的原生证据。TP1 与 TP2 分别保留源和参考，固定图只作现有实测基线回归。
+
+## 2026-11-24 — S15 TP2 来源的批次差异
+
+**证据**　TP1 独立参考匹配 8 个动作、5 次驻留或淘汰效果，固定图回算的发布边界偏差为 0。TP2 单卡运行写完两 rank 的 profile 和 manifest，容器退出触及外层超时。原始来源的两个 rank 都有 20 个同序动作和相同的物理页效果，已通过编译和来源检查。
+
+**问题与处理**　两卡参考的旧请求先于尾部两个请求完成。单卡来源仍有旧请求在途，后段组批因此不同。首轮结构对照在前 12 个动作匹配后报告缺少实际的 Prefill 根查询，合计盘点四个缺失形态。用一份独立两请求的小负载在单卡原生运行，集中采这四种查询所需的实际工作，再用原物理记录对照。同窗物理参考始终归评价端。[首轮对照](../../../data/shared-libraries-on-demand-acquisition/s15/combined/structure/result.json) · [四项需求](../../../data/shared-libraries-on-demand-acquisition/s15/combined/alternate-demands.json)
+
+## 2026-11-24 — S15 前缀缓存与调度组合交付
+
+**改动与审查**　原生树选择命中及驱逐，核心区分请求私有页、缓存驻留页和空闲页，只有解除引用的物理页才可驱逐。配置和内容在入口核对，采集与原生控制共用请求内容。结构对照核验实际写入、保护范围、容量和有序页效果。业务代码净增 512 行，示例编排零改动。三种镜像集中构建通过，S14 固定图回归通过。
+
+**验证**　Qwen3-8B 的 TP1 使用 96 token 池，匹配 8 个动作、4 个请求、5 次缓存效果及 4,976 项设备工作。TP2 使用 128 token 池和 32 token 分块，匹配 20 个动作、6 个请求、17 次缓存效果及 28,924 项工作，实际包含两个混合批次。两种配置均出现同前缀复用 32 token、压力驱逐及从零重算。定向来源只追加需求中的四个根查询，复用原两卡参考。五次原生尝试累计 945.47 卡秒，观测约 1,175 MiB。[TP1 对照](../../../data/shared-libraries-on-demand-acquisition/s15/isolated/structure/result.json) · [TP2 对照](../../../data/shared-libraries-on-demand-acquisition/s15/combined/closure/result.json) · [机制证据](../../../data/shared-libraries-on-demand-acquisition/s15/cache-evidence.json)
+
+**结论与限制**　默认发布 `4241e73a-1df6-4afb-93b5-e338d9303ec8` 增加两个配置域，结构证据覆盖当前 Ascend 稠密单阶段 LRU。TP1 固定图的实测回算发布偏差为 0，新配置的自主成本仍报告域外。后续用规模负载检验观察、展开与比较的开销。[发布记录](../../../data/shared-libraries-on-demand-acquisition/s15/default-release.json) · [固定图基线](../../../data/shared-libraries-on-demand-acquisition/s15/isolated/fixed-baseline.json)
