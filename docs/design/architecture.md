@@ -150,11 +150,11 @@ CPU 消息交接和目标设备通信分别表达。图使用参与者局部资�
 
 原生时钟校准等离线工作使用 Python 的数值工具。验证内的因果投影、可达性等图运算若成为计算或内存热点，可基于稳定的图合同批量交给 C++23。
 
-SGLang 的批次、逻辑组和 KV 布局在 `src/prologue/integrations/frameworks/sglang/` 解释一次。其 `observation/` 和 `control/` 分别驱动原生取证和无设备调度，共用该解释。平台在 `integrations/platforms/ascend/` 提供物理部署、设备标记、时间校准及独立 SDK 证据。
+SGLang 的配置、批次、逻辑组和 KV 布局在 `src/prologue/integrations/frameworks/sglang/` 解释一次。原生取证、调度与采样共用这一解释。平台在 `integrations/platforms/ascend/` 提供物理部署、设备标记、时间校准及独立 SDK 证据。
 
-C++ 的 `graph/` 从共同观测生成粗图，`templates/` 负责切图、归一化和调用绑定。需要成本证据时，模板生产者按原图工作顺序交出定义和区间。服务闭环位于 `serving/`，其 `controller/` 接收原生动作，`resources/` 持有页与槽位，`execution/` 推进事件。C++ 公共库独立于具体框架构建。
+C++ 的 `core/structure/` 从共同观测生成粗图，并负责切图、归一化和调用绑定。`core/serving/` 维护稳定的请求交付顺序、模拟资源和虚拟时钟，处理原生动作及完成反馈。已绑定的工作由 `core/performance/` 判定耗时与适用域。C++ 公共库独立于具体框架构建。
 
-Python 的 `app/` 选择框架和平台并装配命令，`workflow/` 管理用户任务，`acquisition/` 组织观测、生产及采样。原生工作到共享证据的交接在 `acquisition/observation/`，框架专属的来源选择及样本复用在 SGLang 的 `acquisition/`。性能层只拟合已取得资格的测量。任务和观察共用 `prologue.artifacts` 原子发布结果。
+Python 的 `app/` 选择框架和平台并装配命令，`workflow/` 管理用户任务，`acquisition/` 组织共同观测和补采需求，原生入口与框架状态准备由相应适配器负责。`calibration/` 拟合已取得资格的测量，`assets/` 发布可共同读取的模板、模型和规则。业务判定留在实际所有者，`rules/` 维护适用条件及判例。
 
 条件 EP 路由属于 workload：按逻辑请求/token 区间及实际专家层校验，采集与控制使用同一实现；框架 adapter 按原生MoE块配对路由器与专家计算模块，取得各层的top-k、层号和专家数，路由注入与控制复用同一份层几何。不从第一个router推断全模型，也不要求专家计算模块重复维护路由器的选择数。并行 rank 使用原生初始化规则，核心只传递参与者身份及角色事实。原生参数规范化改变用户请求的拓扑时，在启动 worker 前报告，不能把改写后的运行记为原配置成功。
 

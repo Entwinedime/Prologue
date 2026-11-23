@@ -77,3 +77,23 @@
 [R01 参考和三路状态](../../../data/architecture-acquisition-performance/rounds/01/result.json) · [R04 对照结果](../../../data/architecture-acquisition-performance/rounds/04/independent/assessment.json) · [R05 对照结果](../../../data/architecture-acquisition-performance/rounds/05/independent/assessment.json) · [定点 attention 费用](../../../data/architecture-acquisition-performance/f2/attention/handoff.json)
 
 **结论与限制**　S01 交付合同和已有证据分类，本阶段只读核对，未运行采集或构建。旧版报告以开发对照继承，组合、多角色成本及 128 请求以上全链路仍需新版证据。检查时上一窗口的 Qwen 128 请求离线回放仍在运行，容器只读挂载旧工作区。S02 归档前以活跃挂载为准隔离新构建，保留旧运行和任务数据。
+
+## 2026-11-23 — S02 启动并归档旧实现
+
+**范围**　从已推送的 `63c3755` 接续。按用户要求停止旧 Qwen 128 请求回放，确认旧容器和宿主启动进程退出后，在主工作区归档。回放的输入、日志及已有产物原路径保留。
+
+**改动**　原样移动 `src/`、`example/`、`docker/` 到本地 `deprecated/`，留存旧构建配置和设计文档。新构建只沿用不含旧项目代码的系统工具链及原生依赖层。S02 公共入口选用 `plan`，为后续采集和仿真提供按同一请求合同整理的目标。
+
+**验证**　移动前后核对 658 份文件的位置、inode、大小、修改时间和权限。旧回放记录退出码 143，检查时无遗留原生进程。旧工作树的临时隔离副本已撤除。[回放退出记录](../../../data/architecture-acquisition-performance/rounds/17/development/sustained-tp2/qwen/case-128-staggered/replay-full-exit.json)
+
+**结论与限制**　旧代码可按原目录结构查阅，新应用构建、安装和输入合同在本阶段单独交付。
+
+## 2026-11-23 — S02 独立应用交付
+
+**范围**　从新任务 JSON 到已安装的公开入口及 C++ 工作负载合同。S02 使用现有建模软件依赖构建，不占用 NPU。
+
+**改动**　以 `prologue plan` 接收任务。Python 解释 SGLang 配置和目标组合，C++ 负责请求 ID、长度、时间范围和稳定到达顺序。删除旧应用入口、旧采集/控制镜像装配和旧操作说明，保留可复用的软件依赖层。活动 `src/` 的 Python、C++ 及头文件合计 267 行，归档同口径为 43,764 行。旧示例 728 行脚本原样归档，现有输入示例由安装后的命令直接消费。
+
+**验证**　核对 CMake、Python 包、Docker COPY、示例和活动说明的引用。用暂存快照的干净检出编译并安装应用镜像 `3dfa03cf222f`。仅挂载合法输入时列出四个目标并按到达时间排序，零输出 token 的负例退出 2 且不产生计划。在暂存区核对实验数据、个人笔记和旧归档保持本地。[镜像标识](../../../data/shared-libraries-on-demand-acquisition/s02/image.txt) · [合法计划](../../../data/shared-libraries-on-demand-acquisition/s02/plan.json) · [合同负例](../../../data/shared-libraries-on-demand-acquisition/s02/invalid-stderr.txt)
+
+**结论与限制**　S02 的构建、安装和输入合同通过。原生观察、图模板和性能模拟将在后续阶段使用这一构建边界。
