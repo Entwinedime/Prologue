@@ -10,7 +10,8 @@
 
 namespace prologue::structure {
 
-nlohmann::json batch_geometry(const nlohmann::json& phase, const nlohmann::json& members);
+nlohmann::json batch_geometry(const nlohmann::json& phase, const nlohmann::json& members,
+                             const nlohmann::json& expert_routes = nullptr);
 
 class TemplateGap final : public std::runtime_error {
 public:

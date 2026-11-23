@@ -1,7 +1,7 @@
 """Fit exact-coordinate medians from separate native device and host observations."""
 
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from statistics import median
 
 from prologue.acquisition.observation.batches import ObservedBatches, aligned_batches, aligned_collectives
@@ -60,25 +60,33 @@ class Calibration:
         if links != physical.transport_links:
             raise ValueError("the collective samples use a different physical topology")
 
-        measured, unavailable = 0, 0
+        measured = 0
+        unavailable = Counter()
         ranks = [ObservedBatches(rank.evidence).entries for rank in physical.ranks]
         for batches in aligned_batches(ranks):
-            graph = {"calls": [], "work": []}
+            graph = {"calls": [], "work": [], "collectives": []}
             samples = []
-            for entries in aligned_collectives(batches):
+            for entries, transfers in aligned_collectives(batches):
                 parameters = entries[0][1]["parameters"]
                 gates = [rank.gates.get(scope) for rank, (scope, _) in zip(physical.ranks, entries, strict=True)]
                 if None in gates:
-                    unavailable += len(entries)
+                    unavailable["missing_stream_gate"] += len(entries)
                     continue
                 ready = max(gate.ready_raw_ns for gate in gates)
+                if any(gate.completed_raw_ns < ready for gate in gates):
+                    unavailable["completion_before_group_readiness"] += len(entries)
+                    continue
+
+                group_index = len(graph["collectives"])
+                group = {"kind": parameters["kind"]}
+                if transfers is not None:
+                    group["transfers"] = transfers
+                graph["collectives"].append(group)
                 for rank, ((_, call), gate) in enumerate(zip(entries, gates, strict=True)):
                     duration = gate.completed_raw_ns - ready
-                    if duration < 0:
-                        raise ValueError("a collective result precedes the common device readiness")
                     path = [rank, *call["path"]]
                     graph["calls"].append({**call, "path": path})
-                    graph["work"].append({"path": path, "slot": 0, "ordinal": 0, "collective": True,
+                    graph["work"].append({"path": path, "slot": 0, "ordinal": 0, "collective": group_index,
                                           "kind": "collective", "name": parameters["kind"]})
 
                     # Service starts at device readiness. Host submission is outside this coordinate.
@@ -88,7 +96,9 @@ class Calibration:
             self.observations.append((None, samples))
 
         self.record_source("collective", recording.mode, recording.delivery)
-        self.sources[-1].update(measured_results=measured, unattested_results=unavailable)
+        self.sources[-1].update(measured_results=measured, unattested_results=sum(unavailable.values()))
+        if unavailable:
+            self.sources[-1]["unattested_reasons"] = dict(unavailable)
 
     def host(self, directory):
         manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))

@@ -165,12 +165,16 @@ private:
     std::vector<std::string> active_;
 };
 
-json batch_geometry(const json& phase, const json& members) {
+json batch_geometry(const json& phase, const json& members, const json& expert_routes) {
     auto sequence = json::array();
     for (const auto& member : members) {
         sequence.push_back(member.at("kv_committed_tokens"));
     }
-    return {{"phase", phase}, {"sequence_lengths", std::move(sequence)}};
+    json query{{"phase", phase}, {"sequence_lengths", std::move(sequence)}};
+    if (!expert_routes.is_null()) {
+        query["expert_routes"] = expert_routes;
+    }
+    return query;
 }
 
 Templates::Templates(const json& bank, const json& domain, const json& rule) : definitions_(bank.at("definitions")) {

@@ -5,6 +5,7 @@ import json
 from prologue.acquisition.planning import structure_demands
 from prologue.app.core import run_core
 from prologue.assets.publication import Store
+from prologue.integrations.frameworks.sglang.configuration import Configuration
 from prologue.rules.catalog import Rules
 from prologue.rules.review import RuleReview
 
@@ -29,6 +30,23 @@ def template_model(templates, model):
         if entry["model"] == model:
             return entry["model_config"]
     raise ValueError("the template asset has no configuration for the model")
+
+
+def control_inputs(templates, domain, workload):
+    result = {"model_config": template_model(templates, domain["model"])}
+    routes = Configuration(**domain["configuration"]).route_table(workload)
+    if routes is None:
+        return result
+
+    # Routed layers are part of the published source contract, independent of the reference run.
+    layouts = {tuple(row["layer"] for row in root["query"]["expert_routes"])
+               for source in templates["sources"] if source["domain"] == domain
+               for root in source["roots"] if "expert_routes" in root["query"]}
+    if len(layouts) != 1:
+        raise ValueError("the template sources require one native routed layer layout for this domain")
+    layers, = layouts
+    result["expert_routes"] = {"layers": list(layers), "routes": routes, "requests": workload["requests"]}
+    return result
 
 
 def structure_targets(batch):

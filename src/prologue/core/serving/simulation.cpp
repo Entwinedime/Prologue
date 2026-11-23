@@ -124,7 +124,8 @@ void Simulation::execute(const json& message) {
     }
     require_residence(0, message);
 
-    const auto query = structure::batch_geometry(message.at("phase"), message.at("members"));
+    const auto query = structure::batch_geometry(message.at("phase"), message.at("members"),
+                                                 message.value("expert_routes", json{}));
     auto graph = templates_.expand(query);
 
     // Only a fully selected action can query time. The provider cannot choose the graph.
@@ -141,6 +142,9 @@ void Simulation::execute(const json& message) {
         {"phase", message.at("phase")}, {"members", message.at("members")}, {"began_ns", started},
         {"model_ready_ns", now()}, {"publications", json::array()},
     };
+    if (message.contains("expert_routes")) {
+        current_["expert_routes"] = message.at("expert_routes");
+    }
     if (record_structure_) {
         auto observed = json::array();
         for (const auto& interval : completed.intervals) {
@@ -204,7 +208,11 @@ void Simulation::finish_action() {
 json Simulation::request(const json& message) {
     const auto operation = message.at("operation").get<std::string>();
     if (operation == "initialize") {
-        return {{"domain", job_.at("domain")}, {"model_config", job_.at("model_config")}};
+        json setup{{"domain", job_.at("domain")}, {"model_config", job_.at("model_config")}};
+        if (job_.contains("expert_routes")) {
+            setup["expert_routes"] = job_.at("expert_routes");
+        }
+        return setup;
     }
     if (pipeline_) {
         return pipeline_->request(message);

@@ -48,6 +48,8 @@ class StructureComparison:
             return {"failure": {"status": "timing_gap", "reason": f"no measured work at {key}"}}
         if query["work"] != expected:
             return {"failure": {"status": "action_mismatch", "reason": f"work differs at {key}"}}
+        if query["action"].get("expert_routes") != self.actions[index].get("expert_routes"):
+            return {"failure": {"status": "action_mismatch", "reason": f"expert routing differs at {key}"}}
 
         # The reference owns the measured graph. A selected action receives only elapsed times.
         return self.measurements[index]

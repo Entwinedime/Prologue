@@ -53,7 +53,7 @@ def main():
 
                 from prologue.integrations.frameworks.sglang.control.scheduler import NativeScheduler
 
-                NativeScheduler(peer, model, domain).drive()
+                NativeScheduler(peer, model, domain, expert_routes=setup.get("expert_routes")).drive()
 
 
 if __name__ == "__main__":

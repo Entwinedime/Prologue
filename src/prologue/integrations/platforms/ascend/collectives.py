@@ -49,10 +49,11 @@ class PhysicalRank:
 
         result = {}
         for scope, rows in by_scope.items():
-            if [row["kind"] for row in rows] == ["EVENT_RECORD", "EVENT_WAIT"]:
-                record, wait = rows
-                result[scope] = CollectiveGate(record["end_ns"] + self.offset_ns, wait["end_ns"] + self.offset_ns,
-                                               record["id"], wait["id"])
+            if [row["kind"] for row in rows[:2]] == ["EVENT_RECORD", "EVENT_WAIT"]:
+                # An in-call reorder can be required before the result is available to its caller.
+                record, complete = rows[0], rows[-1]
+                result[scope] = CollectiveGate(record["end_ns"] + self.offset_ns, complete["end_ns"] + self.offset_ns,
+                                               record["id"], complete["id"])
         return result
 
     def transport_links(self):

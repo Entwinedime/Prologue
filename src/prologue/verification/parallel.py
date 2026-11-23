@@ -27,7 +27,7 @@ class RecordedParallelBatch:
             pending.append(deque((node, row) for node, row in zip(batch.graph["work"], batch.device, strict=True)
                                  if row["owner"] not in cuts))
 
-        for entries in aligned_collectives(batches):
+        for entries, transfers in aligned_collectives(batches):
             gates = [profile.gates.get(scope) for profile, (scope, _) in zip(profiles, entries, strict=True)]
             if None in gates:
                 raise ValueError("the physical reference is missing a collective stream gate")
@@ -46,7 +46,10 @@ class RecordedParallelBatch:
                 node = {"path": path, "kind": "collective", "name": kind, "ordinal": 0, "slot": 0,
                         "after": predecessors, "collective": len(self.groups)}
                 results.append(self.append(rank, node, ready, gate.completed_raw_ns))
-            self.groups.append({"kind": kind, "results": results})
+            group = {"kind": kind, "results": results}
+            if transfers is not None:
+                group["transfers"] = transfers
+            self.groups.append(group)
 
         for rank, queue in enumerate(pending):
             self.take_local(rank, queue, profiles[rank].offset_ns)

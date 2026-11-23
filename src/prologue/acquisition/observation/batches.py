@@ -19,13 +19,42 @@ def aligned_batches(ranks):
 
 def aligned_collectives(batches):
     for entries in zip(*(batch.collectives() for batch in batches), strict=True):
-        first = entries[0][1]
-        if first["parameters"]["participants"] != list(range(len(entries))) or any(
-            any(call[name] != first[name] for name in ("parameters", "inputs", "outputs"))
-            for _, call in entries[1:]
-        ):
-            raise ValueError("the observed collective operands disagree across ranks")
-        yield entries
+        calls = [call for _, call in entries]
+        participants = calls[0]["parameters"]["participants"]
+        if participants != list(range(len(entries))):
+            raise ValueError("the observed collective participants disagree with the physical ranks")
+        if calls[0]["parameters"]["kind"] == "all_to_all":
+            yield entries, observed_transfers(calls, participants)
+        else:
+            if any(any(call[name] != calls[0][name] for name in ("parameters", "inputs", "outputs"))
+                   for call in calls[1:]):
+                raise ValueError("the observed collective operands disagree across ranks")
+            yield entries, None
+
+
+def observed_transfers(calls, participants):
+    sends, receives = [], []
+    first = calls[0]["parameters"]
+    for call in calls:
+        parameters = call["parameters"]
+        if any(parameters[key] != first[key] for key in ("kind", "phase", "participants")):
+            raise ValueError("the observed AllToAll calls disagree on their execution phase or participants")
+        for key, direction, result in (("send_rows", "inputs", sends), ("receive_rows", "outputs", receives)):
+            splits = parameters[key]
+            port, = call[direction]
+            if len(splits) != len(participants) or min(splits) < 0 or sum(splits) != port["shape"][0]:
+                raise ValueError("native AllToAll row counts disagree with the tensor port")
+            result.append(splits)
+
+    transfers = []
+    for source in participants:
+        for target in participants:
+            rows = sends[source][target]
+            if rows != receives[target][source]:
+                raise ValueError(f"the native AllToAll row count disagrees for {source} to {target}")
+            if rows > 0:
+                transfers.append({"source": source, "target": target, "rows": rows})
+    return transfers
 
 
 @dataclass(slots=True)
@@ -39,7 +68,10 @@ class ObservedBatch:
 
     def action(self):
         members = [{**member, "slot": member["slot"] - 1} for member in self.call["members"]]
-        return {"phase": self.call["parameters"]["phase"], "members": members}
+        action = {"phase": self.call["parameters"]["phase"], "members": members}
+        if "expert_routes" in self.call:
+            action["expert_routes"] = self.call["expert_routes"]
+        return action
 
     def collectives(self):
         return [(scope, call) for scope, call in zip(self.scopes, self.graph["calls"], strict=True)

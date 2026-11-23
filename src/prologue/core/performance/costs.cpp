@@ -2,6 +2,7 @@
 
 #include "prologue/core/structure/templates/library.hpp"
 
+#include <cstddef>
 #include <optional>
 #include <span>
 #include <unordered_set>
@@ -65,7 +66,8 @@ json missing_cost(bool covered_domain) {
 CostGap::CostGap(json gap) : std::runtime_error(gap.at("reason").get<std::string>()), detail(std::move(gap)) {}
 
 CostQueries::CostQueries(const json& action, const json& graph)
-    : host{{"family", "host_thread"}, {"geometry", structure::batch_geometry(action.at("phase"), action.at("members"))}},
+    : host{{"family", "host_thread"}, {"geometry", structure::batch_geometry(action.at("phase"), action.at("members"),
+                                                                            action.value("expert_routes", json{}))}},
       device(json::array()) {
     std::unordered_map<std::string, const json*> scopes;
     for (const auto& call : graph.at("calls")) {
@@ -85,6 +87,10 @@ CostQueries::CostQueries(const json& action, const json& graph)
         if (work.contains("collective")) {
             coordinate["family"] = "collective";
             coordinate["rank"] = work.at("path").front();
+            const auto& group = graph.at("collectives").at(work.at("collective").get<std::size_t>());
+            if (group.contains("transfers")) {
+                coordinate["transfers"] = group.at("transfers");
+            }
         }
         device.push_back(std::move(coordinate));
     }

@@ -18,6 +18,7 @@ from sglang.srt.server_args import PortArgs, ServerArgs
 
 from prologue.integrations.frameworks.sglang.control.resources import PageView
 from prologue.integrations.frameworks.sglang.control.runner import MetadataRunner
+from prologue.integrations.frameworks.sglang.expert_routes import ExpertRoutes
 
 
 class Finished(Exception):
@@ -78,7 +79,7 @@ class Publications:
 
 
 class NativeScheduler(Scheduler):
-    def __init__(self, peer, model_directory, domain, stage=0):
+    def __init__(self, peer, model_directory, domain, stage=0, *, expert_routes=None):
         self.peer = peer
         config = domain["configuration"]
         args = ServerArgs(
@@ -104,6 +105,11 @@ class NativeScheduler(Scheduler):
             native_scheduler.create_scheduler_watchdog = original_watchdog
 
         self.request_receiver = Inbox(peer, self.model_config.vocab_size)
+        self.expert_alignment = config["tp"] if config.get("ep", 1) > 1 else 1
+        self.experts = None
+        if expert_routes is not None:
+            self.experts = ExpertRoutes(expert_routes["routes"], expert_routes["requests"], expert_routes["layers"],
+                                        self.model_config.hf_config.num_hidden_layers)
         self.publications = None
         if self.output_streamer.send_to_detokenizer.socket is not None:
             self.publications = Publications(peer)
@@ -142,7 +148,10 @@ class NativeScheduler(Scheduler):
 
     def submit_batch(self, batch, result, proxy, phase, members):
         # Result processing begins only after the core closes the device and host boundaries.
-        self.peer.call("execute", phase=phase, members=members)
+        action = {"phase": phase, "members": members}
+        if self.experts is not None:
+            action["expert_routes"] = self.experts.aligned(batch, self.expert_alignment)
+        self.peer.call("execute", **action)
         return result
 
     def process_batch_result(self, batch, result):

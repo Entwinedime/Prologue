@@ -7,13 +7,13 @@ from pathlib import Path
 from prologue.app.acquire import plan_costs, sample_costs
 from prologue.app.core import run_core, run_simulation
 from prologue.app.releases import (
+    control_inputs,
     cost_quotes,
     pinned,
     publish,
     query_structure,
     read_document,
     structure_targets,
-    template_model,
 )
 from prologue.app.task import Plan
 from prologue.assets.publication import Store
@@ -121,7 +121,7 @@ def verify_structure(args):
                                   [{"domain": recording.domain, "queries": queries}], include_graph=True)
         reference.prepare(document["programs"], graphs)
     job = {"domain": reference.domain, "workload": reference.workload,
-           "templates": templates, "model_config": template_model(templates, reference.domain["model"]),
+           "templates": templates, **control_inputs(templates, reference.domain, reference.workload),
            "rules": rules.document, "record_structure": True}
     result = reference.compare(run_simulation(job, args.socket, reference))
     return {**result, "release": release["release"]}
@@ -157,7 +157,7 @@ def predict(args):
     domain = {"framework_revision": revisions.pop(), "model": task["model"], "configuration": configuration}
 
     job = {"domain": domain, "cost_domain": {**domain, "hardware": read_document(args.hardware)}, "workload": workload,
-           "costs": costs, "templates": templates, "model_config": template_model(templates, task["model"]),
+           "costs": costs, "templates": templates, **control_inputs(templates, domain, workload),
            "rules": rules.document}
     result = run_core("predict", job, str(args.socket))
     return {**result, "domain": domain, "workload": workload, "cost_sources": costs["sources"],

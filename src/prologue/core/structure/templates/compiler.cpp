@@ -232,7 +232,7 @@ std::vector<Root> compile_calls(const json& observation, const std::unordered_se
         }
 
         auto query = call.contains("query") ? call.at("query")
-            : batch_geometry(call.at("parameters").at("phase"), call.at("members"));
+            : batch_geometry(call.at("parameters").at("phase"), call.at("members"), call.value("expert_routes", json{}));
         if (wanted.empty() || wanted.contains(query.dump())) {
             included.insert(index);
             selected_roots.push_back({index, std::move(query)});
