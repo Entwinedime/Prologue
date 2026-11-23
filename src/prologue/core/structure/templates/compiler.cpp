@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -18,6 +19,7 @@ namespace {
 
 using nlohmann::json;
 using Index = std::size_t;
+using Scopes = std::unordered_set<Index>;
 
 struct Root final {
     Index call;
@@ -37,6 +39,15 @@ public:
 
     json take() {
         return std::move(entries_);
+    }
+
+    Index compose(const std::string& operation, json parameters, json children) {
+        return insert({
+            {"operation", operation}, {"implementation", operation},
+            {"parameters", std::move(parameters)}, {"children", std::move(children)},
+            {"inputs", json::array()}, {"outputs", json::array()},
+            {"device_work", json::array()}, {"tensor_links", json::array()},
+        });
     }
 
 private:
@@ -94,8 +105,8 @@ private:
 
 class Calls final {
 public:
-    Calls(const json& calls, const json& observed_work)
-        : calls_(calls), children_(calls.size()), work_(calls.size()) {
+    Calls(const json& calls, const json& observed_work, const Scopes& roots)
+        : calls_(calls), children_(calls.size()), work_(calls.size()), scopes_(calls.size()) {
         if (!calls.is_array() || calls.empty() || !observed_work.is_array()) {
             throw std::invalid_argument("template compilation requires observed calls and device work");
         }
@@ -115,12 +126,22 @@ public:
                     throw std::invalid_argument("an imported call only observes ports");
                 }
                 children_.at(parent).push_back(index);
+                scopes_.at(index) = scopes_.at(parent);
+            }
+            if (roots.contains(index)) {
+                if (scopes_.at(index)) {
+                    throw std::invalid_argument("selected template roots overlap");
+                }
+                scopes_.at(index) = index;
             }
         }
 
-        std::unordered_map<Index, Index> lanes;
+        std::unordered_map<Index, std::unordered_map<Index, Index>> lanes;
         for (const auto& entry : observed_work) {
             const auto owner = entry.at("owner").get<Index>();
+            if (!scopes_.at(owner)) {
+                continue;
+            }
             const auto& call = calls_.at(owner);
             const auto slot = entry.at("slot").get<Index>();
             if (call.contains("template_query")) {
@@ -130,11 +151,14 @@ public:
                 throw std::invalid_argument("device submission must fall between observed child calls");
             }
 
-            // The common collective owns the result. Transport tasks are physical evidence.
-            if (call.at("operation") == "collective") {
+            // Logical communication and signal cuts retain their native ports. SDK work stays with the physical evidence.
+            const auto& operation = call.at("operation");
+            if (operation == "collective" || operation == "transfer_post" || operation == "transfer_wait" ||
+                operation == "signal_record" || operation == "signal_wait") {
                 continue;
             }
-            const auto lane = lanes.try_emplace(entry.at("lane").get<Index>(), lanes.size()).first->second;
+            auto& local_lanes = lanes[*scopes_.at(owner)];
+            const auto lane = local_lanes.try_emplace(entry.at("lane").get<Index>(), local_lanes.size()).first->second;
             work_.at(owner).push_back({{"slot", slot}, {"lane", lane},
                                        {"kind", entry.at("kind")}, {"name", entry.at("name")}});
         }
@@ -147,6 +171,18 @@ public:
         }
     }
 
+    std::vector<Index> compile(Definitions& definitions) const {
+        std::vector<Index> selected(calls_.size());
+        for (Index next = calls_.size(); next > 0; --next) {
+            const auto index = next - 1;
+            if (scopes_.at(index) && !calls_.at(index).contains("template_query")) {
+                selected.at(index) = definitions.insert(definition(index, selected));
+            }
+        }
+        return selected;
+    }
+
+private:
     json definition(Index index, const std::vector<Index>& selected) const {
         const auto& call = calls_.at(index);
         const auto& direct = children_.at(index);
@@ -178,31 +214,27 @@ public:
         };
     }
 
-private:
     const json& calls_;
     std::vector<std::vector<Index>> children_;
     std::vector<std::vector<json>> work_;
+    std::vector<std::optional<Index>> scopes_;
 };
 
 std::vector<Root> compile_calls(const json& observation, const std::unordered_set<std::string>& wanted,
                                 Definitions& definitions) {
     const auto& calls = observation.at("calls");
-    const Calls graph(calls, observation.at("work"));
-
     std::vector<Root> selected_roots;
-    std::vector<bool> included(calls.size());
+    Scopes included;
     for (Index index = 0; index < calls.size(); ++index) {
         const auto& call = calls.at(index);
-        const auto& parent = call.at("parent");
-        if (!parent.is_null()) {
-            included.at(index) = included.at(parent.get<Index>());
+        if (!call.at("parent").is_null()) {
             continue;
         }
 
         auto query = call.contains("query") ? call.at("query")
             : batch_geometry(call.at("parameters").at("phase"), call.at("members"));
         if (wanted.empty() || wanted.contains(query.dump())) {
-            included.at(index) = true;
+            included.insert(index);
             selected_roots.push_back({index, std::move(query)});
         }
     }
@@ -210,15 +242,7 @@ std::vector<Root> compile_calls(const json& observation, const std::unordered_se
         throw std::invalid_argument("source observations did not cover the required root queries");
     }
 
-    std::vector<Index> selected(calls.size());
-    for (Index next = calls.size(); next > 0; --next) {
-        const auto index = next - 1;
-        if (!included.at(index) || calls.at(index).contains("template_query")) {
-            continue;
-        }
-        selected.at(index) = definitions.insert(graph.definition(index, selected));
-    }
-
+    const auto selected = Calls(calls, observation.at("work"), included).compile(definitions);
     for (auto& root : selected_roots) {
         root.definition = selected.at(root.call);
     }
@@ -281,13 +305,60 @@ json parallel_roots(const json& observation, const std::unordered_set<std::strin
             }
             children.push_back(action->second.definition);
         }
-        const auto identity_in_bank = definitions.insert({
-            {"operation", "parallel_batch"}, {"implementation", "parallel_batch"},
-            {"parameters", {{"ranks", ranks}, {"publication_rank", publisher}}}, {"children", std::move(children)},
-            {"inputs", json::array()}, {"outputs", json::array()},
-            {"device_work", json::array()}, {"tensor_links", json::array()},
-        });
+        const auto identity_in_bank = definitions.compose(
+            "parallel_batch", {{"ranks", ranks}, {"publication_rank", publisher}}, std::move(children));
         roots.push_back({{"query", root.query}, {"definition", identity_in_bank}});
+    }
+    return roots;
+}
+
+json program_roots(const json& observation, const std::unordered_set<std::string>& wanted, Definitions& definitions) {
+    std::vector<std::pair<json, const json*>> selected;
+    std::map<Index, Scopes> scopes;
+    for (const auto& program : observation.at("programs")) {
+        auto query = batch_geometry(program.at("phase"), program.at("members"));
+        if (!wanted.empty() && !wanted.contains(query.dump())) {
+            continue;
+        }
+
+        selected.emplace_back(std::move(query), &program);
+        for (const auto& step : program.at("steps")) {
+            for (const auto& scope : step.at("scopes")) {
+                scopes[scope.at("observed_rank").get<Index>()].insert(scope.at("scope").get<Index>());
+            }
+        }
+    }
+    if (selected.empty()) {
+        throw std::invalid_argument("pipeline observations did not cover the required root queries");
+    }
+
+    std::unordered_map<Index, std::vector<Index>> compiled;
+    for (const auto& worker : observation.at("workers")) {
+        const auto rank = worker.at("rank").get<Index>();
+        const auto& document = worker.at("document");
+        compiled.emplace(rank, Calls(document.at("calls"), document.at("work"), scopes.at(rank)).compile(definitions));
+    }
+
+    auto roots = json::array();
+    for (auto& [query, program] : selected) {
+        auto steps = json::array();
+        auto children = json::array();
+        for (const auto& step : program->at("steps")) {
+            auto ranks = json::array();
+            auto bindings = json::array();
+            for (const auto& scope : step.at("scopes")) {
+                const auto representative = scope.at("observed_rank").get<Index>();
+                ranks.push_back(scope.at("rank"));
+                bindings.push_back(compiled.at(representative).at(scope.at("scope").get<Index>()));
+            }
+            steps.push_back({{"stage", step.at("stage")}, {"name", step.at("name")}, {"queue", step.at("queue")}});
+            children.push_back(definitions.compose("parallel_step", {{"ranks", std::move(ranks)}}, std::move(bindings)));
+        }
+        const auto root = definitions.compose("pipeline_batch",
+            {{"steps", std::move(steps)}, {"dependencies", program->at("dependencies")},
+             {"transfers", program->at("transfers")}, {"publication_rank", program->at("publication_rank")}},
+            std::move(children));
+        roots.push_back({{"query", std::move(query)}, {"definition", root}});
     }
     return roots;
 }
@@ -303,7 +374,9 @@ nlohmann::json Compiler::compile(const nlohmann::json& observation) const {
     }
     Definitions definitions;
     auto roots = json::array();
-    if (observation.contains("workers")) {
+    if (observation.contains("programs")) {
+        roots = program_roots(observation, wanted, definitions);
+    } else if (observation.contains("workers")) {
         roots = parallel_roots(observation, wanted, definitions);
     } else {
         for (auto& root : compile_calls(observation, wanted, definitions)) {

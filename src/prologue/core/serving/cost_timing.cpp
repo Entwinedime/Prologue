@@ -48,4 +48,15 @@ ActionTiming CostTiming::for_action(const nlohmann::json& action, const nlohmann
     return timing;
 }
 
+ProgramTiming CostTiming::for_program(const nlohmann::json& action, const nlohmann::json& graph) {
+    const auto geometry = structure::batch_geometry(action.at("phase"), action.at("members"));
+    auto coordinates = nlohmann::json::array();
+    for (const auto& step : graph.at("steps")) {
+        coordinates.push_back({{"family", "host_thread"}, {"geometry", geometry},
+                               {"stage", step.at("stage")}, {"cut", step.at("name")}});
+    }
+    throw performance::CostGap({{"status", "cost_gap"}, {"reason", "pipeline cuts need qualified timing models"},
+                                {"domain", domain_}, {"coordinates", std::move(coordinates)}});
+}
+
 }

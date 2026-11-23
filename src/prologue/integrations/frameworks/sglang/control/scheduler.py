@@ -47,9 +47,11 @@ class Inbox:
         turn = self.peer.call("arrivals")
         if turn["done"]:
             raise Finished
+        return self.requests(turn["requests"])
 
+    def requests(self, entries):
         requests = []
-        for request in turn["requests"]:
+        for request in entries:
             sampling = SamplingParams(max_new_tokens=request["output_tokens"], ignore_eos=True, temperature=0)
             sampling.normalize(None)
             sampling.verify(self.vocabulary)
@@ -65,16 +67,18 @@ class Inbox:
 class Publications:
     def __init__(self, peer):
         self.peer = peer
+        self.program = None
 
     def send_output(self, output, *args, **kwargs):
         if not isinstance(output, BatchTokenIDOutput):
             return
-        for request, count, finished in zip(output.rids, output.completion_tokens, output.finished_reasons, strict=True):
-            self.peer.call("publish", request=request, count=count, finished=finished is not None)
+        publications = zip(output.rids, output.completion_tokens, output.finished_reasons, strict=True)
+        for request, count, finished in publications:
+            self.peer.call("publish", request=request, count=count, finished=finished is not None, program=self.program)
 
 
 class NativeScheduler(Scheduler):
-    def __init__(self, peer, model_directory, domain):
+    def __init__(self, peer, model_directory, domain, stage=0):
         self.peer = peer
         config = domain["configuration"]
         args = ServerArgs(
@@ -84,6 +88,7 @@ class NativeScheduler(Scheduler):
             max_prefill_tokens=config["max_prefill_tokens"], page_size=config["page_size"],
             chunked_prefill_size=-1, disable_radix_cache=True, disable_overlap_schedule=True,
             disable_cuda_graph=True, disable_custom_all_reduce=True, stream_interval=1, random_seed=13,
+            pp_size=config.get("pp", 1), pp_max_micro_batch_size=config.get("microbatch_requests"),
         )
 
         # Native initialization still constructs the policy, caches and event loop.
@@ -93,13 +98,16 @@ class NativeScheduler(Scheduler):
         native_scheduler.create_scheduler_watchdog = self.expiration_owner
         try:
             super().__init__(args, PortArgs.init_new(args), gpu_id=0, tp_rank=0, moe_ep_rank=0,
-                             pp_rank=0, attn_cp_rank=0, moe_dp_rank=0, dp_rank=None)
+                             pp_rank=stage, attn_cp_rank=0, moe_dp_rank=0, dp_rank=None)
         finally:
             model_runner.ModelRunner = original_runner
             native_scheduler.create_scheduler_watchdog = original_watchdog
 
         self.request_receiver = Inbox(peer, self.model_config.vocab_size)
-        self.output_streamer.send_to_detokenizer = Publications(peer)
+        self.publications = None
+        if self.output_streamer.send_to_detokenizer.socket is not None:
+            self.publications = Publications(peer)
+            self.output_streamer.send_to_detokenizer = self.publications
         self.model_worker.forward_batch_generation = self.model_result
         PageView.install()
 
@@ -115,7 +123,7 @@ class NativeScheduler(Scheduler):
             next_token_ids=torch.ones(batch.batch_size(), dtype=torch.int64),
         )
 
-    def run_batch(self, batch, *args, **kwargs):
+    def run_batch(self, batch, pp_proxy_tensors=None):
         if batch.forward_mode.is_decode():
             phase = "decode"
         elif batch.forward_mode.is_extend():
@@ -129,8 +137,10 @@ class NativeScheduler(Scheduler):
              "output_tokens": len(request.output_ids)}
             for request in batch.reqs
         ]
-        result = super().run_batch(batch, *args, **kwargs)
+        result = super().run_batch(batch, pp_proxy_tensors)
+        return self.submit_batch(batch, result, pp_proxy_tensors, phase, members)
 
+    def submit_batch(self, batch, result, proxy, phase, members):
         # Result processing begins only after the core closes the device and host boundaries.
         self.peer.call("execute", phase=phase, members=members)
         return result

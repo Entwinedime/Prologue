@@ -79,14 +79,22 @@ class ObservedBatches:
         work_by_root = defaultdict(list)
         device_by_root = defaultdict(list)
         coordinates = {}
+        lanes = defaultdict(dict)
+        order = {}
+        for row in evidence["work"]:
+            root, _ = parents[row["owner"]]
+            lane = row["lane"]
+            order[row["id"]] = lanes[root].setdefault(lane, len(lanes[root]))
+
         for call in calls:
             identity = call["id"]
             root, path = parents[identity]
             calls_by_root[root].append(self.call_structure(call, path, children[identity]))
             scopes_by_root[root].append(identity)
-            local = sorted(owned[identity], key=lambda row: (row["slot"], row["lane"]))
+            local = sorted(owned[identity], key=lambda row: (row["slot"], order[row["id"]]))
             for ordinal, row in enumerate(local):
-                description = {name: row[name] for name in ("slot", "lane", "kind", "name")}
+                description = {name: row[name] for name in ("slot", "kind", "name")}
+                description["lane"] = order[row["id"]]
                 coordinates[row["id"]] = {**description, "path": path, "ordinal": ordinal}
         for row in evidence["work"]:
             root, _ = parents[row["owner"]]

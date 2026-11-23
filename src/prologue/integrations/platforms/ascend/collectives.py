@@ -23,7 +23,6 @@ class PhysicalRank:
         self.publications = observation.publications
         self.directory = recording.profile_directory(rank)
         self.offset_ns = self.clock_offset()
-        self.gates = self.collective_gates()
 
     def clock_offset(self):
         start, = self.directory.rglob("host/start_info")
@@ -71,6 +70,8 @@ class PhysicalCollectives:
         if recording.windows is None or recording.manifest["placement"] != "full" or len(recording.windows) != 1:
             raise ValueError("physical collectives require a simultaneous full-rank recording")
         self.ranks = [PhysicalRank(recording, rank) for rank in recording.bindings()]
+        for rank in self.ranks:
+            rank.gates = rank.collective_gates()
         self.hardware = AscendEvidence.hardware(self.ranks[0].directory)
         if any(AscendEvidence.hardware(rank.directory) != self.hardware for rank in self.ranks[1:]):
             raise ValueError("the collective recording has different accelerators or native software across ranks")

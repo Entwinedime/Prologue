@@ -101,7 +101,8 @@ nlohmann::json serve_control(const std::string& socket_path, serving::Simulation
     while (const auto message = channel.receive()) {
         try {
             auto reply = simulation.request(*message);
-            const bool drained = message->at("operation") == "arrivals" && reply.at("done").get<bool>();
+            const auto& operation = message->at("operation");
+            const bool drained = (operation == "arrivals" || operation == "turn") && reply.at("done").get<bool>();
             channel.respond({{"now_ns", simulation.now()}, {"result", std::move(reply)}});
             if (drained) {
                 return simulation.result("complete", "");

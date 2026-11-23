@@ -21,7 +21,7 @@ from prologue.integrations.platforms.ascend.evidence import AscendEvidence, Asce
 from prologue.rules.catalog import Rules
 
 
-def template_document(recording):
+def template_document(recording, projections=None):
     if recording.windows is None:
         return recording.read().document()
 
@@ -29,11 +29,19 @@ def template_document(recording):
     workers = []
     evidence = {}
     for rank in sorted(recording.profiles):
-        observation = recording.read(rank).document()
+        observation = recording.read(rank).document() if projections is None else projections[rank]
         workers.append({"rank": rank, "document": {key: observation[key] for key in ("calls", "work")}})
         evidence[rank] = observation["evidence"]
-    return {"domain": recording.domain, "workers": workers, "rank_bindings": bindings,
-            "publication_rank": recording.publication_rank(), "evidence": evidence}
+    document = {"domain": recording.domain, "workers": workers, "rank_bindings": bindings,
+                "publication_rank": recording.publication_rank(), "evidence": evidence}
+    if recording.domain["configuration"].get("pp", 1) > 1:
+        from prologue.integrations.frameworks.sglang.observation.pipeline_source import PipelinePrograms
+
+        pipeline = PipelinePrograms(recording, workers, bindings)
+        document["programs"] = pipeline.programs()
+        for worker in workers:
+            worker["document"]["calls"] = pipeline.observed[worker["rank"]].normalize()
+    return document
 
 
 def compile_source(args):
@@ -86,18 +94,32 @@ def verify_structure(args):
     store, release, rules = pinned(args)
     templates = store.asset(release, "templates")
     recording = AscendRecording(args.reference)
-    if recording.windows is None:
-        reference = detailed_reference(recording)
-    else:
-        from prologue.verification.parallel import ParallelStructureReference
-
-        reference = ParallelStructureReference(recording)
-    if not any(source["domain"] == reference.domain for source in templates["sources"]):
+    if not any(source["domain"] == recording.domain for source in templates["sources"]):
         raise ValueError("template and reference domains disagree")
     origin = recording.delivery["origin_raw_ns"]
     if any(source["source"]["origin_raw_ns"] == origin for source in templates["sources"]):
         raise ValueError("the structure reference was used to build templates")
 
+    if recording.windows is None:
+        reference = detailed_reference(recording)
+    elif recording.domain["configuration"].get("pp", 1) == 1:
+        from prologue.verification.parallel import ParallelStructureReference
+
+        reference = ParallelStructureReference(recording)
+    else:
+        from prologue.app.releases import prepare_templates, query_templates
+        from prologue.verification.pipeline import PipelineReference
+
+        reference = PipelineReference(recording)
+        document = template_document(recording, {rank: trace.evidence for rank, trace in reference.traces.items()})
+        measured_asset = run_core("templates", document)
+        measured_asset["model_config"] = recording.manifest["model_config"]
+        measured_asset["source"] = {"purpose": "structure_reference"}
+        measured_bank = prepare_templates([measured_asset], rules.templates)
+        queries = [entry["query"] for entry in measured_asset["roots"]]
+        graphs, = query_templates(measured_bank, rules.templates,
+                                  [{"domain": recording.domain, "queries": queries}], include_graph=True)
+        reference.prepare(document["programs"], graphs)
     job = {"domain": reference.domain, "workload": reference.workload,
            "templates": templates, "model_config": template_model(templates, reference.domain["model"]),
            "rules": rules.document, "record_structure": True}

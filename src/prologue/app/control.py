@@ -32,9 +32,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("socket", type=Path)
     inputs = parser.parse_args()
-    CpuDeclarations.install(Path("/opt/prologue/sglang/sgl-kernel/python"))
-
-    from prologue.integrations.frameworks.sglang.control.scheduler import NativeScheduler
+    kernel_python = Path("/opt/prologue/sglang/sgl-kernel/python")
 
     with socket.socket(socket.AF_UNIX) as connection, TemporaryDirectory(prefix="prologue-control-") as temporary:
         connection.connect(str(inputs.socket))
@@ -45,7 +43,17 @@ def main():
                 raise ValueError("control framework revision differs from the source domain")
             model = Path(temporary)
             (model / "config.json").write_text(json.dumps(setup["model_config"]), encoding="utf-8")
-            NativeScheduler(peer, model, setup["domain"]).drive()
+            domain = setup["domain"]
+            if domain["configuration"].get("pp", 1) > 1:
+                from prologue.app.control_group import ControlGroup
+
+                ControlGroup(peer, model, domain, kernel_python).drive()
+            else:
+                CpuDeclarations.install(kernel_python)
+
+                from prologue.integrations.frameworks.sglang.control.scheduler import NativeScheduler
+
+                NativeScheduler(peer, model, domain).drive()
 
 
 if __name__ == "__main__":

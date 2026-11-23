@@ -11,11 +11,13 @@ find_package(nlohmann_json 3.11 REQUIRED)
 add_library(prologue_core STATIC
     src/prologue/core/performance/costs.cpp
     src/prologue/core/serving/cost_timing.cpp
+    src/prologue/core/serving/pipeline.cpp
     src/prologue/core/serving/resources.cpp
     src/prologue/core/serving/simulation.cpp
     src/prologue/core/serving/timeline.cpp
     src/prologue/core/serving/workload.cpp
     src/prologue/core/structure/parallel.cpp
+    src/prologue/core/structure/pipeline.cpp
     src/prologue/core/structure/templates/bank.cpp
     src/prologue/core/structure/templates/compiler.cpp
     src/prologue/core/structure/templates/library.cpp

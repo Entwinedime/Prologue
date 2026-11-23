@@ -10,6 +10,7 @@ public:
     CostTiming(const nlohmann::json& domain, const performance::CostCatalog& costs);
 
     ActionTiming for_action(const nlohmann::json& action, const nlohmann::json& graph) override;
+    ProgramTiming for_program(const nlohmann::json& action, const nlohmann::json& graph) override;
 
 private:
     const nlohmann::json& domain_;

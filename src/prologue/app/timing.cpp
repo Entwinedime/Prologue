@@ -57,6 +57,40 @@ serving::ActionTiming read_timing(const json& record, const json& work) {
     return timing;
 }
 
+serving::ProgramTiming read_program_timing(const json& record, const json& graph) {
+    auto interval = [](const json& item) {
+        const auto begin = elapsed(item, "begin_ns");
+        const auto end = elapsed(item, "end_ns");
+        if (end < begin) {
+            throw Stopped("timing_gap", "a measured program interval ends before it begins");
+        }
+        return serving::Interval{begin, end};
+    };
+    const auto& work = record.at("work");
+    const auto& steps = record.at("steps");
+    if (work.size() != graph.at("work").size() || steps.size() != graph.at("steps").size()) {
+        throw Stopped("timing_gap", "measured program timing must cover every selected cut and work item");
+    }
+    serving::ProgramTiming timing;
+    for (const auto& item : work) {
+        timing.work.push_back(interval(item));
+    }
+    for (std::size_t index = 0; index < steps.size(); ++index) {
+        const auto& ranks = steps.at(index);
+        if (ranks.size() != graph.at("steps").at(index).at("ranks").size()) {
+            throw Stopped("timing_gap", "a pipeline cut is missing measured rank timing");
+        }
+        auto& samples = timing.steps.emplace_back();
+        for (const auto& rank : ranks) {
+            samples.push_back({interval(rank), elapsed(rank, "ready_ns")});
+        }
+    }
+    for (const auto& item : record.at("publications").items()) {
+        timing.publications.emplace(item.key(), elapsed(record.at("publications"), item.key().c_str()));
+    }
+    return timing;
+}
+
 json replay(const json& job) {
     const auto& domain = job.at("domain");
     const auto restore = job.at("restore_kind");

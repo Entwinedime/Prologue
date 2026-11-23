@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -32,15 +33,28 @@ struct ActionTiming final {
     std::unordered_map<std::string, BoundaryTime> publications;
 };
 
+struct CutTiming final {
+    Interval host;
+    Nanoseconds ready_ns;
+};
+
+struct ProgramTiming final {
+    std::vector<Interval> work;
+    std::vector<std::vector<CutTiming>> steps;
+    std::unordered_map<std::string, Nanoseconds> publications;
+};
+
 class TimingSource {
 public:
     virtual ~TimingSource() = default;
     virtual ActionTiming for_action(const nlohmann::json& action, const nlohmann::json& graph) = 0;
+    virtual ProgramTiming for_program(const nlohmann::json& action, const nlohmann::json& graph) = 0;
 };
 
 class Simulation final {
 public:
     Simulation(const nlohmann::json& job, Workload workload, TimingSource& timing_source);
+    ~Simulation();
 
     nlohmann::json request(const nlohmann::json& message);
     nlohmann::json result(std::string status, std::string reason);
@@ -48,9 +62,13 @@ public:
     bool done() const;
 
 private:
-    nlohmann::json arrivals();
-    nlohmann::json capacity() const;
-    nlohmann::json resources(const std::string& operation, const nlohmann::json& message);
+    class Pipeline;
+
+    nlohmann::json arrivals(Nanoseconds time_ns, bool finished);
+    nlohmann::json capacity(std::size_t actor) const;
+    nlohmann::json resources(std::size_t actor, const nlohmann::json& message);
+    void require_residence(std::size_t actor, const nlohmann::json& action) const;
+    void record_publication(const nlohmann::json& message, Nanoseconds time_ns, nlohmann::json& target);
     void execute(const nlohmann::json& message);
     void publish(const nlohmann::json& message);
     void finish_action();
@@ -58,7 +76,7 @@ private:
 
     const nlohmann::json& job_;
     Workload workload_;
-    Resources resources_;
+    std::vector<Resources> pools_;
     structure::Templates templates_;
     Timeline timeline_;
     TimingSource& timing_source_;
@@ -71,6 +89,7 @@ private:
     nlohmann::json current_;
     std::optional<ActionTiming> timing_;
     Nanoseconds work_ready_ns_ = 0;
+    std::unique_ptr<Pipeline> pipeline_;
 };
 
 }

@@ -1,5 +1,6 @@
 #include "prologue/core/structure/templates/library.hpp"
 #include "prologue/core/structure/parallel.hpp"
+#include "prologue/core/structure/pipeline.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -12,6 +13,26 @@ namespace prologue::structure {
 
 using nlohmann::json;
 using Index = std::size_t;
+
+namespace {
+
+bool same_structure(const json& left, const json& right) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (const auto& field : left.items()) {
+        if (field.key() == "definition_ids") {
+            continue;
+        }
+        const auto match = right.find(field.key());
+        if (match == right.end() || *match != field.value()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}
 
 TemplateGap::TemplateGap(json gap) : std::runtime_error(gap.at("reason").get<std::string>()), detail(std::move(gap)) {}
 
@@ -41,11 +62,13 @@ public:
             }
             std::vector<Index> path;
             visit(candidate, path, graph);
-            if (graph.at("calls").front().at("operation") == "parallel_batch") {
+            const auto& operation = graph.at("calls").front().at("operation");
+            if (operation == "parallel_batch") {
                 bind_collectives(graph);
+            } else if (operation == "pipeline_batch") {
+                bind_pipeline(graph);
             }
-            if (!selected.is_null() && (selected.at("calls") != graph.at("calls") ||
-                                       selected.at("work") != graph.at("work"))) {
+            if (!selected.is_null() && !same_structure(selected, graph)) {
                 throw TemplateGap({{"status", "candidate_conflict"}, {"reason", "template candidates disagree"},
                                    {"query", request_}, {"required", query}});
             }
@@ -71,6 +94,11 @@ private:
             graph.at("work").push_back({
                 {"path", path}, {"slot", 0}, {"ordinal", 0}, {"kind", "collective"},
                 {"name", definition.at("parameters").at("kind")},
+            });
+        } else if (definition.at("operation") == "transfer_wait" && definition.at("parameters").at("direction") == "receive") {
+            graph.at("work").push_back({
+                {"path", path}, {"slot", 0}, {"ordinal", 0}, {"lane", 0},
+                {"kind", "transfer"}, {"name", "point_to_point"},
             });
         }
         const auto& work = definition.at("device_work");

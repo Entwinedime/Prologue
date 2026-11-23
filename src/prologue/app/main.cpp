@@ -52,13 +52,21 @@ class StreamTiming final : public TimingSource {
 public:
     ActionTiming for_action(const json& action, const json& graph) override {
         const auto& work = graph.at("work");
-        std::cout << json{{"timing_query", {{"action", action}, {"work", work}}}} << std::endl;
+        return prologue::app::read_timing(query({{"action", action}, {"work", work}}), work);
+    }
+
+    prologue::serving::ProgramTiming for_program(const json& action, const json& graph) override {
+        return prologue::app::read_program_timing(query({{"action", action}, {"program", graph}}), graph);
+    }
+
+private:
+    static json query(const json& document) {
+        std::cout << json{{"timing_query", document}} << std::endl;
         const auto reply = read_record();
         if (const auto failure = reply.find("failure"); failure != reply.end()) {
             throw Stopped(failure->at("status"), failure->at("reason"));
         }
-
-        return prologue::app::read_timing(reply, work);
+        return reply;
     }
 };
 
