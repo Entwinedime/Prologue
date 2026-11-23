@@ -389,3 +389,49 @@
 **验证**　C++23、采集及控制镜像构建通过。两组结构对照各完成 2 请求、6 批次，消费 9,120 和 15,748 项实测工作。EP2 展开 288 组变长交换。全部 1,464 个组通信端点可用正式成本查询得到实测估值，其中 72 个为合并的只接收端。未观测路由报告父模板缺口，收发不一致与缺路由表均被拒绝。复用 PP3 来源重编得到原有 148 个定义及相同根调用。完成本阶段代码、合同、镜像和数据审查，自有 C++ 和 Python 源码共约 8.5 千行。[结构和成本检查](../../../data/shared-libraries-on-demand-acquisition/s12/final/summary.json) · [EP1 对照](../../../data/shared-libraries-on-demand-acquisition/s12/final/ep1/result.json) · [EP2 对照](../../../data/shared-libraries-on-demand-acquisition/s12/final/ep2/result.json)
 
 **结论与限制**　默认发布已加入两个结构域，实测 EP2 成本独立保存。当前证据覆盖单阶段、同宽 TP2 的上述两种路由，扩展模型、拓扑及自主性能精度按后续阶段验证。[默认发布](../../../data/shared-libraries-on-demand-acquisition/s12/final/ep2-default-release.json) · [EP2 物理成本](../../../data/shared-libraries-on-demand-acquisition/s12/final/ep2-costs.json)
+
+## 2026-11-24 — S13 两池配置与原生 PD 取证启动
+
+**范围**　从已推送的 `6dfe229` 接续，使用 Qwen3-8B Prefill TP1、Decode TP2。进程实际分片与物理卡部署分别记录，候选来源使用一张卡，完整参考使用三张卡。两组来源分别包含一个单成员请求和一组同时到达的请求。
+
+**改动**　按两池独立几何表达目标。复用原生请求、预热、选 rank 和 trace 的入口。首批原生预算两次、1,000 卡秒、12 GiB；同一会话覆盖两种成员情形。计划按 Prefill 写入、实际 KV 与元数据交接、Decode 接收与首次使用的次序贯通端口。
+
+**验证**　复核已有的 S07 原生页表准入和历史 TP1 → TP2 双来源记录，确认原生 Ascend SDMA、组宽和物理部署依据。当前版本详细采集待执行。
+
+**结论与限制**　S07 证明页表复制和成员归属。完整 PD 目标还需证明每个选中页和元数据从源端到接收端的实际可用关系，并接入动态控制。
+
+## 2026-11-24 — S13 单成员交接取证与双成员触发条件
+
+**范围**　原生普通提交在单卡与三卡各执行一次。单卡轮换观察 Prefill 与两个 Decode rank，三卡同窗记录三者。
+
+**改动**　将源端写入、各对端真实接收页、元数据槽与首 token、通知、准入切片和首个 Decode 的块表按请求关联。沿已有两池几何编译 Prefill、Decode 与预建页表调用。验证允许真实发布者在另一个 rank 尚在完成本地页表装配时发布首 token，发布前核对两个 rank 的传输通知。
+
+**验证**　两次原生会话均完成，首批累计 578.90 卡秒、约 383 MiB。四份观测窗均核对三条请求交接。Qwen3-8B 每个 Decode rank 接收 36 层 K/V 各两页和元数据，实际首读与该 rank 的预留页一致。两条同时到达的请求均分别获准，尚未触发同批准入。[交接证据](../../../data/shared-libraries-on-demand-acquisition/s13/handoff-evidence.json)
+
+**结论与限制**　同一到达时刻只约束入口。双成员场景使用独立示例，通过原生暂停控制让 Decode 在两条真实传输均提交后恢复准入。补充一组单卡和完整取证，累计上限 1,500 卡秒；原始普通提交继续作单成员和自然分组依据。
+
+## 2026-11-24 — S13 传输模板与双成员取证复盘
+
+**改动**　把实际注册的 KV 布局及元数据字节数转成有类型的传输端口，与 Prefill、Decode 和页表装配一起编译。物理时间保留在原生参考中。
+
+**验证**　单卡、三卡各编出相同的 45 个定义和 15 条根记录。两个库的 10 个唯一查询均可展开且结果相同，每个传输模板含两条 KV 工作及两条元数据工作。双成员补充采集均在预热的等待队列检查处超时，四次采集累计 922.36 卡秒。[模板核对](../../../data/shared-libraries-on-demand-acquisition/s13/compile-summary.json) · [单卡补充采集](../../../data/shared-libraries-on-demand-acquisition/s13/single_device-cohort/attempt.json) · [三卡补充采集](../../../data/shared-libraries-on-demand-acquisition/s13/full-cohort/attempt.json)
+
+**结论与限制**　原生负载快照由执行批次或完全空闲时更新；待分配、待传输及暂停的阶段可以读到旧快照。双成员示例需要直接观察原生队列边界，延长快照等待无法保证读到新状态。原生动态控制与独立全链路对照仍待接通。
+
+## 2026-11-24 — S13 原生两角色动态控制及独立对照
+
+**改动**　Prefill 与 Decode 原生队列通过共同控制接口运行。核心维护各自的页与槽位，以及写入、交接、装配和发布的模拟时间。单阶段、流水线及两角色共用动作或多进程推进，框架适配器交接原生元数据。PD 的返回页延迟到活跃空闲页不足时合并排序，规则来自原生 allocator，核心统一实现。
+
+**验证**　单卡模板对独立三卡记录匹配 12 个动作、9,006 项实测设备工作及三条完整逐请求交接，三条通知时间偏移均为 0。PP3 回归匹配 6 个微批次、42 个接收端和 18 次唤醒。[PD 对照](../../../data/shared-libraries-on-demand-acquisition/s13/control/physical-layout/result.json) · [PP3 回归](../../../data/shared-libraries-on-demand-acquisition/s13/control/pp3-regression/result.json)
+
+**结论与限制**　上述三个请求各自获准，旧记录缺少页表装配结果处理退出边界。新增这一采集点。直接负载 RPC 的单卡试采在预热等待回复时超时，累计约 1,008.31 卡秒。双成员示例现从各 rank 实际预留、暂停和提交的观察记录取证。再允许一组单卡及完整物理尝试，累计上限调整为 1,800 卡秒，先确认单卡证据再使用三卡。[RPC 试采](../../../data/shared-libraries-on-demand-acquisition/s13/single_device-cohort-live/attempt.json)
+
+## 2026-11-24 — S13 PD 完整结构交付
+
+**范围**　Qwen3-8B Prefill TP1 与 Decode TP2。单卡分别采三个逻辑角色，三卡在同一个窗口独立取证。普通提交得到三个单成员准入。受控提交中两个 Decode rank 都在原生暂停后提交两份 KV 与元数据，恢复后原生队列一次准入两个成员。
+
+**改动**　实测入口时刻和管理命令通过共同控制接口交接。等待者实际注册后才接收预留唤醒，解决 Decode 可以先于 Prefill 收到请求时的零时间循环。交接按请求关联真实写页、两路传输和通知、接收元数据、页表装配以及首读。Decode 实际消费通过核心核验，Prefill 在完成后交还本地资源。
+
+**验证**　常规和双成员来源分别编出 45、48 个定义，各自的单卡与三卡定义和根查询一致。独立三卡对照分别匹配 12、8 个动作，消费 9,006、6,009 项设备工作，各覆盖三条交接和 12 段物理传输工作。两组的通知最大偏移均为 0，双成员组另有两次原生页表结果处理退出边界。PP3、S07 局部模板及来源隔离核对通过。前后七次原生尝试中四次完成，累计 1,579.93 卡秒和约 678 MiB。修复虚拟唤醒只重跑离线对照，复用同一份物理记录。[普通对照](../../../data/shared-libraries-on-demand-acquisition/s13/control/ordinary-closure/result.json) · [双成员对照](../../../data/shared-libraries-on-demand-acquisition/s13/control/cohort-closure/result.json) · [共同发布](../../../data/shared-libraries-on-demand-acquisition/s13/control/default-release.json)
+
+**结论与限制**　默认发布 `c00c5c4e-daa4-4066-aa8a-3f4be284f62e` 增加 PD 结构域。应用、控制和观察镜像已重建，最终观察镜像与成功取证的版本具有相同的原生记录钩子。交付范围为已验证的稠密 P1D2 与当前 Ascend 后端。单卡暂存的传输耗时没有物理链路资格，自主性能以及更宽 Prefill 拓扑仍待各自证据。

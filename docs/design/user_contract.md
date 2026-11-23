@@ -23,6 +23,8 @@
 
 PD 配置分别声明 Prefill/Decode 的拓扑、槽位和 KV 容量；两池模型、dtype、backend 和页布局一致，资源独立。chunk 由 Prefill 侧推进；两池的缓存分别服从原生支持范围和各自来源实现，不共享缓存状态或隐式沿用另一池的开关。不把同实例 serving 的来源直接当作 PD 来源。
 
+SGLang/Ascend 的 PD 任务在配置顶层给出 `id`、`attention_backend`、`page_size` 和 `disaggregation`。`disaggregation.prefill` 与 `disaggregation.decode` 分别给出 `tp`、`max_running_requests`、`max_total_tokens` 和 `max_prefill_tokens`。这条接入路径接受稠密模型和 Prefill TP1，Decode 的逻辑分片来自目标 TP。原生预分配的附加槽位由适配器声明，与准入上限分别处理。
+
 所有配置先满足原生框架与设备的真实约束。项目不 patch 上游强行运行不支持的模型/并行策略；无法运行、缺来源、缺变换、缺时间依据及尚未验证分别报告。
 
 外部输入在边界检查一次：类型、整数范围、唯一 ID、正容量、合法请求长度及路由覆盖等必须成立。未知或未实现字段不静默忽略，不保留旧字段和控制分支兼容。
