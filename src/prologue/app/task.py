@@ -1,10 +1,10 @@
 """Read a task and enumerate its configuration and workload pairs."""
 
 import json
-import subprocess
 from dataclasses import asdict
 from pathlib import Path
 
+from prologue.app.core import run_core
 from prologue.integrations.frameworks.sglang.configuration import Configuration, Model
 
 
@@ -24,12 +24,7 @@ class Plan:
             raise ValueError("configuration IDs must be unique")
 
         # The core owns request validation and arrival order for both planning and simulation.
-        result = subprocess.run(
-            ["prologue-core", "workloads"], input=json.dumps(source["workloads"]), encoding="utf-8", capture_output=True,
-        )
-        if result.returncode != 0:
-            raise ValueError(result.stderr.strip() or f"workload validation exited with {result.returncode}")
-        self.workloads = json.loads(result.stdout)
+        self.workloads = run_core("workloads", source["workloads"])
 
     def document(self) -> dict:
         return {

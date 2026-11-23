@@ -1,4 +1,5 @@
 #include "prologue/core/serving/workload.hpp"
+#include "prologue/core/structure/templates/compiler.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -74,13 +75,20 @@ json normalize_workloads(const json& source) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 2 || std::string_view(argv[1]) != "workloads") {
-        std::cerr << "Usage: prologue-core workloads < workloads.json\n";
+    if (argc != 2) {
+        std::cerr << "Usage: prologue-core workloads|templates < input.json\n";
         return 2;
     }
 
     try {
-        std::cout << normalize_workloads(json::parse(std::cin)) << '\n';
+        const std::string_view command(argv[1]);
+        if (command == "workloads") {
+            std::cout << normalize_workloads(json::parse(std::cin)) << '\n';
+        } else if (command == "templates") {
+            std::cout << prologue::structure::Compiler{}.compile(json::parse(std::cin)) << '\n';
+        } else {
+            throw std::invalid_argument("unknown core command " + std::string(command));
+        }
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 2;

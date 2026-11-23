@@ -8,11 +8,15 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(nlohmann_json 3.11 REQUIRED)
 
-add_library(prologue_core STATIC src/prologue/core/serving/workload.cpp)
+add_library(prologue_core STATIC
+    src/prologue/core/serving/workload.cpp
+    src/prologue/core/structure/templates/compiler.cpp
+)
 target_include_directories(prologue_core PUBLIC src)
+target_link_libraries(prologue_core PUBLIC nlohmann_json::nlohmann_json)
 
 add_executable(prologue-core src/prologue/app/main.cpp)
-target_link_libraries(prologue-core PRIVATE prologue_core nlohmann_json::nlohmann_json)
+target_link_libraries(prologue-core PRIVATE prologue_core)
 
 foreach(target prologue_core prologue-core)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)

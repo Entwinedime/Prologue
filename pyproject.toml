@@ -11,6 +11,9 @@ description = "Inference serving simulation"
 [project.scripts]
 prologue = "prologue.app.cli:main"
 
+[project.entry-points."sglang.srt.plugins"]
+prologue = "prologue.integrations.frameworks.sglang.observation.hooks:install"
+
 [tool.setuptools]
 include-package-data = false
 
