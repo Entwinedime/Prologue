@@ -21,21 +21,16 @@ public:
 
 class Templates final {
 public:
-    Templates(const nlohmann::json& libraries, const nlohmann::json& rule);
+    Templates(const nlohmann::json& bank, const nlohmann::json& domain, const nlohmann::json& rule);
 
-    nlohmann::json expand(const nlohmann::json& query) const;
+    nlohmann::json expand(const nlohmann::json& query, bool include_definitions = false) const;
     void qualify() const;
 
 private:
-    struct Candidate final {
-        std::size_t library;
-        std::size_t definition;
-    };
-
     class Expansion;
 
-    const nlohmann::json& libraries_;
-    std::unordered_map<std::string, std::vector<Candidate>> queries_;
+    const nlohmann::json& definitions_;
+    std::unordered_map<std::string, std::vector<std::size_t>> queries_;
 };
 
 }

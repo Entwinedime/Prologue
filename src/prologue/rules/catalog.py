@@ -10,12 +10,19 @@ class Rules:
         if (not isinstance(document, dict) or document.keys() != sections
                 or any(not isinstance(section, dict) for section in document.values())):
             raise ValueError("rules require templates, performance and acquisition sections")
-        self.document = document
         self.templates = document["templates"]
         self.performance = document["performance"]
         self.acquisition = document["acquisition"]
 
-        self.check_choice(self.templates, "selector")
+        if self.templates.keys() != {"selector", "shared_operations"}:
+            raise ValueError("template rules require a selector and shared_operations")
+        self.check_choice({"selector": self.templates["selector"]}, "selector")
+        operations = self.templates["shared_operations"]
+        if (not isinstance(operations, list) or any(not isinstance(name, str) or not name for name in operations)
+                or len(operations) != len(set(operations))):
+            raise ValueError("shared_operations must list distinct operation names")
+        self.templates = {**self.templates, "shared_operations": sorted(operations)}
+        self.document = {**document, "templates": self.templates}
         for binding in self.performance.values():
             self.check_choice(binding, "estimator")
         for recipe in self.acquisition.values():

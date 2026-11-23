@@ -6,6 +6,7 @@ from prologue.acquisition.planning import structure_demands
 from prologue.app.core import run_core
 from prologue.assets.publication import Store
 from prologue.rules.catalog import Rules
+from prologue.rules.review import RuleReview
 
 
 def read_document(path):
@@ -19,22 +20,18 @@ def pinned(args):
     return store, release, rules
 
 
-def prepare_templates(paths, model_config, previous=None):
-    sources = [read_document(path) for path in paths]
-    domain = previous["domain"] if previous else sources[0]["domain"]
-    libraries = previous["libraries"].copy() if previous else []
-    for source in sources:
-        if source["domain"] != domain:
-            raise ValueError("template sources must belong to the same domain")
-        library = {key: source[key] for key in ("definitions", "roots", "source")}
-        if library not in libraries:
-            libraries.append(library)
-    return {"domain": domain, "libraries": libraries, "model_config": model_config}
+def prepare_templates(sources, rule, previous=None):
+    return run_core("template-bank", {"previous": previous, "sources": sources, "rule": rule})
 
 
-def structure_targets(domain, batch):
-    if batch["domain"] != domain:
-        raise ValueError("source domain does not match the structure queries")
+def template_model(templates, model):
+    for entry in templates["models"]:
+        if entry["model"] == model:
+            return entry["model_config"]
+    raise ValueError("the template asset has no configuration for the model")
+
+
+def structure_targets(batch):
     targets = batch["targets"]
     if not isinstance(targets, list) or not targets:
         raise ValueError("a structure query requires at least one target")
@@ -46,12 +43,16 @@ def structure_targets(domain, batch):
     return targets
 
 
-def examine_structure(templates, rules, batch, include_graph=False):
-    targets = structure_targets(templates["domain"], batch)
-    decisions = run_core("query-structure", {
-        "libraries": templates["libraries"], "rule": rules.templates,
-        "queries": [row["query"] for row in targets], "include_graph": include_graph,
+def query_templates(templates, rule, batches, include_graph=False):
+    return run_core("query-structure", {
+        "bank": templates, "rule": rule, "batches": batches, "include_graph": include_graph,
     })
+
+
+def examine_structure(templates, rules, batch, include_graph=False):
+    targets = structure_targets(batch)
+    queries = [{"domain": batch["domain"], "queries": [row["query"] for row in targets]}]
+    decisions, = query_templates(templates, rules.templates, queries, include_graph)
     return structure_demands(targets, decisions)
 
 
@@ -59,7 +60,8 @@ def query_structure(args):
     store, release, rules = pinned(args)
     templates = store.asset(release, "templates")
     if args.candidate:
-        templates = prepare_templates(args.candidate, templates["model_config"], templates)
+        sources = [read_document(path) for path in args.candidate]
+        templates = prepare_templates(sources, rules.templates, templates)
     batch = read_document(args.query)
     return {"release": release["release"], "preview": bool(args.candidate),
             **examine_structure(templates, rules, batch, args.graph)}
@@ -90,15 +92,14 @@ def qualify(documents, rules):
     templates = documents["templates"]
     costs = documents["performance"]
     domain = {key: value for key, value in costs["domain"].items() if key != "hardware"}
-    if domain != templates["domain"]:
-        raise ValueError("template and performance asset domains disagree")
-    for library in templates["libraries"]:
-        source = library["source"]
+    if not any(entry["domain"] == domain for entry in templates["sources"]):
+        raise ValueError("the performance asset has no corresponding template domain")
+    for entry in templates["sources"]:
+        source = entry["source"]
         rules.require_observation(source["purpose"], source["mode"])
     for source in costs["sources"]:
         rules.require_observation(source["family"], source["mode"])
-    run_core("qualify-release", {"libraries": templates["libraries"], "costs": costs,
-                                "rules": rules.document})
+    run_core("qualify-release", {"bank": templates, "costs": costs, "rules": rules.document})
 
 
 def publish(args):
@@ -111,26 +112,30 @@ def publish(args):
 
     snapshot = store.snapshot(base)
     documents = snapshot.documents.copy()
+    if args.rules or "rules" not in documents:
+        rules = Rules.read(args.rules)
+    else:
+        rules = Rules(documents["rules"])
+
+    # A full source replacement qualifies sharing from the isolated rule on those same sources.
+    previous = None if args.library else documents.get("templates")
+    prior_rule = (snapshot.documents["rules"]["templates"] if previous is not None
+                  else {**rules.templates, "shared_operations": []})
+    changed_rule = prior_rule != rules.templates
+    if changed_rule and args.rule_cases is None:
+        raise ValueError("changing template sharing requires --rule-cases")
+
+    sources = [read_document(path) for path in (args.library or args.add_library or ())]
+    structure_requirements = read_document(args.require_structure) if args.require_structure else None
+    if args.add_library:
+        if previous is None or structure_requirements is None:
+            raise ValueError("adding a template source requires a published base and --require-structure")
+        if any(source["domain"] != structure_requirements["domain"] for source in sources):
+            raise ValueError("added template sources must match the original query domain")
+    if sources or changed_rule:
+        documents["templates"] = prepare_templates(sources, rules.templates, previous)
+
     cost_requirements = read_document(args.require_costs) if args.require_costs else None
-    previous = documents.get("templates")
-    model_config = previous["model_config"] if previous else None
-    if args.model_config:
-        model_config = read_document(args.model_config)
-    if args.library:
-        if model_config is None:
-            raise ValueError("the initial template asset requires --model-config")
-        templates = prepare_templates(args.library, model_config)
-        if previous and templates["domain"]["model"] != previous["domain"]["model"] and not args.model_config:
-            raise ValueError("changing the model requires --model-config")
-        documents["templates"] = templates
-    elif args.add_library:
-        if previous is None:
-            raise ValueError("adding a template source requires a published base")
-        if not args.require_structure:
-            raise ValueError("adding a template source requires the original query batch with --require-structure")
-        documents["templates"] = prepare_templates(args.add_library, model_config, previous)
-    elif args.model_config and previous:
-        documents["templates"] = {**previous, "model_config": model_config}
     if args.costs:
         documents["performance"] = read_document(args.costs)
     elif args.add_costs:
@@ -139,17 +144,11 @@ def publish(args):
         addition = read_document(args.add_costs)
         documents["performance"] = extend_costs(documents["performance"], addition, cost_requirements)
     if "templates" not in documents or "performance" not in documents:
-        raise ValueError("the initial publication requires --library, --model-config and --costs")
+        raise ValueError("the initial publication requires --library and --costs")
+    documents["rules"] = rules.document
 
-    if args.rules or "rules" not in documents:
-        rules = Rules.read(args.rules)
-        documents["rules"] = rules.document
-    else:
-        rules = Rules(documents["rules"])
-
-    if args.require_structure:
-        batch = read_document(args.require_structure)
-        report = examine_structure(documents["templates"], rules, batch)
+    if structure_requirements is not None:
+        report = examine_structure(documents["templates"], rules, structure_requirements)
         if report["demands"]:
             return {"status": "unresolved_structure", "release": base, **report}
     if cost_requirements is not None:
@@ -159,4 +158,18 @@ def publish(args):
             return {"status": "unresolved_costs", "release": base,
                     "domain": cost_requirements["domain"], "missing": missing}
     qualify(documents, rules)
-    return store.publish(snapshot, documents)
+
+    review = None
+    if args.rule_cases:
+        candidate = documents["templates"]
+        prior = prepare_templates(sources, prior_rule, previous) if sources else previous
+        comparison = RuleReview(candidate, read_document(args.rule_cases))
+        before = query_templates(prior, prior_rule, comparison.batches, include_graph=True)
+        after = query_templates(candidate, rules.templates, comparison.batches, include_graph=True)
+        review = comparison.compare(before, after, prior_rule, rules.templates)
+        if not review["passed"]:
+            return {"status": "rule_cases_failed", "release": base, "rule_review": review}
+
+    if args.preview:
+        return {"status": "qualified", "release": base, "rule_review": review}
+    return store.publish(snapshot, documents, review)

@@ -71,7 +71,7 @@ class Store:
         manifest = self.release(base)
         return Snapshot(manifest, {family: self.asset(manifest, family) for family in self.families})
 
-    def publish(self, previous, candidates):
+    def publish(self, previous, candidates, rule_review=None):
         if candidates.keys() != set(self.families):
             raise ValueError("a release requires templates, performance and rules")
         base = previous.manifest["release"]
@@ -85,6 +85,8 @@ class Store:
 
         revision = str(uuid4()) if sources else base
         receipt = {"release": revision, "base": base, "assets": assets}
+        if rule_review is not None:
+            receipt["rule_review"] = rule_review
         self.root.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(prefix=".candidate-", dir=self.root) as temporary:
             staging = Path(temporary)

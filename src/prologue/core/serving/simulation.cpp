@@ -23,7 +23,7 @@ const std::string& Stopped::status() const {
 
 Simulation::Simulation(const json& job, Workload workload, TimingSource& timing_source)
     : job_(job), workload_(std::move(workload)), resources_(workload_, limits(job)),
-      templates_(job.at("libraries"), job.at("rules").at("templates")),
+      templates_(job.at("templates"), job.at("domain"), job.at("rules").at("templates")),
       timing_source_(timing_source), record_structure_(job.value("record_structure", false)) {
     for (const auto& request : workload_.requests()) {
         output_limits_.emplace(request.id, request.output_tokens);

@@ -16,7 +16,8 @@ TemplateGap::TemplateGap(json gap) : std::runtime_error(gap.at("reason").get<std
 
 class Templates::Expansion final {
 public:
-    Expansion(const Templates& library, const json& request) : library_(library), request_(request) {}
+    Expansion(const Templates& library, const json& request, bool include_definitions)
+        : library_(library), request_(request), include_definitions_(include_definitions) {}
 
     json resolve(const json& query) {
         const auto key = query.dump();
@@ -32,12 +33,15 @@ public:
 
         active_.push_back(key);
         json selected;
-        for (const auto& candidate : candidates->second) {
+        for (const auto candidate : candidates->second) {
             auto graph = json{{"calls", json::array()}, {"work", json::array()}};
+            if (include_definitions_) {
+                graph["definition_ids"] = json::array();
+            }
             std::vector<Index> path;
-            const auto& definitions = library_.libraries_.at(candidate.library).at("definitions");
-            visit(definitions, candidate.definition, path, graph);
-            if (!selected.is_null() && selected != graph) {
+            visit(candidate, path, graph);
+            if (!selected.is_null() && (selected.at("calls") != graph.at("calls") ||
+                                       selected.at("work") != graph.at("work"))) {
                 throw TemplateGap({{"status", "candidate_conflict"}, {"reason", "template candidates disagree"},
                                    {"query", request_}, {"required", query}});
             }
@@ -48,13 +52,16 @@ public:
     }
 
 private:
-    void visit(const json& definitions, Index identity, std::vector<Index>& path, json& graph) {
-        const auto& definition = definitions.at(identity);
+    void visit(Index identity, std::vector<Index>& path, json& graph) {
+        const auto& definition = library_.definitions_.at(identity);
         auto call = definition;
         call.erase("children");
         call.erase("device_work");
         call["path"] = path;
         graph.at("calls").push_back(std::move(call));
+        if (include_definitions_) {
+            graph.at("definition_ids").push_back(identity);
+        }
 
         const auto& work = definition.at("device_work");
         const auto& children = definition.at("children");
@@ -77,7 +84,7 @@ private:
                 if (index >= identity) {
                     throw std::invalid_argument("template child must precede its parent definition");
                 }
-                visit(definitions, index, path, graph);
+                visit(index, path, graph);
             } else {
                 auto resolved = resolve(child.at("query"));
                 const auto& ports = resolved.at("calls").front();
@@ -93,7 +100,14 @@ private:
         }
     }
 
-    static void append(json child, const std::vector<Index>& prefix, json& graph) {
+    void append(json child, const std::vector<Index>& prefix, json& graph) const {
+        if (include_definitions_) {
+            auto& bindings = graph.at("definition_ids");
+            for (const auto& identity : child.at("definition_ids")) {
+                bindings.push_back(identity);
+            }
+        }
+
         // Keep reusable definitions relative to their own root and bind their paths at the call site.
         for (const auto* kind : {"calls", "work"}) {
             for (auto& row : child.at(kind)) {
@@ -109,6 +123,7 @@ private:
 
     const Templates& library_;
     const json& request_;
+    bool include_definitions_;
     std::vector<std::string> active_;
 };
 
@@ -120,19 +135,30 @@ json batch_geometry(const json& phase, const json& members) {
     return {{"phase", phase}, {"sequence_lengths", std::move(sequence)}};
 }
 
-Templates::Templates(const json& libraries, const json& rule) : libraries_(libraries) {
+Templates::Templates(const json& bank, const json& domain, const json& rule) : definitions_(bank.at("definitions")) {
     if (rule.at("selector") != "exact_query") {
         throw std::invalid_argument("unsupported template selector");
     }
-    for (Index source = 0; source < libraries_.size(); ++source) {
-        for (const auto& root : libraries_.at(source).at("roots")) {
-            queries_[root.at("query").dump()].push_back({source, root.at("definition").get<Index>()});
+    for (const auto& source : bank.at("sources")) {
+        if (source.at("domain") != domain) {
+            continue;
+        }
+        for (const auto& root : source.at("roots")) {
+            auto& candidates = queries_[root.at("query").dump()];
+            const auto definition = root.at("definition").get<Index>();
+            if (std::ranges::find(candidates, definition) == candidates.end()) {
+                candidates.push_back(definition);
+            }
         }
     }
 }
 
-json Templates::expand(const json& query) const {
-    return Expansion(*this, query).resolve(query);
+json Templates::expand(const json& query, bool include_definitions) const {
+    if (queries_.empty()) {
+        throw TemplateGap({{"status", "template_domain_gap"}, {"reason", "no observed template roots for this domain"},
+                           {"query", query}, {"required", query}});
+    }
+    return Expansion(*this, query, include_definitions).resolve(query);
 }
 
 void Templates::qualify() const {

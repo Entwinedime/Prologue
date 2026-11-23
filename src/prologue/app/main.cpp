@@ -4,6 +4,7 @@
 #include "prologue/core/serving/cost_timing.hpp"
 #include "prologue/core/serving/simulation.hpp"
 #include "prologue/core/serving/workload.hpp"
+#include "prologue/core/structure/templates/bank.hpp"
 #include "prologue/core/structure/templates/compiler.hpp"
 #include "prologue/core/structure/templates/library.hpp"
 
@@ -123,29 +124,43 @@ json cost_quotes(const json& input) {
 }
 
 json structure_queries(const json& input) {
-    const prologue::structure::Templates templates(input.at("libraries"), input.at("rule"));
+    const auto& bank = input.at("bank");
+    const auto& rule = input.at("rule");
     const auto include_graph = input.at("include_graph").get<bool>();
-    auto results = json::array();
-    for (const auto& query : input.at("queries")) {
-        try {
-            auto graph = templates.expand(query);
-            auto result = json{{"status", "covered"}};
-            if (include_graph) {
-                result["graph"] = std::move(graph);
+    auto batches = json::array();
+    for (const auto& batch : input.at("batches")) {
+        const prologue::structure::Templates templates(bank, batch.at("domain"), rule);
+        auto results = json::array();
+        for (const auto& query : batch.at("queries")) {
+            try {
+                auto graph = templates.expand(query, include_graph);
+                auto result = json{{"status", "covered"}};
+                if (include_graph) {
+                    result["definition_ids"] = std::move(graph.at("definition_ids"));
+                    graph.erase("definition_ids");
+                    result["graph"] = std::move(graph);
+                }
+                results.push_back(std::move(result));
+            } catch (const prologue::structure::TemplateGap& gap) {
+                results.push_back(gap.detail);
             }
-            results.push_back(std::move(result));
-        } catch (const prologue::structure::TemplateGap& gap) {
-            results.push_back(gap.detail);
         }
+        batches.push_back(std::move(results));
     }
-    return results;
+    return batches;
 }
 
 json qualify_release(const json& input) {
     const auto& rules = input.at("rules");
-    const prologue::structure::Templates templates(input.at("libraries"), rules.at("templates"));
+    const auto& bank = input.at("bank");
+    std::unordered_set<std::string> domains;
+    for (const auto& source : bank.at("sources")) {
+        const auto& domain = source.at("domain");
+        if (domains.insert(domain.dump()).second) {
+            prologue::structure::Templates(bank, domain, rules.at("templates")).qualify();
+        }
+    }
     const prologue::performance::CostCatalog costs(input.at("costs"), rules.at("performance"));
-    templates.qualify();
     return {{"status", "qualified"}};
 }
 
@@ -153,7 +168,8 @@ json qualify_release(const json& input) {
 
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 3) {
-        std::cerr << "Usage: prologue-core workloads|templates|query-structure|qualify-release|simulate|predict|coordinates|quote|replay [socket]\n";
+        std::cerr << "Usage: prologue-core workloads|templates|template-bank|query-structure|qualify-release"
+                     "|simulate|predict|coordinates|quote|replay [socket]\n";
         return 2;
     }
 
@@ -163,6 +179,8 @@ int main(int argc, char** argv) {
             std::cout << normalize_workloads(json::parse(std::cin)) << '\n';
         } else if (argc == 2 && command == "templates") {
             std::cout << prologue::structure::Compiler{}.compile(json::parse(std::cin)) << '\n';
+        } else if (argc == 2 && command == "template-bank") {
+            std::cout << prologue::structure::assemble_bank(json::parse(std::cin)) << '\n';
         } else if (argc == 2 && command == "query-structure") {
             std::cout << structure_queries(json::parse(std::cin)) << '\n';
         } else if (argc == 2 && command == "qualify-release") {

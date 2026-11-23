@@ -1,5 +1,5 @@
 {
-  "templates": {"selector": "exact_query"},
+  "templates": {"selector": "exact_query", "shared_operations": []},
   "performance": {
     "device_task": {"estimator": "exact_median"},
     "host_thread": {"estimator": "exact_median"}
