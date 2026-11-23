@@ -8,6 +8,7 @@ from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns, monotonic, sleep
 
 from prologue.integrations.frameworks.sglang.configuration import native_options
+from prologue.integrations.frameworks.sglang.content import PromptContent
 from prologue.integrations.frameworks.sglang.observation.parallel import RankPlan
 
 
@@ -19,13 +20,13 @@ class Session:
         self.output = output.resolve()
         self.mode = mode
         self.placement = placement
+        self.content = PromptContent.declared(workload, configuration.prefix_cache)
         self.ranked = configuration.worker_count > 1
         if self.ranked and mode != "detailed":
             raise ValueError("parallel workers currently require detailed observation")
 
-    @staticmethod
-    async def request(engine, native, request):
-        tokens = [1] * request["prompt_tokens"]
+    async def request(self, engine, native, request):
+        tokens = self.content.prompt(request["id"]) if self.content is not None else [1] * request["prompt_tokens"]
         submitted = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
         output = await engine.async_generate(
             rid=native, input_ids=tokens, stream=True,
@@ -136,8 +137,12 @@ class Session:
         self.output.mkdir()
         specification = self.output / "observation.json"
         description = {"requests": self.aliases("source"), "mode": self.mode, "pp": self.configuration.pp,
-                       "scheduled": bool(self.configuration.prefill_chunk_tokens),
+                       "scheduled": bool(self.configuration.prefill_chunk_tokens or self.configuration.prefix_cache),
+                       "prefix_cache": self.configuration.prefix_cache,
                        "parallel_placement": self.placement if self.ranked else None, **details}
+        if self.content is not None:
+            description["synthetic_sampling"] = {"outputs": self.content.outputs, "warmup": self.aliases("warmup"),
+                                                 "vocabulary": self.content.vocabulary}
         ep = self.configuration.ep
         if ep > 1:
             os.environ.update(DEEP_USE_ALLTOALL_MODE="1", DEEPEP_HCCL_BUFFSIZE="1024", HCCL_BUFFSIZE="1024")

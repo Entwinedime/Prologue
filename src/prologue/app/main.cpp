@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -71,8 +72,9 @@ private:
 };
 
 Workload read_workload(const json& source) {
-    if (!source.is_object() || source.size() != 2 + static_cast<std::size_t>(source.contains("expert_routes"))) {
-        throw std::invalid_argument("workload fields are id, requests and optional expert_routes");
+    if (!source.is_object() || source.size() != 2 + static_cast<std::size_t>(source.contains("expert_routes")) +
+        static_cast<std::size_t>(source.contains("prefixes"))) {
+        throw std::invalid_argument("workload fields are id, requests, optional expert_routes and prefixes");
     }
     const auto& entries = source.at("requests");
     if (!entries.is_array()) {
@@ -81,8 +83,8 @@ Workload read_workload(const json& source) {
 
     std::vector<Request> requests;
     for (const auto& entry : entries) {
-        if (!entry.is_object() || entry.size() != 4) {
-            throw std::invalid_argument("request fields are id, arrival_ns, prompt_tokens and output_tokens");
+        if (!entry.is_object() || entry.size() != 4 + static_cast<std::size_t>(entry.contains("prefix_id"))) {
+            throw std::invalid_argument("request fields are id, arrival_ns, prompt_tokens, output_tokens and optional prefix_id");
         }
         requests.push_back({entry.at("id").get<std::string>(), integer(entry, "arrival_ns"),
                             integer(entry, "prompt_tokens"), integer(entry, "output_tokens")});
@@ -103,15 +105,17 @@ json normalize_workloads(const json& source) {
             throw std::invalid_argument("duplicate workload ID " + workload.id());
         }
 
+        std::unordered_map<std::string, const json*> input;
+        for (const auto& request : entry.at("requests")) {
+            input.emplace(request.at("id").get<std::string>(), &request);
+        }
         auto requests = json::array();
         for (const auto& request : workload.requests()) {
-            requests.push_back({{"id", request.id}, {"arrival_ns", request.arrival_ns},
-                                {"prompt_tokens", request.prompt_tokens}, {"output_tokens", request.output_tokens}});
+            requests.push_back(*input.at(request.id));
         }
-        workloads.push_back({{"id", workload.id()}, {"requests", std::move(requests)}});
-        if (entry.contains("expert_routes")) {
-            workloads.back()["expert_routes"] = entry.at("expert_routes");
-        }
+        auto normalized = entry;
+        normalized["requests"] = std::move(requests);
+        workloads.push_back(std::move(normalized));
     }
     return workloads;
 }

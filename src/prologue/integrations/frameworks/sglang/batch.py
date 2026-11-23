@@ -46,11 +46,14 @@ class BatchWork:
         return parameters
 
     @staticmethod
-    def cache(batch, members):
+    def cache(batch, members, *, prefix_cache=False):
         end = max(member["kv_committed_tokens"] for member in members)
         table = batch.req_to_token_pool.req_to_token
         rows = table[batch.req_pool_indices, :end].detach().cpu().tolist()
-        return {
+        cache = {
             "rows": [row[:member["kv_committed_tokens"]] for row, member in zip(rows, members, strict=True)],
             "written": batch.out_cache_loc.detach().cpu().tolist(),
         }
+        if prefix_cache:
+            cache["prefix_tokens"] = [request.cache_protected_len for request in batch.reqs]
+        return cache

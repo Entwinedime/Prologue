@@ -2,6 +2,7 @@
 
 import json
 import os
+from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns, thread_time_ns
@@ -14,7 +15,9 @@ from prologue.integrations.frameworks.sglang.observation.parallel import RankPro
 
 
 class Observation:
-    def __init__(self, output, requests, mode, parallel, pipeline, experts, disaggregation, stream_handoff, scheduled):
+    def __init__(self, output, document):
+        requests, mode = document["requests"], document["mode"]
+        parallel = document["parallel_placement"] is not None
         self.output = output
         self.requests = requests
         self.publications = {native: [] for native in requests}
@@ -27,29 +30,36 @@ class Observation:
         self.result_cpu_started = None
         self.host_work = []
         self.prepare_cpu_ns = 0
-        self.scheduled = scheduled and mode == "detailed"
+        self.scheduled = document.get("scheduled", False) and mode == "detailed"
         self.ingress = {}
         self.awaiting_read = None
+        self.sampling = document.get("synthetic_sampling")
+        self.batch_tokens = None
         self.calls = None
         if mode == "detailed":
             from torch.autograd.profiler import record_function
 
             self.calls = Calls(record_function)
         self.pipeline = None
-        if pipeline:
+        if document["pp"] > 1:
             from prologue.integrations.frameworks.sglang.observation.pipeline import PipelineObservation
 
             self.pipeline = PipelineObservation(self)
         self.experts = None
-        if experts is not None:
+        if experts := document.get("experts"):
             from prologue.integrations.frameworks.sglang.observation.experts import ExpertObservation
 
             self.experts = ExpertObservation(self, experts)
         self.pd = None
-        if disaggregation is not None:
+        if disaggregation := document.get("disaggregation"):
             from prologue.integrations.frameworks.sglang.observation.handoff import PDHandoff
 
-            self.pd = PDHandoff(self, disaggregation, stream_handoff)
+            self.pd = PDHandoff(self, disaggregation, document.get("stream_handoff", False))
+        self.cache = None
+        if document.get("prefix_cache", False) and self.scheduled:
+            from prologue.integrations.frameworks.sglang.observation.residency import CacheObservation
+
+            self.cache = CacheObservation(self)
 
     def begin_window(self, output, requests, capture_calls):
         self.output = output
@@ -60,12 +70,17 @@ class Observation:
         self.awaiting_read = None
         self.capture_calls = capture_calls
         self.calls.reset()
+        if self.cache is not None:
+            self.cache.reset()
         if self.pipeline is not None:
             self.pipeline.reset()
         if self.pd is not None:
             self.pd.reset()
 
     def flush(self, original, scheduler, empty_cache=True):
+        if self.cache is not None:
+            self.cache.bind(scheduler.tree_cache)
+
         # Drain logical KV state while preserving warmed device allocator workspaces.
         drained = original(scheduler, empty_cache=False)
         if self.parallel is None and drained and self.finished == self.publications.keys():
@@ -101,6 +116,8 @@ class Observation:
             document["calls"] = self.calls.rows
             if self.scheduled:
                 document["ingress"] = self.ingress
+            if self.cache is not None:
+                document["cache_effects"] = self.cache.effects
         elif self.mode == "host-timing":
             document["host_work"] = self.host_work
         if self.pd is not None:
@@ -134,6 +151,29 @@ class Observation:
         return inputs
 
     def batch(self, original, scheduler, batch, pp_proxy_tensors=None):
+        if self.sampling is None:
+            return self.observe_batch(original, scheduler, batch, pp_proxy_tensors)
+        outputs, warmup = self.sampling["outputs"], self.sampling["warmup"]
+        self.batch_tokens = [outputs[self.requests.get(request.rid) or warmup[request.rid]] for request in batch.reqs]
+        try:
+            return self.observe_batch(original, scheduler, batch, pp_proxy_tensors)
+        finally:
+            self.batch_tokens = None
+
+    def sample(self, original, runner, *args, **kwargs):
+        tokens = original(runner, *args, **kwargs)
+        if self.batch_tokens is not None:
+
+            # Preserve the native sampler and tensor identity while making later cache keys reproducible.
+            scope = (self.calls.scope("capture_auxiliary", "ModelRunner.synthetic_output", "sampling", {})
+                     if self.calls is not None and self.calls.stack else nullcontext())
+            with scope:
+                tokens.copy_(tokens.new_tensor(self.batch_tokens))
+        return tokens
+
+    def observe_batch(self, original, scheduler, batch, pp_proxy_tensors):
+        if self.mode == "light":
+            return original(scheduler, batch, pp_proxy_tensors)
         if self.mode == "detailed" and not self.capture_calls:
             return original(scheduler, batch, pp_proxy_tensors)
 
@@ -156,12 +196,14 @@ class Observation:
 
         parameters = {"phase": phase, "members": len(requests)}
         with self.calls.scope("batch", "Scheduler.run_batch", "scheduler", parameters) as call:
+            if self.cache is not None:
+                self.cache.actions += 1
             self.pending_batches[id(batch)] = call
             call["members"] = members
             call["resources"] = self.resources(scheduler)
             if self.pd is not None or self.scheduled:
                 with self.calls.scope("capture_auxiliary", "PageTable.snapshot", phase, {}):
-                    call["cache"] = BatchWork.cache(batch, members)
+                    call["cache"] = BatchWork.cache(batch, members, prefix_cache=self.cache is not None)
             if pp_proxy_tensors is not None:
                 call["inputs"] = self.pipeline.ports(pp_proxy_tensors.tensors)
             result = original(scheduler, batch, pp_proxy_tensors)
@@ -173,12 +215,15 @@ class Observation:
                                    self.calls.ports(next_token_ids=result.next_token_ids))
             return result
 
-    @staticmethod
-    def resources(scheduler):
-        return {
+    def resources(self, scheduler):
+        capacity = {
             "slots": scheduler.req_to_token_pool.available_size(),
             "kv_tokens": scheduler.token_to_kv_pool_allocator.available_size(),
         }
+        if self.cache is not None:
+            capacity.update(evictable_tokens=self.cache.tree.evictable_size(),
+                            protected_tokens=self.cache.tree.protected_size())
+        return capacity
 
     def process_result(self, original, scheduler, batch, result):
         call = self.pending_batches.pop(id(batch), None)
@@ -234,6 +279,8 @@ class Observation:
         from sglang.srt.layers.radix_attention import RadixAttention
 
         result = original(runner)
+        if self.sampling is not None and self.sampling["vocabulary"] > runner.model_config.vocab_size:
+            raise ValueError("the model vocabulary cannot distinguish the declared prompt branches")
         routed_modules = ExpertRoutes.native_modules(runner.model)
         if bool(routed_modules) != (self.experts is not None):
             raise ValueError("a workload expert route table is required exactly for models with native routed experts")
@@ -267,9 +314,13 @@ class Observation:
         sender = "sglang.srt.managers.scheduler_components.output_sender.SenderWrapper.send_output"
         HookRegistry.register(scheduler + "flush_cache", self.flush, HookType.AROUND)
         HookRegistry.register(sender, self.publish, HookType.AROUND)
-        if self.mode != "light":
+        if self.mode != "light" or self.sampling is not None:
             HookRegistry.register(scheduler + "run_batch", self.batch, HookType.AROUND)
+        if self.mode != "light":
             HookRegistry.register(scheduler + "process_batch_result", self.process_result, HookType.AROUND)
+        if self.sampling is not None:
+            HookRegistry.register("sglang.srt.model_executor.model_runner.ModelRunner.sample",
+                                  self.sample, HookType.AROUND)
         if self.mode == "host-timing":
             HookRegistry.register(scheduler + "get_next_batch_to_run", self.prepare, HookType.AROUND)
         if self.scheduled:
@@ -285,6 +336,8 @@ class Observation:
             self.experts.install()
         if self.pd is not None:
             self.pd.install()
+        if self.cache is not None:
+            self.cache.install()
 
 
 def install():
@@ -309,7 +362,4 @@ def install():
             StagedTransport(Path(document.get("device_lock", path.parent / ".device.lock"))).install(
                 pipeline, experts is not None and experts["width"] > 1,
             )
-        Observation(
-            path.parent, document["requests"], document["mode"], placement is not None, pipeline, experts,
-            document.get("disaggregation"), document.get("stream_handoff", False), document.get("scheduled", False),
-        ).install()
+        Observation(path.parent, document).install()

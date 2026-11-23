@@ -30,6 +30,7 @@ class Configuration:
     ep: int = 1
     prefill_chunk_tokens: int = 0
     mixed_batches: bool = False
+    prefix_cache: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id:
@@ -55,17 +56,23 @@ class Configuration:
             raise ValueError(f"{self.id} prefill_chunk_tokens must be a nonnegative multiple of page_size")
         if type(self.mixed_batches) is not bool or (self.mixed_batches and chunk == 0):
             raise ValueError(f"{self.id} mixed_batches requires a positive Prefill chunk size")
+        if type(self.prefix_cache) is not bool or (self.prefix_cache and (self.pp > 1 or self.ep > 1)):
+            raise ValueError(f"{self.id} prefix_cache requires a boolean and a single-stage dense instance")
 
     @property
     def worker_count(self):
         return self.tp * self.pp
 
     def route_table(self, workload):
+        if self.pp > 1 and ("prefixes" in workload or any("prefix_id" in row for row in workload["requests"])):
+            raise ValueError(f"{self.id} shared prompt content requires a single-stage instance")
         routes = workload.get("expert_routes", {})
         if not isinstance(routes, dict):
             raise ValueError(f"{workload['id']} expert_routes must be an object keyed by EP width")
         width = str(self.ep)
         if width in routes:
+            if self.prefix_cache:
+                raise ValueError(f"{self.id} prefix caching requires dense cache keys")
             if not isinstance(routes[width], dict):
                 raise ValueError(f"{workload['id']} requires an expert route table for {self.id}")
             return routes[width]
@@ -85,12 +92,15 @@ class Configuration:
             del fields["prefill_chunk_tokens"]
         if not self.mixed_batches:
             del fields["mixed_batches"]
+        if not self.prefix_cache:
+            del fields["prefix_cache"]
         return fields
 
 
 def scheduling_options(configuration):
     return {"chunked_prefill_size": configuration.get("prefill_chunk_tokens", 0) or -1,
-            "enable_mixed_chunk": configuration.get("mixed_batches", False), "disable_radix_cache": True}
+            "enable_mixed_chunk": configuration.get("mixed_batches", False),
+            "disable_radix_cache": not configuration.get("prefix_cache", False)}
 
 
 class Disaggregation:
@@ -116,6 +126,8 @@ class Disaggregation:
     def route_table(self, workload):
         if "expert_routes" in workload:
             raise ValueError(f"{self.id} requires a workload for independently placed dense workers")
+        if "prefixes" in workload or any("prefix_id" in request for request in workload["requests"]):
+            raise ValueError(f"{self.id} shared prompt content requires a colocated instance")
         return None
 
     @staticmethod
@@ -156,6 +168,7 @@ def native_options(model, configuration):
     schedule = scheduling_options(config)
     config.pop("prefill_chunk_tokens", None)
     config.pop("mixed_batches", None)
+    config.pop("prefix_cache", None)
     config["tp_size"] = config.pop("tp")
     config["pp_size"] = config.pop("pp", 1)
     if "microbatch_requests" in config:

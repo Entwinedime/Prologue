@@ -63,6 +63,7 @@ class AscendEvidence:
         self.publications = worker["publications"]
         self.calls = worker["calls"]
         self.ingress = worker.get("ingress")
+        self.cache_effects = worker.get("cache_effects")
         self.rows = [row for row in rows if row.get("ph") == "X"]
 
     def markers(self):
@@ -172,6 +173,8 @@ class AscendEvidence:
         }
         if self.ingress is not None:
             document["ingress"] = self.ingress
+        if self.cache_effects is not None:
+            document["cache_effects"] = self.cache_effects
         return document
 
     @staticmethod

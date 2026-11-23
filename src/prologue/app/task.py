@@ -6,6 +6,7 @@ from pathlib import Path
 
 from prologue.app.core import run_core
 from prologue.integrations.frameworks.sglang.configuration import Model, configuration_from
+from prologue.integrations.frameworks.sglang.content import PromptContent
 
 
 class Plan:
@@ -26,6 +27,7 @@ class Plan:
         # The core owns request validation and arrival order for both planning and simulation.
         self.workloads = run_core("workloads", source["workloads"])
         for workload in self.workloads:
+            PromptContent.declared(workload)
             for configuration in self.configurations:
                 configuration.route_table(workload)
 
