@@ -188,7 +188,6 @@ struct TemplateFrame {
     std::optional<std::string> state_input;
     std::optional<CommunicationGroup> communication;
 
-    static TemplateFrame read(const nlohmann::json & source);
     nlohmann::json local_document() const;
     nlohmann::json document() const;
     std::map<std::string, StateBindings> state_inputs() const;
@@ -227,7 +226,7 @@ struct LocalImplementation {
 
 class TemplateLibrary {
 public:
-    static TemplateLibrary read(const nlohmann::json & source);
+    static TemplateLibrary read(const nlohmann::json & body, const nlohmann::json * published_header = nullptr);
     nlohmann::json document() const;
     void validate_observations() const;
     void validate() const;

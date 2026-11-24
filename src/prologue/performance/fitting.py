@@ -1,8 +1,10 @@
 """Publish selected service models in the domains that supplied their training evidence."""
 
+import json
 from collections import defaultdict
 from itertools import chain
 
+from prologue.artifacts import write_json
 from prologue.performance.models import ModelBindings
 from prologue.performance.requirements import cost_identity
 
@@ -75,3 +77,33 @@ class FittedCosts:
     def document(self):
         return {"domains": self.domains, "sources": self.sources, "sample_recordings": self.sample_recordings,
                 "reused": self.reused}
+
+    @staticmethod
+    def publish(directory, asset):
+        if asset is None:
+            write_json(directory / "costs.json", FittedCosts({}, []).document(), replace=False)
+            return
+        fitted = json.loads(asset.read_bytes())
+        origins = fitted["sample_recordings"]
+        names = {}
+        (directory / "samples").mkdir(parents=True)
+        for index, (name, recordings) in enumerate(zip(fitted["sources"], origins, strict=True)):
+            if name in names:
+                raise ValueError(f"duplicate training source in fitted cost asset: {name}")
+            path = asset.parent / name
+            content = path.read_bytes()
+            if json.loads(content).get("native_recordings", []) != recordings:
+                raise ValueError(f"fitted model and sample disagree about the native recordings: {path}")
+            relative = f"samples/{index}.json"
+            (directory / relative).write_bytes(content)
+            names[name] = relative
+
+        # Model training rows index this ordered table. Reused observations must refer to the same portable samples.
+        for group in fitted["reused"]:
+            for sample in group["samples"]:
+                donor = sample["observation"]
+                donor["source"] = names[donor["source"]]
+        write_json(directory / "costs.json", {
+            "domains": fitted["domains"], "sources": list(names.values()), "sample_recordings": origins,
+            "reused": fitted["reused"],
+        }, replace=False)

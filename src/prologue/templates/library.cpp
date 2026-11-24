@@ -5,6 +5,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include "prologue/templates/selection.hpp"
+
 namespace prologue {
 namespace {
 
@@ -279,9 +281,18 @@ nlohmann::json TemplateDefinition::document() const {
     return result;
 }
 
-TemplateFrame TemplateFrame::read(const nlohmann::json & source) {
+namespace {
+
+TemplateFrame read_frame(const nlohmann::json & source, const std::map<std::size_t, std::size_t> & definitions,
+                         const nlohmann::json & entry, const nlohmann::json & domain) {
     TemplateFrame result;
-    result.definition = index(source.at("definition"));
+    const auto id = index(source.at("definition"));
+    const auto found = definitions.find(id);
+    if (found == definitions.end())
+        throw TemplateGap({ { "status", "missing_definition" }, { "action", entry.at("action") }, { "call", entry.at("frame").at("site") },
+                            { "site", source.at("site") }, { "definition", id }, { "domain", domain } });
+
+    result.definition = found->second;
     result.guard = TemplateGuard::read(source.at("guard"));
     if (source.contains("communication")) result.communication = CommunicationGroup::read(source.at("communication"));
     result.site = source.at("site").get<std::string>();
@@ -303,9 +314,12 @@ TemplateFrame TemplateFrame::read(const nlohmann::json & source) {
             if (!tensor.at("writer").is_null()) result.tensors.back()->writer = indices(tensor.at("writer"));
         }
     }
-    for (const auto & child : source.at("children").get_ref<const nlohmann::json::array_t &>()) result.children.push_back(read(child));
+    for (const auto & child : source.at("children").get_ref<const nlohmann::json::array_t &>())
+        result.children.push_back(read_frame(child, definitions, entry, domain));
     return result;
 }
+
+} // namespace
 
 nlohmann::json TemplateFrame::local_document() const {
     nlohmann::json result{
@@ -357,21 +371,36 @@ std::map<std::string, StateBindings> TemplateFrame::state_inputs() const {
     return result;
 }
 
-TemplateLibrary TemplateLibrary::read(const nlohmann::json & source) {
+TemplateLibrary TemplateLibrary::read(const nlohmann::json & source, const nlohmann::json * published_header) {
     TemplateLibrary result;
-    result.domain = source.at("domain");
-    result.local_domain = source.at("local_domain");
-    for (const auto & resource : source.at("resources").get_ref<const nlohmann::json::array_t &>()) result.resources.push_back(Resource::read(resource));
-    for (const auto & definition : source.at("definitions").get_ref<const nlohmann::json::array_t &>())
+    const auto & header = published_header ? *published_header : source;
+    result.domain = header.at("domain");
+    result.local_domain = header.at("local_domain");
+    for (const auto & resource : header.at("resources").get_ref<const nlohmann::json::array_t &>()) result.resources.push_back(Resource::read(resource));
+
+    std::map<std::size_t, std::size_t> definitions;
+    for (const auto & definition : source.at("definitions").get_ref<const nlohmann::json::array_t &>()) {
+        const auto position = result.definitions.size();
+        const auto id = published_header ? index(definition.at("id")) : position;
+        if (!definitions.emplace(id, position).second) throw std::invalid_argument("duplicate published template definition id");
         result.definitions.push_back(TemplateDefinition::read(definition));
+    }
+
     for (const auto & entry : source.at("entries").get_ref<const nlohmann::json::array_t &>()) {
-        TemplateEntry value{ entry.at("action").get<std::string>(), entry.at("condition"), TemplateFrame::read(entry.at("frame")), {} };
+        TemplateEntry value{ entry.at("action").get<std::string>(), entry.at("condition"),
+                             read_frame(entry.at("frame"), definitions, entry, result.domain), {} };
         for (const auto & observation : entry.at("observations").get_ref<const nlohmann::json::array_t &>())
             value.observations.insert(read_parameters(observation));
         result.entries.push_back(std::move(value));
     }
-    for (const auto & local : source.at("implementations"))
-        result.implementations.push_back({ local.at("contract"), index(local.at("definition")), TemplateGuard::read(local.at("guard")) });
+    for (const auto & local : source.at("implementations")) {
+        const auto id = index(local.at("definition"));
+        const auto found = definitions.find(id);
+        if (found == definitions.end())
+            throw TemplateGap({ { "status", "missing_definition" }, { "contract", local.at("contract") },
+                                { "definition", id }, { "domain", result.domain } });
+        result.implementations.push_back({ local.at("contract"), found->second, TemplateGuard::read(local.at("guard")) });
+    }
     result.validate();
     return result;
 }
