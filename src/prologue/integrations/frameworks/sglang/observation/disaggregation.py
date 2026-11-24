@@ -52,7 +52,8 @@ class ServingRole(Session):
         self.barrier.wait()
         rooms = self.submissions * len(self.workload["requests"]) + 1
         self.submissions += 1
-        return await self.dispatch_at(engine, phase, self.clock.origin.value, rooms)
+        requests = enumerate(self.workload["requests"])
+        return await self.dispatch_at(engine, phase, self.clock.origin.value, requests, rooms)
 
     def check_publications(self, engine, directory):
         if self.role == "decode":
@@ -88,7 +89,7 @@ class ServingRole(Session):
         try:
             initialized = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
             engine.loop.run_until_complete(self.dispatch(engine, "warmup"))
-            self.drain(engine)
+            self.finish_warmup(engine)
             warmed = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
             recorded = self.record_workers(engine)
             self.barrier.wait()

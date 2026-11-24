@@ -57,11 +57,12 @@ class Session:
                 for _, request in requests]
 
     async def dispatch(self, engine, phase):
-        return await self.dispatch_at(engine, phase, clock_gettime_ns(CLOCK_MONOTONIC_RAW))
+        requests = enumerate(self.workload["requests"])
+        return await self.dispatch_at(engine, phase, clock_gettime_ns(CLOCK_MONOTONIC_RAW), requests)
 
-    async def dispatch_at(self, engine, phase, origin, *role_arguments):
+    async def dispatch_at(self, engine, phase, origin, requests, *role_arguments):
         pending = []
-        for offset, tied in groupby(enumerate(self.workload["requests"]), key=lambda item: item[1]["arrival_ns"]):
+        for offset, tied in groupby(requests, key=lambda item: item[1]["arrival_ns"]):
 
             # One native request envelope preserves tied ingress without deciding serving batches.
             delay_ns = origin + offset - clock_gettime_ns(CLOCK_MONOTONIC_RAW)
@@ -70,6 +71,22 @@ class Session:
             pending.append(asyncio.create_task(self.generate(engine, phase, list(tied), *role_arguments)))
         delivered = [row for cohort in await asyncio.gather(*pending) for row in cohort]
         return {"origin_raw_ns": origin, "requests": delivered}
+
+    async def warmup(self, engine):
+        requests = self.workload["requests"]
+        pending = enumerate(requests)
+
+        # Finish one request at startup before slow initialization can merge its Decode with later arrivals.
+        await self.generate(engine, "warmup", [next(pending)])
+        if len(requests) > 1:
+            origin = clock_gettime_ns(CLOCK_MONOTONIC_RAW) - requests[1]["arrival_ns"]
+            await self.dispatch_at(engine, "warmup", origin, pending)
+
+    def finish_warmup(self, engine):
+
+        # Keep startup objects out of steady-state GC and drain the scheduler after the native command.
+        engine.freeze_gc()
+        self.drain(engine)
 
     @staticmethod
     def drain(engine):
@@ -195,8 +212,8 @@ class Session:
         started = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
         with Engine(**native_options(self.model, self.configuration)) as engine:
             initialized = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
-            engine.loop.run_until_complete(self.dispatch(engine, "warmup"))
-            self.drain(engine)
+            engine.loop.run_until_complete(self.warmup(engine))
+            self.finish_warmup(engine)
             warmed = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
             recorded = self.record_workers(engine)
         self.save(started, initialized, warmed, recorded)
