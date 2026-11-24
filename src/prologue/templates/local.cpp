@@ -110,6 +110,7 @@ nlohmann::json TemplateLibrary::local_contract(const TemplateFrame & frame, cons
         tensors.push_back({ { "value", value }, { "storage", allocation }, { "version", tensor->version }, { "external", tensor->external },
                             { "writer", !tensor->writer ? "absent" : *tensor->writer == position ? "local" : "outside" },
                             { "buffer", tensor->buffer } });
+        if (frame.allocations.contains(tensor->storage)) tensors.back()["allocates"] = true;
     }
     auto communication = nlohmann::json();
     if (frame.communication) {

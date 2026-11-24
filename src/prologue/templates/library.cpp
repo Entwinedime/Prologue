@@ -298,6 +298,8 @@ TemplateFrame read_frame(const nlohmann::json & source, const std::map<std::size
     result.bindings = source.at("bindings");
     result.constants = read_parameters(source.at("constants"));
     result.resources = indices(source.at("resources"));
+    if (const auto owned = source.find("allocations"); owned != source.end())
+        result.allocations = owned->get<std::set<std::string>>();
     result.state = StateBindings::read(source.at("state"));
     if (!source.at("state_input").is_null()) result.state_input = source.at("state_input").get<std::string>();
     for (const auto & tensor : source.at("tensors").get_ref<const nlohmann::json::array_t &>()) {
@@ -348,6 +350,7 @@ nlohmann::json TemplateFrame::local_document() const {
             });
         else result["tensors"].push_back(nullptr);
     }
+    if (!allocations.empty()) result["allocations"] = allocations;
     if (communication) result["communication"] = communication->document();
     return result;
 }

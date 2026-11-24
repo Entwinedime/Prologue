@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -20,6 +21,7 @@
 namespace prologue {
 
 class CoarseGraph;
+class FeatureValues;
 class WorkFeatures;
 enum class WorkKind;
 struct TemplateDefinition;
@@ -50,16 +52,20 @@ private:
         std::string_view status() const;
     };
 
-    using PhaseModels = std::map<std::string, std::unique_ptr<const ServiceModel>, std::less<>>;
+    struct Binding {
+        std::string phase;
+        nlohmann::json operand;
+        std::unique_ptr<const ServiceModel> model;
+    };
+    using IntervalModels = std::vector<Binding>;
 
     template<class Definitions>
     WorkCosts(nlohmann::json domain, const nlohmann::json & asset, const Definitions & definitions);
     std::optional<std::size_t> external_index(const nlohmann::json & identity, WorkKind kind) const;
-
-    template<class Features>
-    Estimate estimate(std::optional<std::size_t> definition, std::size_t interval, std::string_view phase, const Features & features) const;
-    template<class Features>
-    Estimate work_estimate(std::optional<std::size_t> definition, std::size_t interval, WorkKind kind, const Features & features,
+    static const ServiceModel * lookup(const IntervalModels & models, std::string_view phase, const nlohmann::json * operand);
+    Estimate estimate(std::optional<std::size_t> definition, std::size_t interval, std::string_view phase, const FeatureValues & features,
+                      const nlohmann::json * operand) const;
+    Estimate work_estimate(std::optional<std::size_t> definition, std::size_t interval, WorkKind kind, const FeatureValues & features,
                            const nlohmann::json * explicit_service = nullptr) const;
     CostGap gap(const Estimate & estimate, const WorkFeatures & features, nlohmann::json details) const;
 
@@ -67,7 +73,7 @@ private:
     std::span<const TemplateDefinition> definitions_;
     std::vector<std::optional<std::size_t>> model_indices_;
     std::map<nlohmann::json, std::pair<std::size_t, WorkKind>> external_;
-    std::vector<std::vector<PhaseModels>> models_;
+    std::vector<std::vector<IntervalModels>> models_;
 };
 
 } // namespace prologue

@@ -63,17 +63,23 @@ Resource Resource::read(const nlohmann::json & source) {
                      source.at("serial").get<bool>() };
     if (result.rank < 0 || result.role.empty() || result.identity.empty()) throw std::invalid_argument("invalid graph resource identity");
     if (result.kind != ResourceKind::Service && !result.serial) throw std::invalid_argument("threads and streams require serial order");
+    if (source.contains("binding")) {
+        result.binding = source.at("binding").get<std::string>();
+        if (result.binding->empty()) throw std::invalid_argument("empty logical resource binding");
+    }
     return result;
 }
 
 nlohmann::json Resource::document() const {
-    return {
+    nlohmann::json result = {
         {     "kind", resource_name(kind) },
         {     "rank",                rank },
         {     "role",                role },
         { "identity",            identity },
         {   "serial",              serial }
     };
+    if (binding) result["binding"] = *binding;
+    return result;
 }
 
 TensorRule TensorRule::read(const nlohmann::json & source) {

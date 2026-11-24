@@ -19,6 +19,8 @@ namespace prologue {
 
 class FeatureValues {
 public:
+    virtual std::string_view phase() const = 0;
+    virtual const nlohmann::json * transport() const = 0;
     virtual std::optional<double> value(std::string_view axis) const = 0;
 
 protected:
@@ -31,9 +33,9 @@ public:
     WorkFeatures(const TensorCopy & copy, const GraphScope & scope, const Resource & resource);
     explicit WorkFeatures(Parameters parameters);
 
-    std::string_view phase() const { return phase_; }
+    std::string_view phase() const override { return phase_; }
     std::optional<double> value(std::string_view axis) const override;
-    const nlohmann::json * transport() const { return transport_.is_null() ? nullptr : &transport_; }
+    const nlohmann::json * transport() const override { return transport_.is_null() ? nullptr : &transport_; }
     nlohmann::json document() const;
 
 private:

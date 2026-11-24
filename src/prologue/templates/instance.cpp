@@ -111,6 +111,10 @@ private:
         // Empty-extent checks select a template. Only native branch predicates describe the work being timed.
         graph_.scopes.back().info.guards = frame.guard.branches;
         graph_.scopes.back().communication = frame.communication;
+        for (const auto & storage : frame.allocations) {
+            if (external_.contains(storage) || !allocations_.emplace(storage, identity).second)
+                throw std::invalid_argument("local storage must have one allocating call: " + storage);
+        }
         InstanceScope node{ &frame, parent, call, {}, {} };
         for (std::size_t slot = 0; slot < definition.resources.size(); ++slot) {
             const auto & actual = graph_.resources.at(frame.resources[slot]);
@@ -208,7 +212,12 @@ private:
                                           std::move(layout.shape),
                                           description.tensor->shape };
                 if (description.tensor->packing) tensor.bind_rows(description.tensor->packing, graph_.scopes[scope].info);
-                if (!binding.external) tensor.allocation = 0;
+                if (!binding.external) {
+
+                    // The invocation owns fresh storage unless a nested call declares its allocation.
+                    const auto owner = allocations_.find(binding.storage);
+                    tensor.allocation = owner == allocations_.end() ? 0 : owner->second;
+                }
                 tensor.buffer = binding.buffer;
                 if (binding.writer) {
                     std::size_t writer = 0;
@@ -229,6 +238,7 @@ private:
     CoarseGraph graph_;
     std::vector<InstanceScope> scopes_;
     std::set<std::string> external_;
+    std::map<std::string, std::size_t> allocations_;
 };
 
 } // namespace

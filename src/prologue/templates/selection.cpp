@@ -188,7 +188,8 @@ public:
                               {},
                               source.state,
                               source.state_input,
-                              source.communication },
+                              source.communication,
+                              source.allocations },
                 {},
                 {}
             };
@@ -261,7 +262,9 @@ TemplateEntry TemplateSelection::select(std::string_view action, const nlohmann:
         };
 
         // A local observation needs each admitted member's extent; aggregate dimensions cannot recover their order.
-        if (work.contains("members")) details["members"] = work.at("members");
+        for (const auto key : { "members", "context", "callers" }) {
+            if (work.contains(key)) details[key] = work.at(key);
+        }
         for (const auto & [name, state] : state_inputs) details["state_inputs"][name] = state.document();
         if (chosen.ambiguity) details["site"] = *chosen.ambiguity;
         else if (chosen.rejection) {

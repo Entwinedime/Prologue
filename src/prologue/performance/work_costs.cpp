@@ -18,9 +18,9 @@ public:
         : document_(document), phase_(document.at("phase").get_ref<const std::string &>()),
           axes_(document.at("axes").get_ref<const nlohmann::json::object_t &>()) {}
 
-    std::string_view phase() const { return phase_; }
+    std::string_view phase() const override { return phase_; }
 
-    const nlohmann::json * transport() const {
+    const nlohmann::json * transport() const override {
         const auto found = document_.find("transport");
         return found == document_.end() ? nullptr : &*found;
     }
@@ -75,10 +75,21 @@ WorkCosts::WorkCosts(nlohmann::json domain, const nlohmann::json & asset, const 
         const auto & model = bindings[ordinal];
         const auto definition = model.at("definition").get<std::size_t>();
         const auto interval = model.at("interval").get<std::size_t>();
-        auto & phases = models_.at(definition).at(interval);
-        auto service = ServiceModel::decode(model, ordinal, measured.at(definition), interval);
-        if (!phases.try_emplace(model.at("phase").get<std::string>(), std::move(service)).second)
-            throw std::invalid_argument("cost asset repeats a work interval and phase");
+        const auto & declared = measured.at(definition);
+        const auto & phase = model.at("phase").get_ref<const std::string &>();
+        const auto external = declared.find("external");
+        const auto transport = model.find("transport");
+        if (external != declared.end() && transport != model.end())
+            throw std::invalid_argument("external service already declares its operand in the definition");
+        const nlohmann::json * operand = nullptr;
+        if (external != declared.end()) operand = &*external;
+        else if (transport != model.end()) {
+            if (!transport->is_object()) throw std::invalid_argument("measured transport must identify its physical operand");
+            operand = &*transport;
+        }
+        auto & entries = models_.at(definition).at(interval);
+        if (lookup(entries, phase, operand)) throw std::invalid_argument("cost asset repeats a work interval, phase and operand");
+        entries.push_back({phase, operand ? *operand : nlohmann::json(nullptr), ServiceModel::decode(model, ordinal, declared, interval)});
     }
 
     // Work definitions may be shared; the models always come from the selected execution domain.
@@ -109,41 +120,45 @@ std::optional<std::size_t> WorkCosts::external_index(const nlohmann::json & iden
     return found->second.first;
 }
 
-template<class Features>
-WorkCosts::Estimate WorkCosts::estimate(std::optional<std::size_t> definition, std::size_t interval,
-                                        std::string_view phase, const Features & features) const {
-    if (!definition) return {};
-    const auto & phases = models_[*definition].at(interval);
-    const auto match = phases.find(phase);
-    if (match == phases.end()) return {};
-
-    // Variable traffic requires training coverage of the reported row split, including zero-row peers.
-    if (const auto * operand = features.transport()) {
-        const auto axes = operand->find("row_axes");
-        if (axes != operand->end() && std::ranges::any_of(*axes, [&](const auto & axis) {
-            return !match->second->bounds.contains(axis.template get_ref<const std::string &>());
-        })) return { match->second.get(), std::nullopt };
+const ServiceModel * WorkCosts::lookup(const IntervalModels & models, std::string_view phase, const nlohmann::json * operand) {
+    for (const auto & binding : models) {
+        if (binding.phase == phase && (operand ? binding.operand == *operand : binding.operand.is_null())) return binding.model.get();
     }
-    return { match->second.get(), match->second->estimate(features) };
+    return nullptr;
 }
 
-template<class Features>
+WorkCosts::Estimate WorkCosts::estimate(std::optional<std::size_t> definition, std::size_t interval,
+                                        std::string_view phase, const FeatureValues & features, const nlohmann::json * operand) const {
+    if (!definition) return {};
+    const auto * model = lookup(models_[*definition].at(interval), phase, operand);
+    if (!model) return {};
+
+    // Variable traffic requires training coverage of the reported row split, including zero-row peers.
+    if (operand) {
+        const auto axes = operand->find("row_axes");
+        if (axes != operand->end() && std::ranges::any_of(*axes, [&](const auto & axis) {
+            return !model->bounds.contains(axis.template get_ref<const std::string &>());
+        })) return { model, std::nullopt };
+    }
+    return { model, model->estimate(features) };
+}
+
 WorkCosts::Estimate WorkCosts::work_estimate(std::optional<std::size_t> definition, std::size_t interval, WorkKind kind,
-                                             const Features & features, const nlohmann::json * explicit_service) const {
+                                             const FeatureValues & features, const nlohmann::json * explicit_service) const {
     const auto * operand = features.transport();
     if (explicit_service) {
         if (operand && *operand != *explicit_service)
             throw std::invalid_argument("cost query operand differs from its declared external service");
-        return estimate(definition, interval, features.phase(), features);
+        return estimate(definition, interval, features.phase(), features, explicit_service);
     }
     if (kind == WorkKind::Transfer && operand)
-        return estimate(external_index(*operand, kind), 0, features.phase(), features);
-    const auto measured = estimate(definition, interval, features.phase(), features);
+        return estimate(external_index(*operand, kind), 0, features.phase(), features, operand);
+    const auto measured = estimate(definition, interval, features.phase(), features, operand);
     if (measured.service_ns || kind != WorkKind::Collective || !operand) return measured;
 
     // A physical profile binds the group and layout. It estimates the instantiated payload at its own phase.
-    const auto point = external_index(*operand, kind);
-    return point ? estimate(point, 0, "", features) : measured;
+    const auto calibrated = estimate(external_index(*operand, kind), 0, "", features, operand);
+    return calibrated.model ? calibrated : measured;
 }
 
 std::string_view WorkCosts::Estimate::status() const {

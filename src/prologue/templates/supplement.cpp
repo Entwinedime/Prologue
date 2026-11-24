@@ -17,6 +17,32 @@ namespace {
 
 using Json = nlohmann::json;
 
+std::optional<std::size_t> matching_resource(const Resource & lane, std::span<const Resource> observed,
+                                             std::span<const Resource> known) {
+    const auto equivalent = [&](const Resource & other) {
+        return other.kind == lane.kind && other.rank == lane.rank && other.role == lane.role && other.serial == lane.serial
+            && other.binding == lane.binding;
+    };
+
+    // A declared logical lane survives process-local stream numbers. Unnamed lanes still need an unambiguous match.
+    if (!lane.binding) {
+        auto exact = std::ranges::find(known, lane);
+        if (exact != known.end()) return static_cast<std::size_t>(exact - known.begin());
+    }
+    auto found = std::ranges::find_if(known, equivalent);
+    if (found == known.end()) return std::nullopt;
+    if (std::ranges::count_if(known, equivalent) != 1 || std::ranges::count_if(observed, equivalent) != 1)
+        throw TemplateGap({{"status", "unbound_evidence_resource"}, {"resource", lane.document()}});
+    return static_cast<std::size_t>(found - known.begin());
+}
+
+void relocate(TemplateFrame & frame, const std::vector<std::size_t> & definitions, const std::vector<std::size_t> & lanes) {
+    frame.definition = definitions.at(frame.definition);
+    for (auto & lane : frame.resources) lane = lanes.at(lane);
+    for (auto & child : frame.children) relocate(child, definitions, lanes);
+    for (auto & branch : frame.alternatives) relocate(branch.frame, definitions, lanes);
+}
+
 std::string body_key(const Json & body) {
     const auto bytes = body.dump();
     std::array<unsigned char, SHA256_DIGEST_LENGTH> digest;
@@ -129,6 +155,7 @@ public:
         if (target.domain != evidence.at("domain") || target.local_domain != evidence.at("local_domain"))
             throw std::invalid_argument("evidence belongs to a different template domain");
         for (std::size_t i = 0; i < target.definitions.size(); ++i) known_.emplace(body_key(candidate_["definitions"][i]), i);
+        for (const auto & lane : evidence.at("resources")) observed_resources_.push_back(Resource::read(lane));
     }
 
     void apply(const Json & demand, const Json & gap) {
@@ -207,18 +234,10 @@ public:
 private:
     std::size_t resource(std::size_t slot) {
         if (const auto it = resources_.find(slot); it != resources_.end()) return it->second;
-        const auto observed = Resource::read(evidence_.at("resources").at(slot));
-        auto found = std::ranges::find(target_.resources, observed);
-        if (found == target_.resources.end()) {
-            const auto equivalent = [&](const Resource & other) {
-                return observed.kind == other.kind && observed.role == other.role && observed.rank == other.rank && observed.serial == other.serial;
-            };
-            const auto source_count = std::ranges::count_if(evidence_.at("resources"), [&](const Json & item) { return equivalent(Resource::read(item)); });
-            if (source_count != 1 || std::ranges::count_if(target_.resources, equivalent) != 1)
-                throw TemplateGap({{"status", "unbound_evidence_resource"}, {"resource", observed.document()}});
-            found = std::ranges::find_if(target_.resources, equivalent);
-        }
-        return resources_.emplace(slot, static_cast<std::size_t>(found - target_.resources.begin())).first->second;
+        const auto & observed = observed_resources_.at(slot);
+        const auto found = matching_resource(observed, observed_resources_, target_.resources);
+        if (!found) throw TemplateGap({{"status", "unbound_evidence_resource"}, {"resource", observed.document()}});
+        return resources_.emplace(slot, *found).first->second;
     }
 
     Json bind(const Json & observed) {
@@ -245,9 +264,45 @@ private:
     Json candidate_;
     std::map<std::string, std::size_t> known_;
     std::map<std::size_t, std::size_t> resources_;
+    std::vector<Resource> observed_resources_;
 };
 
 } // namespace
+
+void TemplateLibrary::join_observation(const TemplateLibrary & observed) {
+    if (domain != observed.domain || local_domain != observed.local_domain || resources.at(0).rank != observed.resources.at(0).rank)
+        throw std::invalid_argument("local observations belong to different worker domains");
+
+    // Idle initialization may only have run a control thread. New lanes come from this worker's actual call.
+    const auto previous = resources.size();
+    std::vector<std::size_t> lanes, bodies;
+    for (const auto & lane : observed.resources) {
+        const auto found = matching_resource(lane, observed.resources, std::span(resources).first(previous));
+        lanes.push_back(found.value_or(resources.size()));
+        if (!found) resources.push_back(lane);
+    }
+    std::map<std::string, std::size_t> known;
+    for (std::size_t i = 0; i < definitions.size(); ++i) known.emplace(body_key(definitions[i].document()), i);
+    for (const auto & definition : observed.definitions) {
+        auto [body, inserted] = known.try_emplace(body_key(definition.document()), definitions.size());
+        bodies.push_back(body->second);
+        if (inserted) definitions.push_back(definition);
+    }
+
+    // A whole observation retains its own arguments; identical programs accumulate the measured coordinates.
+    std::map<Json, std::size_t> calls;
+    const auto key = [](const TemplateEntry & entry) { return Json::array({entry.action, entry.condition, entry.frame.document()}); };
+    for (std::size_t i = 0; i < entries.size(); ++i) calls.emplace(key(entries[i]), i);
+    for (auto entry : observed.entries) {
+        if (entry.observations.empty()) continue;
+        relocate(entry.frame, bodies, lanes);
+        auto [call, inserted] = calls.try_emplace(key(entry), entries.size());
+        if (inserted) entries.push_back(std::move(entry));
+        else entries[call->second].observations.merge(entry.observations);
+    }
+    collect_local_implementations();
+    validate();
+}
 
 Json TemplateLibrary::evidence(const Json & measured, const TemplateLibrary & recipient) const {
     return MeasuredCalls(*this, recipient).extract(measured);

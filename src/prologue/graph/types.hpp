@@ -79,6 +79,7 @@ struct Resource {
     std::string role;
     std::string identity;
     bool serial;
+    std::optional<std::string> binding{};
 
     bool operator==(const Resource &) const = default;
 

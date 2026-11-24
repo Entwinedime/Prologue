@@ -66,6 +66,34 @@ nlohmann::json read_json(const std::filesystem::path & path) {
     return nlohmann::json::parse(stream);
 }
 
+class PublishedTemplates {
+public:
+    explicit PublishedTemplates(std::filesystem::path directory) : directory_(std::move(directory)) {}
+
+    prologue::TemplateLibrary read(std::size_t index, const nlohmann::json & header) {
+        auto body = read_json(directory_ / (std::to_string(index) + ".json"));
+        for (auto & declaration : body.at("definitions")) {
+            const auto reference = declaration.find("object");
+            if (reference == declaration.end()) continue;
+            const auto & key = reference->get_ref<const std::string &>();
+            if (key.size() != 64 || key.find_first_not_of("0123456789abcdef") != std::string::npos)
+                throw std::invalid_argument("invalid published template definition key");
+
+            // A worker keeps its own frame positions even when another worker uses the same body.
+            auto [found, inserted] = definitions_.try_emplace(key);
+            if (inserted) found->second = read_json(directory_ / "definitions" / (key + ".json"));
+            auto id = declaration.at("id");
+            declaration = found->second;
+            declaration["id"] = std::move(id);
+        }
+        return prologue::TemplateLibrary::read(body, &header);
+    }
+
+private:
+    std::filesystem::path directory_;
+    std::map<std::string, nlohmann::json> definitions_;
+};
+
 // Publishing a new artifact must neither expose a partial JSON nor replace an existing input or output.
 class Publication {
 public:
@@ -98,12 +126,13 @@ private:
 
 constexpr std::string_view usage = "prologue project <native-facts.json> <coarse.json> [--evidence]\n"
                                    "prologue action-layouts <observed-coarse.json> <layouts.json>\n"
-                                   "prologue templates <coarse.json> <templates.json>\n"
+                                   "prologue templates <coarse.json> <templates.json> [--root-site <site>]\n"
                                    "prologue work-identities <observed-coarse.json> <work.json>\n"
                                    "prologue work-costs <observed-coarse.json> <costs.json> <services.json> [--bindings]\n"
                                    "prologue cost-points <points.json> <costs.json> <estimates.json> [--bindings]\n"
                                    "prologue link-templates <source-libraries.json> <output-directory>\n"
                                    "prologue query-template <templates.json> <query.json> <answer.json>\n"
+                                   "prologue join-observation <worker.json> <observed.json> <candidate.json>\n"
                                    "prologue template-evidence <templates.json> <observed-templates.json> <measured-call.json> <evidence.json>\n"
                                    "prologue supplement-template <templates.json> <query.json> <evidence.json> <candidate.json>\n"
                                    "prologue instantiate <templates.json> <invocation.json> <coarse.json>\n"
@@ -262,9 +291,17 @@ int main(int argc, char ** argv) {
             output = prologue::CoarseProjection::project(std::move(observation), argc == 5 ? &evidence : nullptr).document();
             if (argc == 5) output["evidence"] = evidence.document(observation);
         }
-        else if ((command == "templates" || command == "work-identities") && argc == 4) {
+        else if (((command == "templates" || command == "work-identities") && argc == 4)
+                 || (command == "templates" && argc == 6 && std::string_view(argv[4]) == "--root-site")) {
+            destination = argv[3];
             const auto document = read_json(argv[2]);
-            const auto source = prologue::sglang::NativeTemplates::describe(prologue::CoarseGraph::read(document));
+            auto source = prologue::sglang::NativeTemplates::describe(prologue::CoarseGraph::read(document));
+            if (argc == 6) {
+
+                // Compile the observed root and its children without publishing incidental calls from the same window.
+                std::erase_if(source.entries, [&](const auto & entry) { return source.graph.scopes.at(entry.scope).info.site != argv[5]; });
+                if (source.entries.empty()) throw std::invalid_argument("requested root site has no observed template entry");
+            }
             output = command == "templates" ? source.compile().document() : work_identities(source, document.at("evidence").at("window_ns"));
         }
         else if ((command == "work-costs" || command == "cost-points") && (argc == 5 || (argc == 6 && std::string_view(argv[5]) == "--bindings"))) {
@@ -328,6 +365,11 @@ int main(int argc, char ** argv) {
             const auto observed = prologue::TemplateLibrary::read(read_json(argv[3]));
             output = observed.evidence(read_json(argv[4]), library);
         }
+        else if (command == "join-observation" && argc == 5) {
+            auto worker = prologue::TemplateLibrary::read(read_json(argv[2]));
+            worker.join_observation(prologue::TemplateLibrary::read(read_json(argv[3])));
+            output = worker.document();
+        }
         else if (command == "supplement-template" && argc == 6) {
             const auto library = prologue::TemplateLibrary::read(read_json(argv[2]));
             output = library.supplement(read_json(argv[3]), read_json(argv[4])).document();
@@ -366,10 +408,10 @@ int main(int argc, char ** argv) {
             StreamPeer peer;
             try {
                 std::map<std::size_t, prologue::TemplateLibrary> libraries;
+                PublishedTemplates published(argv[2]);
                 for (const auto & header : task.at("template_sources").get_ref<const nlohmann::json::array_t &>()) {
                     const auto index = libraries.size();
-                    const auto path = std::filesystem::path(argv[2]) / (std::to_string(index) + ".json");
-                    libraries.emplace(index, prologue::TemplateLibrary::read(read_json(path), &header));
+                    libraries.emplace(index, published.read(index, header));
                 }
 
                 // Auxiliary bodies can supply closed actions or local children; participants come from the role binding.

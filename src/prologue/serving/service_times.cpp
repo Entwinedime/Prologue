@@ -20,13 +20,25 @@ std::optional<InvocationInput> ServiceTimes::action_input(const ServingAction & 
     return conditions_->invocation(action.task.group, "action", ExecutionInputs::action_identity(action));
 }
 
-GraphTiming ServiceTimes::action(const std::string & group, const CoarseGraph & graph, std::span<const TemplateInterval> origins,
+GraphTiming ServiceTimes::action(const ServingAction & action, const CoarseGraph & graph, std::span<const TemplateInterval> origins,
                                  const std::optional<InvocationInput> & observed) {
     if (observed) return observed->timing(graph, observer_);
     if (given_) return { std::vector<ServiceDuration>(graph.work.size(), given_), {} };
 
     const auto began = std::chrono::steady_clock::now();
-    auto result = participants_.at(group).timing(graph, origins, nullptr, observer_ != nullptr);
+    GraphTiming result;
+    try {
+        result = participants_.at(action.task.group).timing(graph, origins, nullptr, observer_ != nullptr);
+    } catch (const CostGap & gap) {
+        auto details = gap.details();
+
+        // Keep the measured work identity separate from the live invocation an adapter can use to reproduce it.
+        auto & call = details["invocation"] = {{ "action", action.name }, { "condition", action.condition }, { "parameters", action.parameters }};
+        for (const auto key : { "members", "context", "callers" }) {
+            if (action.work.contains(key)) call[key] = action.work.at(key);
+        }
+        throw CostGap(std::move(details));
+    }
     query_time_ += std::chrono::steady_clock::now() - began;
     queries_ += graph.work.size();
     return result;

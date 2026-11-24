@@ -137,6 +137,9 @@ private:
                           const std::map<std::string, Expression> & arguments, const std::vector<nlohmann::json> & rows,
                           std::set<nlohmann::json> & shared) const {
         const auto & definition = library_.definitions[frame.definition];
+        for (const auto & storage : frame.allocations) {
+            if (!storage.starts_with(owner)) shared.insert({{"position", position}, {"allocates", storage}});
+        }
         for (std::size_t port = 0; port < frame.tensors.size(); ++port) {
             const auto & tensor = frame.tensors[port];
             if (!tensor || (tensor->value.starts_with(owner) && tensor->storage.starts_with(owner))) continue;

@@ -212,6 +212,7 @@ struct TemplateFrame {
     StateBindings state;
     std::optional<std::string> state_input;
     std::optional<CommunicationGroup> communication;
+    std::set<std::string> allocations{};
     std::vector<ObservedBranch> alternatives{};
 
     nlohmann::json local_document() const;
@@ -264,6 +265,7 @@ public:
     nlohmann::json document() const;
     nlohmann::json evidence(const nlohmann::json & measured, const TemplateLibrary & recipient) const;
     TemplateLibrary supplement(const nlohmann::json & demand, const nlohmann::json & evidence) const;
+    void join_observation(const TemplateLibrary & observed);
     void validate_observations() const;
     void validate() const;
     TemplateInterface call_interface(const TemplateFrame & frame) const;

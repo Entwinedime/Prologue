@@ -73,6 +73,10 @@ public:
                     values_.emplace(tensor.value, spaces[value_owner] + "value/" + std::to_string(value_counts[value_owner]++));
                 if (!storage_.contains(tensor.storage))
                     storage_.emplace(tensor.storage, spaces[storage_owner] + "storage/" + std::to_string(storage_counts[storage_owner]++));
+
+                // A local storage name can span siblings. Its allocating call is independent of that shared namespace.
+                if (tensor.allocation && *tensor.allocation != 0)
+                    scopes_[*tensor.allocation].frame.allocations.insert(storage_.at(tensor.storage));
             }
         }
         for (std::size_t event = 0; event < source.events.size(); ++event) {

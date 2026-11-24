@@ -23,7 +23,7 @@ public:
     bool modeled() const { return !assets_.is_null(); }
     ExecutionInputs * conditions() const { return conditions_; }
     std::optional<InvocationInput> action_input(const ServingAction & action);
-    GraphTiming action(const std::string & group, const CoarseGraph & graph, std::span<const TemplateInterval> origins,
+    GraphTiming action(const ServingAction & action, const CoarseGraph & graph, std::span<const TemplateInterval> origins,
                        const std::optional<InvocationInput> & observed);
     ServiceDuration external(const std::string & group, const nlohmann::json & identity, WorkKind kind, const WorkFeatures & features);
     nlohmann::json finish() const;

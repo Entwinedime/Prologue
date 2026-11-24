@@ -124,6 +124,14 @@ public:
     }
 };
 
+class LayerTokens final : public AxisRegression {
+public:
+    explicit LayerTokens(const Binding & spec) : AxisRegression(spec, "parameter.model_tokens", "ns_per_token") {
+        if (spec.work.at("kind") != "device" || spec.definition.value("role", "") != "layer")
+            throw std::invalid_argument("a layer-token model requires device work in a model layer");
+    }
+};
+
 template<class Backend>
 std::unique_ptr<const ServiceModel> load(const Binding & spec) { return std::make_unique<Backend>(spec); }
 
@@ -136,7 +144,8 @@ std::unique_ptr<const ServiceModel> ServiceModel::decode(const Json & model, std
                                                         std::size_t interval) {
     using Factory = std::unique_ptr<const ServiceModel> (*)(const Binding &);
     static const std::map<std::string_view, Factory> backends{
-        { "bounded_curve", load<BoundedCurve> }, { "startup_transfer", load<StartupTransfer> }, { "attention_pairs", load<AttentionPairs> },
+        { "bounded_curve", load<BoundedCurve> }, { "startup_transfer", load<StartupTransfer> },
+        { "attention_pairs", load<AttentionPairs> }, { "layer_tokens", load<LayerTokens> },
     };
     const auto & family = model.at("family").get_ref<const std::string &>();
     const auto found = backends.find(family);
