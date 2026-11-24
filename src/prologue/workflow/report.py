@@ -4,8 +4,9 @@ from collections import defaultdict
 
 
 class ExplorationReport:
-    def __init__(self, targets, libraries, usage):
+    def __init__(self, targets, libraries, usage, unresolved_services):
         self.targets, self.libraries, self.usage = targets, libraries, usage
+        self.unresolved_services = unresolved_services
 
     def rankings(self):
         workloads = defaultdict(list)
@@ -27,9 +28,10 @@ class ExplorationReport:
 
     def document(self):
         return {
-            "status": "complete" if all(row["status"] == "predicted" for row in self.targets) else "partial",
+            "status": "complete" if not self.unresolved_services and all(row["status"] == "predicted" for row in self.targets) else "partial",
             "qualification": "modeled_predictions", "targets": self.targets, "rankings": self.rankings(),
             "libraries": str(self.libraries), "usage": self.usage,
+            **({"unresolved_training_services": self.unresolved_services} if self.unresolved_services else {}),
         }
 
     @staticmethod
@@ -46,6 +48,11 @@ class ExplorationReport:
             "| Configuration | Workload | Status | P95 TTFT (ms) | Mean TPOT (ms) | Tokens/s |",
             "| --- | --- | --- | ---: | ---: | ---: |",
         ]
+        if "card_ns" in self.usage:
+            lines.insert(4, f"Physical devices used {self.usage['card_ns'] / 1e9:.2f} card-seconds. "
+                            f"This task added {self.usage['published_bytes']} bytes to the shared libraries.")
+        if self.unresolved_services:
+            lines.insert(4, "Some services declared by this task's measured training cuts still require qualification. See `result.json`.")
         for row in self.targets:
             values = [row["configuration"], row["workload"], row["status"]]
             for metric, scale in (("p95_ttft_ns", 1e6), ("mean_tpot_ns", 1e6), ("tokens_per_second", 1)):
@@ -53,4 +60,7 @@ class ExplorationReport:
                 values.append("-" if value is None else f"{value / scale:.3f}")
             lines.append("| " + " | ".join(self.cell(value) for value in values) + " |")
         lines.extend(("", "`result.json` includes each target's evidence, capture usage, and ties in each metric's rankings.", ""))
+        for row in self.targets:
+            if answer := row.get("acquisition"):
+                lines.append(f"- {self.cell(row['configuration'])} / {self.cell(row['workload'])}: {self.cell(answer['status'])}")
         return "\n".join(lines)

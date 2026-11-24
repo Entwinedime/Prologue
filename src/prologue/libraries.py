@@ -1,14 +1,14 @@
 """Read a fixed, portable pair of template and service-cost publications."""
 
 import json
-from shutil import copyfile
+from hashlib import sha256
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
-from prologue.artifacts import write_json
+from prologue.artifacts import content_id, write_json
 
 
 def asset_path(directory, name):
@@ -22,6 +22,7 @@ def asset_path(directory, name):
 @dataclass(frozen=True, slots=True)
 class BoundTemplates:
     paths: list[Path]
+    definitions: Path | None
     headers: list[dict]
     worker_count: int
     worker_deployment: dict
@@ -32,14 +33,47 @@ class TemplateCatalog:
     def __init__(self, directory, index):
         self.directory = directory
         self.observations = index["observations"]
+        self.body_digests = {}
         self.bindings = {}
         for binding in index["bindings"]:
             key = json.dumps(binding["domain"], sort_keys=True)
             if key in self.bindings:
                 raise ValueError(f"template publication has conflicting worker bindings for {binding['domain']}")
-            if {binding["workers"], *binding["imports"]} - self.observations.keys():
+            if {binding["workers"], *binding["imports"], *binding.get("sources", ())} - self.observations.keys():
                 raise ValueError("worker binding refers to an unpublished observation")
             self.bindings[key] = binding
+
+    @staticmethod
+    def write_shard(directory, name, template, *, sampling=None):
+        header = {key: template[key] for key in ("domain", "local_domain", "resources")}
+        body = {key: value for key, value in template.items() if key not in header and key != "definitions"}
+        references = []
+        for position, definition in enumerate(template["definitions"]):
+            key = content_id(definition)
+            path = directory / "definitions" / (key + ".json")
+            if not path.exists():
+                write_json(path, definition, replace=False)
+            references.append({"id": position, "object": key})
+
+        # Frames keep their observed positions; equivalent roles point to one immutable definition.
+        write_json(directory / name, body | {"definitions": references})
+        shard = {"body": name, "header": header}
+        if sampling is not None:
+            shard["sampling"] = str(Path(name).with_suffix("")) + "-sampling.json"
+            write_json(directory / shard["sampling"], sampling, replace=False)
+        return shard
+
+    def read_shard(self, shard):
+        body = json.loads(asset_path(self.directory, shard["body"]).read_bytes())
+        for position, definition in enumerate(body["definitions"]):
+            if "object" in definition:
+                key = definition["object"]
+                path = asset_path(self.directory / "definitions", key + ".json")
+                value = json.loads(path.read_bytes())
+                if content_id(value) != key:
+                    raise ValueError(f"published template definition differs from its content address: {key}")
+                body["definitions"][position] = value | {"id": definition["id"]}
+        return body
 
     @classmethod
     def publish(cls, directory, observations, bindings):
@@ -47,18 +81,9 @@ class TemplateCatalog:
         for ordinal, (identity, (deployment, paths)) in enumerate(observations.items()):
             shards = []
             for role, (path, sampling) in enumerate(paths):
-                body = json.loads(path.read_bytes())
-                header = {field: body.pop(field) for field in ("domain", "local_domain", "resources")}
-
-                # A frame names a definition independently of the other definitions present in this release.
-                for identity_in_body, definition in enumerate(body["definitions"]):
-                    definition["id"] = identity_in_body
                 name = f"bodies/{ordinal}/{role}.json"
-                write_json(directory / name, body, replace=False)
-                shard = {"body": name, "header": header}
-                if sampling is not None:
-                    shard["sampling"] = f"bodies/{ordinal}/{role}-sampling.json"
-                    copyfile(sampling, directory / shard["sampling"])
+                recipe = json.loads(sampling.read_bytes()) if sampling is not None else None
+                shard = cls.write_shard(directory, name, json.loads(path.read_bytes()), sampling=recipe)
                 shards.append(shard)
             records[identity] = {"deployment": deployment, "shards": shards}
 
@@ -71,13 +96,16 @@ class TemplateCatalog:
         if binding is None:
             return None
         workers = self.observations[binding["workers"]]
-        recordings = tuple(dict.fromkeys((binding["workers"], *binding["imports"])))
+        recordings = tuple(dict.fromkeys((binding["workers"], *binding.get("sources", ()), *binding["imports"])))
 
-        # Auxiliary bodies can extend local calls. Only the first observation supplies serving participants.
-        shards = [shard for name in recordings for shard in self.observations[name]["shards"]]
+        # Only an initialized worker supplies participants. Local observations can extend its effective program.
+        primary = binding.get("compiled", workers["shards"])
+        shards = [*primary, *(shard for name in binding["imports"] for shard in self.observations[name]["shards"])]
+        definitions = self.directory / "definitions"
         return BoundTemplates(
             [asset_path(self.directory, shard["body"]) for shard in shards],
-            [shard["header"] for shard in shards], len(workers["shards"]), workers["deployment"], recordings,
+            definitions if definitions.is_dir() else None, [shard["header"] for shard in shards],
+            len(workers["shards"]), workers["deployment"], recordings,
         )
 
     def sampling_sources(self):
@@ -85,6 +113,14 @@ class TemplateCatalog:
             for shard in observation["shards"]:
                 if "sampling" in shard:
                     yield identity, json.loads(asset_path(self.directory, shard["sampling"]).read_bytes())
+
+    def program_identity(self, binding):
+        for path in binding.paths:
+            if path not in self.body_digests:
+                self.body_digests[path] = sha256(path.read_bytes()).hexdigest()
+
+        # The body includes the content addresses of its definitions. The header supplies the worker's initial state.
+        return [binding.worker_count, binding.worker_deployment, binding.headers, [self.body_digests[path] for path in binding.paths]]
 
 
 class LibraryRelease:
@@ -109,9 +145,16 @@ class LibraryRelease:
         return cls(directory)
 
     def __init__(self, directory):
-        self.directory = directory.resolve()
+        self.root = directory.resolve()
+        self.directory = self.root
+        pointer = self.root / "current.json"
+        if pointer.is_file():
+            current = json.loads(pointer.read_bytes())["release"]
+            self.directory = asset_path(self.root, current)
         manifest = self.directory / "release.json"
-        if not manifest.exists() and (not self.directory.exists() or not any(self.directory.iterdir())):
+        if not manifest.exists() and self.directory == self.root and (not self.root.exists() or all(
+            path.name in {".library.lock", ".pending.json", "releases"} for path in self.root.iterdir()
+        )):
             self.identity = None
             self.catalog = None
             self.costs = None
@@ -127,3 +170,10 @@ class LibraryRelease:
         if self.catalog is None:
             return TemplateCatalog(self.directory, {"bindings": [], "observations": {}})
         return TemplateCatalog(self.catalog.parent, json.loads(self.catalog.read_bytes()))
+
+    @cached_property
+    def cost_identities(self):
+        if self.costs is None:
+            return {}
+        return {content_id(group["domain"]): content_id([group["definitions"], group["models"]])
+                for group in json.loads(self.costs.read_bytes())["domains"]}
