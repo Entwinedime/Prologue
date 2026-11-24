@@ -23,7 +23,7 @@ def main() -> None:
     capture = commands.add_parser("capture", help="capture or resume a native task with cumulative allowances")
     capture.add_argument("--input", type=Path, required=True)
     local = commands.add_parser("acquire-local", help="answer compatible prediction gaps in one bounded native session")
-    local.add_argument("--query", type=Path, nargs="+", required=True, help="original structure or work queries")
+    local.add_argument("--query", type=Path, nargs="+", action="extend", required=True, help="original structure or work queries")
     local.add_argument("--libraries", type=Path, help="fixed release providing native cuts for stateful work")
     local.add_argument("--storage-bytes", type=int, help="optional storage allowance under the session directory")
     for command in (capture, local):

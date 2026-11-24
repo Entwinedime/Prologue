@@ -62,7 +62,7 @@ class LocalPrebuilt:
         job = {"domain": domain, "rank": rank, "capacity": capacity, "batches": batches}
         card = placement.devices[0 if placement.single_device else rank]
         return SGLangAscendLaunch.local_attempt(
-            arguments, limit, deployment, card, impl["framework_revision"], job, "--local-prebuilt",
+            arguments, limit, deployment, [card], impl["framework_revision"], job, "--local-prebuilt",
             runtime_trace=True, model=impl["model"]["_name_or_path"],
         )
 

@@ -72,7 +72,8 @@ class SGLangObservation(NativeCallObservation):
             "load_format": runner.server_args.load_format,
             "disaggregation_mode": self.description["mode"],
         }
-        self.modules = ModelScopes(self, self.model)
+        self.modules = ModelScopes(self)
+        self.modules.attach_model(self.model)
         if self.routing is not None:
             from prologue.integrations.frameworks.sglang.observation.expert_scopes import ExpertScopes
 

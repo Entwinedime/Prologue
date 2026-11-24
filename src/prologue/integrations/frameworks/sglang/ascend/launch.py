@@ -20,17 +20,19 @@ class SGLangAscendLaunch:
         from prologue.acquisition.rules import LocalAcquisition
         from prologue.integrations.frameworks.sglang.ascend.local_attention import LocalAttention
         from prologue.integrations.frameworks.sglang.ascend.local_copy import LocalCopies
+        from prologue.integrations.frameworks.sglang.ascend.local_embedding import LocalEmbedding
         from prologue.integrations.frameworks.sglang.ascend.local_prebuilt import LocalPrebuilt
 
         attention = LocalAttention(release.templates.sampling_sources if release else None)
-        return LocalAcquisition((LocalCopies, attention, LocalPrebuilt), cls.check_local_placement, release.identity if release else None)
+        return LocalAcquisition((LocalCopies, attention, LocalPrebuilt, LocalEmbedding), cls.check_local_placement,
+                                release.identity if release else None)
 
     @classmethod
-    def local_attempt(cls, arguments, limit, deployment, card, revision, job, worker, *, runtime_trace, model=None, **evidence):
+    def local_attempt(cls, arguments, limit, deployment, cards, revision, job, worker, *, runtime_trace, model=None, **evidence):
         from prologue.acquisition.rules import EvidenceGap
 
         platform = AscendDeployment({"acquisition_mode": deployment.get("acquisition_mode", "full"),
-                                     "physical_devices": [card]}, 1, False)
+                                     "physical_devices": cards}, len(cards), False)
         image = NativeAttempt.image(arguments.source_image)
         if cls.domain.image_revision(image) != revision:
             raise EvidenceGap("framework_revision_mismatch", required=revision, image=image["Id"])

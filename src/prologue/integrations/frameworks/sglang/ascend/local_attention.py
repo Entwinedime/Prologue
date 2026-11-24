@@ -61,7 +61,7 @@ class LocalAttention:
         platform = AscendDeployment(deployment, 1, False)
         revision = domain["implementation"]["framework_revision"]
         job = {"runner": runner, "site": cut["site"], "contexts": [list(batch) for batch in sorted(contexts)]}
-        return SGLangAscendLaunch.local_attempt(arguments, limit, deployment, platform.devices[0], revision, job,
+        return SGLangAscendLaunch.local_attempt(arguments, limit, deployment, platform.devices, revision, job,
                                                 "--local-attention", runtime_trace=False, model=runner["model"]["path"],
                                                 template_recording=recording, cut=cut, domain=domain)
 

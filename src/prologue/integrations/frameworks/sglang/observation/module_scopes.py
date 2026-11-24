@@ -84,11 +84,13 @@ class ModelScopes:
             })
         return experts, layers
 
-    def __init__(self, observation: Any, model: Any) -> None:
+    def __init__(self, observation: Any) -> None:
+        self.observation = observation
+        self.bindings = {}
+
+    def attach_model(self, model: Any) -> None:
         from sglang.srt.layers.logits_processor import LogitsProcessor
 
-        self.observation = observation
-        self.model = model
         modules = dict(model.named_modules())
         self.experts, self.expert_layers = self.expert_structure(modules)
         experts = set(self.experts.values())
@@ -97,31 +99,30 @@ class ModelScopes:
                 original = module._compute_lm_head
                 module._compute_lm_head = update_wrapper(partial(self.logits, original), original)
 
-        self.bindings = {}
         for path, role in self.selected(modules).items():
             module = modules[path]
-            original = module.forward
             expert_layers = {child.layer_id for child in module.modules() if child in experts} if role == "layer" else set()
             if len(expert_layers) > 1:
                 raise ValueError("decoder scope contains multiple expert layers with independent routes")
-            rows = {"input": "model_tokens", "output": "model_tokens"}
-            communicator = LayerCommunication.read(module)
-            if role == "layer" and communicator is not None:
-                rows = communicator.observe(observation)
-            self.bindings[path] = {
-                "rows": rows,
-                "expert_layer": next(iter(expert_layers), None),
-                "role": role, "signature": inspect.signature(original),
-                "implementation": f"{type(module).__module__}.{type(module).__qualname__}",
-                "weights": [name for name, _ in module.named_parameters(recurse=False)], "module": module,
-            }
-
-            # Native capability checks inspect forward's signature after instrumentation is installed.
-            module.forward = update_wrapper(partial(self.invoke, path, original), original)
+            self.attach(path, role, module, next(iter(expert_layers), None))
 
         # A pipeline input enters the first local decoder with that decoder's native token partition.
         first_layer = next(spec for spec in self.bindings.values() if spec["role"] == "layer")
         self.proxy_rows = first_layer["rows"]["input"]
+
+    def attach(self, path, role, module, expert_layer=None):
+        original = module.forward
+        rows = {"input": "model_tokens", "output": "model_tokens"}
+        if role == "layer" and (communicator := LayerCommunication.read(module)) is not None:
+            rows = communicator.observe(self.observation)
+        self.bindings[path] = {
+            "rows": rows, "expert_layer": expert_layer, "role": role, "signature": inspect.signature(original),
+            "implementation": f"{type(module).__module__}.{type(module).__qualname__}",
+            "weights": [name for name, _ in module.named_parameters(recurse=False)], "module": module,
+        }
+
+        # Native capability checks inspect forward's signature after instrumentation is installed.
+        module.forward = update_wrapper(partial(self.invoke, path, original), original)
 
     def logits(self, original: Any, *args: Any, **kwargs: Any) -> Any:
         result = original(*args, **kwargs)
@@ -199,7 +200,11 @@ class ModelScopes:
                 raise NotImplementedError("multiple KV pool layouts require separate pool identities")
 
         scope = {}
-        if spec["role"] == "layer" and owner.routing is not None:
+        if spec["role"] == "embedding":
+            tokens = arguments["input_"]
+            scope = {"parameters": {"model_tokens": int(tokens.shape[0])},
+                     "arguments": {"model_tokens": "model_tokens"} if owner.capture.current.get() else {}}
+        elif spec["role"] == "layer" and owner.routing is not None:
             enclosing = owner.capture.scopes[owner.capture.current.get()]
             parameters, relations = owner.routing.geometry.scope(enclosing, spec["expert_layer"])
             scope = {"parameters": parameters, "arguments": relations, "constants": enclosing["constants"]}

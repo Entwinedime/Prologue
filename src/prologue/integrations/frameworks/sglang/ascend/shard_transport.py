@@ -138,9 +138,8 @@ class ShardTransport:
         buffer.low_latency_mode, buffer.alltoall_mode = False, True
         buffer._alltoall_layout = None
 
-    def install(self, description):
+    def install_collectives(self, ep_size):
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-        from prologue.integrations.frameworks.sglang.ascend.shard_weights import ShardWeights
 
         for name, source, output in (
             ("all_reduce", "tensor", "tensor"), ("broadcast", "tensor", "tensor"),
@@ -154,9 +153,14 @@ class ShardTransport:
             signature = inspect.signature(getattr(distributed, name))
             HookRegistry.register(f"torch.distributed.{name}", partial(self.post, name, signature), HookType.AROUND)
 
-        if description["ep_size"] > 1:
+        if ep_size > 1:
             HookRegistry.register("deep_ep.Buffer.__init__", self.expert_buffer, HookType.REPLACE)
 
+    def install(self, description):
+        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
+        from prologue.integrations.frameworks.sglang.ascend.shard_weights import ShardWeights
+
+        self.install_collectives(description["ep_size"])
         weights = ShardWeights(Path(description["instance_directory"]), description["worker_count"], self.auxiliary)
         HookRegistry.register("sglang.srt.model_executor.model_runner.ModelRunner.init_torch_distributed", weights.measure, HookType.AROUND)
 

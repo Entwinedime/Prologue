@@ -22,6 +22,7 @@ def main() -> None:
     observation.add_argument("--local-copy", action="store_true", help="time isolated native tensor copies on one device")
     observation.add_argument("--local-attention", action="store_true", help="measure Decode on a native ModelRunner and KV pool")
     observation.add_argument("--local-prebuilt", action="store_true", help="observe the receiver assembling a native PD batch")
+    observation.add_argument("--local-embedding", action="store_true", help="observe a vocabulary lookup across native TP shards")
     observation.add_argument("--attention", action="store_true", help="measure selected native Decode attention calls")
     interpret = commands.add_parser("interpret", help="interpret an SDK-exported worker recording")
     interpret.add_argument("--trace", type=Path, required=True)
@@ -47,16 +48,19 @@ def main() -> None:
         from prologue.integrations.frameworks.sglang.ascend.attention_runner import AttentionRunner
 
         AttentionRunner(json.loads(arguments.input.read_bytes()), arguments.output).run(os.environ["PROLOGUE_SGLANG_REVISION"])
-    elif arguments.command == "capture" and arguments.local_prebuilt:
+    elif arguments.command == "capture" and (arguments.local_prebuilt or arguments.local_embedding):
         import os
 
         # Queue allocation can precede the measured calls, including during native module initialization.
         runtime = arguments.output / "runtime"
         runtime.mkdir(parents=True)
         os.environ["PROLOGUE_NATIVE_RUNTIME_DIR"] = str(runtime)
-        from prologue.integrations.frameworks.sglang.ascend.prebuilt_runner import PrebuiltRunner
+        if arguments.local_embedding:
+            from prologue.integrations.frameworks.sglang.ascend.embedding_runner import EmbeddingRunner as Runner
+        else:
+            from prologue.integrations.frameworks.sglang.ascend.prebuilt_runner import PrebuiltRunner as Runner
 
-        PrebuiltRunner(json.loads(arguments.input.read_bytes()), arguments.output).run(os.environ["PROLOGUE_SGLANG_REVISION"])
+        Runner(json.loads(arguments.input.read_bytes()), arguments.output).run(os.environ["PROLOGUE_SGLANG_REVISION"])
     elif arguments.command == "capture":
         from prologue.integrations.frameworks.sglang.observation.session import NativeServingSession
 

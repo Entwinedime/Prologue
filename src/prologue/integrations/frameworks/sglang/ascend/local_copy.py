@@ -71,7 +71,7 @@ class LocalCopies:
             caller, dtype, width, size = cls.point(query)
             operands[caller, dtype, width][size].add(rank)
         card, revision, runtime = session
-        return SGLangAscendLaunch.local_attempt(arguments, limit, deployment, card, revision, cls.job(runtime, operands),
+        return SGLangAscendLaunch.local_attempt(arguments, limit, deployment, [card], revision, cls.job(runtime, operands),
                                                 "--local-copy", runtime_trace=True)
 
     @staticmethod
