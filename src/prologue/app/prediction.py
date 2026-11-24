@@ -8,22 +8,24 @@ import time
 from contextlib import ExitStack
 from uuid import uuid4
 
-from prologue.acquisition.publication import PredictionSources
 from prologue.artifacts import write_json
-from prologue.integrations.frameworks.sglang.acquisition.domains import SGLangTask, SourceDomain
-from prologue.integrations.frameworks.sglang.acquisition.planning import SourcePlanning
+from prologue.integrations.frameworks.sglang.worker_templates import SGLangTask, WorkerDomain
 from prologue.integrations.runtimes.docker import OwnedContainers
 from prologue.workflow.limits import OperationLimit
 
 
 class PredictionProcess:
-    def __init__(self, arguments, limit=None) -> None:
+    def __init__(self, arguments, release, source, limit=None) -> None:
         self.arguments = arguments
+        self.release = release
         self.limit = limit if limit is not None else OperationLimit()
 
-    @staticmethod
-    def sources(collection):
-        return PredictionSources(collection, SourcePlanning.primary, SGLangTask)
+        self.given_work_ns = source.get("given_work_ns")
+        if "given_work_ns" in source and (
+            type(self.given_work_ns) is not int or not 0 <= self.given_work_ns < 1 << 63 or arguments.execution_inputs
+        ):
+            raise ValueError("given_work_ns requires nonnegative signed 64-bit nanoseconds and no measured timing input")
+        self.task = SGLangTask({key: value for key, value in source.items() if key != "given_work_ns"}, release.templates)
 
     @staticmethod
     def recover(output):
@@ -39,29 +41,27 @@ class PredictionProcess:
                 return status, evidence
         return None
 
-    def run(self, *, source=None, productions=None) -> None:
+    def run(self) -> bool:
         args = self.arguments
         if not math.isfinite(args.timeout) or args.timeout <= 0:
             raise ValueError("Prediction timeout must be positive")
         self.limit.check()
         deadline = time.monotonic() + args.timeout
-        source = json.loads(args.input.read_text()) if source is None else source
-        timing_asset = args.costs or args.execution_inputs
-        given_duration = None
-        if timing_asset is None:
-            source = dict(source)
-            given_duration = source.pop("given_work_ns", None)
-            if type(given_duration) is not int or not 0 <= given_duration < 1 << 63:
-                raise ValueError("select a timing asset or provide given_work_ns as nonnegative signed 64-bit nanoseconds")
+        output = args.output.resolve()
+        if output.is_relative_to(self.release.directory):
+            raise ValueError("prediction output must be outside the published libraries")
+        output.mkdir(parents=True)
+        if self.task.binding is None:
+            write_json(output / "template-gap.json", self.task.missing_workers(), replace=False)
+            return False
 
-        productions = self.sources(args.production) if productions is None else productions
-        templates, primary, document = productions.prepare(source)
-        if given_duration is not None:
-            document["given_work_ns"] = given_duration
-
+        document = self.task.document()
         timing_mount, timing_option = [], []
-        if timing_asset is not None:
-            option = "--costs" if args.costs is not None else "--execution-inputs"
+        if self.given_work_ns is not None:
+            document["given_work_ns"] = self.given_work_ns
+        else:
+            timing_asset = args.execution_inputs or self.release.costs
+            option = "--execution-inputs" if args.execution_inputs else "--costs"
             path = f"/inputs/{option[2:]}.json"
             timing_mount = ["--mount", f"type=bind,src={timing_asset.resolve(strict=True)},dst={path},readonly"]
             timing_option = [option, path]
@@ -72,10 +72,8 @@ class PredictionProcess:
             ))[0]
             for role, image in (("modeling", args.modeling_image), ("control", args.control_image))
         }
-        SourceDomain.require_control(descriptions["control"], primary)
+        WorkerDomain.require_control(descriptions["control"], self.task.workers)
         images = {role: image["Id"] for role, image in descriptions.items()}
-        output = args.output.resolve()
-        output.mkdir(parents=True)
         task = output / ".task.json"
         stem = f"prologue-serve-{uuid4().hex}"
         names = [f"{stem}-core", f"{stem}-control"]
@@ -94,7 +92,8 @@ class PredictionProcess:
                     "docker", "run", "--rm", "--init", "-i", "--runtime", "runc", "--network", "none", "--name", names[0],
                     "--entrypoint", "/usr/bin/timeout",
                     "--mount", f"type=bind,src={binary},dst=/app/prologue,readonly",
-                    *[item for index, path in enumerate(templates) for item in ("--mount", f"type=bind,src={path},dst=/inputs/templates/{index}.json,readonly")],
+                    *[item for index, path in enumerate(self.task.binding.paths)
+                      for item in ("--mount", f"type=bind,src={path},dst=/inputs/templates/{index}.json,readonly")],
                     "--mount", f"type=bind,src={task},dst=/inputs/task.json,readonly",
                     *timing_mount,
                     "--mount", f"type=bind,src={output},dst=/output",
@@ -109,7 +108,12 @@ class PredictionProcess:
                     "python3", "-m", "prologue.app.control_worker", "--kernel-python", "/opt/prologue/sglang/sgl-kernel/python",
                 ],
             ]
-            self.execute(commands, names, output, deadline)
+            try:
+                self.execute(commands, names, output, deadline)
+            except RuntimeError:
+                if self.gap(output):
+                    return False
+                raise
             self.limit.check()
 
             # Both endpoints and their owned containers must close before the result becomes consumable.
@@ -121,6 +125,7 @@ class PredictionProcess:
             (output / ".result.json").unlink(missing_ok=True)
             task.unlink(missing_ok=True)
         print(f"Created {output / 'result.json'}")
+        return True
 
     def execute(self, commands, names, output, deadline) -> None:
         processes = []

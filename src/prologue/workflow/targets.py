@@ -1,102 +1,65 @@
-"""Run one target against published assets and retain the first concrete gap."""
+"""Recover one prediction or publish its metrics and first concrete evidence gap."""
 
 import json
 import subprocess
 import time
-from types import SimpleNamespace
 
 from prologue.artifacts import write_json
 from prologue.serving.latency import RequestLatency
 from prologue.workflow.limits import AllowanceExhausted
 
 
-class ExplorationAsset:
-    def __init__(self, sources, costs):
-        self.sources, self.costs = sources, costs.resolve(strict=True)
-        self.production = sources.directory
-
-    def document(self):
-        return {"production": str(self.production), "costs": str(self.costs)}
-
-
 class ExplorationTarget:
-    def __init__(self, root, index, model, configuration, workload, predictor):
-        self.task = root
-        self.predictor = predictor
-        self.root = root / "targets" / str(index)
-        self.input = {"model": model, "instances": configuration["instances"], "workload": workload}
-        self.identity = {"configuration": configuration["id"], "workload": workload["id"]}
+    def __init__(self, task, index, source, configuration):
+        self.task = task
+        self.root = task / "targets" / str(index)
+        self.source = source
+        self.identity = {"configuration": configuration, "workload": source["workload"]["id"]}
 
-    def reuse(self, assets, runtime, limit):
-        best_gap = None
-        eligible = (asset for asset in assets if asset.sources.select(self.input) is not None)
-        for index, asset in enumerate(eligible):
-            stage = "reused" if index == 0 else f"reused-{index}"
-            row = self.predict(runtime, limit, asset, stage)
-            if row["status"] not in {"template_gap", "cost_gap"}:
-                return asset, row
-
-            # A cost gap has an instantiated template. It can be completed without structural recapture.
-            if best_gap is None or (best_gap[1]["status"] == "template_gap" and row["status"] == "cost_gap"):
-                best_gap = asset, row
-        return best_gap
-
-    def predict(self, arguments, limit, asset, stage):
+    def predict(self, predictor, options, release, limit):
+        outcome = self.root / "outcome.json"
+        if outcome.is_file():
+            return json.loads(outcome.read_bytes())
         input_path = self.root / "input.json"
         if not input_path.is_file():
-            write_json(input_path, self.input, indent=2, replace=False)
+            write_json(input_path, self.source, indent=2, replace=False)
+        attempts = self.root / "attempts"
+        attempts.mkdir(exist_ok=True)
+        previous = sorted(attempts.iterdir(), key=lambda path: int(path.name))
+        output = previous[-1] if previous else attempts / "0"
 
-        directory = self.root / stage
-        outcome = directory / "outcome.json"
-        if outcome.is_file():
-            row = json.loads(outcome.read_text())
-            if row["asset"] != asset.document():
-                raise ValueError("target outcome belongs to different assets")
-            return row
-        directory.mkdir(parents=True, exist_ok=True)
-        attempts = sorted((path for path in directory.iterdir() if path.is_dir()), key=lambda path: int(path.name))
-        output = attempts[-1] if attempts else directory / "0"
-
-        # A stopped coordinator can leave two named processes or a completed publication.
-        if attempts and not (output / "result.json").is_file():
-            self.predictor.recover(output)
-        result, evidence = self.evidence(output)
+        if previous:
+            predictor.recover(output)
+        result, evidence = self.evidence(predictor, output)
         elapsed = None
         if result is None:
-            if attempts:
-                output = directory / str(int(output.name) + 1)
+            if previous:
+                output = attempts / str(int(output.name) + 1)
+            options.output = output
             start = time.monotonic_ns()
             try:
-                self.predictor(SimpleNamespace(
-                    **arguments, input=input_path, output=output, production=asset.production,
-                    costs=asset.costs, execution_inputs=None,
-                ), limit).run(source=self.input, productions=asset.sources)
+                predictor(options, release, self.source, limit).run()
+                result, evidence = self.evidence(predictor, output)
             except AllowanceExhausted:
                 raise
             except (ValueError, RuntimeError, subprocess.SubprocessError, TimeoutError) as failure:
-                result, evidence = self.evidence(output)
-                if result is None:
-                    timed_out = isinstance(failure, (subprocess.TimeoutExpired, TimeoutError))
-                    result = {"status": "prediction_timeout" if timed_out else "prediction_failed", "message": str(failure)}
-            else:
-                result, evidence = self.evidence(output)
+                timed_out = isinstance(failure, (subprocess.TimeoutExpired, TimeoutError))
+                result = {"status": "prediction_timeout" if timed_out else "prediction_failed", "message": str(failure)}
             elapsed = time.monotonic_ns() - start
 
-        row = {**self.identity, **result, "asset": asset.document(), "asset_use": stage,
-               "directory": str(output.relative_to(self.task)), "elapsed_ns": elapsed}
+        row = {**self.identity, **result, "directory": str(output.relative_to(self.task)), "elapsed_ns": elapsed}
         if evidence is not None:
             row["evidence"] = str(evidence.relative_to(self.task))
         write_json(outcome, row, indent=2, replace=False)
         return row
 
-    def evidence(self, output):
+    def evidence(self, predictor, output):
         result = output / "result.json"
         if result.is_file():
-            metrics = RequestLatency.predicted(json.loads(result.read_text()), self.input["workload"]["requests"]).report()
-            requests = metrics.pop("requests")
-            write_json(output / "request-latency.json", requests)
+            metrics = RequestLatency.predicted(json.loads(result.read_bytes()), self.source["workload"]["requests"]).report()
+            write_json(output / "request-latency.json", metrics.pop("requests"))
             return {"status": "predicted", **metrics}, result
-        if gap := self.predictor.gap(output):
+        if gap := predictor.gap(output):
             status, path = gap
             return {"status": status}, path
         return None, None

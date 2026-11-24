@@ -10,8 +10,8 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from prologue.acquisition.recording import PublishedCapture
-from prologue.acquisition.publication import SourceProductions
-from prologue.app.prediction import PredictionProcess
+from prologue.integrations.frameworks.sglang.worker_templates import SGLangTask
+from prologue.libraries import LibraryRelease
 from prologue.artifacts import write_json
 from prologue.integrations.runtimes.docker import OwnedContainers
 from prologue.verification.reference import ReferenceRecording
@@ -115,79 +115,35 @@ class MatrixRun:
 
     def sources(self, domain):
         name = domain["id"]
-        if "source" in domain:
-            source = domain["source"]
-            collection = Path(source["collection"]).resolve(strict=True)
-
-            # Fixed-library validation checks its explicit original sources without planning or collecting from the new targets.
-            return {"id": name, "collection": str(collection), "source_kind": "fixed_library"} | self.source_evidence(name, collection)
-        plan = self.root / "assets" / self.name / name / "plan"
-        code = self.process(f"{name}/plan", self.commands.command(
-            "prologue.app", "plan-sources", "--input", self.root / domain["exploration"], "--output", plan,
-        ))
-        result = {"id": name, "plan_exit": code, "plan": str(plan)}
-        if code:
-            return result | {"status": "planning-failed"}
-
-        specification = json.loads((plan / "plan.json").read_text())
-        jobs = specification["native_jobs"]
-        native, processing = jobs * self.budget["task_seconds"], jobs * self.budget["operation_seconds"]
-        collection = self.root / "sources" / self.name / name
-        model = json.loads((self.root / domain["exploration"]).read_text())["model"]["path"]
-        command = self.commands.command(
-            "prologue.app", "acquire-sources", "--plan", plan, "--deployment", self.root / domain["deployment"], "--output", collection,
-            "--binary", self.binary, "--source-image", self.images["source"], "--modeling-image", self.images["modeling"],
-            "--timeout", self.budget["task_seconds"], "--native-budget-seconds", native,
-            "--postprocessing-budget-seconds", processing, "--attempt-limit", jobs,
-            "--storage-bytes", self.budget["retained_bytes"], "--resource-trace", "--keep-intermediates", model=model,
-        )
-        code = self.step(f"{name}/sources", command,
-                         {"native_seconds": native + 60, "processing_seconds": processing + 60, "native_attempts": jobs},
-                         native + processing + 60, collection / "status.json")
-        result.update(acquisition_exit=code, collection=str(collection))
-        if code:
-            return result | {"status": "source-acquisition-failed"}
-
-        return result | self.source_evidence(name, collection)
-
-    def source_evidence(self, name, collection):
-        published = SourceProductions(collection)
+        release = LibraryRelease(self.root / domain["libraries"])
         checks = []
-        for job in published.plan["sources"]:
-            identity = job["id"]
-            if str(identity) in published.unavailable:
-                checks.append({"job": identity, "mapped": False, **published.unavailable[str(identity)]})
-                continue
-            observation = PublishedCapture(published.captures[identity], published.jobs[str(identity)]).source
-            output = self.results / "sources" / name / str(identity)
-            command = [
-                "docker", "run", "--rm", "--init", "--runtime", "runc", "--network", "none",
-                "--mount", f"type=bind,src={self.repository},dst={self.repository}",
-                "--env", "PYTHONPATH=src",
-                "--workdir", str(self.repository), "--entrypoint", "timeout", self.images["control"],
-                "--signal=KILL", str(self.budget["operation_seconds"]), "python3", "-m", "prologue.verification.source_evidence",
-                "--production", str(published.paths[identity]), "--capture", str(observation), "--output", str(output),
-            ]
-            self.process(f"{name}/source-evidence-{identity}", command)
+        for index, reference in enumerate(domain.get("template_observations", [])):
+            recording = PublishedCapture(self.root / reference["capture"])
+            production = self.root / reference["production"]
+            output = self.results / "sources" / name / str(index)
+            command = self.commands.command(
+                "prologue.verification.source_evidence", "--production", production, "--capture", recording.source,
+                "--libraries", release.directory, "--output", output,
+            )
+            code = self.process(f"{name}/source-evidence-{index}", command)
             path = output / "source-evidence.json"
-            report = json.loads(path.read_text()) if path.exists() else None
-            checks.append({"job": identity, "report": str(path), "mapped": report is not None and report["qualification"]["local_templates"],
-                           "native_group_status": None if report is None else report["native_case"]["status"]})
-        return {"status": "ready" if all(row["mapped"] for row in checks) else "source-evidence-unqualified", "jobs": checks}
+            checks.append({"recording": recording.attempt_id, "mapped": code == 0, "report": str(path)})
+        return {"id": name, "status": "source_evidence_checked", "libraries": str(release.directory), "checks": checks}
 
     @staticmethod
     def selected_source(source, prediction):
-        if "jobs" not in source:
+        if "checks" not in source:
             return {"source_status": source["status"]}
+        release = LibraryRelease(Path(source["libraries"]))
+        task = SGLangTask(prediction, release.templates)
+        if task.binding is None:
+            return {"source_status": "source-unavailable", "source_failure": task.missing_workers()}
 
-        published = PredictionProcess.sources(Path(source["collection"]))
-        jobs = published.jobs_for(prediction)
-        if not jobs:
-            return {"source_status": "source-unavailable", "source_failure": published.failure(prediction)}
-
-        # Only evidence for libraries consumed by this prediction can qualify its source.
-        mapped = {row["job"] for row in source["jobs"] if row["mapped"]}
-        return {"source_status": "ready" if mapped.issuperset(jobs) else "source-evidence-unqualified", "source_jobs": jobs}
+        # Only the observations used in this target's binding need an independently mapped source.
+        checked = {row["recording"] for row in source["checks"] if row["mapped"]}
+        missing = sorted(set(task.binding.recordings) - checked)
+        return {"source_status": "source-evidence-unqualified" if missing else "ready",
+                "source_recordings": list(task.binding.recordings), "unverified_recordings": missing}
 
     def evaluate(self, phase, domain, case, source, target):
         native = json.loads((self.root / case["capture_input"]).read_text())
@@ -295,7 +251,7 @@ class MatrixRun:
         timing = ("--peer-handoffs",) if case.get("peer_handoffs") else ()
         command = self.commands.command(
             "prologue.verification.structure", "--capture", target["native"], "--reference", target["production"],
-            "--production", source["collection"], "--input", self.root / case["prediction_input"], "--output", output,
+            "--libraries", source["libraries"], "--input", self.root / case["prediction_input"], "--output", output,
             "--binary", self.binary, "--modeling-image", self.images["modeling"], "--control-image", self.images["control"],
             "--timeout", self.budget["task_seconds"], *timing,
         )
@@ -313,13 +269,14 @@ class MatrixRun:
         result = {"id": name}
         if phase == "fixed" and case.get("detailed_capture") != "service-reference":
             return result | {"status": "not-selected"}
-        if "costs" not in domain:
-            return result | {"status": "cost-asset-unavailable"}
         if phase == "fixed":
             if target["status"] != "produced":
                 return result | {"status": "target-prerequisite-unqualified"}
             module = "fixed_graph"
-            evidence = ("--capture", target["native"], "--reference", target["production"])
+            release = LibraryRelease(self.root / domain["libraries"])
+            if release.costs is None:
+                return result | {"status": "cost-asset-unavailable"}
+            evidence = ("--capture", target["native"], "--reference", target["production"], "--costs", release.costs)
             if groups := case.get("fixed_work_groups"):
                 evidence += ("--work-groups", self.root / groups)
         else:
@@ -336,7 +293,7 @@ class MatrixRun:
             result.update(self.selected_source(source, prediction))
             if result["source_status"] != "ready":
                 return result | {"status": "source-prerequisite-unqualified"}
-            evidence = ("--capture", latency, "--production", source["collection"],
+            evidence = ("--capture", latency, "--libraries", source["libraries"],
                         "--input", self.root / case["prediction_input"], "--control-image", self.images["control"])
             if case.get("retain_execution_trace"):
                 evidence += ("--details",)
@@ -344,7 +301,7 @@ class MatrixRun:
         output = self.results / phase / name
         timeout = self.budget["operation_seconds"]
         command = self.commands.command(
-            f"prologue.verification.{module}", *evidence, "--costs", self.root / domain["costs"], "--output", output,
+            f"prologue.verification.{module}", *evidence, "--output", output,
             "--binary", self.binary, "--modeling-image", self.images["modeling"], "--timeout", timeout,
         )
         allowance = (2 * timeout if phase == "fixed" else timeout) + 60
@@ -374,7 +331,6 @@ class MatrixRun:
             needs_native = (
                 phase in {"detailed", "light"}
                 or phase == "autonomous" and any("latency_observation" not in case for domain in domains for case in domain["targets"])
-                or phase == "sources" and any("source" not in domain for domain in domains)
                 or phase == "targets" and any("observation" not in case for domain in domains for case in domain["targets"])
             )
             if needs_native:

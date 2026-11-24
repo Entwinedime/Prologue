@@ -1,9 +1,9 @@
 """Launch the formal exploration task with the repository example inputs."""
 
 import argparse
-import json
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -13,17 +13,20 @@ class TaskCommands:
     def __init__(self, repository, images):
         self.repository, self.images = repository, images
 
-    def command(self, module, *arguments, model=None, files=()):
+    def command(self, module, *arguments, model=None, files=None):
 
-        # The coordinator and host daemon must see the same absolute paths for child mounts.
-        mounts = [(self.repository, self.repository, False)]
+        # Independent experiments need their workspace. Prediction receives only its inputs and result directory.
+        if files is None:
+            mounts = [(self.repository, self.repository, False)]
+        else:
+            source = self.repository / "src"
+            mounts = [(source, source, True), *((path, path, readonly) for path, readonly in files)]
         if model is not None:
             destination = Path(model).absolute()
             mounts.append((destination.resolve(strict=True), destination, True))
             for name in ("/usr/local/Ascend/driver", "/etc/ascend_install.info", "/etc/hccn.conf"):
                 mounts.append((Path(name).resolve(strict=True), Path(name), True))
 
-        mounts.extend((path, path, readonly) for path, readonly in files if not path.is_relative_to(self.repository))
         mounts.extend([
             (Path("/var/run/docker.sock"), Path("/var/run/docker.sock"), False),
             (Path(shutil.which("docker")).resolve(strict=True), Path("/usr/bin/docker"), True),
@@ -43,41 +46,34 @@ def main():
     repository = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--input", type=Path, default=Path(__file__).with_name("input.json"))
-    parser.add_argument("--deployment", type=Path)
+    parser.add_argument("--libraries", type=Path)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--reuse", type=Path)
-    parser.add_argument("--transport-samples", type=Path, nargs="+", default=[])
     parser.add_argument("--binary", type=Path, default=repository / "build/coarse-graph/prologue")
-    parser.add_argument("--source-image", default="prologue-sglang:ubuntu22.04")
     parser.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
     parser.add_argument("--control-image", default="prologue-control:ubuntu22.04")
     options, remaining = parser.parse_known_args()
-    images = {role: getattr(options, f"{role}_image") for role in ("source", "control", "modeling")}
+    images = {"control": options.control_image, "modeling": options.modeling_image}
     commands = TaskCommands(repository, images)
     if "--help" in remaining or "-h" in remaining:
-        raise SystemExit(subprocess.call(commands.command("prologue.app", "explore", "--help")))
-    if options.deployment is None:
-        parser.error("--deployment is required")
+        raise SystemExit(subprocess.call(commands.command("prologue.app", "explore", "--help", files=())))
+    if options.libraries is None:
+        parser.error("--libraries is required")
 
-    arguments, files = [], {}
-    for name in ("input", "deployment", "binary", "reuse", "output"):
-        path = getattr(options, name)
-        if path is None:
-            continue
-        path = path.resolve(strict=name != "output")
-        mounted = path.parent if name == "output" else path
-        if name == "output":
-            mounted.mkdir(parents=True, exist_ok=True)
-        files[mounted] = name != "output"
-        arguments.extend(("--" + name, path))
-    if options.transport_samples:
-        profiles = [path.resolve(strict=True) for path in options.transport_samples]
-        files.update((path, True) for path in profiles)
-        arguments.extend(("--transport-samples", *profiles))
-    model = json.loads(options.input.read_text())["model"]["path"]
-    for role, image in images.items():
-        arguments.extend(("--" + role + "-image", image))
-    command = commands.command("prologue.app", "explore", *arguments, *remaining, model=model, files=files.items())
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    output = (options.output or repository / "data" / f"{stamp}_exploration").resolve()
+    libraries = options.libraries.resolve()
+    source, binary = options.input.resolve(strict=True), options.binary.resolve(strict=True)
+    if output.is_relative_to(libraries) or libraries.is_relative_to(output):
+        parser.error("exploration output and published libraries must be separate")
+    output.mkdir(parents=True, exist_ok=True)
+    files = [(source, True), (binary, True), (output, False)]
+    if libraries.exists():
+        files.append((libraries, True))
+
+    command = commands.command(
+        "prologue.app", "explore", "--input", source, "--libraries", libraries, "--output", output, "--binary", binary,
+        "--modeling-image", images["modeling"], "--control-image", images["control"], *remaining, files=files,
+    )
     raise SystemExit(subprocess.call(command))
 
 

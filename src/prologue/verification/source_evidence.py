@@ -7,7 +7,9 @@ from collections import Counter, defaultdict
 from heapq import heappop, heappush
 from pathlib import Path
 
+from prologue.acquisition.recording import PublishedCapture
 from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
+from prologue.libraries import LibraryRelease, asset_path
 
 from .actions import ActionScopes
 from .native_case import NativeCase
@@ -254,6 +256,31 @@ class ProductionEvidence:
     def __init__(self, production, capture, output, details):
         self.production, self.capture, self.output, self.details = production, capture, output, details
 
+    def published_templates(self, release):
+        recording = PublishedCapture.from_source(self.capture)
+        catalog = release.templates
+        observation = catalog.observations.get(recording.attempt_id)
+        result = {"recording": recording.attempt_id, "checked_workers": 0}
+        if observation is None or observation["deployment"] != recording.inputs["deployment"]:
+            return result | {"status": "recording_mismatch"}
+
+        production = self.production.resolve(strict=True)
+        paths = json.loads((production / "result.json").read_bytes())["templates"]
+        if len(paths) != len(observation["shards"]):
+            return result | {"status": "worker_count_mismatch"}
+        for name, shard in zip(paths, observation["shards"], strict=True):
+            native = json.loads(asset_path(production, name).read_bytes())
+            body = json.loads(asset_path(catalog.directory, shard["body"]).read_bytes())
+
+            # A portable definition keeps its original ID even if its position in the file changes.
+            definitions = body.pop("definitions")
+            indexed = {definition.pop("id"): definition for definition in definitions}
+            expected = dict(enumerate(native.pop("definitions")))
+            if len(indexed) != len(definitions) or indexed != expected or (body | shard["header"]) != native:
+                return result | {"status": "template_mismatch", "body": shard["body"]}
+            result["checked_workers"] += 1
+        return result | {"status": "matched"}
+
     def observe_rank(self, native_case, rank, facts, retain_measurements):
 
         # SDK/facts belong to this rank; verification can retain the independently checked service evidence.
@@ -371,7 +398,8 @@ class ProductionEvidence:
             timing.add("external_cost_required")
         workers = bool(document["ranks"]) and all(row["mapping"] == "consistent" and row["timing"]["status"] in timing
                                                   for row in document["ranks"])
-        return {"local_templates": workers and status in {"consistent", "incomplete", "local_worker_observations"},
+        published = "published_templates" not in document or document["published_templates"]["status"] == "matched"
+        return {"local_templates": workers and published and status in {"consistent", "incomplete", "local_worker_observations"},
                 "joint_reference": workers and status == "consistent"}
 
     def publish(self, document, *, require_joint=False):
@@ -451,6 +479,9 @@ class ProductionEvidence:
             ])
             for finding in case_report["findings"]:
                 lines.extend(["", f"`{finding['category']}` {finding.get('reason', finding['kind'])}"])
+        if "published_templates" in document:
+            published = document["published_templates"]
+            lines.extend(["", f"Released templates: {published['status']}. Matched {published['checked_workers']} original worker bodies."])
         lines.extend([
             "", "Nominal inversions use original midpoint timestamps. Each rank uses one calibration across all measured relations, "
             "including paths through logical waits. The original API, its observed prerequisites, and the absence of physical submissions "
@@ -471,11 +502,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--production", type=Path, required=True, help="published produce output with retained intermediates")
     parser.add_argument("--capture", type=Path, required=True, help="original native source containing independent device clock samples")
+    parser.add_argument("--libraries", type=Path, help="also compare the released templates with this original production")
     parser.add_argument("--output", type=Path, required=True, help="new report directory")
     parser.add_argument("--details", action="store_true", help="include all timing findings")
     arguments = parser.parse_args()
     check = ProductionEvidence(arguments.production, arguments.capture, arguments.output, arguments.details)
     _, document = check.inspect()
+    if arguments.libraries is not None:
+        document["published_templates"] = check.published_templates(LibraryRelease(arguments.libraries))
     raise SystemExit(check.publish(document))
 
 

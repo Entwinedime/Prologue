@@ -1,7 +1,6 @@
 """Qualify the target input and its separation from the recordings used for training."""
 
 import json
-from pathlib import Path
 
 from prologue.acquisition.recording import PublishedCapture
 from prologue.integrations.frameworks.sglang.configuration import CaptureInput, ServingInput
@@ -90,28 +89,14 @@ class ReferenceRecording(PublishedCapture):
                 return "workload"
         return None
 
-    def training(self, *, production=None, target=None, costs=None):
+    def training(self, *, templates=None, costs=None):
         shared, unknown = [], []
-        templates, samples = 0, 0
-        if production is not None:
-            jobs = production.jobs_for(target)
-            if not jobs:
-                return {"target_attempt": self.attempt_id, "template_jobs": 0, **production.failure(target)}
+        samples = 0
+        records = templates.recordings if templates is not None else ()
 
-            templates = len(jobs)
-            for job in jobs:
-                path = production.paths[job] / "production.json"
-                try:
-                    source = Path(json.loads(path.read_text())["inputs"]["capture_path"])
-                    recording = PublishedCapture.from_source(source)
-                except (OSError, KeyError, ValueError) as error:
-                    unknown.append({"template_job": job, "reason": str(error)})
-                    continue
-
-                if recording.attempt_id == self.attempt_id:
-                    shared.append({"template_job": job})
-                if recording.directory != production.captures[job].resolve() or recording.inputs["job"] != production.jobs[str(job)]:
-                    unknown.append({"template_job": job, "reason": "production and collection name different recordings"})
+        # Publication checks each template against its native attempt. The identity survives moving the release.
+        if self.attempt_id in records:
+            shared.append({"template_recording": self.attempt_id})
 
         if costs is not None:
             asset = json.loads(costs.read_text())
@@ -128,5 +113,5 @@ class ReferenceRecording(PublishedCapture):
                         shared.append({"sample": index, "source": sources[index]})
 
         status = "reference_used_for_training" if shared else "training_origin_unverified" if unknown else "separate"
-        return {"status": status, "target_attempt": self.attempt_id, "template_jobs": templates, "sample_files": samples,
+        return {"status": status, "target_attempt": self.attempt_id, "template_recordings": len(records), "sample_files": samples,
                 "shared": shared, "unknown": unknown}

@@ -7,7 +7,7 @@ from math import prod
 
 from prologue.acquisition.recording import PublishedCapture
 from prologue.artifacts import write_json
-from prologue.integrations.frameworks.sglang.acquisition.domains import SGLangTask
+from prologue.integrations.frameworks.sglang.worker_templates import WorkerDomain
 from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
 from prologue.performance.requirements import cost_identity
 from prologue.performance.samples import ServiceSamples, WorkCatalog
@@ -38,7 +38,7 @@ class DecodeSampling:
                 actor = role["parallel"]["rank"]
                 if actor == rank or role["representative"] != rank:
                     continue
-                bound = SGLangTask.bind_worker(domain, role)
+                bound = WorkerDomain.bind_worker(domain, role)
 
                 # Compiled cost domains keep the worker layout while omitting the global rank field.
                 bound["parallel"] = {key: value for key, value in role["parallel"].items() if key != "rank"}

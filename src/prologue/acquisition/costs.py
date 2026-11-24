@@ -9,7 +9,6 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
-from pathlib import Path
 from types import SimpleNamespace
 
 from prologue.acquisition.capture import NativeAttempt
@@ -48,7 +47,7 @@ class CostSource:
 
 
 class CostAcquisition:
-    def __init__(self, args, place, reuse_samples, limit=None, *, transport_samples, prior_jobs=None, prior_costs=()):
+    def __init__(self, args, place, reuse_samples, *, transport_samples):
         self.args = args
         self.place = place
         self.reuse_samples = reuse_samples
@@ -62,7 +61,7 @@ class CostAcquisition:
             raise ValueError("cost acquisition needs nonnegative native allowances and positive storage")
         self.budget = Usage(int(args.native_budget_seconds * 1e9), args.attempt_limit,
                             int(args.postprocessing_budget_seconds * 1e9))
-        self.limit = limit if limit is not None else OperationLimit(self.output, args.storage_bytes)
+        self.limit = OperationLimit(self.output, args.storage_bytes)
         self.images = {
             role: NativeAttempt.image(image)["Id"]
             for role, image in (("source", args.source_image), ("modeling", args.modeling_image))
@@ -70,18 +69,9 @@ class CostAcquisition:
 
         collections = list(dict.fromkeys(path.resolve(strict=True) for path in args.production))
         self.collections = collections
-        self.prior_jobs = prior_jobs or {}
         self.sources = {}
         self.demand = CostRequirements()
-        paths = list(args.samples)
-        for path in prior_costs:
-            asset = read(path)
-            paths.extend(Path(name) for name in asset["sources"] if name not in asset.get("transport_samples", {}))
-
-            # Preserve cross-role bindings by requalifying their coordinates against the original measured rows.
-            for sample in asset["reused"]:
-                self.demand.samples(str(path), sample, basis="previously_qualified_role_work")
-        self.samples = {path: read(path) for path in dict.fromkeys(path.resolve(strict=True) for path in paths)}
+        self.samples = {path: read(path) for path in dict.fromkeys(path.resolve(strict=True) for path in args.samples)}
         if any("transport_profile" in source for source in self.samples.values()):
             raise ValueError("select physical peer service profiles with --transport-samples")
         self.samples.update(transport_samples.sources)
@@ -94,18 +84,12 @@ class CostAcquisition:
             "demand": [[str(graph), str(identities)] for graph, identities in self.graphs.items()],
             "keep_intermediates": args.keep_intermediates,
         }
-        if self.prior_jobs:
-            self.inputs["prior_jobs"] = {str(path): sorted(jobs) for path, jobs in self.prior_jobs.items()}
-        if prior_costs:
-            self.inputs["prior_costs"] = [str(path) for path in prior_costs]
         if self.transport_samples:
             self.inputs["transport_samples"] = self.transport_samples
 
-    def load_sources(self, collection, selected=None):
+    def load_sources(self, collection):
         bundle = SourceProductions(collection)
         for identity, path in bundle.paths.items():
-            if selected is not None and identity not in selected:
-                continue
             capture = bundle.captures[identity].resolve(strict=True)
             production = path.resolve(strict=True)
             if any(self.output.is_relative_to(root) for root in (collection, production, capture)):
@@ -273,13 +257,6 @@ class CostAcquisition:
                 self.demand.gap(str(path), gap)
 
         fitted, counts, missing, _ = self.fit()
-        if missing and self.prior_jobs:
-
-            # Prior graphs supply possible measurements. Their unrelated work is outside the requested demand.
-            for collection, jobs in self.prior_jobs.items():
-                for source in self.load_sources(collection, jobs):
-                    self.inspect(source, CostRequirements())
-            fitted, counts, missing, _ = self.fit()
 
         candidates = {recipe: source.output / recipe.name for source in self.sources.values()
                       for recipe in source.sampling.windows(self.demand, self.samples.values())}

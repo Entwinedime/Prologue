@@ -345,22 +345,24 @@ int main(int argc, char ** argv) {
             const auto costs = options.contains("--costs") ? read_json(options.at("--costs")) : nlohmann::json();
             if (options.contains("--execution-inputs") && !timing.is_object()) throw std::invalid_argument("execution inputs require an object");
             if (options.contains("--costs") && !costs.is_object()) throw std::invalid_argument("cost asset requires an object");
-            std::map<std::size_t, prologue::TemplateLibrary> libraries;
-            for (const auto & source : task.at("template_sources")) {
-                const auto index = source.get<std::size_t>();
-                libraries.emplace(index, prologue::TemplateLibrary::read(read_json(std::filesystem::path(argv[2]) / (std::to_string(index) + ".json"))));
-            }
-            const auto imports = prologue::sglang::NativeTemplates::share_closed_actions(libraries);
-
-            // Auxiliary productions supply closed local bodies as well as complete batch actions.
-            std::vector<prologue::TemplateLibrary *> sources;
-            for (auto & [_, library] : libraries) sources.push_back(&library);
-            prologue::TemplateLibrary::link_local_implementations(sources);
             std::unique_ptr<prologue::ExecutionTrace> trace;
             if (options.contains("--trace")) trace = std::make_unique<prologue::ExecutionTrace>(options.at("--trace"));
             StreamPeer peer;
             try {
+                std::map<std::size_t, prologue::TemplateLibrary> libraries;
+                for (const auto & header : task.at("template_sources").get_ref<const nlohmann::json::array_t &>()) {
+                    const auto index = libraries.size();
+                    const auto path = std::filesystem::path(argv[2]) / (std::to_string(index) + ".json");
+                    libraries.emplace(index, prologue::TemplateLibrary::read(read_json(path), &header));
+                }
+
+                // Auxiliary bodies can supply closed actions or local children; participants come from the role binding.
+                const auto imports = prologue::sglang::NativeTemplates::share_closed_actions(libraries);
+                std::vector<prologue::TemplateLibrary *> sources;
+                for (auto & [_, library] : libraries) sources.push_back(&library);
+                prologue::TemplateLibrary::link_local_implementations(sources);
                 output = prologue::sglang::serve(libraries, task, timing, costs, peer, trace.get(), trace.get(), trace.get());
+                output["template_imports"] = imports;
             }
             catch (const prologue::CostGap & gap) {
                 Publication(destination.parent_path() / "cost-gap.json").write(gap.details());
@@ -370,7 +372,6 @@ int main(int argc, char ** argv) {
                 Publication(destination.parent_path() / "template-gap.json").write(gap.details());
                 throw;
             }
-            output["template_imports"] = imports;
             if (trace) trace->finish();
         }
         else if (command == "execute" && (argc == 5 || (argc == 7 && std::string_view(argv[5]) == "--trace"))) {

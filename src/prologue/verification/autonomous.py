@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.app.prediction import PredictionProcess
 from prologue.artifacts import write_json
+from prologue.libraries import LibraryRelease
 
 from .latency_metrics import LatencyComparison, NativeLatencyMetrics
 from .reference import ReferenceRecording
@@ -21,8 +22,7 @@ class AutonomousVerification:
         self.report = {
             "input": str(arguments.input.resolve()),
             "native_task": str(arguments.capture.resolve()),
-            "production": str(arguments.production.resolve()),
-            "cost_asset": str(arguments.costs.resolve()),
+            "libraries": str(arguments.libraries.resolve()),
         }
 
     def finish(self, status):
@@ -66,20 +66,15 @@ class AutonomousVerification:
             return "reference_reordered_submissions"
         return "qualified"
 
-    def predict(self, source, sources):
-        args = self.arguments
-        output = self.output / "prediction"
-        command = SimpleNamespace(input=args.input, production=args.production, output=output, timeout=args.timeout,
-                                  binary=args.binary, modeling_image=args.modeling_image, control_image=args.control_image,
-                                  execution_inputs=None, costs=args.costs, execution_trace=args.details)
+    def predict(self, process):
+        output = process.arguments.output
         try:
-            PredictionProcess(command).run(source=source, productions=sources)
-        except (RuntimeError, TimeoutError, TimeoutExpired) as error:
-            self.report["prediction_error"] = str(error)
-            if gap := PredictionProcess.gap(output):
-                status, path = gap
+            if not process.run():
+                status, path = process.gap(output)
                 self.report["evidence"] = str(path)
                 return status
+        except (RuntimeError, TimeoutError, TimeoutExpired) as error:
+            self.report["prediction_error"] = str(error)
             return "prediction_failed"
         self.report["prediction_result"] = str(output / "result.json")
         return "completed"
@@ -88,14 +83,21 @@ class AutonomousVerification:
         args = self.arguments
         self.output.mkdir(parents=True)
         source = json.loads(args.input.read_text())
-        sources = PredictionProcess.sources(args.production)
+        release = LibraryRelease(args.libraries)
+        options = SimpleNamespace(output=self.output / "prediction", timeout=args.timeout, binary=args.binary,
+                                  modeling_image=args.modeling_image, control_image=args.control_image,
+                                  execution_inputs=None, execution_trace=args.details)
+        process = PredictionProcess(options, release, source)
+        if process.task.binding is None:
+            self.report["gap"] = process.task.missing_workers()
+            return self.finish("template_gap")
         recording = ReferenceRecording(args.capture)
-        training = self.report["training"] = recording.training(production=sources, target=source, costs=args.costs)
+        training = self.report["training"] = recording.training(templates=process.task.binding, costs=release.costs)
         if training["status"] != "separate":
             return self.finish(training["status"])
 
         # Only the scoring step consumes native timing. A cold reference still leaves a real prediction outcome.
-        prediction = self.report["prediction_status"] = self.predict(source, sources)
+        prediction = self.report["prediction_status"] = self.predict(process)
         reference = self.report["reference_status"] = self.qualify_reference(recording, source)
         if prediction != "completed":
             return self.finish(prediction)
@@ -109,7 +111,7 @@ class AutonomousVerification:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capture", type=Path, required=True, help="completed lightweight native capture task")
-    for name in ("production", "input", "costs", "binary", "output"):
+    for name in ("libraries", "input", "binary", "output"):
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--timeout", type=float, required=True, help="prediction allowance in seconds")
     parser.add_argument("--control-image", default="prologue-control:ubuntu22.04")

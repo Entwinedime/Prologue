@@ -1,4 +1,4 @@
-"""Materialize declared source probes or held-out requests after an investigation freeze."""
+"""Materialize the declared held-out requests after an investigation freeze."""
 
 import argparse
 import hashlib
@@ -101,41 +101,27 @@ class MatrixInputs:
                 result["ep_routes"][identity] = route
         return result
 
-    def run(self, phase):
+    def run(self):
         models = self.specification["models"]
-        if phase == "targets":
-            inputs = []
-            for case in self.cases:
-                domain = self.domains[case["domain"]]
-                model = models[domain["model"]]
-                configuration = next(row for row in domain["configurations"] if row["id"] == case["configuration"])
-                workload = self.workload(case, configuration["instances"], model["geometry"])
-                common = {"model": model["model"], "instances": configuration["instances"], "workload": workload}
-                native = {**common, "observe_all_workers": True}
-                CaptureInput(native)
-                inputs.append((case, native, common))
+        inputs = []
+        for case in self.cases:
+            domain = self.domains[case["domain"]]
+            model = models[domain["model"]]
+            configuration = next(row for row in domain["configurations"] if row["id"] == case["configuration"])
+            workload = self.workload(case, configuration["instances"], model["geometry"])
+            common = {"model": model["model"], "instances": configuration["instances"], "workload": workload}
+            native = {**common, "observe_all_workers": True}
+            CaptureInput(native)
+            inputs.append((case, native, common))
 
-            # Freeze the whole request draw from its declared inputs, independently of template or cost coverage.
-            for case, native, prediction in inputs:
-                self.publish(case["capture_input"], native)
-                self.publish(case["prediction_input"], prediction)
-            self.publish(f"inputs/independent/{self.stage}/draw.json", {
-                "seed": self.seed, "cases": [case["id"] for case in self.cases],
-                "selection": self.specification["sampling"],
-            })
-            return
-
-        for domain in self.domains.values():
-            if "source" in domain:
-                continue
-            workloads = domain.get("source_workloads")
-            if not workloads:
-                raise ValueError(f"independent domain {domain['id']} needs training workloads or a published source")
-
-            self.publish(domain["exploration"], {
-                "framework": "sglang", "model": models[domain["model"]]["model"],
-                "configurations": domain["configurations"], "workloads": workloads,
-            })
+        # Freeze the whole request draw from its declared inputs, independently of template or cost coverage.
+        for case, native, prediction in inputs:
+            self.publish(case["capture_input"], native)
+            self.publish(case["prediction_input"], prediction)
+        self.publish(f"inputs/independent/{self.stage}/draw.json", {
+            "seed": self.seed, "cases": [case["id"] for case in self.cases],
+            "selection": self.specification["sampling"],
+        })
 
 
 def main():
@@ -144,9 +130,8 @@ def main():
     parser.add_argument("--specification", type=Path, required=True)
     parser.add_argument("--stage", required=True)
     parser.add_argument("--seed", required=True, help="frozen commit or manifest digest, recorded in draw.json")
-    parser.add_argument("--phase", choices=("sources", "targets"), required=True)
     arguments = parser.parse_args()
-    MatrixInputs(arguments.root, arguments.specification, arguments.stage, arguments.seed).run(arguments.phase)
+    MatrixInputs(arguments.root, arguments.specification, arguments.stage, arguments.seed).run()
 
 
 if __name__ == "__main__":

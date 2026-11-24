@@ -3,26 +3,20 @@
 from pathlib import Path
 
 from prologue.acquisition.capture import NativeAttempt
-from prologue.integrations.frameworks.sglang.acquisition.domains import SourceDomain
 from prologue.integrations.frameworks.sglang.configuration import CaptureInput
+from prologue.integrations.frameworks.sglang.worker_templates import WorkerDomain
 from prologue.integrations.platforms.ascend.deployment import AscendDeployment
 from prologue.integrations.platforms.ascend.export import AscendExport
 
 
 class SGLangAscendLaunch:
-    domain = SourceDomain
+    domain = WorkerDomain
     export_profile = staticmethod(AscendExport.command)
 
     def sampling(self, source):
         from prologue.integrations.frameworks.sglang.ascend.sampling import SGLangSampling
 
         return SGLangSampling(self, source)
-
-    @staticmethod
-    def source_planner(source, deployment):
-        from prologue.integrations.frameworks.sglang.acquisition.planning import SourcePlanning
-
-        return SourcePlanning(source, joint_observation=not AscendDeployment.is_single_device(deployment))
 
     def __init__(self, job, deployment):
         self.job = job

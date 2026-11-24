@@ -4,8 +4,8 @@ from collections import defaultdict
 
 
 class ExplorationReport:
-    def __init__(self, targets, assets, usage, reuse):
-        self.targets, self.assets, self.usage, self.reuse = targets, assets, usage, reuse
+    def __init__(self, targets, libraries, usage):
+        self.targets, self.libraries, self.usage = targets, libraries, usage
 
     def rankings(self):
         workloads = defaultdict(list)
@@ -29,7 +29,7 @@ class ExplorationReport:
         return {
             "status": "complete" if all(row["status"] == "predicted" for row in self.targets) else "partial",
             "qualification": "modeled_predictions", "targets": self.targets, "rankings": self.rankings(),
-            "assets": self.assets, "usage": self.usage, "reuse": self.reuse,
+            "libraries": str(self.libraries), "usage": self.usage,
         }
 
     @staticmethod

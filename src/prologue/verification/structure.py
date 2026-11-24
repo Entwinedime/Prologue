@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from prologue.app.prediction import PredictionProcess
 from prologue.artifacts import write_json
 from prologue.integrations.runtimes.docker import ModelingProcess
+from prologue.libraries import LibraryRelease
 
 from .compare_actions import ActionComparison
 from .execution_inputs import NativeInputs
@@ -35,15 +36,23 @@ class StructureVerification:
         wall_ns = {}
         stages = {
             "capture": str(recording.directory), "reference": str(args.reference.resolve(strict=True)),
-            "production": str(args.production.resolve()), "wall_ns": wall_ns,
+            "libraries": str(args.libraries.resolve()), "wall_ns": wall_ns,
         }
         source = json.loads(args.input.read_text())
         if difference := recording.input_difference(recording.inputs["job"], source):
             return self.finish("input_mismatch", stages | {"input_difference": difference})
-        sources = PredictionProcess.sources(args.production)
-        if args.peer_handoffs and sources.deployment["acquisition_mode"] != "single_device":
+        prediction = self.output / "prediction"
+        timing = self.output / "timing"
+        options = SimpleNamespace(output=prediction, timeout=args.timeout, binary=args.binary,
+                                  modeling_image=args.modeling_image, control_image=args.control_image,
+                                  execution_inputs=timing / "execution-inputs.json", execution_trace=True)
+        process = PredictionProcess(options, LibraryRelease(args.libraries), source)
+        binding = process.task.binding
+        if binding is None:
+            return self.finish("template_gap", stages | {"gap": process.task.missing_workers()})
+        if args.peer_handoffs and binding.worker_deployment.get("acquisition_mode", "full") != "single_device":
             return self.finish("peer_handoff_source_unqualified", stages)
-        training = stages["training"] = recording.training(production=sources, target=source)
+        training = stages["training"] = recording.training(templates=binding)
         if training["status"] != "separate":
             return self.finish(training["status"], stages)
 
@@ -60,7 +69,6 @@ class StructureVerification:
             return self.finish("input_mismatch", stages | {"input_difference": difference})
 
         started = monotonic_ns()
-        timing = self.output / "timing"
         with TemporaryDirectory(prefix=".action-layouts-", dir=self.output) as temporary:
             layouts = Path(temporary)
             modeling = ModelingProcess(args.binary, args.modeling_image, args.timeout)
@@ -77,18 +85,18 @@ class StructureVerification:
         if extracted["status"] != "extracted":
             return self.finish("timing_unavailable", stages)
 
-        prediction = self.output / "prediction"
-        command = SimpleNamespace(input=args.input, production=args.production, output=prediction, timeout=args.timeout,
-                                  binary=args.binary, modeling_image=args.modeling_image, control_image=args.control_image,
-                                  execution_inputs=timing / "execution-inputs.json", costs=None, execution_trace=True)
         started = monotonic_ns()
         try:
-            PredictionProcess(command).run(source=source, productions=sources)
+            if not process.run():
+                stages["prediction_error"] = "published library has an uncovered target operation"
         except (RuntimeError, TimeoutError, TimeoutExpired) as error:
             stages["prediction_error"] = str(error)
         wall_ns["prediction"] = monotonic_ns() - started
         trace = prediction / ("execution.partial.jsonl" if "prediction_error" in stages else "execution.jsonl")
         if not trace.is_file():
+            if gap := process.gap(prediction):
+                status, path = gap
+                return self.finish(status, stages | {"evidence": str(path)})
             return self.finish("prediction_no_trace", stages)
 
         # Compare against the original reference, including actual condition consumption and independent causal evidence.
@@ -121,7 +129,7 @@ class StructureVerification:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capture", type=Path, required=True, help="published detailed native capture task")
-    for name in ("reference", "production", "input", "binary", "output"):
+    for name in ("reference", "libraries", "input", "binary", "output"):
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--timeout", type=float, required=True, help="allowance in seconds for each of layout preparation and prediction")
     parser.add_argument("--control-image", default="prologue-control:ubuntu22.04")
