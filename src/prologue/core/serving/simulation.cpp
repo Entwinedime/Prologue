@@ -1,6 +1,7 @@
 #include "prologue/core/serving/simulation.hpp"
 #include "prologue/core/serving/disaggregation.hpp"
 #include "prologue/core/serving/pipeline.hpp"
+#include "prologue/core/structure/parallel.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -248,30 +249,18 @@ void Simulation::execute(Index index, const json& message) {
     auto action = message;
     action["clock_ns"] = actor.clock.now();
     auto timing = timing_source_.for_action(action, graph);
-    actor.clock.advance_by(timing.prepare_ns);
-    const auto started = actor.clock.now();
-    std::optional<std::int64_t> publisher;
-    if (graph.contains("collectives")) {
-        publisher = graph.at("calls").front().at("parameters").at("publication_rank").get<std::int64_t>();
-    }
-    const auto completed = actor.clock.schedule_work(timing.work, record_structure_, publisher);
-    actor.clock.advance_by(timing.model_return_ns);
-
-    // A measured host return is independent of device work relaying tokens to the next iteration.
-    if (timing.await_output_lane) {
-        actor.clock.advance_to(std::max(actor.clock.now(), completed.output_lane_ready_ns));
-    }
+    const auto execution = actor.clock.begin_action(timing, record_structure_, structure::publication_lane(graph));
 
     json record{
-        {"phase", message.at("phase")}, {"members", message.at("members")}, {"began_ns", started},
-        {"model_ready_ns", actor.clock.now()}, {"publications", json::array()},
+        {"phase", message.at("phase")}, {"members", message.at("members")}, {"began_ns", execution.began_ns},
+        {"model_ready_ns", execution.model_ready_ns}, {"publications", json::array()},
     };
     if (message.contains("expert_routes")) {
         record["expert_routes"] = message.at("expert_routes");
     }
     if (record_structure_) {
         auto observed = json::array();
-        for (const auto& interval : completed.intervals) {
+        for (const auto& interval : execution.work.intervals) {
             observed.push_back({interval.begin_ns, interval.end_ns});
         }
         record["resources"] = capacity(index);
@@ -281,7 +270,7 @@ void Simulation::execute(Index index, const json& message) {
             record["cache"] = cache(index, message);
         }
     }
-    actor.action.emplace(ActiveAction{std::move(record), std::move(timing), completed.all_work_ready_ns});
+    actor.action.emplace(ActiveAction{std::move(record), std::move(timing), execution.work.all_work_ready_ns});
 }
 
 void Simulation::publish(Index index, const json& message) {

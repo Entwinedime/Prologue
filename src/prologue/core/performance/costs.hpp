@@ -36,13 +36,15 @@ public:
 
     std::vector<nlohmann::json> require(const nlohmann::json& domain,
                                         std::span<const nlohmann::json* const> coordinates) const;
-    nlohmann::json quote(const nlohmann::json& domain, const nlohmann::json& coordinate) const;
+    nlohmann::json quotes(const nlohmann::json& domain, const nlohmann::json& coordinates) const;
 
 private:
-    std::optional<nlohmann::json> estimate(const nlohmann::json& coordinate) const;
+    using Models = std::unordered_map<std::string, std::unique_ptr<Estimator>>;
 
-    nlohmann::json domain_;
-    std::unordered_map<std::string, std::unique_ptr<Estimator>> models_;
+    const Models* resolve(const nlohmann::json& domain) const;
+    static std::optional<nlohmann::json> estimate(const Models* models, const nlohmann::json& coordinate);
+
+    std::unordered_map<std::string, Models> domains_;
 };
 
 }

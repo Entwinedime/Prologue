@@ -71,7 +71,7 @@ class Store:
         manifest = self.release(base)
         return Snapshot(manifest, {family: self.asset(manifest, family) for family in self.families})
 
-    def publish(self, previous, candidates, rule_review=None):
+    def publish(self, previous, candidates, rule_review=None, operation=None):
         if candidates.keys() != set(self.families):
             raise ValueError("a release requires templates, performance and rules")
         base = previous.manifest["release"]
@@ -87,6 +87,8 @@ class Store:
         receipt = {"release": revision, "base": base, "assets": assets}
         if rule_review is not None:
             receipt["rule_review"] = rule_review
+        if operation is not None:
+            receipt["operation"] = self.identity(operation)
         self.root.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(prefix=".candidate-", dir=self.root) as temporary:
             staging = Path(temporary)
@@ -100,6 +102,11 @@ class Store:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 current = self.current()
                 if current != base:
+                    if operation is not None and current is not None:
+                        existing = self.release(current)
+                        if (existing.get("operation") == operation and existing["base"] == base
+                                and self.snapshot(current).documents == candidates):
+                            return {"status": "published", **existing}
                     return {"status": "stale_release", "release": current, "base": base}
                 if not sources:
                     return {"status": "unchanged", **previous.manifest}

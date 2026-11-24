@@ -92,10 +92,25 @@ def cost_quotes(costs, rules, query):
     return run_core("quote", {**query, "costs": costs, "rules": rules.document})
 
 
+def cost_fit(costs, domain):
+    return next((fit for fit in costs["domains"] if fit["domain"] == domain), None)
+
+
+def cost_sources(costs, domain):
+    fit = cost_fit(costs, domain)
+    return fit["sources"] if fit is not None else []
+
+
 def extend_costs(previous, addition, required):
-    if previous["domain"] != addition["domain"]:
-        raise ValueError("additional costs require the same physical domain")
-    models = {json.dumps(row["coordinate"], sort_keys=True): row for row in previous["models"]}
+    domain = required["domain"]
+    if addition["domain"] != domain:
+        raise ValueError("additional costs require evidence for the requested physical domain")
+    domains = previous["domains"].copy()
+    fit = cost_fit(previous, domain)
+    if fit is None:
+        fit = {"domain": domain, "models": [], "sources": []}
+        domains.append(fit)
+    models = {json.dumps(row["coordinate"], sort_keys=True): row for row in fit["models"]}
     wanted = {json.dumps(row, sort_keys=True) for row in required["coordinates"]}
     count = len(models)
     for row in addition["models"]:
@@ -105,21 +120,24 @@ def extend_costs(previous, addition, required):
     if len(models) == count:
         return previous
 
-    sources = previous["sources"] + [row for row in addition["sources"] if row not in previous["sources"]]
-    return {**previous, "sources": sources, "models": list(models.values())}
+    sources = fit["sources"] + [row for row in addition["sources"] if row not in fit["sources"]]
+    domains[domains.index(fit)] = {**fit, "sources": sources, "models": list(models.values())}
+    return {"domains": domains}
 
 
 def qualify(documents, rules):
     templates = documents["templates"]
     costs = documents["performance"]
-    domain = {key: value for key, value in costs["domain"].items() if key != "hardware"}
-    if not any(entry["domain"] == domain for entry in templates["sources"]):
-        raise ValueError("the performance asset has no corresponding template domain")
     for entry in templates["sources"]:
         source = entry["source"]
         rules.require_observation(source["purpose"], source["mode"])
-    for source in costs["sources"]:
-        rules.require_observation(source["family"], source["mode"])
+
+    for fit in costs["domains"]:
+        domain = {key: value for key, value in fit["domain"].items() if key != "hardware"}
+        if not any(entry["domain"] == domain for entry in templates["sources"]):
+            raise ValueError("the performance asset has no corresponding template domain")
+        for source in fit["sources"]:
+            rules.require_observation(source["family"], source["mode"])
     run_core("qualify-release", {"bank": templates, "costs": costs, "rules": rules.document})
 
 
@@ -158,7 +176,7 @@ def publish(args):
 
     cost_requirements = read_document(args.require_costs) if args.require_costs else None
     if args.costs:
-        documents["performance"] = read_document(args.costs)
+        documents["performance"] = {"domains": [read_document(path) for path in args.costs]}
     elif args.add_costs:
         if "performance" not in documents or cost_requirements is None:
             raise ValueError("adding costs requires a published base and the original --require-costs query")
@@ -193,4 +211,4 @@ def publish(args):
 
     if args.preview:
         return {"status": "qualified", "release": base, "rule_review": review}
-    return store.publish(snapshot, documents, review)
+    return store.publish(snapshot, documents, review, args.operation)

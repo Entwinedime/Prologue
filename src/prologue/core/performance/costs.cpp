@@ -108,47 +108,60 @@ CostQueries::CostQueries(const json& action, const json& graph)
     }
 }
 
-CostCatalog::CostCatalog(const json& asset, const json& rules) : domain_(asset.at("domain")) {
+CostCatalog::CostCatalog(const json& asset, const json& rules) {
     using Decoder = std::unique_ptr<Estimator> (*)(const Samples&);
     static const std::unordered_map<std::string, Decoder> decoders{{"exact_median", exact_median}};
 
-    std::unordered_map<std::string, Samples> samples;
-    for (const auto& entry : asset.at("models")) {
-        const auto family = entry.at("coordinate").at("family").get<std::string>();
-        if (rules.at(family).at("estimator") != entry.at("estimator")) {
-            throw std::invalid_argument("trained estimator does not match its rule for " + family);
+    for (const auto& domain : asset.at("domains")) {
+        auto [entry, inserted] = domains_.try_emplace(domain.at("domain").dump());
+        if (!inserted) {
+            throw std::invalid_argument("multiple cost assets for one domain");
         }
-        samples[family].push_back(&entry);
-    }
-    for (const auto& binding : rules.items()) {
-        const auto name = binding.value().at("estimator").get<std::string>();
-        const auto decoder = decoders.find(name);
-        if (decoder == decoders.end()) {
-            throw std::invalid_argument("unsupported cost estimator " + name);
+
+        std::unordered_map<std::string, Samples> samples;
+        for (const auto& row : domain.at("models")) {
+            const auto family = row.at("coordinate").at("family").get<std::string>();
+            if (rules.at(family).at("estimator") != row.at("estimator")) {
+                throw std::invalid_argument("trained estimator does not match its rule for " + family);
+            }
+            samples[family].push_back(&row);
         }
-        models_.emplace(binding.key(), decoder->second(samples[binding.key()]));
+        for (const auto& binding : rules.items()) {
+            const auto name = binding.value().at("estimator").get<std::string>();
+            const auto decoder = decoders.find(name);
+            if (decoder == decoders.end()) {
+                throw std::invalid_argument("unsupported cost estimator " + name);
+            }
+            entry->second.emplace(binding.key(), decoder->second(samples[binding.key()]));
+        }
     }
 }
 
 CostCatalog::~CostCatalog() = default;
 
-std::optional<json> CostCatalog::estimate(const json& coordinate) const {
-    const auto model = models_.find(coordinate.at("family").get<std::string>());
-    return model == models_.end() ? std::nullopt : model->second->estimate(coordinate);
+const CostCatalog::Models* CostCatalog::resolve(const json& domain) const {
+    const auto entry = domains_.find(domain.dump());
+    return entry == domains_.end() ? nullptr : &entry->second;
+}
+
+std::optional<json> CostCatalog::estimate(const Models* models, const json& coordinate) {
+    if (!models) {
+        return std::nullopt;
+    }
+    const auto model = models->find(coordinate.at("family").get<std::string>());
+    return model == models->end() ? std::nullopt : model->second->estimate(coordinate);
 }
 
 std::vector<json> CostCatalog::require(const json& domain, std::span<const json* const> coordinates) const {
-    const auto covered_domain = domain == domain_;
+    const auto* models = resolve(domain);
     std::vector<json> estimates;
     estimates.reserve(coordinates.size());
     auto missing = json::array();
     std::unordered_set<std::string> reported;
     for (const auto* coordinate : coordinates) {
-        if (covered_domain) {
-            if (auto value = estimate(*coordinate)) {
-                estimates.push_back(std::move(*value));
-                continue;
-            }
+        if (auto value = estimate(models, *coordinate)) {
+            estimates.push_back(std::move(*value));
+            continue;
         }
         if (reported.insert(coordinate->dump()).second) {
             missing.push_back(*coordinate);
@@ -157,7 +170,7 @@ std::vector<json> CostCatalog::require(const json& domain, std::span<const json*
 
     // A caller can schedule the action only after all of its costs are known.
     if (!missing.empty()) {
-        auto gap = missing_cost(covered_domain);
+        auto gap = missing_cost(models != nullptr);
         gap["domain"] = domain;
         gap["coordinates"] = std::move(missing);
         throw CostGap(std::move(gap));
@@ -165,16 +178,19 @@ std::vector<json> CostCatalog::require(const json& domain, std::span<const json*
     return estimates;
 }
 
-json CostCatalog::quote(const json& domain, const json& coordinate) const {
-    const auto covered_domain = domain == domain_;
-    if (covered_domain) {
-        if (auto value = estimate(coordinate)) {
-            return {{"status", "covered"}, {"estimate", std::move(*value)}};
+json CostCatalog::quotes(const json& domain, const json& coordinates) const {
+    const auto* models = resolve(domain);
+    auto result = json::array();
+    for (const auto& coordinate : coordinates) {
+        if (auto value = estimate(models, coordinate)) {
+            result.push_back({{"status", "covered"}, {"estimate", std::move(*value)}});
+        } else {
+            auto gap = missing_cost(models != nullptr);
+            gap["coordinate"] = coordinate;
+            result.push_back(std::move(gap));
         }
     }
-    auto gap = missing_cost(covered_domain);
-    gap["coordinate"] = coordinate;
-    return gap;
+    return result;
 }
 
 }

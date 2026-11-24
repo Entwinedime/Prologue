@@ -19,14 +19,13 @@ class DecodeAttention:
     def length(domain, coordinate):
         config = domain["configuration"]
         geometry = coordinate["geometry"]
-        lengths = geometry["sequence_lengths"]
-        if (config["tp"] != 1 or config.get("pp", 1) != 1
-                or config["attention_backend"] != "ascend" or geometry["phase"] != "decode"
+        if (domain["hardware"]["platform"] != "ascend" or config.get("tp") != 1 or config.get("pp", 1) != 1
+                or config["attention_backend"] != "ascend" or geometry.get("phase") != "decode"
                 or coordinate["family"] != "device_task" or coordinate.get("operation") != "attention"
-                or len(lengths) != 1):
+                or len(geometry.get("sequence_lengths", ())) != 1):
             return None
 
-        length, = lengths
+        length, = geometry["sequence_lengths"]
         page = config["page_size"]
         if type(length) is not int or not 1 < length <= config["max_prefill_tokens"] + 1:
             return None

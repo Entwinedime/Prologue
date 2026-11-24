@@ -26,16 +26,6 @@ private:
     std::string status_;
 };
 
-struct ActionTiming final {
-    std::vector<TimedWork> work;
-    Nanoseconds prepare_ns;
-    Nanoseconds model_return_ns;
-    BoundaryTime result_finished;
-    std::unordered_map<std::string, BoundaryTime> publications;
-    std::optional<BoundaryTime> next_read{};
-    bool await_output_lane = false;
-};
-
 struct CutTiming final {
     Interval host;
     Nanoseconds ready_ns;

@@ -50,15 +50,14 @@ class FixedGraph:
             }
             self.batches.append({"action": action, "graph": batch.graph, "timing": timing,
                                  "input_ready_ns": input_ready, "model_tail_ns": model_tail})
-            self.actual.append({"began_ns": begin, "device_ready_ns": device_ready, "finished_ns": finish,
-                                "intervals": true_intervals, "publications": published})
+            self.actual.append({"began_ns": begin, "device_ready_ns": device_ready, "model_ready_ns": model_ready,
+                                "finished_ns": finish, "intervals": true_intervals, "publications": published})
             previous_end = finish
 
-    def job(self, costs=None, rules=None, restore_kind=None):
+    def job(self, costs=None, rules=None, *, device_only=False, restore_kind=None):
         result = {"domain": self.domain, "batches": self.batches, "restore_kind": restore_kind}
         if costs is not None:
-            result["costs"] = costs
-            result["rules"] = rules
+            result.update(costs=costs, rules=rules, device_only=device_only)
         return result
 
     def check_baseline(self, output):
@@ -71,7 +70,8 @@ class FixedGraph:
                 return {"status": "publication_baseline_mismatch"}
             for row in action["publications"]:
                 worst = max(worst, abs(row["at_ns"] - expected["publications"][row["request"]]))
-            worst = max(worst, abs(action["finished_ns"] - expected["finished_ns"]))
+            worst = max(worst, abs(action["finished_ns"] - expected["finished_ns"]),
+                        abs(action["model_ready_ns"] - expected["model_ready_ns"]))
         return {
             "status": "matched" if worst == 0 else "boundary_baseline_mismatch",
             "max_boundary_error_ns": worst,
@@ -84,10 +84,15 @@ class FixedGraph:
         if output["status"] != "complete":
             return output
         differences = []
-        for expected, action in zip(self.actual, output["actions"], strict=True):
+        for batch, expected, action in zip(self.batches, self.actual, output["actions"], strict=True):
+            ready = batch["input_ready_ns"]
             differences.append({
                 "model_start_error_ns": action["began_ns"] - expected["began_ns"],
                 "device_ready_error_ns": action["device_ready_ns"] - expected["device_ready_ns"],
+                "model_ready_error_ns": action["model_ready_ns"] - expected["model_ready_ns"],
+                "finished_error_ns": action["finished_ns"] - expected["finished_ns"],
+                "input_to_begin_ns": {"observed": expected["began_ns"] - ready,
+                                      "estimated": action["began_ns"] - ready},
                 "publication_error_ns": {row["request"]: row["at_ns"] - expected["publications"][row["request"]]
                                          for row in action["publications"]},
             })

@@ -2,13 +2,16 @@
 
 import argparse
 import json
+import subprocess
 from pathlib import Path
 
-from prologue.app.acquire import plan_costs, sample_costs
+from prologue.app import explore
+from prologue.app.acquire import plan_costs, sample_costs, sample_structure
 from prologue.app.core import run_core, run_simulation
 from prologue.app.releases import (
     control_inputs,
     cost_quotes,
+    cost_sources,
     pinned,
     publish,
     query_structure,
@@ -205,16 +208,22 @@ def predict(args):
     workload = next(row for row in task["workloads"] if row["id"] == args.workload)
     revisions = {entry["domain"]["framework_revision"] for entry in templates["sources"]
                  if entry["domain"]["model"] == task["model"] and entry["domain"]["configuration"] == configuration}
-    if len(revisions) != 1:
+    if args.framework_revision is None and len(revisions) != 1:
         raise ValueError("the target model and configuration require exactly one published framework revision")
-    domain = {"framework_revision": revisions.pop(), "model": task["model"], "configuration": configuration}
+    revision = args.framework_revision if args.framework_revision is not None else next(iter(revisions))
+    domain = {"framework_revision": revision, "model": task["model"], "configuration": configuration}
+    cost_domain = {**domain, "hardware": read_document(args.hardware)}
+    context = {"domain": domain, "workload": workload, "cost_sources": cost_sources(costs, cost_domain),
+               "release": release["release"]}
+    if revision not in revisions:
+        gap = {"status": "template_domain_gap", "domain": domain, "reason": "no published source for the target domain"}
+        return {**context, **gap, "gap": gap}
 
-    job = {"domain": domain, "cost_domain": {**domain, "hardware": read_document(args.hardware)}, "workload": workload,
+    job = {"domain": domain, "cost_domain": cost_domain, "workload": workload,
            "costs": costs, "templates": templates, **control_inputs(templates, domain, workload),
            "rules": rules.document}
     result = run_core("predict", job, str(args.socket))
-    return {**result, "domain": domain, "workload": workload, "cost_sources": costs["sources"],
-            "release": release["release"]}
+    return {**result, **context}
 
 
 def verify_performance(args):
@@ -224,19 +233,22 @@ def verify_performance(args):
     recording = AscendRecording(args.reference)
     reference = detailed_reference(recording)
     costs = store.asset(release, "performance")
-    if any(row["origin_raw_ns"] == recording.delivery["origin_raw_ns"] for row in costs["sources"]):
-        raise ValueError("the fixed-graph reference was used in calibration")
     graph = FixedGraph(reference, recording.manifest, AscendEvidence.hardware(args.reference))
+    if any(row["origin_raw_ns"] == recording.delivery["origin_raw_ns"] for row in cost_sources(costs, graph.domain)):
+        raise ValueError("the fixed-graph reference was used in calibration")
     baseline = graph.check_baseline(run_core("replay", graph.job()))
     report = {"status": baseline["status"], "baseline": baseline, "release": release["release"]}
     if baseline["status"] != "matched":
         return report
 
+    device = graph.compare(run_core("replay", graph.job(costs, rules.document, device_only=True)))
     estimate = graph.compare(run_core("replay", graph.job(costs, rules.document)))
-    report.update(status=estimate["status"], estimate=estimate)
+    report.update(status=estimate["status"], device_only=device, estimate=estimate)
     if estimate["status"] == "complete":
-        report["restored"] = {kind: graph.compare(run_core("replay", graph.job(costs, rules.document, kind)))
-                              for kind in sorted(graph.kinds)}
+        report["restored"] = {
+            kind: graph.compare(run_core("replay", graph.job(costs, rules.document, restore_kind=kind)))
+            for kind in sorted(graph.kinds)
+        }
     return report
 
 
@@ -257,12 +269,22 @@ def release_arguments(parser):
     parser.add_argument("--release", default="current", help="release UUID or current")
 
 
+def sampling_arguments(parser):
+    parser.add_argument("plan", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--attempts", type=int, required=True)
+    parser.add_argument("--card-seconds", type=int, required=True)
+    parser.add_argument("--max-bytes", type=int, required=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="prologue", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     plan = commands.add_parser("plan", help="validate a task and list its targets")
     plan.add_argument("task", type=Path)
     plan.set_defaults(handler=lambda args: Plan(args.task).document())
+
+    explore.arguments(commands.add_parser("explore", help="explore a task using pinned application and native images"))
 
     compile_command = commands.add_parser("compile", help="compile hierarchical templates from a detailed observation")
     compile_command.add_argument("observation", type=Path)
@@ -289,12 +311,13 @@ def main() -> None:
     publication = commands.add_parser("publish", help="atomically publish template, performance and rule assets")
     publication.add_argument("--store", type=Path, default=Path("data/libraries"))
     publication.add_argument("--base", default="current", help="expected current release UUID, current or empty")
+    publication.add_argument("--operation", help="operation UUID for recovery after an interrupted publication")
     libraries = publication.add_mutually_exclusive_group()
     libraries.add_argument("--library", type=Path, action="append", help="complete set of template sources")
     libraries.add_argument("--add-library", type=Path, action="append", help="add to the base template sources")
     publication.add_argument("--require-structure", type=Path, help="require coverage for the original query batch")
     costs = publication.add_mutually_exclusive_group()
-    costs.add_argument("--costs", type=Path)
+    costs.add_argument("--costs", type=Path, action="append", help="trained costs for each domain of the new catalog")
     costs.add_argument("--add-costs", type=Path, help="add uncovered work coordinates to the published costs")
     publication.add_argument("--require-costs", type=Path, help="require coverage for the original cost queries")
     publication.add_argument("--rules", type=Path)
@@ -324,13 +347,15 @@ def main() -> None:
     sampling.set_defaults(handler=plan_costs)
 
     collection = commands.add_parser("sample-costs", help="run one bounded sampling job in the native observer image")
-    collection.add_argument("plan", type=Path)
-    collection.add_argument("output", type=Path)
+    sampling_arguments(collection)
     collection.add_argument("--job", type=int, default=0)
-    collection.add_argument("--attempts", type=int, required=True)
-    collection.add_argument("--card-seconds", type=int, required=True)
-    collection.add_argument("--max-bytes", type=int, required=True)
     collection.set_defaults(handler=sample_costs)
+
+    structural = commands.add_parser("sample-structure", help="record one bounded native training target on one card")
+    sampling_arguments(structural)
+    structural.add_argument("--configuration", required=True)
+    structural.add_argument("--workload", required=True)
+    structural.set_defaults(handler=sample_structure)
 
     forecast = commands.add_parser("predict", help="predict a target using a pinned release")
     forecast.add_argument("task", type=Path)
@@ -338,6 +363,7 @@ def main() -> None:
     forecast.add_argument("--workload", required=True)
     forecast.add_argument("--hardware", type=Path, required=True)
     forecast.add_argument("--socket", type=Path, required=True)
+    forecast.add_argument("--framework-revision", help="use the exact native controller revision")
     release_arguments(forecast)
     forecast.set_defaults(handler=predict)
 
@@ -356,5 +382,5 @@ def main() -> None:
         output = args.handler(args)
         compact = args.command in ("compile", "fit-costs", "quote-costs")
         print(json.dumps(output, separators=(",", ":"), indent=None if compact else 2))
-    except (KeyError, OSError, TypeError, ValueError, StopIteration) as error:
+    except (KeyError, OSError, TypeError, ValueError, StopIteration, subprocess.SubprocessError) as error:
         parser.error(str(error))

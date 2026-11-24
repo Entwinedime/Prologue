@@ -52,6 +52,19 @@ def sample_costs(args):
             or any(row["implementation"] != job["implementation"] for row in job["coordinates"])):
         raise ValueError("the sampling job does not match the native Decode scope")
 
-    command = [sys.executable, "-m", "prologue.integrations.frameworks.sglang.ascend.attention"]
-    return Acquisition(args.output, job).run(command, max_attempts=args.attempts,
-                                            max_card_ns=args.card_seconds * 1_000_000_000, max_bytes=args.max_bytes)
+    return collect(args, job, "prologue.integrations.frameworks.sglang.ascend.attention")
+
+
+def sample_structure(args):
+    plan = read_document(args.plan)
+    target = {"configuration": args.configuration, "workload": args.workload}
+    if target not in plan["targets"]:
+        raise ValueError("the requested structure training target is not in the plan")
+    return collect(args, {"plan": plan, "target": target}, "prologue.app.observe", "--attempt")
+
+
+def collect(args, specification, module, *options):
+    command = [sys.executable, "-m", module, *options]
+    return Acquisition(args.output, specification).run(command, max_attempts=args.attempts,
+                                                       max_card_ns=args.card_seconds * 1_000_000_000,
+                                                       max_bytes=args.max_bytes)

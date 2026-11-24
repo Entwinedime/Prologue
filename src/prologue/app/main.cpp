@@ -131,11 +131,7 @@ json work_coordinates(const json& batches) {
 
 json cost_quotes(const json& input) {
     const prologue::performance::CostCatalog costs(input.at("costs"), input.at("rules").at("performance"));
-    auto result = json::array();
-    for (const auto& coordinate : input.at("coordinates")) {
-        result.push_back(costs.quote(input.at("domain"), coordinate));
-    }
-    return result;
+    return costs.quotes(input.at("domain"), input.at("coordinates"));
 }
 
 json structure_queries(const json& input) {

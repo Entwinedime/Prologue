@@ -200,4 +200,11 @@ void bind_collectives(nlohmann::json& graph) {
     Collectives(graph).bind();
 }
 
+std::optional<std::int64_t> publication_lane(const nlohmann::json& graph) {
+    if (!graph.contains("collectives")) {
+        return std::nullopt;
+    }
+    return graph.at("calls").front().at("parameters").at("publication_rank").get<std::int64_t>();
+}
+
 }

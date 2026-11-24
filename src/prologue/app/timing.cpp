@@ -1,6 +1,8 @@
 #include "prologue/app/timing.hpp"
 
 #include "prologue/core/performance/costs.hpp"
+#include "prologue/core/serving/cost_timing.hpp"
+#include "prologue/core/structure/parallel.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -17,6 +19,7 @@ namespace prologue::app {
 namespace {
 
 using nlohmann::json;
+using serving::ActionTiming;
 using serving::BoundaryTime;
 using serving::Nanoseconds;
 using serving::Stopped;
@@ -32,6 +35,29 @@ Nanoseconds elapsed(const json& row, const char* key) {
 
 BoundaryTime boundary(const json& row) {
     return {elapsed(row, "after_start_ns"), elapsed(row, "after_model_ns")};
+}
+
+void estimate_device_service(ActionTiming& timing, const json& action, const json& graph,
+                             const json& domain, const performance::CostCatalog& costs) {
+    const performance::CostQueries queries(action, graph);
+    std::vector<const json*> coordinates;
+    coordinates.reserve(queries.device.size());
+    for (const auto& coordinate : queries.device) {
+        coordinates.push_back(&coordinate);
+    }
+    const auto estimates = costs.require(domain, coordinates);
+    for (std::size_t index = 0; index < estimates.size(); ++index) {
+        timing.work.at(index).duration_ns = estimates.at(index).at("duration_ns").get<Nanoseconds>();
+    }
+}
+
+void restore_device_kind(ActionTiming& timing, const ActionTiming& measured, const json& work, const json& kind) {
+    for (std::size_t index = 0; index < work.size(); ++index) {
+        if (work.at(index).at("kind") == kind) {
+            timing.work.at(index).dispatch_ns = measured.work.at(index).dispatch_ns;
+            timing.work.at(index).duration_ns = measured.work.at(index).duration_ns;
+        }
+    }
 }
 
 }
@@ -102,38 +128,37 @@ json replay(const json& job) {
         costs.emplace(job.at("costs"), job.at("rules").at("performance"));
     }
 
+    std::optional<serving::CostTiming> modeled;
+    if (costs && !job.value("device_only", false)) {
+        modeled.emplace(domain, *costs);
+    }
     serving::Timeline timeline;
     auto actions = json::array();
     for (const auto& row : job.at("batches")) {
         const auto& action = row.at("action");
         const auto& graph = row.at("graph");
-        auto timing = read_timing(row.at("timing"), graph.at("work"));
-        if (costs) {
-            const performance::CostQueries queries(action, graph);
-            std::vector<const json*> coordinates;
-            std::vector<std::size_t> modeled;
-            for (std::size_t index = 0; index < queries.device.size(); ++index) {
-                const auto& coordinate = queries.device.at(index);
-                if (coordinate.at("kind") != restore) {
-                    coordinates.push_back(&coordinate);
-                    modeled.push_back(index);
-                }
+        const auto& work = graph.at("work");
+        auto timing = modeled ? modeled->for_action(action, graph) : read_timing(row.at("timing"), work);
+        if (modeled) {
+            if (!restore.is_null()) {
+                restore_device_kind(timing, read_timing(row.at("timing"), work), work, restore);
             }
+        } else {
 
-            const auto estimates = costs->require(domain, coordinates);
-            for (std::size_t index = 0; index < modeled.size(); ++index) {
-                timing.work.at(modeled.at(index)).duration_ns = estimates.at(index).at("duration_ns").get<Nanoseconds>();
+            // Preserve the observed host schedule to isolate device service in this replay.
+            timing.await_output_lane = true;
+            if (costs) {
+                estimate_device_service(timing, action, graph, domain, *costs);
             }
         }
 
         timeline.advance_to(std::max(timeline.now(), row.at("input_ready_ns").get<Nanoseconds>()));
-        timeline.advance_by(timing.prepare_ns);
-        const auto started = timeline.now();
-        const auto completed = timeline.schedule_work(timing.work, !costs);
-        timeline.advance_by(timing.model_return_ns);
-        timeline.advance_to(std::max(timeline.now(), completed.all_work_ready_ns));
-        const auto device_ready = timeline.now();
-        timeline.advance_by(row.at("model_tail_ns"));
+        const auto publisher = modeled ? structure::publication_lane(graph) : std::nullopt;
+        const auto execution = timeline.begin_action(timing, !costs, publisher);
+        const auto started = execution.began_ns;
+        if (!modeled) {
+            timeline.advance_by(row.at("model_tail_ns"));
+        }
         const auto model_ready = timeline.now();
 
         auto publications = json::array();
@@ -147,11 +172,13 @@ json replay(const json& job) {
                                     {"at_ns", timeline.now()}});
         }
         timeline.satisfy(started, model_ready, timing.result_finished);
-        auto result = json{{"began_ns", started}, {"device_ready_ns", device_ready},
+        timeline.advance_to(std::max(timeline.now(), execution.work.all_work_ready_ns));
+        auto result = json{{"began_ns", started}, {"device_ready_ns", execution.work.all_work_ready_ns},
+                           {"model_ready_ns", model_ready},
                            {"publications", std::move(publications)}, {"finished_ns", timeline.now()}};
         if (!costs) {
             auto observed = json::array();
-            for (const auto& interval : completed.intervals) {
+            for (const auto& interval : execution.work.intervals) {
                 observed.push_back({interval.begin_ns, interval.end_ns});
             }
             result["intervals"] = std::move(observed);

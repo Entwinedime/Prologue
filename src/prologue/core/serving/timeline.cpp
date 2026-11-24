@@ -37,6 +37,20 @@ void Timeline::satisfy(Nanoseconds started, Nanoseconds model_ready, BoundaryTim
     now_ = std::max({now_, after(started, boundary.after_start_ns), after(model_ready, boundary.after_model_ns)});
 }
 
+RunningAction Timeline::begin_action(const ActionTiming& timing, bool record_intervals,
+                                    std::optional<std::int64_t> publication_lane) {
+    advance_by(timing.prepare_ns);
+    const auto started = now_;
+    auto completed = schedule_work(timing.work, record_intervals, publication_lane);
+    advance_by(timing.model_return_ns);
+
+    // An observed host return can precede the device completion used by the cost model.
+    if (timing.await_output_lane) {
+        advance_to(std::max(now_, completed.output_lane_ready_ns));
+    }
+    return {started, now_, std::move(completed)};
+}
+
 ActionCompletion Timeline::schedule_work(const std::vector<TimedWork>& work, bool record_intervals,
                                          std::optional<std::int64_t> publication_lane) const {
     std::unordered_map<std::int64_t, Nanoseconds> lanes;
