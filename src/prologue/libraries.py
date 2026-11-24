@@ -1,6 +1,7 @@
 """Read a fixed, portable pair of template and service-cost publications."""
 
 import json
+from shutil import copyfile
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -45,7 +46,7 @@ class TemplateCatalog:
         records = {}
         for ordinal, (identity, (deployment, paths)) in enumerate(observations.items()):
             shards = []
-            for role, path in enumerate(paths):
+            for role, (path, sampling) in enumerate(paths):
                 body = json.loads(path.read_bytes())
                 header = {field: body.pop(field) for field in ("domain", "local_domain", "resources")}
 
@@ -54,7 +55,11 @@ class TemplateCatalog:
                     definition["id"] = identity_in_body
                 name = f"bodies/{ordinal}/{role}.json"
                 write_json(directory / name, body, replace=False)
-                shards.append({"body": name, "header": header})
+                shard = {"body": name, "header": header}
+                if sampling is not None:
+                    shard["sampling"] = f"bodies/{ordinal}/{role}-sampling.json"
+                    copyfile(sampling, directory / shard["sampling"])
+                shards.append(shard)
             records[identity] = {"deployment": deployment, "shards": shards}
 
         document = {"bindings": bindings, "observations": records}
@@ -74,6 +79,12 @@ class TemplateCatalog:
             [asset_path(self.directory, shard["body"]) for shard in shards],
             [shard["header"] for shard in shards], len(workers["shards"]), workers["deployment"], recordings,
         )
+
+    def sampling_sources(self):
+        for identity, observation in self.observations.items():
+            for shard in observation["shards"]:
+                if "sampling" in shard:
+                    yield identity, json.loads(asset_path(self.directory, shard["sampling"]).read_bytes())
 
 
 class LibraryRelease:

@@ -15,6 +15,12 @@ def cost_identity(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def require_work_interval(query):
+    work, interval = query["definition"]["work"], query["interval"]
+    if type(interval) is not int or not 0 <= interval < len(work) or work[interval]["kind"] != query["work"]:
+        raise ValueError("work query must identify a declared interval of the requested kind")
+
+
 @dataclass(frozen=True, slots=True)
 class WorkPoint:
     domain: str
@@ -34,10 +40,6 @@ class WorkPoint:
         if self.transport is not None:
             result["transport"] = json.loads(self.transport)
         return result
-
-    @classmethod
-    def from_gap(cls, gap):
-        return cls.at(cost_identity(gap["domain"]), cost_identity(gap["definition"]), gap["interval"], gap["features"])
 
 
 class CostRequirements:
@@ -77,11 +79,10 @@ class CostRequirements:
         return self.add(target, domain, definition, 0, features)
 
     def gap(self, target, gap):
+        require_work_interval(gap)
         self.targets[target] = "first_prediction_gap"
         domain = self.intern(self.domains, gap["domain"])
         definition = self.intern(self.definitions, gap["definition"])
-        if gap["definition"]["work"][gap["interval"]]["kind"] != gap["work"]:
-            raise ValueError("prediction gap changes the kind of its declared work interval")
         self.add(target, domain, definition, gap["interval"], gap["features"])
 
     def samples(self, target, source, *, basis):

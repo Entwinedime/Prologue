@@ -52,9 +52,18 @@ def retained_bytes(root):
 class OperationLimit:
     def __init__(self, root=None, storage_bytes=None):
         self.root, self.storage_bytes = root, storage_bytes
+        self.sampled_peak_bytes = None
+
+    def sample(self):
+        if self.root is None:
+            return None
+        size = retained_bytes(self.root)
+        self.sampled_peak_bytes = max(size, self.sampled_peak_bytes or 0)
+        return size
 
     def check(self):
-        if self.root is not None and retained_bytes(self.root) > self.storage_bytes:
+        size = self.sample()
+        if size is not None and self.storage_bytes is not None and size > self.storage_bytes:
             raise AllowanceExhausted("storage allowance exhausted")
 
     def wait(self, process, deadline):

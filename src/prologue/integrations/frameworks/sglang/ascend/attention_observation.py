@@ -20,22 +20,26 @@ class DecodeAttentionObservation:
 
     def load_model(self, original, runner):
         result = original(runner)
+        self.attach(runner)
+        return result
+
+    def attach(self, runner):
         self.rank = self.offset + runner.pp_rank * runner.tp_size + runner.tp_rank
         self.backend = runner.server_args.attention_backend
         modules = dict(runner.model.named_modules())
         selected = ModelScopes.selected(modules)
-        for site in self.sites.get(str(self.rank), ()):
+        sites = self.sites.get(str(self.rank), ())
+        for site in sites:
             if selected.get(site) != "attention":
                 raise ValueError(f"requested site is not an observed native attention module: {site}")
             module = modules[site]
             module.forward = partial(self.invoke, site, module, module.forward)
-        return result
 
     def invoke(self, site, module, original, q, k, v, forward_batch, *args, **kwargs):
         import torch
         from sglang.srt.model_executor.forward_context import get_attn_backend
 
-        if self.window.phase != "source" or not forward_batch.forward_mode.is_decode():
+        if (self.window is not None and self.window.phase != "source") or not forward_batch.forward_mode.is_decode():
             return original(q, k, v, forward_batch, *args, **kwargs)
         lengths = forward_batch.seq_lens_cpu
         context = tuple(int(length) - 1 for length in lengths.tolist()) if lengths is not None else ()
@@ -43,12 +47,14 @@ class DecodeAttentionObservation:
         key = site, tuple(sorted(context)), query_rows
         self.calls[key] += 1
 
-        # The same native batch geometry runs twice on the warmed engine, first with only two timing events.
+        # Repeating the geometry measures the unprofiled envelope before recording device tasks.
         pool = get_attn_backend().token_to_kv_pool
         row = {
             "site": site, "implementation": f"{type(module).__module__}.{type(module).__qualname__}",
             "context": list(context), "query_rows": query_rows, "kv_layout": MhaKvLayout.from_pool(pool).document(),
-            "backend": self.backend, "page_size": pool.page_size, "q_dtype": str(q.dtype),
+            "backend": self.backend, "page_size": pool.page_size,
+            "operands": {name: {"shape": list(tensor.shape), "dtype": str(tensor.dtype)}
+                         for name, tensor in (("argument.q", q), ("argument.k", k), ("argument.v", v)) if tensor is not None},
             "full_context": not module.is_cross_attention and module.sliding_window_size < 0,
             "heads": {"query": module.tp_q_head_num, "key": module.tp_k_head_num, "value": module.tp_v_head_num,
                       "key_dim": module.qk_head_dim, "value_dim": module.v_head_dim},

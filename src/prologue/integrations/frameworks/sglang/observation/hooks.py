@@ -5,39 +5,31 @@ from __future__ import annotations
 import json
 import os
 import time
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from typing import Any
 
+from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.configuration import NativeConfiguration
+from prologue.integrations.frameworks.sglang.observation.call_scopes import NativeCallObservation
 from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
-from prologue.integrations.frameworks.sglang.state_calls import RequestStateCalls
-
-from prologue.artifacts import write_json
-from prologue.acquisition.observation.capture import SemanticCapture
 
 
-class SGLangObservation:
+class SGLangObservation(NativeCallObservation):
     def __init__(self, description: dict[str, Any], markers) -> None:
         from prologue.integrations.frameworks.sglang.observation.content import NativeContent
         from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
-        from prologue.integrations.runtimes.pytorch.boundaries import TensorBoundaries
 
         self.description = description
         self.framework_revision = NativeConfiguration.upstream_revision(os.environ.get("PROLOGUE_SGLANG_REVISION"))
         self.directory = Path(description["output"])
         self.kv_pools = self.directory / "kv-pools"
         self.window = ObservationWindow(self.directory, description)
-        self.capture = SemanticCapture(markers)
-        self.request_state = RequestStateCalls(observe=description["resource_trace"])
-        self.action_values = []
-        self.tensors = TensorBoundaries(self.capture)
+        super().__init__(markers, description["mode"], resource_trace=description["resource_trace"])
         self.content = NativeContent(description, self.tensors.auxiliary)
-        self.selected = True
-        self.active = False
-        self.resource_history = None
+        self.aliases = self.content.aliases
         if description["resource_trace"]:
             from prologue.integrations.frameworks.sglang.observation.resource_history import NativeResourceHistory
 
@@ -49,40 +41,6 @@ class SGLangObservation:
 
             self.routing = NativeExpertRoutes(description, self.content.execution_aliases, metadata=self.tensors.metadata,
                                              auxiliary=self.tensors.auxiliary)
-
-    @contextmanager
-    def call(self, role: str, original: Any, *, parameters=None, arguments=None, work=None, device=False, stream=None):
-        outer = self.capture.current.get() == 0
-        try:
-            with ExitStack() as contexts:
-                call = contexts.enter_context(self.capture.call(
-                    role, original.__qualname__, f"{original.__module__}.{original.__qualname__}",
-                    parameters=parameters, arguments=arguments, work=work, device=device, stream=stream,
-                    constants=None if parameters is None else {
-                        name: parameters[name] for name in ("page_size", "sequence_capacity") if name in parameters
-                    },
-                ))
-                if outer:
-                    contexts.enter_context(self.tensors)
-                with self.request_state.record() as accesses:
-                    yield call
-                for key, requests in accesses.members.items():
-                    identities = [self.content.aliases[request] for request in requests]
-                    if not identities:
-                        continue
-                    field, mode = key.split("/")
-                    call.record["work"][key] = identities
-                    call.record.setdefault("state_accesses", []).append({
-                        "space": "slot", "pool": "local", "field": field, "access": mode,
-                        "members": key, "requests": identities, "interval": "device",
-                    })
-            if accesses.values:
-                self.action_values.append({"scope": call.identity, "values": {"state": [
-                    {**value, "request": self.content.aliases[value["request"]]} for value in accesses.values
-                ]}})
-        finally:
-            if outer:
-                self.tensors.retire()
 
     def load_model(self, original: Any, runner: Any) -> Any:
         from sglang.srt.layers.radix_attention import RadixAttention
@@ -376,12 +334,12 @@ class SGLangObservation:
     def install(self, device_api, shard_transport) -> None:
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
-        from prologue.integrations.frameworks.sglang.observation.communications import NativeCommunications
-        from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
-        from prologue.integrations.frameworks.sglang.observation.kv_scopes import NativeKvScopes
-        from prologue.integrations.frameworks.sglang.observation.flow_scopes import FlowScopes
-        from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
         from prologue.integrations.frameworks.sglang.metadata_transfers import MetadataTransfers
+        from prologue.integrations.frameworks.sglang.observation.communications import NativeCommunications
+        from prologue.integrations.frameworks.sglang.observation.flow_scopes import FlowScopes
+        from prologue.integrations.frameworks.sglang.observation.kv_scopes import NativeKvScopes
+        from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
+        from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
 
         targets = {
             "sglang.srt.managers.scheduler.Scheduler.handle_generate_request": self.request,

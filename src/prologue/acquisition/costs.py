@@ -16,6 +16,7 @@ from prologue.acquisition.fitting import FitCosts
 from prologue.acquisition.production import CaptureProduction
 from prologue.acquisition.publication import SourceProductions
 from prologue.acquisition.recording import PublishedCapture
+from prologue.acquisition.rules import EvidenceGap
 from prologue.artifacts import write_json
 from prologue.integrations.runtimes.docker import ModelingCommand, OwnedContainers
 from prologue.performance.requirements import CostRequirements
@@ -284,6 +285,9 @@ class CostAcquisition:
                 continue
             try:
                 self.measure(recipe, output, requested, allowance + sum(attempt["charged_ns"] for attempt in previous))
+            except EvidenceGap as gap:
+                row.update(gap.report)
+                continue
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError):
                 failed = NativeAttempt.attempts(output)
                 if not failed or failed[-1]["status"] != "failed":

@@ -79,16 +79,14 @@ class NativeServingSession:
         self.output = output.resolve()
         latency_only = latency_only or host_timing or bool(attention_sites)
         self.instances = []
-        offset = 0
         for index, description in enumerate(serving.instances):
             instance = NativeServingInstance(
-                serving, description, self.output, index, offset,
+                serving, description, self.output, index,
                 resource_trace=resource_trace or service_reference, latency_only=latency_only,
                 host_timing=host_timing, service_reference=service_reference, local_shards=local_shards,
                 attention_sites=attention_sites,
             )
             self.instances.append(instance)
-            offset += len(instance.roles)
         if latency_only and resource_trace:
             raise ValueError("light observation cannot include resource tracing")
         if latency_only and not host_timing and not attention_sites and len(serving.submission_groups) != 1:

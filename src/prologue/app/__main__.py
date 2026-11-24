@@ -22,17 +22,23 @@ def main() -> None:
     production.add_argument("--keep-intermediates", action="store_true")
     capture = commands.add_parser("capture", help="capture or resume a native task with cumulative allowances")
     capture.add_argument("--input", type=Path, required=True)
-    capture.add_argument("--deployment", type=Path, required=True)
-    capture.add_argument("--output", type=Path, required=True)
-    capture.add_argument("--timeout", type=float, required=True)
-    capture.add_argument("--budget-seconds", type=float, required=True, help="cumulative native allowance across attempts and resumes")
-    capture.add_argument("--attempt-limit", type=int, required=True, help="cumulative native attempts; each invocation starts at most one")
-    capture.add_argument("--source-image", default="prologue-sglang:ubuntu22.04")
+    local = commands.add_parser("acquire-local", help="answer compatible prediction gaps in one bounded native session")
+    local.add_argument("--query", type=Path, nargs="+", required=True, help="original structure or work queries")
+    local.add_argument("--libraries", type=Path, help="fixed release providing native cuts for stateful work")
+    local.add_argument("--storage-bytes", type=int, help="optional storage allowance under the session directory")
+    for command in (capture, local):
+        command.add_argument("--deployment", type=Path, required=True)
+        command.add_argument("--output", type=Path, required=True)
+        command.add_argument("--timeout", type=float, required=True)
+        command.add_argument("--budget-seconds", type=float, required=True, help="cumulative native allowance across attempts and resumes")
+        command.add_argument("--attempt-limit", type=int, required=True, help="cumulative native attempts; each invocation starts at most one")
+        command.add_argument("--source-image", default="prologue-sglang:ubuntu22.04")
     observation = capture.add_mutually_exclusive_group()
     observation.add_argument("--resource-trace", action="store_true", help="record optional resource and input-read evidence")
     observation.add_argument("--service-reference", action="store_true", help="record detailed structure and same-run CPU activity")
     observation.add_argument("--latency-only", action="store_true", help="run without the profiler and record scheduler latency")
     observation.add_argument("--host-timing", action="store_true", help="record native CPU work and queue cuts")
+    observation.add_argument("--attention-sites", type=Path, help="measure named Decode modules in a pooled serving comparison")
     samples = commands.add_parser("cost-samples", help="publish measured services from a projected source")
     samples.add_argument("--production", type=Path, required=True, help="published training production that owns the observation")
     samples.add_argument("--projection", type=Path, help="regenerated graph and facts for the same native observation")
@@ -81,7 +87,7 @@ def main() -> None:
         command.add_argument("--binary", type=Path, required=True)
         command.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
     arguments = parser.parse_args()
-    if arguments.command in {"capture", "produce", "acquire-costs"}:
+    if arguments.command in {"capture", "produce", "acquire-costs", "acquire-local"}:
         from prologue.integrations.frameworks.sglang.ascend.launch import SGLangAscendLaunch
     if arguments.command in {"fit-costs", "acquire-costs"}:
         from prologue.integrations.frameworks.sglang.acquisition.cost_reuse import BatchHostReuse
@@ -90,9 +96,17 @@ def main() -> None:
         from prologue.acquisition.recording import PublishedCapture
 
         CaptureProduction(arguments, PublishedCapture(arguments.capture), SGLangAscendLaunch).run()
+    elif arguments.command == "acquire-local":
+        from prologue.libraries import LibraryRelease
+
+        queries = [json.loads(path.read_bytes()) for path in arguments.query]
+        release = LibraryRelease(arguments.libraries) if arguments.libraries else None
+        result = SGLangAscendLaunch.local_acquisition(release).run(arguments, queries, json.loads(arguments.deployment.read_bytes()))
+        raise SystemExit(0 if result["status"] == "qualified" else 1)
     elif arguments.command == "capture":
+        sites = json.loads(arguments.attention_sites.read_bytes()) if arguments.attention_sites else None
         launch = SGLangAscendLaunch(json.loads(arguments.input.read_text()), json.loads(arguments.deployment.read_text()))
-        launch.capture(arguments, latency_only=arguments.latency_only, host_timing=arguments.host_timing,
+        launch.capture(arguments, attention_sites=sites, latency_only=arguments.latency_only, host_timing=arguments.host_timing,
                        service_reference=arguments.service_reference).run()
     elif arguments.command == "cost-samples":
         from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples

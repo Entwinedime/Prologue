@@ -25,7 +25,10 @@ class NativeAttempt:
 
     @classmethod
     def usage(cls, directory):
-        attempts = cls.attempts(directory)
+        return cls.charges(cls.attempts(directory))
+
+    @staticmethod
+    def charges(attempts):
         return Usage(sum(row["charged_ns"] for row in attempts), len(attempts))
 
     def __init__(self, arguments, inputs, options, worker_options, mounts, limit=None):
@@ -111,6 +114,8 @@ class NativeAttempt:
             attempt["elapsed_ns"] = time.monotonic_ns() - started_ns
             attempt["charged_ns"] = attempt["elapsed_ns"]
             attempt["status"] = "exited" if attempt["exit_code"] == 0 else "failed"
+            if self.operation_limit.sample() is not None:
+                attempt["sampled_collection_peak_bytes"] = self.operation_limit.sampled_peak_bytes
             self.save()
 
     def run(self) -> None:

@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from prologue.integrations.frameworks.sglang.configuration import CaptureInput, InstanceConfiguration, NativeConfiguration
+from prologue.integrations.frameworks.sglang.configuration import CaptureInput, InstanceConfiguration
 from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
 from prologue.integrations.frameworks.sglang.observation.submissions import EngineSubmissions
@@ -18,7 +18,7 @@ from prologue.artifacts import write_json
 
 class NativeServingInstance:
     def __init__(
-        self, source: CaptureInput, instance: InstanceConfiguration, output: Path, index: int, rank_offset: int,
+        self, source: CaptureInput, instance: InstanceConfiguration, output: Path, index: int,
         *, resource_trace: bool, latency_only: bool, host_timing: bool, service_reference: bool, local_shards: bool,
         attention_sites=None,
     ) -> None:
@@ -34,13 +34,13 @@ class NativeServingInstance:
         self.instance = instance
         self.instance_count, self.worker_count = len(source.instances), source.worker_count
         self.directory = self.output / "instances" / str(index)
-        self.rank_offset = rank_offset
+        self.rank_offset = instance.ranks.start
         configuration = instance.configuration
         self.configuration = configuration.values
         self.workload = source.workload
         self.submission_groups = source.submission_groups
         self.tp, self.pp, self.ep = configuration.tp, configuration.pp, configuration.ep
-        self.roles = tuple(range(rank_offset, rank_offset + self.tp * self.pp))
+        self.roles = tuple(instance.ranks)
         self.delivery = {}
 
     def generate(self, engine: Any, phase: str, submissions: EngineSubmissions, clock: Any, barrier: Any) -> None:
@@ -165,35 +165,14 @@ class NativeServingInstance:
         else:
             from sglang.srt.entrypoints.engine import Engine
 
-        model = self.model
-        configuration = self.configuration
-        chunk_tokens = configuration["prefill_chunk_tokens"]
-        options = {
-            "model_path": model["path"], "dtype": model["dtype"], "device": NativeConfiguration.accelerator_device,
-            "tp_size": self.tp, "pp_size": self.pp, "base_gpu_id": 0 if self.local_shards else self.rank_offset,
-            "nccl_port": int(rendezvous["MASTER_PORT"]),
-            "attention_backend": configuration["attention_backend"],
-            "page_size": configuration["page_size"],
-            "max_running_requests": configuration["max_running_requests"],
-            "max_total_tokens": configuration["max_total_tokens"],
-            "max_prefill_tokens": configuration["max_prefill_tokens"],
-            "chunked_prefill_size": chunk_tokens if chunk_tokens > 0 else -1,
-            "enable_mixed_chunk": configuration["mixed_batches"],
-            "disable_radix_cache": not configuration["prefix_cache"],
-            "disable_overlap_schedule": True, "disable_cuda_graph": True,
-            "skip_tokenizer_init": True, "load_format": "dummy", "sleep_on_idle": True, "trust_remote_code": True,
-            "mem_fraction_static": 0.8, "log_level": "warning",
-        }
+        options = self.instance.configuration.runner_options(self.model)
+        options.update(base_gpu_id=0 if self.local_shards else self.rank_offset, nccl_port=int(rendezvous["MASTER_PORT"]))
         if mode != "null":
             options.update(
                 disaggregation_mode=mode, disaggregation_transfer_backend="ascend",
                 disaggregation_bootstrap_port=bootstrap["port"],
-                disaggregation_decode_enable_radix_cache=mode == "decode" and configuration["prefix_cache"],
+                disaggregation_decode_enable_radix_cache=mode == "decode" and self.configuration["prefix_cache"],
             )
-        if "microbatch_requests" in configuration:
-            options["pp_max_micro_batch_size"] = configuration["microbatch_requests"]
-        if self.ep > 1:
-            options.update(ep_size=self.ep, moe_a2a_backend="deepep", deepep_mode="normal")
         from sglang.srt.plugins import load_plugins
 
         # Native argument normalization can change EP size; reject that change before loading weights or launching workers.

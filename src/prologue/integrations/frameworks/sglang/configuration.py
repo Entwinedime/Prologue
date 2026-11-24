@@ -91,6 +91,23 @@ class NativeConfiguration:
             "microbatch_requests",
         ) if name in self.values}
 
+    def runner_options(self, model):
+        values = self.values
+        options = {
+            "model_path": model["path"], "dtype": model["dtype"], "device": self.accelerator_device,
+            "tp_size": self.tp, "pp_size": self.pp, "attention_backend": values["attention_backend"],
+            **{key: values[key] for key in ("page_size", "max_running_requests", "max_total_tokens", "max_prefill_tokens")},
+            "chunked_prefill_size": values["prefill_chunk_tokens"] or -1, "enable_mixed_chunk": values["mixed_batches"],
+            "disable_radix_cache": not values["prefix_cache"], "disable_overlap_schedule": True, "disable_cuda_graph": True,
+            "skip_tokenizer_init": True, "load_format": "dummy", "sleep_on_idle": True, "trust_remote_code": True,
+            "mem_fraction_static": 0.8, "log_level": "warning",
+        }
+        if "microbatch_requests" in values:
+            options["pp_max_micro_batch_size"] = values["microbatch_requests"]
+        if self.ep > 1:
+            options.update(ep_size=self.ep, moe_a2a_backend="deepep", deepep_mode="normal")
+        return options
+
     def control(self) -> dict:
         return {
             "mixed_batches": self.values["mixed_batches"], "disable_radix_cache": not self.values["prefix_cache"],
@@ -103,6 +120,7 @@ class InstanceConfiguration:
     identity: str
     mode: str
     configuration: NativeConfiguration
+    ranks: range
 
 
 class ServingInput:
@@ -116,6 +134,7 @@ class ServingInput:
             raise ValueError("serving model dtype must be explicit float16, bfloat16 or float32")
 
         self.instances = []
+        self.worker_count = 0
         identities = set()
         for description in source["instances"]:
             if description.keys() != {"id", "mode", "configuration"}:
@@ -125,7 +144,11 @@ class ServingInput:
                 raise ValueError("serving instance ids must be unique nonempty strings")
             identities.add(identity)
             configuration = NativeConfiguration(description["configuration"])
-            self.instances.append(InstanceConfiguration(identity, description["mode"], configuration))
+
+            # Each PP stage owns one TP group. EP partitions that group on the same workers.
+            ranks = range(self.worker_count, self.worker_count + configuration.pp * configuration.tp)
+            self.instances.append(InstanceConfiguration(identity, description["mode"], configuration, ranks))
+            self.worker_count = ranks.stop
 
         modes = [instance.mode for instance in self.instances]
         if modes != ["null"] and sorted(modes) != ["decode", "prefill"]:
@@ -139,10 +162,6 @@ class ServingInput:
 
                 # Validate declared positions before loading a model; native geometry later checks their consumers.
                 ExpertRoutes.padding_input(routes)
-
-    @property
-    def worker_count(self) -> int:
-        return sum(instance.configuration.tp * instance.configuration.pp for instance in self.instances)
 
     @staticmethod
     def workload_input(source: dict) -> dict:

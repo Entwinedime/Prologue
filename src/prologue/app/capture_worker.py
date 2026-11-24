@@ -20,12 +20,17 @@ def main() -> None:
     observation.add_argument("--latency-only", action="store_true", help="record scheduler ingress and token publication only")
     observation.add_argument("--host-timing", action="store_true", help="sample native call cuts and CPU-only queue activity")
     observation.add_argument("--local-copy", action="store_true", help="time isolated native tensor copies on one device")
+    observation.add_argument("--local-attention", action="store_true", help="measure Decode on a native ModelRunner and KV pool")
+    observation.add_argument("--local-prebuilt", action="store_true", help="observe the receiver assembling a native PD batch")
     observation.add_argument("--attention", action="store_true", help="measure selected native Decode attention calls")
     interpret = commands.add_parser("interpret", help="interpret an SDK-exported worker recording")
     interpret.add_argument("--trace", type=Path, required=True)
     interpret.add_argument("--evidence", action="store_true", help="retain measured boundary clocks for source auditing")
     export = commands.add_parser("export", help="export one worker through an isolated SDK workspace")
-    for command in (interpret, export):
+    cuts = commands.add_parser("sampling-cuts", help="bind source device work to portable native sampling cuts")
+    for option in ("work", "identities", "runner"):
+        cuts.add_argument("--" + option, type=Path, required=True)
+    for command in (interpret, export, cuts):
         command.add_argument("--input", type=Path, required=True)
         command.add_argument("--rank", type=int, required=True)
         command.add_argument("--output", type=Path, required=True)
@@ -36,6 +41,22 @@ def main() -> None:
         from prologue.integrations.platforms.ascend.copy_sampling import TensorCopySamples
 
         TensorCopySamples().sample(json.loads(arguments.input.read_text()), arguments.output, os.environ["PROLOGUE_SGLANG_REVISION"])
+    elif arguments.command == "capture" and arguments.local_attention:
+        import os
+
+        from prologue.integrations.frameworks.sglang.ascend.attention_runner import AttentionRunner
+
+        AttentionRunner(json.loads(arguments.input.read_bytes()), arguments.output).run(os.environ["PROLOGUE_SGLANG_REVISION"])
+    elif arguments.command == "capture" and arguments.local_prebuilt:
+        import os
+
+        # Queue allocation can precede the measured calls, including during native module initialization.
+        runtime = arguments.output / "runtime"
+        runtime.mkdir(parents=True)
+        os.environ["PROLOGUE_NATIVE_RUNTIME_DIR"] = str(runtime)
+        from prologue.integrations.frameworks.sglang.ascend.prebuilt_runner import PrebuiltRunner
+
+        PrebuiltRunner(json.loads(arguments.input.read_bytes()), arguments.output).run(os.environ["PROLOGUE_SGLANG_REVISION"])
     elif arguments.command == "capture":
         from prologue.integrations.frameworks.sglang.observation.session import NativeServingSession
 
@@ -51,6 +72,12 @@ def main() -> None:
 
             # The workers have exited. Exporting SDK evidence can no longer disturb the observed serving calls.
             ScopedTasks.publish(arguments.output)
+    elif arguments.command == "sampling-cuts":
+        from prologue.integrations.frameworks.sglang.ascend.attention_cuts import AttentionCuts
+
+        result = AttentionCuts.extract(arguments.input, arguments.work, arguments.rank, arguments.identities,
+                                       json.loads(arguments.runner.read_bytes()))
+        write_json(arguments.output, result)
     elif arguments.command == "export":
         from prologue.integrations.platforms.ascend.export import AscendExport
 

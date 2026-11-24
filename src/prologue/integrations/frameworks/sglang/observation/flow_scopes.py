@@ -108,7 +108,7 @@ class ServingCuts(CallSegments):
 
 class FlowScopes(ServingCuts):
     def __init__(self, observation) -> None:
-        super().__init__(observation.content.aliases, observation.description["mode"], effects=True)
+        super().__init__(observation.aliases, observation.mode, effects=True)
         self.observation = observation
         self.request_state = observation.request_state
         self.queries = []

@@ -15,6 +15,14 @@ class WorkerDomain:
         return domain | {name: role[name] for name in cls.role_fields if name in role}
 
     @staticmethod
+    def rank(domain):
+        matches = [role["parallel"]["rank"] for role in domain["worker_roles"].values()
+                   if all(role["parallel"].get(key) == value for key, value in domain["parallel"].items())]
+        if len(matches) != 1:
+            raise ValueError("work coordinates require one observed logical worker")
+        return matches[0]
+
+    @staticmethod
     def image_revision(image: dict) -> str:
         labels = image["Config"]["Labels"] or {}
         return NativeConfiguration.upstream_revision(labels.get("org.prologue.sglang.revision"))
@@ -72,7 +80,31 @@ class SGLangTask:
         return self.binding.headers[:self.binding.worker_count]
 
     def missing_workers(self):
-        return {"status": "missing_worker_binding", "action": "initialize_workers", "domain": self.domain}
+        instances = []
+        for instance in self.serving.instances:
+            implementation = ["framework_revision", "model", "dtype", "attention_backend", "load_format",
+                              "disaggregation_mode", "page_size", "allocator", "cache", "scheduling"]
+            if "ep" in instance.configuration.values:
+                implementation.append("expert_layout")
+            role_fields = ["parallel", "groups", "modules", "kv_layout", "expert_layers", "representative"]
+            if instance.mode != "null":
+                role_fields.append("kv_peers")
+
+            instances.append({
+                "id": instance.identity, "mode": instance.mode,
+                "rank_begin": instance.ranks.start, "rank_end": instance.ranks.stop,
+                "settings": instance.configuration.settings(),
+                "readback": {
+                    "environment": ["framework", "torch", "device"], "implementation": implementation,
+                    "worker_roles": role_fields, "initial_state": ["logical_kv", "workspace"],
+                },
+            })
+
+        # The domain identifies reusable structure. Target capacities are inputs to preparing a native instance.
+        return {
+            "status": "missing_worker_binding", "action": "initialize_workers", "domain": self.domain,
+            "instances": instances,
+        }
 
     def participants(self, description: InstanceConfiguration) -> list[dict]:
         candidates = [

@@ -110,19 +110,23 @@ class ScopedTasks:
         return {"tasks": [[*cls.identity(r), round(Decimal(str(r["dur"])) * 1000)] for r in measured]}
 
     @classmethod
+    def export_calls(cls, directory, rank, calls):
+        for call in calls:
+            if "profile" not in call:
+                continue
+            root = directory / call["profile"]
+            profile, = (root / "native" / f"rank-{rank}").glob("*_ascend_pt")
+            with TemporaryDirectory(dir=root) as temporary:
+                data = Path(temporary) / "sdk"
+                AscendExport.run(root, rank, data)
+                call.update(cls.measured(profile, data / "trace.json"))
+
+    @classmethod
     def publish(cls, directory):
         manifest = json.loads((directory / "capture.json").read_text())
         for instance in manifest["instances"]:
             for actor, relative in instance["attention_samples"].items():
                 path = directory / relative
                 record = json.loads(path.read_text())
-                for call in record["calls"]:
-                    if "profile" not in call:
-                        continue
-                    root = directory / call["profile"]
-                    profile, = (root / "native" / f"rank-{actor}").glob("*_ascend_pt")
-                    with TemporaryDirectory(dir=root) as temporary:
-                        data = Path(temporary) / "sdk"
-                        AscendExport.run(root, int(actor), data)
-                        call.update(cls.measured(profile, data / "trace.json"))
+                cls.export_calls(directory, int(actor), record["calls"])
                 write_json(path, record)

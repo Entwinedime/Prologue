@@ -36,6 +36,7 @@ class CaptureProduction:
             raise ValueError("source production requires a detailed native recording")
         capture = recording.manifest
         self.ranks = CapturedWorkers(capture["instances"]).observed
+        self.sampling_input = adapter.sampling_input(recording.inputs["job"]) if arguments.product == "templates" else None
         if not self.ranks:
             raise ValueError("source production requires at least one profiled worker")
         images = {}
@@ -105,6 +106,8 @@ class CaptureProduction:
         executable.chmod(0o500)
         if self.arguments.product == "templates":
             write_json(self.output / "inputs/templates.json", [f"/production/work/{rank}-templates.json" for rank in self.ranks])
+        if self.sampling_input:
+            write_json(self.output / "inputs/sampling.json", self.sampling_input)
         self.state = {"inputs": self.inputs, "spent_ns": 0, "attempts": 0,
                       "completed": [], "running": None, "error": None}
         self.publish_state()
@@ -169,6 +172,7 @@ class CaptureProduction:
                 return
 
             templates = self.arguments.product == "templates"
+            evidence = self.arguments.keep_intermediates or self.sampling_input is not None
             pending = [] if "link-templates" in self.state["completed"] else self.ranks
             for rank in pending:
                 facts, graph, template = (f"work/{rank}-facts.json", f"work/{rank}-graph.json", f"work/{rank}-templates.json")
@@ -179,15 +183,25 @@ class CaptureProduction:
                     self.step(f"{rank}-interpret", facts, "source", [
                         "python3", "-m", "prologue.app.capture_worker", "interpret", "--input", "/source", "--rank", str(rank),
                         "--trace", f"/production/{exported}/trace.json", "--output", f"/production/{facts}",
-                        *(["--evidence"] if self.arguments.keep_intermediates else []),
+                        *(["--evidence"] if evidence else []),
                     ])
                 self.step(f"{rank}-project", graph, "modeling", [
                     "/production/inputs/prologue", "project", f"/production/{facts}", f"/production/{graph}",
-                    *(["--evidence"] if self.arguments.keep_intermediates else []),
+                    *(["--evidence"] if evidence else []),
                 ])
                 if templates:
                     self.step(f"{rank}-templates", template, "modeling", [
                         "/production/inputs/prologue", "templates", f"/production/{graph}", f"/production/{template}",
+                    ])
+                if self.sampling_input:
+                    identities = f"work/{rank}-identities.json"
+                    self.step(f"{rank}-work", identities, "modeling", [
+                        "/production/inputs/prologue", "work-identities", f"/production/{graph}", f"/production/{identities}",
+                    ])
+                    self.step(f"{rank}-cuts", f"sampling/{rank}.json", "source", [
+                        "python3", "-m", "prologue.app.capture_worker", "sampling-cuts", "--input", "/source", "--rank", str(rank),
+                        "--work", "/production/work", "--identities", f"/production/{identities}", "--runner", "/production/inputs/sampling.json",
+                        "--output", f"/production/sampling/{rank}.json",
                     ])
 
             # Observed target graphs remain valid independently of source-template selection and transformation rules.
@@ -201,6 +215,7 @@ class CaptureProduction:
             # Publish only when every observed worker has its requested product; graphs cannot be consumed as templates.
             write_json(self.output / "result.json", {
                 self.arguments.product: [f"assets/{rank}.json" if templates else f"work/{rank}-graph.json" for rank in self.ranks],
+                **({"sampling": {str(rank): f"sampling/{rank}.json" for rank in self.ranks}} if self.sampling_input else {}),
                 "observed_roles": self.ranks, "postprocessing_ns": self.state["spent_ns"],
                 "qualification": "compiled_source_templates" if templates else "observed_coarse_graphs",
             }, indent=2)

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from prologue.acquisition.capture import NativeAttempt
+from prologue.integrations.frameworks.sglang.ascend.attention_cuts import AttentionCuts
 from prologue.integrations.frameworks.sglang.configuration import CaptureInput
 from prologue.integrations.frameworks.sglang.worker_templates import WorkerDomain
 from prologue.integrations.platforms.ascend.deployment import AscendDeployment
@@ -12,6 +13,50 @@ from prologue.integrations.platforms.ascend.export import AscendExport
 class SGLangAscendLaunch:
     domain = WorkerDomain
     export_profile = staticmethod(AscendExport.command)
+    sampling_input = staticmethod(AttentionCuts.runner)
+
+    @classmethod
+    def local_acquisition(cls, release=None):
+        from prologue.acquisition.rules import LocalAcquisition
+        from prologue.integrations.frameworks.sglang.ascend.local_attention import LocalAttention
+        from prologue.integrations.frameworks.sglang.ascend.local_copy import LocalCopies
+        from prologue.integrations.frameworks.sglang.ascend.local_prebuilt import LocalPrebuilt
+
+        attention = LocalAttention(release.templates.sampling_sources if release else None)
+        return LocalAcquisition((LocalCopies, attention, LocalPrebuilt), cls.check_local_placement, release.identity if release else None)
+
+    @classmethod
+    def local_attempt(cls, arguments, limit, deployment, card, revision, job, worker, *, runtime_trace, model=None, **evidence):
+        from prologue.acquisition.rules import EvidenceGap
+
+        platform = AscendDeployment({"acquisition_mode": deployment.get("acquisition_mode", "full"),
+                                     "physical_devices": [card]}, 1, False)
+        image = NativeAttempt.image(arguments.source_image)
+        if cls.domain.image_revision(image) != revision:
+            raise EvidenceGap("framework_revision_mismatch", required=revision, image=image["Id"])
+        inputs = {"job": job, "deployment": deployment, "physical_devices": platform.devices,
+                  "image": image["Id"], "framework_revision": revision, **evidence}
+        mounts = []
+        if model is not None:
+            path = Path(model).resolve(strict=True)
+            if arguments.output.resolve().is_relative_to(path):
+                raise ValueError("local sample output must be outside the native model directory")
+            mounts = ["--mount", f"type=bind,src={path},dst={Path(model).absolute()},readonly"]
+        return NativeAttempt(arguments, inputs, platform.options(latency_only=not runtime_trace), [worker], mounts, limit)
+
+    @staticmethod
+    def check_local_placement(query, deployment):
+        from prologue.acquisition.rules import EvidenceGap
+
+        platform = AscendDeployment(deployment, 1, False)
+        if query.get("work") != "collective" or "torch_npu" not in query["domain"]:
+            return
+        operand = query["features"].get("transport")
+        if operand and len(operand["required"]) > 1 and (
+            platform.single_device or max(operand["required"]) >= len(deployment["physical_devices"])
+        ):
+            raise EvidenceGap("missing_physical_peers", required_ranks=operand["required"],
+                              physical_devices=deployment["physical_devices"])
 
     def sampling(self, source):
         from prologue.integrations.frameworks.sglang.ascend.sampling import SGLangSampling
@@ -38,6 +83,15 @@ class SGLangAscendLaunch:
 
     def capture(self, arguments, limit=None, *, latency_only=False, host_timing=False, service_reference=False,
                 attention_sites=None):
+        if attention_sites is not None:
+            ranks = {str(rank) for rank in range(self.serving.worker_count)}
+            if not isinstance(attention_sites, dict) or not attention_sites or not attention_sites.keys() <= ranks:
+                raise ValueError("serving comparison requires module lists keyed by participating ranks")
+            for sites in attention_sites.values():
+                if (not isinstance(sites, list) or not sites or not all(isinstance(site, str) and site for site in sites)
+                        or len(sites) != len(set(sites))):
+                    raise ValueError("each selected rank requires distinct native module names")
+
         model = Path(self.serving.model["path"]).resolve(strict=True)
         output = arguments.output.resolve()
         if output.is_relative_to(model):
@@ -63,7 +117,7 @@ class SGLangAscendLaunch:
         runtime = self.platform.options(
             detailed_timing=service_reference, host_timing=host_timing, latency_only=latency,
         )
-        worker = self.worker_options(reference=service_reference or latency_only)
+        worker = self.worker_options(reference=service_reference or latency_only or bool(attention_sites))
         for flag, active in (("--resource-trace", arguments.resource_trace), ("--latency-only", latency_only),
                              ("--attention", attention_sites),
                              ("--host-timing", host_timing), ("--service-reference", service_reference)):

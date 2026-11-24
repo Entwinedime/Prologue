@@ -1,18 +1,16 @@
 """Choose native measurements from work actually observed in an SGLang deployment."""
 
 import json
-from collections import defaultdict
 from pathlib import Path
 
-from prologue.acquisition.capture import NativeAttempt
 from prologue.acquisition.recording import PublishedCapture
+from prologue.acquisition.rules import EvidenceGap, LocalAcquisition
 from prologue.artifacts import write_json
-from prologue.integrations.frameworks.sglang.ascend.attention_window import DecodeSampling
+from prologue.integrations.frameworks.sglang.ascend.attention_cuts import AttentionCuts
 from prologue.integrations.frameworks.sglang.ascend.host_samples import HostCostSamples
-from prologue.integrations.platforms.ascend.copy_sampling import TensorCopySamples
-from prologue.integrations.platforms.ascend.deployment import AscendDeployment
+from prologue.integrations.frameworks.sglang.ascend.local_attention import LocalAttention
+from prologue.integrations.frameworks.sglang.ascend.local_copy import LocalCopies
 from prologue.performance.requirements import cost_identity
-from prologue.performance.samples import ServiceSamples
 
 
 class HostWindow:
@@ -38,109 +36,53 @@ class HostWindow:
             yield path, sample
 
 
-class LocalCopyWindow:
+class SourceRuleWindow:
+    """Pass demand from an explicitly supplied training graph to the same local rule as direct queries."""
+
     ready = True
-    services = {cost_identity(TensorCopySamples.service(caller)): caller for caller in TensorCopySamples.directions}
 
-    def __init__(self, owner, card, domain):
-        self.owner, self.card = owner, card
-        self.name = f"local-copy-card-{card}"
-        self.domains, self.roles, self.points = {}, {}, {}
-        self.runtime = {key: domain[key] for key in ("device", "torch", "torch_npu")}
-
-    @staticmethod
-    def operand(point, definition):
-        declared = definition["work"][point.interval].get("copy")
-        if not declared or LocalCopyWindow.services.get(point.transport) != declared["caller"]:
-            return None
-        return declared["caller"], declared["tensor"]["dtype"], declared["element_bytes"]
-
-    def observe(self, rank, domain, point, operand):
-        if any(domain[key] != value for key, value in self.runtime.items()):
-            raise ValueError("roles observed on the same physical card disagree about its native runtime")
-        self.domains[rank] = domain
-        self.roles[point.domain, operand] = rank
-
-    def select(self, demand):
-        for point in demand.points:
-            if point.transport not in self.services:
-                continue
-            operand = self.operand(point, demand.definitions[point.definition])
-            rank = self.roles.get((point.domain, operand))
-            if rank is None:
-                continue
-            size = dict(point.axes)["transfer.bytes"]
-            if type(size) is int and size > 0 and size % operand[2] == 0:
-                self.points[point] = rank, operand, size
+    def __init__(self, owner, name, rule):
+        self.owner, self.name, self.rule = owner, name, rule
+        self.points = {}
 
     def collect(self, arguments, requested, limit):
-        launch, recording = self.owner.launch, self.owner.source.recording
-        launch.require_recorded_placement(recording.inputs["deployment"])
-        platform = AscendDeployment({"acquisition_mode": "single_device", "physical_devices": [self.card]}, 1, False)
-        image = NativeAttempt.image(arguments.source_image)
-        revision = launch.domain.image_revision(image)
-        if revision != recording.inputs["framework_revision"]:
-            raise ValueError("isolated sampler and originating templates use different framework revisions")
+        source = self.owner.source
+        self.owner.launch.require_recorded_placement(source.recording.inputs["deployment"])
+        state = arguments.output / "execution.json"
+        resuming = state.is_file()
+        points = self.points if resuming else requested
+        known = {LocalAcquisition.identity(self.points[p]): self.points[p] for p in points}
+        if resuming:
 
-        operands = defaultdict(lambda: defaultdict(set))
-        for point in requested:
-            rank, operand, size = self.points[point]
-            operands[operand][size].add(rank)
-        job = {
-            "runtime": self.runtime,
-            "operands": [{"caller": caller, "dtype": dtype, "element_bytes": width,
-                          "points": [{"bytes": size, "ranks": sorted(ranks)} for size, ranks in sorted(sizes.items())]}
-                         for (caller, dtype, width), sizes in sorted(operands.items())],
-        }
-        if (arguments.output / "execution.json").is_file():
-
-            # A completed or interrupted session owns its original selection even if another recipe now covers a point.
-            job = json.loads((arguments.output / "input.json").read_text())
-        inputs = {
-            "job": job, "deployment": platform.source, "image": image["Id"], "framework_revision": revision,
-            "training_capture": str(recording.directory),
-        }
-        NativeAttempt(arguments, inputs, platform.options(), ["--local-copy"], [], limit).run()
+            # Partial fits may have reduced current demand; recover the original observations for this session.
+            keys = json.loads(state.read_bytes())["inputs"]["queries"]
+        else:
+            keys = sorted(known)
+        self.queries = [known[key] for key in keys]
+        self.recording = LocalAcquisition.recording(self.rule, self.queries, keys, source.deployment, arguments, limit)
 
     def samples(self, output, acquisition):
-        recording = PublishedCapture(output)
-        manifest = recording.manifest
-        operands = recording.inputs["job"]["operands"]
-        if manifest["services"] != {op["caller"]: TensorCopySamples.service(op["caller"]) for op in operands}:
-            raise ValueError("isolated sampler measured different native services")
-        measured = json.loads((recording.source / manifest["measurements"]).read_text())
-        rows = {(row["caller"], row["dtype"], row["bytes"]): row for row in measured}
-        results, missing = {}, defaultdict(int)
-        for operand in operands:
-            service = manifest["services"][operand["caller"]]
-            for point in operand["points"]:
-                row = rows[operand["caller"], operand["dtype"], point["bytes"]]
-                features = {"phase": "", "axes": {"transfer.bytes": row["bytes"]}}
-                for rank in point["ranks"]:
-                    if rank not in results:
-                        results[rank] = ServiceSamples(self.domains[rank])
-                    for duration in row["observations_ns"]:
-                        results[rank].add_external(service, "transfer", features, duration)
-                    missing[rank] += row["unmatched_calls"]
-        for rank, samples in results.items():
-            path = self.owner.source.output / f"{self.name}-{rank}.json"
-            report = samples.document({"unmatched_calls": missing[rank]})
-            report["native_recordings"] = [self.owner.source.recording.attempt_id, recording.attempt_id]
-            report["observation"] = {
-                "sampling": str(output), "training_capture": recording.inputs["training_capture"], "rank": rank,
-                "physical_device": self.card, "sampling_image": recording.inputs["image"],
-            }
-            write_json(path, report)
-            yield path, report
+        source = self.owner.source
+        published = {}
+        with acquisition.processing():
+            products, _ = LocalAcquisition.products(self.rule, self.queries, self.recording)
+            for ordinal, product in enumerate(products.values()):
+                origins = product["native_recordings"]
+                if source.recording.attempt_id not in origins:
+                    origins.insert(0, source.recording.attempt_id)
+                path = source.output / f"{self.name}-{ordinal}.json"
+                write_json(path, product)
+                published[path] = product
+        return published
 
 
 class SGLangSampling:
     def __init__(self, launch, source):
         self.launch, self.source = launch, source
-        self.host_points, self.copies = set(), {}
+        self.host_points, self.copies, self.attention = set(), {}, {}
+        self.runner_input = AttentionCuts.runner(launch.job)
         self.single_request_host_points = set()
         self.protocol_services = set()
-        self.attention = DecodeSampling(self)
         self.measured_host = set()
         self.external = HostCostSamples.external_work(source.recording.source)
 
@@ -158,7 +100,6 @@ class SGLangSampling:
         return widths
 
     def observe(self, rank, target, catalog, demand):
-        self.attention.observe(rank, catalog)
         platform = self.launch.platform
         card = platform.devices[0 if platform.single_device else rank]
         widths = self.cohort_widths(catalog.graph["scopes"])
@@ -169,14 +110,61 @@ class SGLangSampling:
                 self.host_points.add(point)
                 if widths[work["scope"]] <= 1:
                     self.single_request_host_points.add(point)
-            elif operand := LocalCopyWindow.operand(point, definition):
-                if card not in self.copies:
-                    self.copies[card] = LocalCopyWindow(self, card, catalog.domain)
-                self.copies[card].observe(rank, catalog.domain, point, operand)
+            elif point.transport is not None:
+                operand = LocalCopies.operand(definition, point.interval, json.loads(point.transport))
+                if operand:
+                    self.copies[point.domain, operand] = card
+            elif (work["kind"] == "device" and point.phase == "decode" and definition["role"] == "attention"
+                  and not definition["children"] and self.runner_input is not None):
+                self.attention.setdefault((point.domain, point.definition), len(self.attention))
         for identity, kind, features in self.external[rank]:
             point = demand.external(target, catalog.domain, identity, kind, features)
             self.host_points.add(point)
             self.protocol_services.add((point.domain, point.definition, point.interval, point.phase))
+
+    def sampling_sources(self):
+        source = self.source
+        rank, = source.ranks
+        publication = json.loads((source.production / "result.json").read_bytes())
+        path = publication.get("sampling", {}).get(str(rank))
+        if path:
+            cut = json.loads((source.production / path).read_bytes())
+        else:
+            cut = AttentionCuts.extract(source.recording.source, source.projection / "work", rank, source.identities(rank),
+                                        self.runner_input)
+        yield source.recording.attempt_id, cut
+
+    def local_windows(self, demand):
+        windows = {}
+        attention = LocalAttention(self.sampling_sources)
+        for point in demand.points:
+            definition = demand.definitions[point.definition]
+            if point.transport is not None:
+                operand = LocalCopies.operand(definition, point.interval, json.loads(point.transport))
+                card = self.copies.get((point.domain, operand))
+                if card is None:
+                    continue
+                name, rule = f"local-copy-card-{card}", LocalCopies
+            elif (point.domain, point.definition) in self.attention and point.phase == "decode":
+                index = self.attention[point.domain, point.definition]
+                name, rule = f"decode-attention-{index}", attention
+            else:
+                continue
+            query = {"domain": demand.domains[point.domain], "definition": definition, "interval": point.interval,
+                     "work": definition["work"][point.interval]["kind"], "features": point.features()}
+            if not rule.matches(query):
+                continue
+            if rule is LocalCopies:
+                try:
+                    rule.point(query)
+                except EvidenceGap:
+                    continue
+            elif not AttentionCuts.fits(self.launch.serving.instances[0].configuration, AttentionCuts.contexts(dict(point.axes))):
+                continue
+            if name not in windows:
+                windows[name] = SourceRuleWindow(self, name, rule)
+            windows[name].points[point] = query
+        return windows.values()
 
     def windows(self, demand, samples):
         receipts = set()
@@ -190,11 +178,7 @@ class SGLangSampling:
             if (path / "result.json").is_file():
                 self.measured_host.add(cost_identity(PublishedCapture(path).inputs["job"]))
 
-        for window in self.copies.values():
-            window.select(demand)
-            if window.points:
-                yield window
-        yield from self.attention.windows(demand)
+        yield from self.local_windows(demand)
         job, serving = self.launch.job, self.launch.serving
         yield HostWindow(self, "observed-submission", job, self.host_points)
         if self.single_request_host_points and any(len(group) != 1 for group in serving.submission_groups):

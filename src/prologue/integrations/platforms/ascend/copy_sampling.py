@@ -47,7 +47,8 @@ class TensorCopySamples:
                 raise ValueError("copy sizes must be positive whole numbers of tensor elements")
             dtype = getattr(torch, name.removeprefix("torch."))
             upload = direction == "host_to_device"
-            buffer = torch.zeros(max(sizes) // width, dtype=dtype, device="cpu" if upload else "npu")
+            buffer = torch.ones(max(sizes) // width, dtype=dtype, device="cpu" if upload else "npu")
+            buffer[1::2] = 0
             if buffer.element_size() != width or str(buffer.dtype) != name:
                 raise ValueError("isolated operand differs from its observed dtype or element width")
             for size in sizes:
@@ -64,24 +65,37 @@ class TensorCopySamples:
         warmed = self.now()
 
         windows = []
+        readbacks = []
         path = directory / "runtime-timing.jsonl"
         timing = AscendRuntimeTiming()
         for enabled in (False, True):
             if enabled:
                 timing.start()
             try:
-                for _ in range(7):
+                for repeat in range(7):
                     for copy, args, row in operands:
                         begin = self.now()
-                        copy(*args)
+                        result = copy(*args)
                         end = self.now()
                         row["timed_call_ns" if enabled else "plain_call_ns"].append(end - begin)
                         if enabled:
                             windows.append((row, format(args[0].data_ptr(), "x"), begin, end))
+                            if repeat == 6:
+                                readbacks.append((row, args[0], result))
+                        del result
             finally:
                 if enabled:
                     timing.finish(path)
         observed = self.now()
+
+        # Read the actual destination after timing stops, including the return value of Tensor.tolist.
+        for row, source, result in readbacks:
+            if isinstance(result, torch.Tensor):
+                destination = "npu" if source.device.type == "cpu" else "cpu"
+                row["verified_operand"] = (result.device.type == destination and result.dtype == source.dtype
+                                           and torch.equal(result.cpu(), source.cpu()))
+            else:
+                row["verified_operand"] = row["caller"] == "torch.Tensor.tolist" and result == source.tolist()
 
         transfers = defaultdict(list)
         with path.open() as stream:
@@ -104,6 +118,8 @@ class TensorCopySamples:
         write_json(directory / "capture.json", {
             "framework_revision": revision, "runtime": actual,
             "services": {row["caller"]: self.service(row["caller"]) for row in rows},
+            "completion": "successful_synchronous_acl_return", "engine_starts": 0, "model_runner_starts": 0,
             "preparation_ns": prepared - start, "warmup_ns": warmed - prepared, "observation_ns": observed - warmed,
+            "readback_ns": self.now() - observed,
             "measurements": "services.json",
         }, replace=False)

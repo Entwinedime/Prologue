@@ -20,7 +20,10 @@ def import_assets(collection, costs, output):
             raise ValueError(f"template production belongs to another native recording: {directory}")
 
         result = json.loads((directory / "result.json").read_bytes())
-        paths = [asset_path(directory, name) for name in result["templates"]]
+        paths = []
+        for rank, name in zip(result["observed_roles"], result["templates"], strict=True):
+            sampling = result.get("sampling", {}).get(str(rank))
+            paths.append((asset_path(directory, name), asset_path(directory, sampling) if sampling else None))
         identity = identities[job] = recording.attempt_id
         value = recording.inputs["deployment"], paths
         if observations.setdefault(identity, value) != value:

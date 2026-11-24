@@ -48,8 +48,11 @@ COPY src/prologue/artifacts.py src/prologue/
 COPY src/prologue/app/capture_worker.py src/prologue/app/sglang_plugin.py src/prologue/app/
 COPY src/prologue/contracts/workload src/prologue/contracts/workload/
 COPY src/prologue/acquisition/observation src/prologue/acquisition/observation/
+COPY src/prologue/performance/samples.py src/prologue/performance/
 COPY src/prologue/integrations/frameworks/sglang/*.py src/prologue/integrations/frameworks/sglang/
-COPY src/prologue/integrations/frameworks/sglang/ascend/attention_observation.py \
+COPY src/prologue/integrations/frameworks/sglang/ascend/attention_cuts.py \
+    src/prologue/integrations/frameworks/sglang/ascend/attention_observation.py \
+    src/prologue/integrations/frameworks/sglang/ascend/*_runner.py \
     src/prologue/integrations/frameworks/sglang/ascend/shard_weights.py \
     src/prologue/integrations/frameworks/sglang/ascend/shard_transport.py src/prologue/integrations/frameworks/sglang/ascend/
 COPY src/prologue/integrations/frameworks/sglang/observation src/prologue/integrations/frameworks/sglang/observation/
