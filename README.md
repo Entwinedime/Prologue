@@ -48,7 +48,7 @@ docker run --rm --runtime runc --network none \
   prologue-app:ubuntu24.04 compile /source > "$run/templates.json"
 ```
 
-Use `--mode light` and a separate output directory for native submission and token publication times without a profiler. For parallel or disaggregated targets, use `--placement full` with the devices required by the topology. PD reference time starts at Prefill submission and ends at Decode publication. Detailed observations carry concrete call bindings and device work for compiling templates or checking structure. Supply `compile --model-config` with the original model configuration when a source lacks it. Device records with unresolved ownership are counted separately.
+Use `--mode light` and a separate output directory for native submission and token publication times without a profiler. The observer calls SGLang's native GC freeze after warmup. Garbage collection remains active for objects allocated during serving. For parallel or disaggregated targets, use `--placement full` with the devices required by the topology. PD reference time starts at Prefill submission and ends at Decode publication. Detailed observations carry concrete call bindings and device work for compiling templates or checking structure. Supply `compile --model-config` with the original model configuration when a source lacks it. Device records with unresolved ownership are counted separately.
 
 ### Observe a tensor-parallel target
 
@@ -94,7 +94,7 @@ prologue fit-costs --device single-device-observation --collective full-observat
 
 ### Review a template sharing rule
 
-A release can contain native roots from several models and configurations. Each root needs evidence from its own domain. Selected leaf definitions with observed device work can share storage across those domains when their complete bodies and native framework revision agree. The cost asset keeps its own physical domain.
+A release can contain native roots from several models and configurations. Each root needs evidence from its own domain. Selected leaf definitions with observed device work can share storage across those domains when their complete bodies and native framework revision agree. Costs retain separate qualification for each physical domain.
 
 Copy the [default rules](src/prologue/rules/defaults.json) and set `templates.shared_operations` to the operations supported by your evidence. In `cases.json`, provide a `cases` array. Each case has an `id`, `left` and `right` witnesses, and the expected `shared` Boolean. Each witness supplies the compiled source's `domain`, an observed root `query`, the relative child-slot `path`, and the source's `origin_raw_ns`. For each added operation, provide both a sharing case and a distinct-body case.
 
@@ -149,6 +149,23 @@ docker run --rm --runtime runc --network none \
 
 The prediction reports the resolved release UUID. Pass that UUID to `--release` to replay the same asset selection later. Autonomous prediction requires released cost coverage for host preparation, forward and result handling, local device work and any collective results.
 
+Each fitted cost document covers one physical domain. Pass `--costs` once per fitted document to publish a complete catalog. Use `--add-costs` with the original demand file to add only missing coordinates to its domain while preserving the other domains.
+
+## Explore a task
+
+Run exploration on the Docker host. It starts the application and native control containers for each target, pins the release and image IDs, and writes a short `result.json` beside the per-target predictions. The default path reads the library without publishing or accessing a physical device.
+
+```bash
+PYTHONPATH=src python3 -m prologue.app.explore \
+  example/reuse-task.json "$run/explore" --hardware "$run/hardware.json" --store "$store"
+```
+
+An installed Prologue CLI exposes the same command as `prologue explore`. Use a new output directory for a new exploration. Run the same command with the original output directory to resume from the saved release, target results and charges.
+
+Add `--acquire` to allow publication. Repeat `--source` for independent, detailed training recordings in the relevant domains. For new physical acquisitions, pass an allocated `--device` and explicit `--attempts`, `--card-seconds` and `--max-bytes` limits. The initial release must be current when publishing. The `--processing-seconds` limit covers active elapsed time, including acquisition. Keep evaluation recordings separate from all acquisition inputs.
+
+A retained source is compiled for the named structure gaps. The eligible TP1 Decode attention case uses a scoped ModelRunner sample. With `--training`, structure acquisition can run an independently declared workload on one card. Each accepted addition must cover its original query before publication. Only affected targets run again. Other gaps and exhausted budgets remain visible in the run report.
+
 ## Verify from a release
 
 Use a separate detailed recording as `reference`. The structure verifier answers timing queries while the controller chooses actions from the workload and simulated resources. Run the verifier with the same two-process socket procedure. The application container reads the shared store and the detailed reference.
@@ -159,7 +176,7 @@ prologue verify-performance reference --store /library --release current
 prologue score prediction.json light-reference
 ```
 
-Fixed-graph verification checks recorded endpoints before replacing device service durations. Autonomous scoring uses a separate lightweight recording of the prediction workload for TTFT, TPOT and throughput. `quote-costs` accepts a JSON document with `domain` and `coordinates` and uses the same released estimator.
+Fixed-graph verification first checks that measured inputs reproduce the recorded endpoints. The `estimate` replay keeps the native actions and external arrivals fixed and uses the released host and device timing models. The `device_only` replay replaces device durations while retaining measured host and dispatch timing. Per-kind replays restore measured device timing for one kind while preserving the modeled host schedule. Autonomous scoring uses a separate lightweight recording of the prediction workload for TTFT, TPOT and throughput. `quote-costs` accepts a JSON document with `domain` and `coordinates` and uses the same released estimator.
 
 ## Collect missing Decode attention costs
 
