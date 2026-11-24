@@ -49,9 +49,10 @@ class AutonomousReference:
             for row in action["publications"]:
                 published[row["request"]].append(row)
 
+        workload = self.manifest["workload"]["requests"]
         requests, errors = [], defaultdict(list)
         predicted_arrivals = {}
-        for request in self.manifest["workload"]["requests"]:
+        for request in workload:
             rid, total = request["id"], request["output_tokens"]
             predicted_arrivals[rid] = request["arrival_ns"]
             observed = self.request_metrics(self.publications[rid], self.arrivals[rid], total)
@@ -66,10 +67,13 @@ class AutonomousReference:
                 row[metric] = {"observed": truth, "predicted": estimate, "error_percent": percentage}
             requests.append(row)
 
+        # A single output has a first token but no interval between tokens.
+        applicable = {"ttft_ns": len(workload),
+                      "tpot_ns": sum(request["output_tokens"] > 1 for request in workload)}
         score = {}
-        for metric in ("ttft_ns", "tpot_ns"):
+        for metric, count in applicable.items():
             amounts = errors[metric]
-            score[metric] = {"eligible": len(amounts), "total": len(requests),
+            score[metric] = {"eligible": len(amounts), "applicable": count, "total": len(workload),
                              "mape_percent": sum(amounts) / len(amounts) if amounts else None}
         return {"status": prediction["status"], "requests": requests, "scores": score,
                 "tokens_per_second": {"observed": self.throughput(self.publications, self.arrivals),

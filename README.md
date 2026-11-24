@@ -178,6 +178,8 @@ prologue score prediction.json light-reference
 
 Fixed-graph verification checks the recorded endpoints and reports coverage of distinct cost coordinates for one scheduler timeline, including ranked execution. The `estimate` replay keeps native actions and external arrivals fixed and uses the released host and device timing models. The `device_only` replay uses measured host timing. It retains recorded submission and dispatch timing on TP1 and recorded work start conditions on ranked targets. Per-kind replays restore measured device timing for one kind while preserving the modeled host schedule. Pipeline and disaggregated cases report `unsupported_fixed_graph` on this path. Autonomous scoring uses a separate lightweight recording of the prediction workload for TTFT, TPOT and throughput. `quote-costs` accepts a JSON document with `domain` and `coordinates` and uses the same released estimator.
 
+Each score reports all requests as `total`, requests that admit the metric as `applicable`, and requests with a scored comparison as `eligible`. A one-token response counts toward TTFT and throughput. TPOT applies when the request calls for at least two output tokens.
+
 ## Collect missing Decode attention costs
 
 `plan-costs` accepts a `targets` array. Each target has a name in `target` and the `domain` and `coordinates` from a reported cost gap. It checks a pinned release and groups uncovered coordinates by actual sampling conditions. The native sampler supports single-member Ascend TP1 Decode and uses SGLang to build the real KV context. Other gaps remain in the plan with their coordinates and affected targets.
