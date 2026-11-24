@@ -84,10 +84,10 @@ docker run --rm --runtime runc --network none \
 
 The release records the template, performance and rule objects together. `show-release` displays their identifiers. For a template update, repeat `--library` with the full set of desired sources. Omitted asset families use the base release. Pass `--base <release UUID>` when an update is prepared against a specific release.
 
-To combine local shard costs with physical communication costs, use the current default rules with the `collective` family. Each result latency comes from the measured time between the last participant becoming ready and that rank's result becoming available. The cost asset includes the measured directed transport links.
+To combine local shard costs with physical communication costs, use the current default rules with the `collective` family. Each result latency comes from the measured time between the last participant becoming ready and that rank's result becoming available. The cost asset includes the measured directed transport links. For a single scheduler stage, collect `--mode host-timing --placement full` on the same deployment. The native publishing rank supplies the scheduler costs.
 
 ```bash
-prologue fit-costs --device single-device-observation --collective full-observation > costs.json
+prologue fit-costs --device single-device-observation --collective full-observation --host host-training > costs.json
 ```
 
 `query-structure` uses the same selection and expansion as prediction. Pass a JSON document with the target `domain` and `targets`, an array of `{ "target": "case-id", "query": { "phase": "decode", "sequence_lengths": [9] } }` entries. `--candidate` previews an additional source and `--graph` includes the expanded graph and a definition ID for each call in graph order. The report distinguishes an unobserved domain, a missing parent, a missing child and conflicting candidates. Use `publish --add-library ... --require-structure queries.json` to add sources for the original query domain and resolve those queries before changing the release.
@@ -176,7 +176,7 @@ prologue verify-performance reference --store /library --release current
 prologue score prediction.json light-reference
 ```
 
-Fixed-graph verification first checks that measured inputs reproduce the recorded endpoints. The `estimate` replay keeps the native actions and external arrivals fixed and uses the released host and device timing models. The `device_only` replay replaces device durations while retaining measured host and dispatch timing. Per-kind replays restore measured device timing for one kind while preserving the modeled host schedule. Autonomous scoring uses a separate lightweight recording of the prediction workload for TTFT, TPOT and throughput. `quote-costs` accepts a JSON document with `domain` and `coordinates` and uses the same released estimator.
+Fixed-graph verification checks the recorded endpoints and reports coverage of distinct cost coordinates for one scheduler timeline, including ranked execution. The `estimate` replay keeps native actions and external arrivals fixed and uses the released host and device timing models. The `device_only` replay uses measured host timing. It retains recorded submission and dispatch timing on TP1 and recorded work start conditions on ranked targets. Per-kind replays restore measured device timing for one kind while preserving the modeled host schedule. Pipeline and disaggregated cases report `unsupported_fixed_graph` on this path. Autonomous scoring uses a separate lightweight recording of the prediction workload for TTFT, TPOT and throughput. `quote-costs` accepts a JSON document with `domain` and `coordinates` and uses the same released estimator.
 
 ## Collect missing Decode attention costs
 

@@ -713,3 +713,33 @@
 **验证：** 三组的两套来源各匹配 6/6 个动作，固定图的实测、仅设备和全成本回放完成，纯预测均零采集。基础 Qwen 的 TTFT / TPOT MAPE 为 2.21% / 1.50%，小池 Qwen 为 5.23% / 3.38%，Mistral 为 1.67% / 6.63%，各指标均计入 3/3 请求。授权路径耗 85.014 卡秒，补一项成本、重跑一个目标，零完整 Engine。默认发布实跑的两个 Qwen 目标均完成且零采集。[独立汇总](../../../data/shared-libraries-on-demand-acquisition/s18/independent-steady/evaluation-summary.json) · [默认发布回归](../../../data/shared-libraries-on-demand-acquisition/s18/delivery/explore-summary.json)
 
 **结论与限制：** S18 完成，最小 TP1 组的两项指标均低于 6%。两轮未达标的候选保留。S19 先补齐 TP2 的宿主成本和固定图资格，沿用已有的物理通信证据做开发回归，再冻结多角色新留出。
+
+## 2026-11-24 — S19 多角色验收前置与 TP2 开发取证
+
+**范围：** 以已推送的 `6595993` 为基线。先补齐单调度实例中的多 rank 性能对照，流水线切口和 PD 交接单列证据资格。
+
+**改动：** 登记一次两卡 Qwen3-8B TP2 宿主训练，使用六条独立的 8 输入、3 输出请求，复用 S10 的设备和 HCCS 样本。上限 240 秒墙钟、480 卡秒、1 GiB 新数据及 10 分钟离线处理。
+
+**验证：** 读取原成本目录，已有 189 项设备任务和 12 项集体通信成本，尚缺发布 rank 的宿主训练。旧固定图入口只读取单份 rank trace。[S10 成本证据](../../../data/shared-libraries-on-demand-acquisition/s10/delivery/costs.json)
+
+**结论与限制：** 当前只登记开发取证。下一批独立参考在工作流和适用分母核对后冻结。
+
+## 2026-11-24 — S19 TP2 开发路径与多角色留出冻结
+
+**范围：** Qwen3-8B TP2 宿主训练取得 18 个动作，三种坐标各六次，实耗 247.112 卡秒。沿用 S10 的 189 项设备和 12 项 HCCS 成本参数。[原生训练](../../../data/shared-libraries-on-demand-acquisition/s19/development/host/receipt.json) · [成本资产](../../../data/shared-libraries-on-demand-acquisition/s19/development/tp2-costs.json)
+
+**改动：** 固定图共用单调度实例的已验结构和 C++ 时间线。发布 rank 的设备就绪可早于全组收尾。仅设备回放保留实测的工作起动条件，全成本回放使用正式模型。多角色留出登记七个目标，依次采集 14 份参考，上限 9,600 卡秒、8 GiB 及 30 分钟离线处理。[冻结清单](../../../data/shared-libraries-on-demand-acquisition/s19/independent/freeze.json)
+
+**验证：** 复用 S10 完整记录，固定图实测回放核对 3,992 项工作、3 个动作和发布端点，最大边界偏差为零。已有 TP1 固定图回放与 S18 一致。TP2 新开发输入的 3 条请求、9 个动作已自主完成，预测采集次数为零。[TP2 实测回放](../../../data/shared-libraries-on-demand-acquisition/s19/development/ranked-measured-baseline.json) · [开发预测](../../../data/shared-libraries-on-demand-acquisition/s19/development/tp2-predict-summary.json)
+
+**结论与限制：** 两套候选累积已获证的五个成本域。Qwen TP2 预登记每种来源、每项适用指标 3/3 可评分。流水线和 PD 当前固定图入口仅报告需要多调度器时间线的范围，结构和自主预测分别走既有入口。
+
+## 2026-11-24 — S19 多角色独立验收交付
+
+**范围：** 14 份原生参考全部完成，实耗 4,857.543 卡秒，保留 1.93 GiB。各目标的两类来源共用同一对参考，14 个实测起点与 26 个建库及训练起点均隔离。[来源和角色核对](../../../data/shared-libraries-on-demand-acquisition/s19/independent/source-scope-audit.json)
+
+**改动：** 从 `6595993` 核对原生发布者归属、同刻进件预热、按物理连接查成本、两种时间输入及固定图覆盖报告。业务代码净增 50 行，示例无改动。默认发布 `f26ef744-b9be-4ffe-8ff0-b29981fddff2` 增加 Qwen TP2 和 EP2 成本域，沿用已发布模板与规则。[默认发布](../../../data/shared-libraries-on-demand-acquisition/s19/delivery/current-release.json)
+
+**验证：** 七个目标的 14 项结构对照全部匹配。Qwen TP2 两类来源各匹配 9 个动作，覆盖 204 个成本坐标，TTFT 和 TPOT 各 3/3 可评分，MAPE 分别为 10.95% 和 6.37%。两项 PP 配置共核对 126 个接收端和 54 次唤醒，EP2 核对 144 次只接收行为，PD 核对三条 KV 交接。默认发布的 TP2 预测完成 3 条请求，采集与完整 Engine 次数均为零。[独立结果](../../../data/shared-libraries-on-demand-acquisition/s19/independent/evaluation-summary.json) · [通信证据](../../../data/shared-libraries-on-demand-acquisition/s19/independent/communication-evidence.json) · [默认入口](../../../data/shared-libraries-on-demand-acquisition/s19/delivery/explore-summary.json)
+
+**结论与限制：** S19 完成。EP2 的 897 个设备与通信坐标可回放，缺六个宿主坐标。Mistral TP2 和 EP1 仍缺合格成本域，PP 和 PD 当前固定图路径限于能力状态。PD 同刻到达的两条请求在本轮分别准入，同批准入的证据来自开发批。下一阶段按实际触发核对分块、混批、缓存和组合。
