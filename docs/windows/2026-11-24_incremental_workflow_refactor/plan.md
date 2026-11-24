@@ -82,7 +82,7 @@
 
 当前有两处直接依赖整次采集任务。探索入口在模板未命中时走 `prepare_sources`，经 `SourcePlanning` 和 `RepresentativeSources` 组织请求。只读预测的 `PredictionProcess.sources` 也通过 `SourcePlanning.primary` 读取以前的主来源。只有把生产端和这条读取依赖一起换掉，双库才真正独立。旧版的参数表达式、父子调用绑定、原生控制、资源时间线和按工作绑定模型都有实际消费者，应保住其行为。[探索主流程](../../../src/prologue/workflow/exploration.py) · [只读预测入口](../../../src/prologue/app/prediction.py) · [起点提交中的代表请求规划](https://github.com/Entwinedime/Prologue/blob/63c3755/src/prologue/integrations/frameworks/sglang/acquisition/planning.py)
 
-衡量旧采集代码能否留下，要读到它实际启动的入口。例如当前 `DecodeWindow.collect` 已能从缺项构造目标特征，但随后仍调用 `capture`。可复用其中对 head、KV 和设备工作的核对，把执行移到独立模型运行入口。同步张量搬运已有直接操作设备张量的采样器，适合接入共同规则。两者需要的改造量不同。[现有 Decode 采样](../../../src/prologue/integrations/frameworks/sglang/ascend/attention_window.py) · [单卡同步搬运](../../../src/prologue/integrations/platforms/ascend/copy_sampling.py)
+恢复基线中的 `DecodeWindow.collect` 能从缺项构造目标特征，随后会调用整服务 `capture`。局部入口须保留对 head、KV 和设备工作的核对，将执行收窄到原生模型中的目标模块。同步搬运可以直接操作设备张量。两类采集各自准备所需状态，共用会话、额度和结果交付。[独立模型入口](../../../src/prologue/integrations/frameworks/sglang/ascend/attention_runner.py) · [单卡同步搬运](../../../src/prologue/integrations/platforms/ascend/copy_sampling.py)
 
 以下是重组后的职责落点。实现时以真实调用链决定文件的合并、删除或整段重写。路径相对 `src/prologue/`，`example/` 位于仓库根。
 
@@ -192,6 +192,8 @@ R04 可以告诉用户“缺了什么”，空库用户还需要系统说明“�
 ### M3　增强有限变换，多层子图只更新必要部分（R10–R14、F03）
 
 M2 即使把一次采集做得很便宜，按每个长度、每种成员组合各存一套图，费用和维护量仍会随目标增长。M3 要决定已有定义能解释什么、哪个未覆盖的外部作用才值得再采。R09 的独立父调用证据只约束 PD 对应的声明，TP1 的参数变换可以用自己的原生证据推进。
+
+本阶段先用 R09 已取得的两成员调用做 R10，两次调用的总长度同为 27，第二笔写入的起点分别为 8 和 19。R10 要从实例化后的图读出各自的写入范围，并用额外写入或等待检验定义能区分实际差异。R11 引入有来源依据的长度与页参数，R12 再把写入组成可复用的子调用。采集时的读回明细留作对照。R13 检查缺项能否落到最小的子调用或连接，F03 统一绑定解释，R14 最后检查角色与物理放置。
 
 #### R10　拆清定义和实例
 

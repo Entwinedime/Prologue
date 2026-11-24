@@ -83,6 +83,26 @@ PYTHONPATH=src python3 example/coarse_graph/import_assets.py \
 
 发布根的 `release.json` 固定两个库的入口和本次发布身份。模板索引保存实施域、worker 角色及初态、经授权的局部来源和原生取证身份。每个图体保存有固定编号的定义、绑定、端口、调用和观测。性能入口保存按域绑定的模型、特征范围、样本和训练记录索引。所有运行时引用指向发布根内的文件。源采集的原始路径可以作为测量注释保存在样本中。检查原始证据时显式提供独立保存的采集和生产目录。
 
+## 从实际缺项运行一次局部采集
+
+`acquire-local` 接受预测返回的原查询。多个查询可以共用一次原生初始化时，一起传给 `--query`。部署文件给出采集模式和物理卡，原生时限与次数覆盖同目录的重试。
+
+```bash
+PYTHONPATH=src python3 -m prologue.app acquire-local \
+  --query /path/to/cost-gap.json --deployment /path/to/deployment.json \
+  --output /path/to/local-session --timeout 60 --budget-seconds 60 --attempt-limit 1
+```
+
+当前同步搬运规则从模板工作取得调用、方向、dtype 和字节数。在指定卡上执行原生张量操作，核对同步 ACL 调用的开始、成功返回及实际目标数据。这段时间归控制线程。结果的 `answers` 逐项给出状态和样本文件，`native` 保存执行和计费收据。样本沿 `fit-costs --samples ... --gap ...` 重新回答原查询。初始 worker 布局等尚无局部规则的需求会返回 `no_matching_rule`。单卡遇到需要真实多卡完成的集合通信会列出缺少的参与者。
+
+稠密 TP1 的 Decode attention 查询还需传入 `--libraries <发布根>`。模板库提供原生模块位置、模型配置及各设备工作对应的任务序列。局部规则用一个 ModelRunner 为所选长度建立槽位，运行 Prefill 写入 KV，再运行到指定的 Decode attention 模块。适配器从原生池回读 K/V，并逐段核对实际任务、操作数和计时边界。同一次初始化可以交付多个长度和多段工作。样本丢失时，在原输出目录以相同输入恢复，可用零次新增尝试从已发布的原生记录重新取得证据。
+
+PD 的 `prebuilt_prepare` 缺项携带已准入成员的顺序和长度。接收端规则在原生分页池中预备本地 KV，执行批准备，核对页表写入位置和设备完成后的 K/V 读回。`structure/receiver.json` 可依次交给 C++ 的 `project`、`templates` 和 `instantiate`。单卡或完整部署均只占用这一局部操作需要的接收卡。验证跨卡交付时另外核对发送端、接收会话及实际读回。
+
+局部会话的收据记录实际设备、累计卡时、写本次收据前的保留字节和采样到的磁盘峰值。进程运行期间按秒采样，快速创建又删除的文件可能低于采样分辨率。恢复旧会话时，缺少原始采样的峰值保留为空。
+
+比较局部采集与完整服务的开销时，显式使用 `capture --attention-sites <文件>`。文件按逻辑 rank 列出要观察的原生 attention 模块；两边采用相同的模块、工作点和测量边界。
+
 ## 原生采集任务
 
 正式外围入口在声明的设备上启动一个采集容器，模型只读挂载，输出归本次新目录；需要 Python≥3.10 和 Docker CLI。
