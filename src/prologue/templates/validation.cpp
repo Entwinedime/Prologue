@@ -30,7 +30,11 @@ void reference(const TemplateDefinition & owner, const TemplateReference & endpo
     else if (endpoint.event >= owner.events.size()) throw std::invalid_argument("undefined local template endpoint");
 }
 
-void frame(const TemplateLibrary & library, const TemplateFrame & bindings, const TemplateFrame & root, std::map<std::string, std::string> & buffers) {
+void observed_frame(const TemplateLibrary & library, const TemplateFrame & bindings, Parameters parameters, std::span<const nlohmann::json> members);
+
+void frame(const TemplateLibrary & library, const TemplateFrame & bindings, std::map<std::string, std::string> & buffers,
+           std::vector<std::size_t> & path, std::vector<const TemplateFrame *> & owners) {
+    owners.push_back(&bindings);
     const auto & definition = library.definitions.at(bindings.definition);
     variables(bindings.guard, definition.parameters);
     if (!bindings.bindings.is_object() || bindings.resources.size() != definition.resources.size() || bindings.tensors.size() != definition.ports.size()
@@ -82,29 +86,39 @@ void frame(const TemplateLibrary & library, const TemplateFrame & bindings, cons
                 }
             }
             if (tensor.writer) {
-                const auto * owner = &root;
-                for (const auto child : *tensor.writer) owner = &owner->children.at(child);
+
+                // An absolute writer inside the chosen branch must resolve in that branch's own call tree.
+                const auto common = std::ranges::mismatch(path, *tensor.writer);
+                const auto * owner = owners.at(static_cast<std::size_t>(common.in1 - path.begin()));
+                for (auto child = common.in2; child != tensor.writer->end(); ++child) owner = &owner->children.at(*child);
             }
         }
     }
     for (std::size_t child = 0; child < definition.children.size(); ++child) {
-        frame(library, bindings.children[child], root, buffers);
+        path.push_back(child);
+        frame(library, bindings.children[child], buffers, path, owners);
+        path.pop_back();
         if (library.call_interface(bindings.children[child]) != definition.children[child].contract)
             throw std::invalid_argument("child implementation differs from the caller interface");
     }
+    owners.pop_back();
+    for (const auto & alternative : bindings.alternatives) {
+        if (path.empty()) throw std::invalid_argument("root observations belong to action entries");
+        if (library.call_interface(alternative.frame) != library.call_interface(bindings))
+            throw std::invalid_argument("measured child changes the caller interface at " + bindings.site);
+        frame(library, alternative.frame, buffers, path, owners);
+        const auto work = alternative.input.work();
+        observed_frame(library, alternative.frame, alternative.input.parameters, admitted_members(work));
+    }
 }
 
-void observed_frame(const TemplateLibrary & library, const TemplateFrame & bindings, Parameters parameters) {
-    for (const auto & [name, value] : bindings.constants) {
-        const auto [previous, inserted] = parameters.emplace(name, value);
-        if (!inserted && previous->second != value) throw std::invalid_argument("observed call changes a fixed template parameter");
-    }
-    if (bindings.guard.evaluate(parameters) == 0) throw std::invalid_argument("local template guard contradicts its source at " + bindings.site);
+void observed_frame(const TemplateLibrary & library, const TemplateFrame & bindings, Parameters parameters, std::span<const nlohmann::json> members) {
     const auto & definition = library.definitions[bindings.definition];
+    parameters = bindings.bind(definition, std::move(parameters));
+    if (bindings.guard.evaluate(parameters) == 0) throw std::invalid_argument("local template guard contradicts its source at " + bindings.site);
     for (std::size_t child = 0; child < definition.children.size(); ++child) {
-        Parameters arguments;
-        for (const auto & [name, expression] : definition.children[child].arguments) arguments.emplace(name, expression.evaluate(parameters));
-        observed_frame(library, bindings.children[child], std::move(arguments));
+        auto bound = definition.children[child].bind(parameters, members);
+        observed_frame(library, bindings.children[child], std::move(bound.parameters), bound.members);
     }
 }
 
@@ -152,7 +166,8 @@ void TemplateLibrary::validate_observations() const {
             for (const auto & [name, expression] : child.arguments) {
                 if (!callee.parameters.contains(name) || callee.fixed.contains(name))
                     throw std::invalid_argument("template call overrides a fixed or unknown parameter");
-                variables(expression, definition.parameters);
+                if (child.row) variables(expression, {"context_tokens", "new_tokens"});
+                else variables(expression, definition.parameters);
             }
         }
 
@@ -210,6 +225,10 @@ void TemplateLibrary::validate_observations() const {
             if (port.tensor) {
                 if (port.tensor->dtype.empty()) throw std::invalid_argument("template tensor has no dtype");
                 for (const auto & dimension : port.tensor->shape) variables(dimension, definition.parameters);
+                if (const auto & packing = port.tensor->packing) {
+                    variables(packing->member_count, definition.parameters);
+                    variables(packing->row_extent, definition.parameters);
+                }
             }
         }
         for (const auto & child : definition.children) {
@@ -221,24 +240,33 @@ void TemplateLibrary::validate_observations() const {
             || !definitions[entry.frame.definition].imports.empty())
             throw std::invalid_argument("template action requires a name, condition and closed definition");
         std::map<std::string, std::string> buffers;
-        frame(*this, entry.frame, entry.frame, buffers);
-        for (const auto & parameters : entry.observations) observed_frame(*this, entry.frame, parameters);
+        std::vector<std::size_t> path;
+        std::vector<const TemplateFrame *> owners;
+        frame(*this, entry.frame, buffers, path, owners);
+        for (const auto & point : entry.observations) {
+            const auto work = point.work();
+            observed_frame(*this, entry.frame, point.parameters, admitted_members(work));
+        }
     }
 }
 
 void TemplateLibrary::validate() const {
     validate_observations();
+    validate_selection();
+}
 
+void TemplateLibrary::validate_selection() const {
     // A published library must select one implementation for its own observations, before any serving run needs it.
     const TemplateSelection selection(*this);
-    std::set<std::tuple<std::string, nlohmann::json, Parameters, nlohmann::json>> checked;
+    std::set<std::tuple<std::string, nlohmann::json, ObservedArguments, nlohmann::json>> checked;
     for (const auto & entry : entries) {
+        selection.validate_branches(entry.frame);
         const auto inputs = entry.frame.state_inputs();
         auto state = nlohmann::json::object();
         for (const auto & [name, value] : inputs) state[name] = value.document();
-        for (const auto & parameters : entry.observations) {
-            if (checked.emplace(entry.action, entry.condition, parameters, state).second)
-                selection.select(entry.action, entry.condition, parameters, inputs);
+        for (const auto & point : entry.observations) {
+            if (checked.emplace(entry.action, entry.condition, point, state).second)
+                selection.select(entry.action, entry.condition, point.parameters, inputs, point.work());
         }
     }
 }

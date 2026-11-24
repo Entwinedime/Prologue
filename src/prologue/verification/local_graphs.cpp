@@ -33,7 +33,7 @@ public:
     prologue::CoarseGraph build(const prologue::EntrySpecification & action, const prologue::Parameters & parameters,
                              const nlohmann::json & work) const {
         const auto states = worker_.state_inputs(work.value("bindings", nlohmann::json::object()), work);
-        auto entry = selection_.select(action.action, action.condition, parameters, states);
+        auto entry = selection_.select(action.action, action.condition, parameters, states, work);
         auto graph_work = work;
         worker_.bind(entry.frame, "local", graph_work);
         prologue::GraphInvocation call{ action.action, action.condition, parameters, library_.resources, std::move(graph_work),

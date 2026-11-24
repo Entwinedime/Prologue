@@ -31,7 +31,10 @@ public:
         for (const auto scope : subtree) {
             GraphScope copy{ source.scopes[scope].info, {}, {}, source.scopes[scope].communication };
             copy.info.parent = scope == root ? std::nullopt : std::optional(scope_ids_.at(*copy.info.parent));
-            if (scope == root) copy.info.arguments.clear();
+            if (scope == root) {
+                copy.info.arguments.clear();
+                copy.info.row_call.reset();
+            }
             scope_ids_.emplace(scope, graph_.scopes.size());
             graph_.scopes.push_back(std::move(copy));
         }

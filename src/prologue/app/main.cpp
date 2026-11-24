@@ -103,6 +103,9 @@ constexpr std::string_view usage = "prologue project <native-facts.json> <coarse
                                    "prologue work-costs <observed-coarse.json> <costs.json> <services.json> [--bindings]\n"
                                    "prologue cost-points <points.json> <costs.json> <estimates.json> [--bindings]\n"
                                    "prologue link-templates <source-libraries.json> <output-directory>\n"
+                                   "prologue query-template <templates.json> <query.json> <answer.json>\n"
+                                   "prologue template-evidence <templates.json> <observed-templates.json> <measured-call.json> <evidence.json>\n"
+                                   "prologue supplement-template <templates.json> <query.json> <evidence.json> <candidate.json>\n"
                                    "prologue instantiate <templates.json> <invocation.json> <coarse.json>\n"
                                    "prologue execute <coarse.json> <given-timing.json> <execution.json> [--trace <execution.jsonl>]\n"
                                    "prologue replay <fixed-execution.json> <services.json> <event-times.json>\n"
@@ -316,6 +319,19 @@ int main(int argc, char ** argv) {
             std::cerr << "Created " << directory << '\n';
             return 0;
         }
+        else if (command == "query-template" && argc == 5) {
+            const auto library = prologue::TemplateLibrary::read(read_json(argv[2]));
+            output = prologue::TemplateSelection(library).query(read_json(argv[3]));
+        }
+        else if (command == "template-evidence" && argc == 6) {
+            const auto library = prologue::TemplateLibrary::read(read_json(argv[2]));
+            const auto observed = prologue::TemplateLibrary::read(read_json(argv[3]));
+            output = observed.evidence(read_json(argv[4]), library);
+        }
+        else if (command == "supplement-template" && argc == 6) {
+            const auto library = prologue::TemplateLibrary::read(read_json(argv[2]));
+            output = library.supplement(read_json(argv[3]), read_json(argv[4])).document();
+        }
         else if (command == "instantiate" && argc == 5) {
             const auto library = prologue::TemplateLibrary::read(read_json(argv[2]));
             const auto call = invocation(read_json(argv[3]));
@@ -386,6 +402,10 @@ int main(int argc, char ** argv) {
         Publication(destination).write(output);
         std::cerr << "Created " << destination.string() << '\n';
         return 0;
+    }
+    catch (const prologue::TemplateGap & gap) {
+        std::cerr << gap.details() << '\n';
+        return 1;
     }
     catch (const std::exception & error) {
         std::cerr << "prologue: " << error.what() << '\n';

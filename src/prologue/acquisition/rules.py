@@ -28,6 +28,12 @@ class EvidenceRule(Protocol):
     def qualify(self, queries: list[dict], recording: PublishedCapture) -> tuple[dict, list[dict]]: ...
 
 
+def missing_root(query):
+    cut = query.get("cut", {})
+    return (query.get("status") == "no_declared_candidates"
+            or (query.get("status") == "unmatched_conditions" and cut.get("cause") == "guard" and cut["path"] == []))
+
+
 class LocalAcquisition:
     """Adapters select a cut, prepare a bounded native attempt, and qualify its readback."""
 

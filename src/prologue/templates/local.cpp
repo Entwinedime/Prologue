@@ -12,7 +12,9 @@ namespace {
 
 class LocalCollection {
 public:
-    explicit LocalCollection(TemplateLibrary & library) : library_(library) {}
+    explicit LocalCollection(TemplateLibrary & library) : library_(library) {
+        for (const auto & local : library.implementations) seen_.emplace(local.contract, local.definition, local.guard.document());
+    }
 
     void add(const TemplateFrame & frame, std::vector<std::size_t> & position) {
         const auto contract = library_.local_contract(frame, position);
@@ -24,6 +26,7 @@ public:
             add(frame.children[child], position);
             position.pop_back();
         }
+        for (const auto & alternative : frame.alternatives) add(alternative.frame, position);
     }
 
 private:
@@ -126,7 +129,6 @@ nlohmann::json TemplateLibrary::local_contract(const TemplateFrame & frame, cons
 }
 
 void TemplateLibrary::collect_local_implementations() {
-    implementations.clear();
     LocalCollection collection(*this);
     std::vector<std::size_t> position;
     for (const auto & entry : entries) collection.add(entry.frame, position);

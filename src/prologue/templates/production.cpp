@@ -137,7 +137,10 @@ public:
                     throw std::invalid_argument("compiled work repeats an observed interval");
             }
         }
-        return { entry.action, entry.condition, std::move(scopes_[0].frame), { source_.scopes[0].info.parameters } };
+        const auto uses_members = std::ranges::any_of(source_.scopes, [](const auto & scope) { return bool(scope.info.row_call); });
+        const auto & root = source_.scopes[0].info;
+        const auto point = ObservedArguments::capture(root.parameters, uses_members ? admitted_members(root.work) : std::span<const nlohmann::json>{});
+        return { entry.action, entry.condition, std::move(scopes_[0].frame), {point} };
     }
 
 private:
@@ -295,6 +298,7 @@ private:
                 const auto & tensor = *port.tensor;
                 if (!tensor.shape_rule) throw std::invalid_argument("template boundary requires a declared shape rule at " + frame.site + ":" + port.name);
                 boundary.tensor = TensorRule{ tensor.dtype, *tensor.shape_rule };
+                if (tensor.packing) boundary.tensor->packing = tensor.packing->rule;
                 for (std::size_t axis = 0; axis < tensor.shape.size(); ++axis) {
                     const auto & dimension = (*tensor.shape_rule)[axis];
                     if (dimension.evaluate(observed.info.parameters) != tensor.shape[axis])
@@ -318,14 +322,10 @@ private:
             auto & result = scopes_[child];
             const auto & info = source_.scopes[child].info;
             const auto & child_definition = library_.definitions[result.frame.definition];
-            TemplateCall call{ library_.call_interface(result.frame), info.arguments, {} };
-            for (const auto & parameter : child_definition.parameters) {
-                if (child_definition.fixed.contains(parameter)) continue;
-                const auto argument = call.arguments.find(parameter);
-                if (argument == call.arguments.end()) throw std::invalid_argument("call parameter has no declared relation at " + info.site + ":" + parameter);
-                if (argument->second.evaluate(observed.info.parameters) != info.parameters.at(parameter))
-                    throw std::invalid_argument("declared call argument differs from observation at " + info.site + ":" + parameter);
-            }
+            TemplateCall call{ library_.call_interface(result.frame), info.arguments, {}, info.row_call };
+            auto bound = call.bind(observed.info.parameters, admitted_members(observed.info.work));
+            if (result.frame.bind(child_definition, std::move(bound.parameters)) != info.parameters)
+                throw std::invalid_argument("declared call arguments differ from observation at " + info.site);
             for (const auto imported : result.imports) call.imports.push_back(reference(scope, imported, definition, frame));
             definition.children.push_back(std::move(call));
             frame.children.push_back(std::move(result.frame));

@@ -118,7 +118,6 @@ nlohmann::json ResourceService::call(const nlohmann::json & message, const std::
                     { "tokens", member.at("tokens") }
                 });
                 tokens = demand.at("tokens");
-                if (tokens < 0) throw std::invalid_argument("allocation has a negative token demand");
             }
 
             if (kind == "slots" && member.contains("prefix")) {

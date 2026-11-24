@@ -59,16 +59,73 @@ std::vector<TokenRegion> TokenRangeRule::evaluate(const nlohmann::json & work) c
     std::vector<TokenRegion> regions;
     std::set<std::string> requests;
     for (const auto & member : work.at("members").get_ref<const nlohmann::json::array_t &>()) {
-        Parameters parameters{
-            { "context_tokens", nonnegative(member.at("context_tokens")) },
-            {     "new_tokens",     nonnegative(member.at("new_tokens")) }
-        };
+        const auto parameters = member_parameters(member);
         TokenRegion region{ member.at("id").get<std::string>(), begin.evaluate(parameters), end.evaluate(parameters) };
         if (region.request.empty() || !requests.insert(region.request).second || region.begin < 0 || region.end < region.begin)
             throw std::invalid_argument("token range produces an invalid request region");
         regions.push_back(std::move(region));
     }
     return regions;
+}
+
+RowPacking RowPacking::read(const nlohmann::json & source) {
+    RowPacking rule{ source.at("table").get<std::string>(), Expression::read(source.at("member_count")),
+                     Expression::read(source.at("row_extent")), TokenRangeRule::read(source.at("range")) };
+    if (rule.table.empty()) throw std::invalid_argument("packed rows require a source table");
+    return rule;
+}
+
+nlohmann::json RowPacking::document(const std::map<std::string, Expression> & arguments) const {
+    return {{ "table", table }, { "member_count", member_count.document(arguments) },
+            { "row_extent", row_extent.document(arguments) }, { "range", range.document() }};
+}
+
+nlohmann::json RowPacking::bind(const nlohmann::json & work, const Parameters & parameters, const std::vector<std::int64_t> & shape) const {
+    if (shape.empty() || shape.front() < 0) throw std::invalid_argument("packed rows require a leading tensor dimension");
+    const auto regions = range.evaluate(work);
+    if (!std::cmp_equal(regions.size(), member_count.evaluate(parameters)))
+        throw std::invalid_argument("packed row count differs from the number of admitted members");
+    const auto width = row_extent.evaluate(parameters);
+    if (width < 0) throw std::invalid_argument("packed source row extent is negative");
+
+    auto slices = nlohmann::json::array();
+    std::int64_t offset = 0;
+    for (const auto & region : regions) {
+        if (region.end > width)
+            throw std::invalid_argument("packed source exceeds " + table + " row for " + region.request + ": "
+                                        + std::to_string(region.end) + " > " + std::to_string(width));
+        const auto length = region.end - region.begin;
+        if (length > shape.front() - offset) throw std::invalid_argument("packed rows exceed the output extent");
+        slices.push_back({
+            { "request", region.request },
+            { "source", { region.begin, region.end } },
+            { "target", { offset, offset + length } },
+        });
+        offset += length;
+    }
+    if (offset != shape.front()) throw std::invalid_argument("packed rows do not fill the output extent");
+    return slices;
+}
+
+RowCall RowCall::read(const nlohmann::json & source) {
+    RowCall result{ static_cast<std::size_t>(nonnegative(source.at("member"))), source.at("parent_port").get<std::string>(),
+                   source.at("source_port").get<std::string>(), source.at("destination_port").get<std::string>() };
+    if (result.parent_port.empty() || result.source_port.empty() || result.destination_port.empty())
+        throw std::invalid_argument("a row call requires its source, destination and parent output ports");
+    return result;
+}
+
+nlohmann::json RowCall::document() const {
+    return {{ "member", member }, { "parent_port", parent_port }, { "source_port", source_port }, { "destination_port", destination_port }};
+}
+
+std::span<const nlohmann::json> admitted_members(const nlohmann::json & work) {
+    const auto members = work.find("members");
+    return members == work.end() ? std::span<const nlohmann::json>{} : members->get_ref<const nlohmann::json::array_t &>();
+}
+
+Parameters member_parameters(const nlohmann::json & member) {
+    return {{ "context_tokens", nonnegative(member.at("context_tokens")) }, { "new_tokens", nonnegative(member.at("new_tokens")) }};
 }
 
 KvSlice KvSlice::read(const nlohmann::json & source) {

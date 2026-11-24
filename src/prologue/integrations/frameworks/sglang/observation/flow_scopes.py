@@ -10,6 +10,7 @@ from prologue.integrations.frameworks.sglang.disaggregated_calls import Disaggre
 from prologue.integrations.frameworks.sglang.host_reads import HostReads
 from prologue.integrations.frameworks.sglang.kv_layout import MhaKvLayout
 from prologue.integrations.frameworks.sglang.metadata_collectives import MetadataCollectives
+from prologue.integrations.frameworks.sglang.observation.receiver_table import ReceiverTableCopies
 from prologue.integrations.frameworks.sglang.resources import ResourceCalls
 from prologue.integrations.frameworks.sglang.selection import BatchSelection
 from prologue.integrations.runtimes.pytorch.boundaries import TensorUpload
@@ -197,7 +198,16 @@ class FlowScopes(ServingCuts):
             "invocation", frame.original, parameters=frame.parameters, work=frame.work,
         ) as call:
             call.record["envelope"] = True
-            yield
+            if frame.operation == "prebuilt_prepare":
+                table = ReceiverTableCopies(self.observation, frame.inputs, frame.work)
+                with table:
+                    yield
+
+                # The last continuation publishes the completed table; the observation spans the entire native loop.
+                terminal = self.observation.capture.scopes[frame.observations[-1]]
+                terminal["page_table"] = table.readback(frame.inputs.out_cache_loc)
+            else:
+                yield
             if frame.local_upload is not None:
                 call.record["parameters"][frame.local_upload] = frame.parameters[frame.local_upload]
         if frame.values:

@@ -176,6 +176,12 @@ class ActionScopes:
         return None if expressions is None else tuple(cls.expression_key(value) for value in expressions)
 
     @classmethod
+    def packing_key(cls, tensor):
+        if packing := tensor.get("packing"):
+            rules = {key: packing[key] for key in ("member_count", "row_extent", "range")}
+            return packing["table"], cls.expression_key(rules), packing["slices"]
+
+    @classmethod
     def declaration_expressions(cls, scope):
         return {"arguments": cls.expression_key(scope.get("arguments", {})),
                 "guards": cls.expression_list_key(scope.get("guards", []))}
@@ -239,6 +245,7 @@ class ActionScopes:
             bindings["source_scopes"] = origins
             parent = None if observed["parent"] is None else self.source_ids[observed["parent"]]
             if (not observed["complete"] or scope["bindings"] != bindings or scope["parent"] != parent
+                    or scope.get("row_call") != observed.get("row_call")
                     or scope.get("communication") != communication
                     or any(scope[field] != observed[field] for field in ("role", "site", "implementation", "parameters", "constants", "work"))
                     or self.declaration_expressions(scope) != self.declaration_expressions(observed)):
@@ -281,6 +288,7 @@ class ActionScopes:
                 projected = boundary["tensor"]
                 if (projected is None
                         or any(tensor[field] != projected[field] for field in ("dtype", "shape", "value", "storage", "version", "buffer"))
+                        or self.packing_key(tensor) != self.packing_key(projected)
                         or projected["allocation"] != (None if tensor["allocation"] is None else self.source_ids[tensor["allocation"]])
                         or projected["writer"] != (None if tensor["writer"] is None else self.source_ids[tensor["writer"]])
                         or self.expression_list_key(tensor.get("shape_rule")) != self.expression_list_key(projected.get("shape_rule"))):

@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <compare>
+#include <expected>
 #include <map>
 #include <memory>
 #include <optional>
@@ -66,6 +68,7 @@ struct TemplatePort {
     std::optional<StreamWait<TemplateReference>> wait{};
     std::optional<TemplateReference> rendezvous{};
 
+    nlohmann::json operand(const std::map<std::string, Expression> & arguments = {}) const;
     nlohmann::json document() const;
 };
 
@@ -94,6 +97,13 @@ struct TemplateCall {
     TemplateInterface contract;
     std::map<std::string, Expression> arguments;
     std::vector<TemplateReference> imports;
+    std::shared_ptr<const RowCall> row{};
+
+    struct Inputs {
+        Parameters parameters;
+        std::span<const nlohmann::json> members;
+    };
+    Inputs bind(const Parameters & parent, std::span<const nlohmann::json> members) const;
 };
 
 struct TemplateKvAccess {
@@ -130,6 +140,7 @@ struct TemplateDefinition {
 
     static TemplateDefinition read(const nlohmann::json & source);
     nlohmann::json document() const;
+    std::expected<Parameters, nlohmann::json> bind(Parameters arguments, const Parameters & constants) const;
 };
 
 // Concrete sites, model constants and aliases are bindings, never part of shared identity.
@@ -173,6 +184,20 @@ struct TemplateGuard {
     static TemplateGuard read(const nlohmann::json & source);
 };
 
+struct ObservedArguments {
+    Parameters parameters;
+    std::vector<std::pair<std::int64_t, std::int64_t>> member_extents;
+
+    auto operator<=>(const ObservedArguments &) const = default;
+    static ObservedArguments read(nlohmann::json source);
+    static ObservedArguments capture(const Parameters & parameters, std::span<const nlohmann::json> members);
+    bool matches(const Parameters & arguments, std::span<const nlohmann::json> members) const;
+    nlohmann::json document() const;
+    nlohmann::json work() const;
+};
+
+struct ObservedBranch;
+
 struct TemplateFrame {
 
     // Implementation selection belongs to this call; the shared caller only specifies its interface.
@@ -187,10 +212,19 @@ struct TemplateFrame {
     StateBindings state;
     std::optional<std::string> state_input;
     std::optional<CommunicationGroup> communication;
+    std::vector<ObservedBranch> alternatives{};
 
     nlohmann::json local_document() const;
     nlohmann::json document() const;
+    Parameters bind(const TemplateDefinition & body, Parameters arguments) const;
+    bool accepts_state(const std::map<std::string, StateBindings> & inputs) const;
     std::map<std::string, StateBindings> state_inputs() const;
+};
+
+// A measured alternative qualifies this call only. Its ancestors gain no new whole-action observation.
+struct ObservedBranch {
+    TemplateFrame frame;
+    ObservedArguments input;
 };
 
 struct GraphInvocation {
@@ -214,7 +248,7 @@ struct TemplateEntry {
     TemplateFrame frame;
 
     // Distinct source parameter points qualify selection. Imported actions have no observations in this library.
-    std::set<Parameters> observations;
+    std::set<ObservedArguments> observations;
 };
 
 // A local implementation carries no caller tensor identities, communication ranks or physical resources.
@@ -228,6 +262,8 @@ class TemplateLibrary {
 public:
     static TemplateLibrary read(const nlohmann::json & body, const nlohmann::json * published_header = nullptr);
     nlohmann::json document() const;
+    nlohmann::json evidence(const nlohmann::json & measured, const TemplateLibrary & recipient) const;
+    TemplateLibrary supplement(const nlohmann::json & demand, const nlohmann::json & evidence) const;
     void validate_observations() const;
     void validate() const;
     TemplateInterface call_interface(const TemplateFrame & frame) const;
@@ -247,6 +283,10 @@ public:
     std::vector<TemplateDefinition> definitions;
     std::vector<TemplateEntry> entries;
     std::vector<LocalImplementation> implementations;
+
+private:
+    static TemplateLibrary decode(const nlohmann::json & body, const nlohmann::json * header = nullptr);
+    void validate_selection() const;
 };
 
 } // namespace prologue

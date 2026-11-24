@@ -44,7 +44,7 @@ public:
 
     CoarseGraph instantiate() {
         if (origins_) origins_->clear();
-        append(entry_.frame, std::nullopt, 0, invocation_.parameters, {});
+        append(entry_.frame, std::nullopt, 0, invocation_.parameters, {}, invocation_.work);
 
         // Allocate all local boundaries before resolving cross-scope references; no event is copied or guessed.
         for (std::size_t scope = 0; scope < scopes_.size(); ++scope) {
@@ -53,12 +53,19 @@ public:
             const auto & definition = library_.definitions[definition_id];
             for (std::size_t child = 0; child < definition.children.size(); ++child) {
                 const auto & call = definition.children[child];
-                Parameters arguments;
-                for (const auto & [name, expression] : call.arguments) arguments.emplace(name, expression.evaluate(graph_.scopes[scope].info.parameters));
+                const auto & parent = graph_.scopes[scope].info;
+                const auto bound = call.bind(parent.parameters, admitted_members(parent.work));
 
                 const auto identity = scopes_.size();
                 scopes_[scope].children.push_back(identity);
-                append(bindings->children[child], scope, child, arguments, call.arguments);
+                if (call.row) {
+                    nlohmann::json work{{ "members", { bound.members.front() } }};
+                    for (const auto key : {"phase", "rank"}) {
+                        if (parent.work.contains(key)) work[key] = parent.work.at(key);
+                    }
+                    append(bindings->children[child], scope, child, bound.parameters, call.arguments, std::move(work), call.row);
+                }
+                else append(bindings->children[child], scope, child, bound.parameters, call.arguments, parent.work);
             }
         }
         for (std::size_t scope = 0; scope < scopes_.size(); ++scope) body(scope);
@@ -69,7 +76,7 @@ public:
 private:
     void validate_inputs(const TemplateFrame & frame) {
         if (frame.state_input) {
-            if (invocation_.state_inputs.at(*frame.state_input).contract() != frame.state.contract())
+            if (!frame.accepts_state(invocation_.state_inputs))
                 throw std::invalid_argument("invocation changes its state binding contract: " + *frame.state_input);
             state_inputs_.insert(*frame.state_input);
         }
@@ -83,17 +90,10 @@ private:
     }
 
     void append(const TemplateFrame & frame, std::optional<std::size_t> parent, std::size_t call, const Parameters & arguments,
-                const std::map<std::string, Expression> & relations) {
+                const std::map<std::string, Expression> & relations, nlohmann::json work, std::shared_ptr<const RowCall> row = {}) {
         const auto & definition = library_.definitions[frame.definition];
-        Parameters parameters = frame.constants;
-        for (const auto & [name, value] : arguments) {
-            if (!definition.parameters.contains(name)) throw std::invalid_argument("unknown invocation parameter: " + name);
-            const auto [bound, added] = parameters.emplace(name, value);
-            if (!added && bound->second != value) throw std::invalid_argument("invocation overrides a fixed parameter: " + name);
-        }
-        if (parameters.size() != definition.parameters.size()) throw std::invalid_argument("invocation has missing dynamic parameters at " + frame.site);
-
-        if (frame.guard.evaluate(parameters) == 0) throw std::invalid_argument("target parameters do not satisfy the local template guard at " + frame.site);
+        auto parameters = frame.bind(definition, arguments);
+        if (!frame.guard.evaluate(parameters)) throw std::invalid_argument("target parameters do not satisfy the local template guard at " + frame.site);
 
         const auto identity = scopes_.size();
         graph_.scopes.push_back({
@@ -103,8 +103,8 @@ private:
                       definition.implementation,
                       std::move(parameters),
                       frame.constants,
-                      relations, invocation_.work,
-                      frame.bindings },
+                      relations, std::move(work),
+                      frame.bindings, {}, std::move(row) },
             {}
         });
 
@@ -151,7 +151,7 @@ private:
                  access.field,
                  access.access,
                  access.members,
-                 invocation_.work.at(access.members).get<std::vector<std::string>>(),
+                 graph_.scopes[scope].info.work.at(access.members).get<std::vector<std::string>>(),
                  access.publication },
                 event(scope, access.start),
                 event(scope, access.finish)
@@ -207,6 +207,7 @@ private:
                                           std::move(layout.dtype),
                                           std::move(layout.shape),
                                           description.tensor->shape };
+                if (description.tensor->packing) tensor.bind_rows(description.tensor->packing, graph_.scopes[scope].info);
                 if (!binding.external) tensor.allocation = 0;
                 tensor.buffer = binding.buffer;
                 if (binding.writer) {

@@ -16,7 +16,7 @@ public:
         for (std::size_t imported = 0; imported < definition.imports.size(); ++imported) result_.imports.push_back(boundary(frame, { imported, {}, true }));
         for (const auto & exported : definition.exports) result_.exports.push_back(boundary(frame, exported));
         for (const auto & port : definition.ports) {
-            auto contract = port.document();
+            auto contract = port.operand();
             contract["event"] = boundary(frame, port.event);
             if (port.rendezvous) contract["rendezvous"] = boundary(frame, *port.rendezvous);
             if (port.wait)

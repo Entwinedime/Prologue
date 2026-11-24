@@ -81,13 +81,16 @@ TensorRule TensorRule::read(const nlohmann::json & source) {
     for (const auto & dimension : source.at("shape").get_ref<const nlohmann::json::array_t &>())
         result.shape.push_back(Expression::read(dimension));
     if (result.dtype.empty()) throw std::invalid_argument("tensor geometry requires a dtype");
+    if (source.contains("packing")) result.packing = std::make_shared<const RowPacking>(RowPacking::read(source.at("packing")));
     return result;
 }
 
-nlohmann::json TensorRule::document() const {
+nlohmann::json TensorRule::document(const std::map<std::string, Expression> & arguments) const {
     auto dimensions = nlohmann::json::array();
-    for (const auto & expression : shape) dimensions.push_back(expression.document());
-    return {{ "dtype", dtype }, { "shape", std::move(dimensions) }};
+    for (const auto & expression : shape) dimensions.push_back(expression.document(arguments));
+    nlohmann::json result{{ "dtype", dtype }, { "shape", std::move(dimensions) }};
+    if (packing) result["packing"] = packing->document(arguments);
+    return result;
 }
 
 TensorLayout TensorRule::evaluate(const Parameters & parameters) const {
@@ -126,7 +129,7 @@ std::int64_t TensorCopy::bytes(const Parameters & parameters) const {
     return size;
 }
 
-TensorObservation TensorObservation::read(const nlohmann::json & source) {
+TensorObservation TensorObservation::read(const nlohmann::json & source, const ScopeInfo & scope) {
     TensorObservation result{ source.at("value").get<std::string>(),
                               source.at("storage").get<std::string>(),
                               integer(source.at("version")),
@@ -155,7 +158,15 @@ TensorObservation TensorObservation::read(const nlohmann::json & source) {
         result.allocation = static_cast<std::size_t>(allocation);
     }
     result.buffer = source.at("buffer").get<std::string>();
+    if (const auto found = source.find("packing"); found != source.end()) {
+        result.bind_rows(std::make_shared<const RowPacking>(RowPacking::read(*found)), scope);
+        if (result.packing->slices != found->at("slices")) throw std::invalid_argument("declared row packing differs from observed writes");
+    }
     return result;
+}
+
+void TensorObservation::bind_rows(const std::shared_ptr<const RowPacking> & rule, const ScopeInfo & scope) {
+    packing = std::make_shared<const PackedRows>(rule, rule->bind(scope.work, scope.parameters, shape));
 }
 
 nlohmann::json TensorObservation::document() const {
@@ -172,6 +183,10 @@ nlohmann::json TensorObservation::document() const {
     if (shape_rule) {
         result["shape_rule"] = nlohmann::json::array();
         for (const auto & rule : *shape_rule) result["shape_rule"].push_back(rule.document());
+    }
+    if (packing) {
+        result["packing"] = packing->rule->document();
+        result["packing"]["slices"] = packing->slices;
     }
     return result;
 }
@@ -201,6 +216,7 @@ ScopeInfo ScopeInfo::read(const nlohmann::json & source) {
     if (!arguments.is_object()) throw std::invalid_argument("scope arguments must be an object");
     for (const auto & [name, value] : arguments.items()) result.arguments.emplace(name, Expression::read(value));
     for (const auto & guard : source.value("guards", nlohmann::json::array())) result.guards.push_back(Expression::read(guard));
+    if (source.contains("row_call")) result.row_call = std::make_shared<RowCall>(RowCall::read(source.at("row_call")));
     return result;
 }
 
@@ -209,7 +225,7 @@ nlohmann::json ScopeInfo::document() const {
     for (const auto & [name, expression] : arguments) arguments_json[name] = expression.document();
     auto conditions = nlohmann::json::array();
     for (const auto & guard : guards) conditions.push_back(guard.document());
-    return {
+    nlohmann::json result{
         {         "parent", parent ? nlohmann::json(*parent) : nlohmann::json(nullptr) },
         {           "role",                                                       role },
         {           "site",                                                       site },
@@ -221,6 +237,8 @@ nlohmann::json ScopeInfo::document() const {
         {       "bindings",                                                   bindings },
         {         "guards",                                      std::move(conditions) }
     };
+    if (row_call) result["row_call"] = row_call->document();
+    return result;
 }
 
 PeerRows PeerRows::read(const nlohmann::json & source) {

@@ -31,6 +31,8 @@ public:
     TemplateSelection & operator=(const TemplateSelection &) = delete;
     TemplateEntry select(std::string_view action, const nlohmann::json & condition, const Parameters & parameters,
                          const std::map<std::string, StateBindings> & state_inputs = {}, const nlohmann::json & work = nullptr) const;
+    nlohmann::json query(const nlohmann::json & demand) const;
+    void validate_branches(const TemplateFrame & frame) const;
 
 private:
     struct Candidate {

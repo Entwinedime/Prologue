@@ -81,8 +81,11 @@ KvAllocation KvPool::plan(std::span<const KvDemand> demands) const {
         KvReservation member{ request, slot, resident.allocated_tokens, tokens, {} };
 
         // Check the complete demand before selecting identities or changing either free list.
-        const auto pages = pages_for(member.context_tokens + member.new_tokens) - static_cast<std::int64_t>(resident.pages.size());
-        if (allocation.allocated_pages + pages > static_cast<std::int64_t>(free_pages_.size()))
+        std::int64_t end;
+        if (tokens < 0 || __builtin_add_overflow(resident.allocated_tokens, tokens, &end))
+            throw std::invalid_argument("invalid KV allocation token extent");
+        const auto pages = pages_for(end) - static_cast<std::int64_t>(resident.pages.size());
+        if (pages > static_cast<std::int64_t>(free_pages_.size()) - allocation.allocated_pages)
             throw std::invalid_argument("allocation exceeds available KV pages");
         member.new_pages.resize(static_cast<std::size_t>(pages));
         allocation.allocated_pages += pages;

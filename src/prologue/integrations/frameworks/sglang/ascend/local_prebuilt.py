@@ -2,8 +2,9 @@
 
 import json
 
-from prologue.acquisition.rules import EvidenceGap
+from prologue.acquisition.rules import EvidenceGap, missing_root
 from prologue.integrations.frameworks.sglang.ascend.launch import SGLangAscendLaunch
+from prologue.integrations.frameworks.sglang.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.worker_templates import WorkerDomain
 from prologue.integrations.platforms.ascend.deployment import AscendDeployment
 
@@ -17,7 +18,7 @@ class LocalPrebuilt:
     @classmethod
     def matches(cls, query):
         domain = query["domain"]
-        return (query.get("status") in {"no_declared_candidates", "unmatched_conditions"}
+        return (missing_root(query)
                 and query.get("action") == "segment" and query["condition"] == cls.condition
                 and domain["framework"] == "sglang" and "torch_npu" in domain
                 and domain["implementation"]["disaggregation_mode"] == "decode")
@@ -99,17 +100,13 @@ class LocalPrebuilt:
                     or row["completion"] != "device_event_synchronized_before_consumer_read"):
                 answers.append({"status": "untriggered", "missing": "matching_receiver_writes_and_readable_kv"})
                 continue
+            BatchTensors.bind_location_rows(call, row["request_slots"], row["writes"])
             answers.append({"status": "qualified", "asset": "structure/receiver.json", "members": len(members),
-                            "observed_writes": len(expected),
+                            "observed_writes": len(expected), "source_scope": call["bindings"]["source_scopes"][0],
                             "boundary": "admitted_members_and_delivered_local_kv_to_readable_batch_outputs"})
 
         # One observation contains all calls. A failed readback would make a shared source unsafe to import.
         if any(answer["status"] != "qualified" for answer in answers):
             incomplete = {"status": "untriggered", "missing": "verified_session"}
             return {}, [answer if answer["status"] != "qualified" else incomplete for answer in answers]
-        facts["receiver_readback"] = {
-            "admission": "ordered_controller_input", "local_kv": "native_pool_seeded_before_call",
-            "calls": [row | {"scope": call["bindings"]["source_scopes"][0]}
-                      for row, call in zip(measurements, calls, strict=True)],
-        }
         return {"structure/receiver.json": facts}, answers

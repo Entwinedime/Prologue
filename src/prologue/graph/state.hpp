@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -36,6 +38,32 @@ struct TokenRangeRule {
     nlohmann::json document() const;
     std::vector<TokenRegion> evaluate(const nlohmann::json & work) const;
 };
+
+// Each member contributes a slice of its own table row to the output's leading dimension.
+struct RowPacking {
+    std::string table;
+    Expression member_count;
+    Expression row_extent;
+    TokenRangeRule range;
+
+    static RowPacking read(const nlohmann::json & source);
+    nlohmann::json document(const std::map<std::string, Expression> & arguments = {}) const;
+    nlohmann::json bind(const nlohmann::json & work, const Parameters & parameters, const std::vector<std::int64_t> & shape) const;
+};
+
+// The caller owns the table and destination; each child sees one admitted row and produces one slice.
+struct RowCall {
+    std::size_t member;
+    std::string parent_port;
+    std::string source_port;
+    std::string destination_port;
+
+    static RowCall read(const nlohmann::json & source);
+    nlohmann::json document() const;
+};
+
+std::span<const nlohmann::json> admitted_members(const nlohmann::json & work);
+Parameters member_parameters(const nlohmann::json & member);
 
 // A token's K/V payload is one logical row; transfers may populate only part of it.
 struct KvSlice {

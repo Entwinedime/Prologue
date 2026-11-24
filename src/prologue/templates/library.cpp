@@ -1,6 +1,5 @@
 #include "prologue/templates/library.hpp"
 
-#include <algorithm>
 #include <map>
 #include <stdexcept>
 #include <utility>
@@ -23,14 +22,30 @@ std::vector<std::size_t> indices(const nlohmann::json & source) {
 
 } // namespace
 
-bool TemplateGuard::evaluate(const Parameters & parameters) const {
-    return extents.evaluate(parameters) && std::ranges::all_of(branches, [&](const Expression & rule) { return rule.evaluate(parameters) != 0; });
+ObservedArguments ObservedArguments::read(nlohmann::json source) {
+    ObservedArguments point;
+    if (const auto extents = source.find("member_extents"); extents != source.end()) {
+        for (const auto & pair : extents->get_ref<const nlohmann::json::array_t &>()) {
+            if (!pair.is_array() || pair.size() != 2) throw std::invalid_argument("an observed member needs its context and new token counts");
+            point.member_extents.emplace_back(index(pair[0]), index(pair[1]));
+        }
+        source.erase(extents);
+    }
+    point.parameters = read_parameters(source);
+    return point;
 }
 
-std::set<std::string> TemplateGuard::variables() const {
-    auto result = extents.variables();
-    for (const auto & rule : branches) result.merge(rule.variables());
+nlohmann::json ObservedArguments::document() const {
+    nlohmann::json result = parameters;
+    if (result.contains("member_extents")) throw std::invalid_argument("member_extents belongs to the observation, outside its scalar parameters");
+    if (!member_extents.empty()) result["member_extents"] = member_extents;
     return result;
+}
+
+nlohmann::json ObservedArguments::work() const {
+    auto members = nlohmann::json::array();
+    for (const auto & [context, added] : member_extents) members.push_back({{ "context_tokens", context }, { "new_tokens", added }});
+    return {{ "members", std::move(members) }};
 }
 
 nlohmann::json TemplateGuard::document() const {
@@ -60,28 +75,6 @@ nlohmann::json StateBindings::document() const {
     return result;
 }
 
-nlohmann::json StateBindings::contract() const {
-    std::map<std::string, std::pair<std::int64_t, std::int64_t>> bases;
-    for (const auto & value : kv) {
-        auto & [layer, byte] = bases.try_emplace(value.pool, value.layer, value.slice.begin).first->second;
-        layer = std::min(layer, value.layer);
-        byte = std::min(byte, value.slice.begin);
-    }
-    std::map<std::string, std::size_t> pools;
-    const auto pool = [&](const std::string & name) { return pools.try_emplace(name, pools.size()).first->second; };
-    nlohmann::json result{{ "kv", nlohmann::json::array() }, { "slots", nlohmann::json::array() }};
-
-    // Whole-pool relocation preserves relative layers and byte aliases, never overlapping independent slices.
-    for (const auto & value : kv) {
-        const auto & [first_layer, first_byte] = bases.at(value.pool);
-        result["kv"].push_back({{ "pool", pool(value.pool) }, { "layer", value.layer - first_layer },
-                                { "begin", value.slice.begin - first_byte },
-                                { "token_bytes", value.slice.token_bytes }, { "bytes", value.slice.end - value.slice.begin }});
-    }
-    for (const auto & name : slots) result["slots"].push_back(pool(name));
-    return result;
-}
-
 TemplateReference TemplateReference::read(const nlohmann::json & source) {
     const auto & child = source.at("child");
     return { index(source.at("event")), child.is_null() ? std::nullopt : std::optional(index(child)), source.at("imported").get<bool>() };
@@ -95,15 +88,19 @@ nlohmann::json TemplateReference::document() const {
     };
 }
 
-nlohmann::json TemplatePort::document() const {
-    nlohmann::json result{
+nlohmann::json TemplatePort::operand(const std::map<std::string, Expression> & arguments) const {
+    return {
         {      "name",                      name },
         { "direction", direction_name(direction) },
         {       "use",        port_use_name(use) },
         {  "relation",   relation_name(relation) },
-        {     "event",          event.document() },
-        {    "tensor", tensor ? tensor->document() : nlohmann::json(nullptr) }
+        {    "tensor", tensor ? tensor->document(arguments) : nlohmann::json(nullptr) }
     };
+}
+
+nlohmann::json TemplatePort::document() const {
+    auto result = operand();
+    result["event"] = event.document();
     if (rendezvous) result["rendezvous"] = rendezvous->document();
     if (wait)
         result["wait"] = {
@@ -201,6 +198,7 @@ TemplateDefinition TemplateDefinition::read(const nlohmann::json & source) {
     }
     for (const auto & child : source.at("children").get_ref<const nlohmann::json::array_t &>()) {
         TemplateCall call{ TemplateInterface::read(child.at("contract")), {}, {} };
+        if (child.contains("row_call")) call.row = std::make_shared<RowCall>(RowCall::read(child.at("row_call")));
         const auto & arguments = child.at("arguments").get_ref<const nlohmann::json::object_t &>();
         for (const auto & [name, expression] : arguments) call.arguments.emplace(name, Expression::read(expression));
         for (const auto & imported : child.at("imports").get_ref<const nlohmann::json::array_t &>()) call.imports.push_back(TemplateReference::read(imported));
@@ -277,6 +275,7 @@ nlohmann::json TemplateDefinition::document() const {
             { "arguments",      std::move(arguments) },
             {   "imports",   std::move(imports_json) }
         });
+        if (child.row) result["children"].back()["row_call"] = child.row->document();
     }
     return result;
 }
@@ -316,6 +315,10 @@ TemplateFrame read_frame(const nlohmann::json & source, const std::map<std::size
     }
     for (const auto & child : source.at("children").get_ref<const nlohmann::json::array_t &>())
         result.children.push_back(read_frame(child, definitions, entry, domain));
+    if (const auto alternatives = source.find("alternatives"); alternatives != source.end()) {
+        for (const auto & branch : alternatives->get_ref<const nlohmann::json::array_t &>())
+            result.alternatives.push_back({read_frame(branch.at("frame"), definitions, entry, domain), ObservedArguments::read(branch.at("input"))});
+    }
     return result;
 }
 
@@ -353,25 +356,18 @@ nlohmann::json TemplateFrame::document() const {
     auto result = local_document();
     result["children"] = nlohmann::json::array();
     for (const auto & child : children) result["children"].push_back(child.document());
-    return result;
-}
-
-std::map<std::string, StateBindings> TemplateFrame::state_inputs() const {
-    std::map<std::string, StateBindings> result;
-    std::vector<const TemplateFrame *> pending{ this };
-    for (std::size_t index = 0; index < pending.size(); ++index) {
-        const auto & frame = *pending[index];
-        if (frame.state_input) {
-            const auto [found, inserted] = result.emplace(*frame.state_input, frame.state);
-            if (!inserted && found->second != frame.state)
-                throw std::invalid_argument("template state input has conflicting source bindings: " + *frame.state_input);
-        }
-        for (const auto & child : frame.children) pending.push_back(&child);
-    }
+    for (const auto & alternative : alternatives)
+        result["alternatives"].push_back({{"frame", alternative.frame.document()}, {"input", alternative.input.document()}});
     return result;
 }
 
 TemplateLibrary TemplateLibrary::read(const nlohmann::json & source, const nlohmann::json * published_header) {
+    auto result = decode(source, published_header);
+    result.validate();
+    return result;
+}
+
+TemplateLibrary TemplateLibrary::decode(const nlohmann::json & source, const nlohmann::json * published_header) {
     TemplateLibrary result;
     const auto & header = published_header ? *published_header : source;
     result.domain = header.at("domain");
@@ -390,7 +386,7 @@ TemplateLibrary TemplateLibrary::read(const nlohmann::json & source, const nlohm
         TemplateEntry value{ entry.at("action").get<std::string>(), entry.at("condition"),
                              read_frame(entry.at("frame"), definitions, entry, result.domain), {} };
         for (const auto & observation : entry.at("observations").get_ref<const nlohmann::json::array_t &>())
-            value.observations.insert(read_parameters(observation));
+            value.observations.insert(ObservedArguments::read(observation));
         result.entries.push_back(std::move(value));
     }
     for (const auto & local : source.at("implementations")) {
@@ -401,7 +397,6 @@ TemplateLibrary TemplateLibrary::read(const nlohmann::json & source, const nlohm
                                 { "definition", id }, { "domain", result.domain } });
         result.implementations.push_back({ local.at("contract"), found->second, TemplateGuard::read(local.at("guard")) });
     }
-    result.validate();
     return result;
 }
 
@@ -419,11 +414,13 @@ nlohmann::json TemplateLibrary::document() const {
     for (const auto & local : implementations)
         result["implementations"].push_back({ { "contract", local.contract }, { "definition", local.definition }, { "guard", local.guard.document() } });
     for (const auto & entry : entries) {
+        auto observations = nlohmann::json::array();
+        for (const auto & point : entry.observations) observations.push_back(point.document());
         result["entries"].push_back({
             {       "action",            entry.action },
             {    "condition",         entry.condition },
             {        "frame",  entry.frame.document() },
-            { "observations",      entry.observations }
+            { "observations", std::move(observations) }
         });
     }
     return result;

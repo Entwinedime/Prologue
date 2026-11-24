@@ -205,6 +205,10 @@ nlohmann::json Expression::document() const {
     return result;
 }
 
+nlohmann::json Expression::document(const std::map<std::string, Expression> & arguments) const {
+    return arguments.empty() ? document() : substitute(arguments).document();
+}
+
 Expression Expression::substitute(const std::map<std::string, Expression> & expressions) const {
     if (const auto * name = std::get_if<std::string>(&value_)) {
         const auto found = expressions.find(*name);

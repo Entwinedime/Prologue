@@ -91,7 +91,8 @@ NativeObservation NativeObservation::read(const nlohmann::json & source) {
                                  port_use(port.at("use").get<std::string>()), relation_kind(port.at("relation").get<std::string>()),
                                  anchor(port.at("at"), result.spans),         std::nullopt };
             if (observed.name.empty()) throw std::invalid_argument("scope port name must not be empty");
-            if (port.contains("tensor") && !port.at("tensor").is_null()) observed.tensor = TensorObservation::read(port.at("tensor"));
+            if (port.contains("tensor") && !port.at("tensor").is_null())
+                observed.tensor = TensorObservation::read(port.at("tensor"), result.scopes[identity].info);
             if (port.contains("wait")) {
                 const auto & wait = port.at("wait");
                 observed.wait =

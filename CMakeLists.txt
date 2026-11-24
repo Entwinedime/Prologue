@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(nlohmann_json 3.11 REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
 add_library(prologue_core
     src/prologue/serving/controller/native.cpp
@@ -36,14 +37,17 @@ add_library(prologue_core
     src/prologue/templates/production.cpp
     src/prologue/templates/entries.cpp
     src/prologue/templates/library.cpp
+    src/prologue/templates/bindings.cpp
     src/prologue/templates/interface.cpp
     src/prologue/templates/local.cpp
+    src/prologue/templates/families.cpp
     src/prologue/templates/selection.cpp
+    src/prologue/templates/supplement.cpp
     src/prologue/templates/validation.cpp
     src/prologue/templates/instance.cpp
 )
 target_include_directories(prologue_core PUBLIC src)
-target_link_libraries(prologue_core PUBLIC nlohmann_json::nlohmann_json)
+target_link_libraries(prologue_core PUBLIC nlohmann_json::nlohmann_json PRIVATE OpenSSL::Crypto)
 
 add_library(prologue_sglang
     src/prologue/integrations/frameworks/sglang/templates.cpp

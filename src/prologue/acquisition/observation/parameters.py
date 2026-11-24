@@ -7,25 +7,30 @@ from dataclasses import dataclass
 class Parameter:
     scope: int
     name: str
+    member: int | None = None
 
 
 class ScopeParameters:
     def __init__(self, scopes) -> None:
         self.scopes = scopes
 
-    def resolve(self, expression, scope):
+    def resolve(self, expression, scope, member=None):
         if isinstance(expression, int):
             return expression
         if isinstance(expression, str):
+            if member is not None:
+                if expression not in ("context_tokens", "new_tokens"):
+                    raise ValueError(f"unknown admitted member feature: {expression}")
+                return Parameter(scope, expression, member)
             record = self.scopes[scope]
             if expression in record["constants"]:
                 return record["constants"][expression]
             if expression in record["arguments"]:
-                return self.resolve(record["arguments"][expression], record["parent"])
+                return self.resolve(record["arguments"][expression], record["parent"], record.get("row_call", {}).get("member"))
             if expression not in record["parameters"]:
                 raise ValueError(f"shape references undeclared parameter: {scope}:{expression}")
             return Parameter(scope, expression)
-        return expression[0], *(self.resolve(value, scope) for value in expression[1:])
+        return expression[0], *(self.resolve(value, scope, member) for value in expression[1:])
 
     def bind(self, rule, scope):
         return tuple(self.resolve(axis, scope) for axis in rule)

@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "prologue/contracts/expression.hpp"
+#include "prologue/graph/state.hpp"
 
 namespace prologue {
 
@@ -96,9 +97,10 @@ struct TensorLayout {
 struct TensorRule {
     std::string dtype;
     std::vector<Expression> shape;
+    std::shared_ptr<const RowPacking> packing{};
 
     static TensorRule read(const nlohmann::json & source);
-    nlohmann::json document() const;
+    nlohmann::json document(const std::map<std::string, Expression> & arguments = {}) const;
     TensorLayout evaluate(const Parameters & parameters) const;
 };
 
@@ -121,6 +123,28 @@ struct StorageBinding {
     std::int64_t version;
 };
 
+struct ScopeInfo {
+    std::optional<std::size_t> parent;
+    std::string role;
+    std::string site;
+    std::string implementation;
+    Parameters parameters;
+    Parameters constants;
+    std::map<std::string, Expression> arguments;
+    nlohmann::json work;
+    nlohmann::json bindings;
+    std::vector<Expression> guards{};
+    std::shared_ptr<const RowCall> row_call{};
+
+    static ScopeInfo read(const nlohmann::json & source);
+    nlohmann::json document() const;
+};
+
+struct PackedRows {
+    std::shared_ptr<const RowPacking> rule;
+    nlohmann::json slices;
+};
+
 struct TensorObservation {
     std::string value;
     std::string storage;
@@ -136,23 +160,10 @@ struct TensorObservation {
     // An adapter-declared persistent storage owner, independent of the observing callsite.
     std::string buffer{};
 
-    static TensorObservation read(const nlohmann::json & source);
-    nlohmann::json document() const;
-};
+    std::shared_ptr<const PackedRows> packing{};
 
-struct ScopeInfo {
-    std::optional<std::size_t> parent;
-    std::string role;
-    std::string site;
-    std::string implementation;
-    Parameters parameters;
-    Parameters constants;
-    std::map<std::string, Expression> arguments;
-    nlohmann::json work;
-    nlohmann::json bindings;
-    std::vector<Expression> guards{};
-
-    static ScopeInfo read(const nlohmann::json & source);
+    static TensorObservation read(const nlohmann::json & source, const ScopeInfo & scope);
+    void bind_rows(const std::shared_ptr<const RowPacking> & rule, const ScopeInfo & scope);
     nlohmann::json document() const;
 };
 

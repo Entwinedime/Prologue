@@ -32,6 +32,7 @@ public:
     std::set<std::string> variables() const;
     Expression substitute(const std::map<std::string, Expression> & expressions) const;
     nlohmann::json document() const;
+    nlohmann::json document(const std::map<std::string, Expression> & arguments) const;
 
 private:
     static Expression make_operation(Kind kind, std::vector<Expression> arguments);

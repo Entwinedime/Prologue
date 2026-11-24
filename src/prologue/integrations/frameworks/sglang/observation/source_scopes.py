@@ -63,6 +63,9 @@ class SGLangSourceScopes:
         result = []
         for scope in ResourceInputs.scopes(scopes, self.environment):
             guards = list(scope.get("guards", ()))
+            if "page_table" in scope:
+                table = scope["page_table"]
+                BatchTensors.bind_location_rows(scope, table["slots"], table["writes"])
 
             # Native prebuilt batches prepare KV indices, relay tokens and finish requests one member at a time.
             if scope["bindings"].get("segment", {}).get("owner") in self.prebuilt_batches:

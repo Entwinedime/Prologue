@@ -63,7 +63,6 @@ class KvPool {
 public:
     KvPool(std::size_t request_count, const ServingSettings & settings);
 
-    std::int64_t pages_for(std::int64_t tokens) const;
     const KvResidence & residence(std::size_t request) const;
     const std::deque<std::size_t> & free_slots() const;
     const std::deque<std::size_t> & free_pages() const;
@@ -80,6 +79,7 @@ public:
     bool return_pages(std::span<const std::size_t> pages);
 
 private:
+    std::int64_t pages_for(std::int64_t tokens) const;
     KvAllocation plan(std::span<const KvDemand> demands) const;
     void reserve(const KvAllocation & allocation);
 

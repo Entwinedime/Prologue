@@ -7,6 +7,24 @@ from typing import Any
 
 class BatchTensors:
     @staticmethod
+    def bind_location_rows(scope, slots, writes):
+        members = scope["work"]["members"]
+        owners = {slot: member["id"] for slot, member in zip(slots, members, strict=True)}
+        if len(owners) != len(members):
+            raise ValueError("admitted members share a request-table slot")
+        output, = (port["tensor"] for port in scope["ports"]
+                   if port["name"] == "cache_locations" and port["direction"] == "output")
+
+        # The native row selects its request. The template keeps the packing rule, independently of physical slots.
+        output["packing"] = {
+            "table": "request_to_token",
+            "member_count": "members", "row_extent": "sequence_capacity",
+            "range": {"begin": "context_tokens", "end": ["add", "context_tokens", "new_tokens"]},
+            "slices": [{"request": owners[row["slot"]], "source": row["source"], "target": row["target"]}
+                       for row in writes],
+        }
+
+    @staticmethod
     def boundaries(batch: Any) -> dict[str, tuple[Any, list[str]]]:
 
         # Capture and control publish the same batch ABI; native scratch tensors stay inside the call.

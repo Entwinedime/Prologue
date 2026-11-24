@@ -6,7 +6,6 @@ from time import monotonic_ns
 from types import SimpleNamespace
 
 import torch
-from torch.overrides import TorchFunctionMode
 
 from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.batches import BatchTensors
@@ -19,25 +18,6 @@ from prologue.integrations.platforms.ascend.export import AscendExport
 from prologue.integrations.platforms.ascend.markers import AscendMarkers
 from prologue.integrations.platforms.ascend.observation import AscendObservation
 from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
-
-
-class PageTableWrites(TorchFunctionMode):
-    def __init__(self, table):
-        self.table = table
-        self.rows = []
-
-    def __torch_function__(self, operation, types, args=(), kwargs=None):
-        if operation is torch.Tensor.__setitem__:
-            target, index, source = args
-            if (isinstance(source, torch.Tensor)
-                    and source.untyped_storage()._cdata == self.table.untyped_storage()._cdata):
-                slot, begin = divmod(source.storage_offset() - self.table.storage_offset(), self.table.stride(0))
-                start, end, step = index.indices(target.numel())
-                if step != 1 or source.ndim != 1 or source.stride(0) != 1 or end - start != source.numel():
-                    raise ValueError("receiver table copy is not a contiguous token interval")
-                self.rows.append((target, {"slot": slot, "source": [begin, begin + source.numel()],
-                                           "target": [start, end]}))
-        return operation(*args, **(kwargs or {}))
 
 
 class ReceiverPools:
@@ -139,14 +119,10 @@ class PrebuiltRunner:
         owner.parallel = {**self.job["domain"]["parallel"], "rank": self.rank}
         owner.aliases = {m["id"]: m["id"] for members, _, _ in batches for m in members}
         cuts = FlowScopes(owner)
-        observed = []
         markers.synchronize()
         with ScopedTasks.profile(self.output, self.rank), markers.window():
             for _, batch, _ in batches:
-                writes = PageTableWrites(pools.slots.req_to_token)
-                with writes:
-                    DisaggregatedCalls(cuts).prepare(ScheduleBatch.prepare_for_prebuilt, batch)
-                observed.append(writes.rows)
+                DisaggregatedCalls(cuts).prepare(ScheduleBatch.prepare_for_prebuilt, batch)
 
         # The final fence and KV reads belong to qualification, outside the captured asynchronous calls.
         finished = torch.npu.Event()
@@ -155,15 +131,18 @@ class PrebuiltRunner:
         environment = {**self.job["domain"], **markers.environment(), "parallel": owner.parallel}
         raw = owner.capture.document(environment)
         raw.update(markers.timing_evidence(), state_queries=cuts.queries)
+
+        # The local qualifier consumes these physical writes alongside the independent device readback.
+        observed = [scope.pop("page_table") for scope in raw["scopes"] if "page_table" in scope]
         write_json(self.output / f"rank-{self.rank}.json", raw)
         markers.release()
         rows = []
-        for (members, batch, locations), writes in zip(batches, observed, strict=True):
-            if any(target is not batch.out_cache_loc for target, _ in writes):
-                raise ValueError("a receiver page-table write targeted another output")
-            rows.append({"members": members, "request_slots": batch.req_pool_indices.tolist(),
+        for (members, batch, locations), table in zip(batches, observed, strict=True):
+            if table["slots"] != batch.req_pool_indices.tolist():
+                raise ValueError("prepared batch slots differ from the native source rows")
+            rows.append({"members": members, "request_slots": table["slots"],
                          "parameters": BatchTensors.parameters(batch, batch.extend_num_tokens),
-                         "writes": [row for _, row in writes], "verified_kv": pools.readable(batch, locations),
+                         "writes": table["writes"], "verified_kv": pools.readable(batch, locations),
                          "completion": "device_event_synchronized_before_consumer_read"})
         write_json(self.output / "receiver.json", rows)
         return raw

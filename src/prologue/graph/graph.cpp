@@ -37,7 +37,7 @@ CoarseGraph CoarseGraph::read(const nlohmann::json & source) {
                                 relation_kind(port.at("relation").get<std::string>()),
                                 identity(port.at("event")),
                                 std::nullopt };
-            if (port.contains("tensor") && !port.at("tensor").is_null()) boundary.tensor = TensorObservation::read(port.at("tensor"));
+            if (port.contains("tensor") && !port.at("tensor").is_null()) boundary.tensor = TensorObservation::read(port.at("tensor"), observed.info);
             if (port.contains("wait")) {
                 const auto & wait = port.at("wait");
                 boundary.wait = StreamWait<std::size_t>{ identity(wait.at("resource")), identity(wait.at("begin")) };
@@ -295,11 +295,39 @@ void CoarseGraph::validate() const {
     }
     std::set<std::pair<std::size_t, std::size_t>> ordered_intervals;
     std::map<std::string, std::string> buffers;
+    struct TableWrites {
+        std::string source_storage;
+        std::set<std::size_t> members;
+    };
+    std::map<std::pair<std::size_t, std::string>, TableWrites> row_writers;
     for (std::size_t scope = 0; scope < scopes.size(); ++scope) {
         const auto parent = scopes[scope].info.parent;
         if ((scope == 0 && parent) || (scope != 0 && (!parent || *parent >= scope)))
             throw std::invalid_argument("graph scopes require one root and parents before children");
 
+        if (const auto & row = scopes[scope].info.row_call) {
+            if (!parent) throw std::invalid_argument("a row call requires a parent packing its destination");
+            const auto & packed = scopes[*parent].port(row->parent_port, Direction::Output);
+            const auto & source = scopes[scope].port(row->source_port, Direction::Input);
+            const auto & destination = scopes[scope].port(row->destination_port, Direction::Output);
+            if (!packed.tensor || !packed.tensor->packing || !source.tensor || !destination.tensor)
+                throw std::invalid_argument("row call requires its input slice, written slice and packed parent output");
+            const auto & slice = packed.tensor->packing->slices.at(row->member);
+            const auto length = slice.at("target")[1].get<std::int64_t>() - slice.at("target")[0].get<std::int64_t>();
+            const auto members = admitted_members(scopes[scope].info.work);
+            const std::vector<std::int64_t> shape{ length };
+            auto & writes = row_writers[{*parent, row->parent_port}];
+            if (writes.members.empty()) writes.source_storage = source.tensor->storage;
+            if (writes.source_storage != source.tensor->storage || packed.use != PortUse::Data || destination.use != PortUse::Data
+                || members.size() != 1 || members.front() != scopes[*parent].info.work.at("members").at(row->member)
+                || members.front().at("id") != slice.at("request") || source.tensor->shape != shape || destination.tensor->shape != shape
+                || destination.tensor->storage != packed.tensor->storage || destination.tensor->dtype != packed.tensor->dtype
+                || destination.tensor->writer != scope || !writes.members.insert(row->member).second)
+                throw std::invalid_argument("row call does not own the declared member and destination slice");
+
+            // Publishing a packed output must follow every contributing device write, including writes on other streams.
+            if (destination.event != packed.event) ordered_intervals.emplace(destination.event, packed.event);
+        }
         if (scopes[scope].communication) {
             scopes[scope].communication->validate();
             if (scopes[scope].communication->ordered_service && scope != 0)
@@ -347,6 +375,10 @@ void CoarseGraph::validate() const {
             }
         }
         if (rendezvous != (scopes[scope].communication ? 1U : 0U)) throw std::invalid_argument("communication scope requires one completion port");
+    }
+    for (const auto & [output, writers] : row_writers) {
+        const auto & tensor = *scopes[output.first].port(output.second, Direction::Output).tensor;
+        if (writers.members.size() != tensor.packing->slices.size()) throw std::invalid_argument("packed output has a member without a row writer");
     }
     for (const auto & event : events) {
         if (event.scope >= scopes.size() || event.resource >= resources.size()) throw std::invalid_argument("graph event has an undefined scope or resource");

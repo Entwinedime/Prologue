@@ -62,6 +62,8 @@ class AscendObservation:
             info["bindings"] = dict(info["bindings"])
 
             info["guards"] = scope.get("guards", [])
+            if "row_call" in scope:
+                info["row_call"] = scope["row_call"]
             for name in ("effects", "publication"):
                 if name in scope:
                     info["bindings"][name] = scope[name]
@@ -601,8 +603,7 @@ class AscendObservation:
                     converted["at"] = self.work_end(scope)
                 if tensor is not None:
                     converted["tensor"] = {name: tensor[name] for name in ("value", "storage", "version", "dtype", "shape", "writer", "allocation", "buffer")}
-                    if "shape_rule" in tensor:
-                        converted["tensor"]["shape_rule"] = tensor["shape_rule"]
+                    converted["tensor"].update((name, tensor[name]) for name in ("shape_rule", "packing") if name in tensor)
                 ports.append(converted)
                 if tensor is not None and port["use"] not in {"state", "metadata"}:
                     observed.append((getattr(self.trace.scopes[scope], side), scope, converted))

@@ -28,9 +28,10 @@ class GraphContents(ActionScopes):
             if path not in native or path not in predicted:
                 yield "scope_tree", {"scope": path, "native": path in native, "predicted": path in predicted}
                 continue
-            for field in native[path]:
-                if native[path][field] != predicted[path][field]:
-                    changes = list(cls.value_differences(native[path][field], predicted[path][field]))
+            for field in sorted(native[path].keys() | predicted[path].keys()):
+                expected, actual = native[path].get(field), predicted[path].get(field)
+                if expected != actual:
+                    changes = list(cls.value_differences(expected, actual))
                     yield field, {"scope": path, "changes": changes if details else changes[:3]}
 
     def control_key(self, root, identity):
@@ -242,6 +243,8 @@ class GraphContents(ActionScopes):
         for index in paths:
             scope = graph["scopes"][index]
             contents = {name: scope[name] for name in ("role", "site", "implementation", "parameters")}
+            if index != root and (row := scope.get("row_call")):
+                contents["row_call"] = {**row, "request": scope["work"]["members"][0]["id"]}
             contents["weights"] = scope["bindings"].get("weights")
             ports = {}
             for port in sorted(scope["ports"], key=lambda value: (value["name"], value["direction"])):
@@ -260,6 +263,8 @@ class GraphContents(ActionScopes):
                 boundary["rendezvous"] = "rendezvous" in port
                 if tensor := port.get("tensor"):
                     boundary["tensor"] = {"dtype": tensor["dtype"], "shape": tensor["shape"]}
+                    if packing := tensor.get("packing"):
+                        boundary["tensor"]["packing"] = {key: packing[key] for key in ("table", "slices")}
 
                     # Metadata describes layout; its runtime buffer lifecycle is not a graph data dependency.
                     if port["use"] == "data":
