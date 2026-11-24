@@ -1,16 +1,24 @@
-"""Publish native SGLang/Ascend work samples from a recorded production."""
+"""Extract measured services from SGLang/Ascend production and local batch recordings."""
 
 import json
 from collections import Counter
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.acquisition.recording import PublishedCapture
 from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.acquisition.pd_samples import PdNotificationSamples
+from prologue.integrations.frameworks.sglang.ascend.local_copy import LocalCopies
+from prologue.integrations.frameworks.sglang.ascend.local_embedding import LocalEmbedding
+from prologue.integrations.frameworks.sglang.ascend.local_scheduler import LocalSchedulerBatch
+from prologue.integrations.frameworks.sglang.ascend.worker_capture import WorkerCapture
+from prologue.integrations.frameworks.sglang.worker_templates import WorkerDomain
 from prologue.integrations.platforms.ascend.collectives import CollectiveServices
 from prologue.integrations.platforms.ascend.services import ObservedServices
 from prologue.integrations.platforms.ascend.transport_profile import AscendTransportProfile
+from prologue.performance.fitting import FittedCosts
+from prologue.performance.requirements import CostRequirements
 from prologue.performance.samples import ServiceSamples, WorkCatalog
 
 
@@ -48,13 +56,16 @@ class CostSamples:
         if self.peer_measurements:
             self.facts.update((rank, self.read_facts(rank)) for rank in observed if rank not in self.facts)
         if collective:
-            self.collectives = CollectiveServices(self.facts, self.recording.source, ranks)
+            self.collectives = CollectiveServices(self.facts, self.worker_sources(), ranks)
         if pd_protocol:
             protocol = {rank: body["measurements"]["pd_protocol"] for rank, body in self.facts.items()}
             self.notifications = PdNotificationSamples(protocol)
 
     def read_facts(self, rank):
         return json.loads((self.work / f"{rank}-facts.json").read_text())
+
+    def worker_sources(self):
+        return dict.fromkeys(self.facts, self.recording.source)
 
     @classmethod
     def export(cls, arguments):
@@ -69,6 +80,115 @@ class CostSamples:
             report = source.measure(rank, catalog, transport_only=arguments.transport_only)
             write_json(path, report, replace=False)
 
+    @staticmethod
+    def structural_worker(recording):
+        paired = "probes" in recording.manifest
+        if not paired and recording.inputs["rule"] != LocalSchedulerBatch.name:
+            return None
+
+        # The structural half of a paired CPU measurement already observed the real device work at this shape.
+        rank = recording.inputs["job"]["batch"].get("rank", 0)
+        return WorkerCapture(recording, rank, "structure" if paired else None)
+
+    @classmethod
+    def product(cls, recording, query):
+        rank = WorkerDomain.rank(query["domain"])
+        if query["work"] in {"device", "transfer"}:
+            if LocalCopies.matches(query):
+                return None
+            worker = cls.structural_worker(recording)
+            return "derived/device-services" if worker is not None and worker.rank == rank else None
+        rule = recording.inputs["rule"]
+        observed = {int(actor) for actor in recording.manifest.get("workers", {"0": "."})}
+        peers = query["features"].get("transport", {}).get("members", ())
+        physical = recording.inputs["deployment"].get("acquisition_mode", "full") == "full"
+        if (query["work"] == "collective" and rank in observed and len(peers) > 1 and physical and observed.issuperset(peers)
+                and (rule == LocalEmbedding.name or "peer_ranks" in recording.inputs["job"].get("batch", {}))):
+            return f"derived/peer-service-{rank}"
+        return None
+
+    @classmethod
+    def extract(cls, session, recording, queries, model, workspace):
+        query = queries[0]
+        if query["work"] != "collective":
+            return cls.batch(session, model, workspace)
+
+        with TemporaryDirectory(dir=workspace) as scratch:
+            table = cls.transport(recording, queries, model, Path(scratch))
+        return table | {"acquisition_rule": recording.inputs["rule"], "native_recordings": [recording.attempt_id]}
+
+    @classmethod
+    def batch(cls, session, model, workspace):
+        recording = PublishedCapture(session / "native")
+        receipt = json.loads((session / "result.json").read_bytes())
+        if (receipt["status"] not in {"qualified", "incomplete"} or receipt["native_recording"] != recording.attempt_id
+                or receipt["rule"] != recording.inputs["rule"] or receipt["queries"] != recording.inputs["queries"]):
+            raise ValueError("local costs require the qualified session owning this native recording")
+
+        worker = cls.structural_worker(recording)
+        if worker is None:
+            raise ValueError("local costs require a structural worker observation")
+        services, asset = cls.worker_services(worker, model, workspace)
+        accepted = {answer["asset"] for answer in receipt["answers"] if answer["status"] == "qualified"}
+        if not accepted or ("probes" not in recording.manifest and accepted != {asset}):
+            raise ValueError("the qualified session and its observed native batch boundary disagree")
+        return services | {"acquisition_rule": recording.inputs["rule"], "native_recordings": [recording.attempt_id]}
+
+    @classmethod
+    def worker_services(cls, worker, model, workspace):
+
+        # Project work and timing from the same recording. Local staging cannot measure service between peers.
+        with TemporaryDirectory(dir=workspace) as scratch:
+            facts, catalog = worker.catalog(model, Path(scratch))
+            asset = LocalSchedulerBatch.observed_asset(worker.job["batch"], worker.read("boundary"), facts)
+            return cls.worker_table(facts, catalog), asset
+
+    @classmethod
+    def worker_table(cls, facts, catalog):
+        services = ObservedServices(catalog.graph, facts, {}, physical_peers=False)
+        samples, absent = cls.local_samples(catalog, services)
+        return samples.document(absent)
+
+    @staticmethod
+    def uncovered(queries, report, model, directory):
+        demand = CostRequirements()
+        points = [demand.gap("query", q) for q in queries]
+        _, missing, _ = demand.check(model, FittedCosts({"physical": report}, []).domains, directory)
+        return {i: missing[p] for i, p in enumerate(points) if p in missing}
+
+    @classmethod
+    def transport(cls, recording, queries, model, directory):
+        if recording.inputs["rule"] == LocalEmbedding.name:
+            ranks = [int(key) for key in recording.manifest["workers"]]
+            sources = dict.fromkeys(ranks, recording.source)
+            traces = {actor: recording.source / f"sdk-{actor}/trace.json" for actor in ranks}
+        else:
+            sources = {worker.rank: worker.source for worker in WorkerCapture.observed(recording)}
+            traces = {actor: source / "sdk/trace.json" for actor, source in sources.items()}
+        rank = WorkerDomain.rank(queries[0]["domain"])
+        if any(WorkerDomain.rank(q["domain"]) != rank or not sources.keys() >= set(q["features"]["transport"]["members"])
+               for q in queries):
+            raise ValueError("transport service requires one worker and an observed physical peer group")
+        return cls.peer_service(recording, sources, traces, rank, model, directory)
+
+    @staticmethod
+    def peer_service(recording, sources, traces, rank, model, directory):
+        if recording.inputs["deployment"].get("acquisition_mode", "full") != "full":
+            raise ValueError("transport calibration requires the full physical deployment")
+        peers = {actor: WorkerCapture.observed_facts(source, actor, traces[actor]) for actor, source in sources.items()}
+        local = peers[rank]
+        catalog = WorkerCapture.project_work(local, model, directory)
+        clocks = CollectiveServices(peers, sources, [rank])
+        services = ObservedServices(catalog.graph, local, clocks.samples[rank], physical_peers=True)
+        origin = {"native_recording": recording.attempt_id, "rank": rank}
+        profile = AscendTransportProfile(sources, peers, traces[rank], origin,
+                                         recording.inputs["image"], recording.inputs["deployment"])
+        samples, absent = profile.samples(catalog, services)
+        report = samples.document(absent) | {"transport_profile": profile.qualification}
+        if conflicts := clocks.notification_conflicts[rank]:
+            report["collective_notification_conflicts"] = conflicts
+        return report
+
     def measure(self, rank, catalog, *, transport_only=False):
         observation = {"production": str(self.production), "rank": rank}
         facts = self.facts[rank] if self.joint else self.read_facts(rank)
@@ -78,7 +198,7 @@ class CostSamples:
         if transport_only:
             if not self.peer_measurements:
                 raise ValueError("a transport profile requires a joint physical observation of the peer group")
-            profile = AscendTransportProfile(self.recording.source, self.facts, self.work / f"{rank}-sdk/trace.json",
+            profile = AscendTransportProfile(self.worker_sources(), self.facts, self.work / f"{rank}-sdk/trace.json",
                                              observation, self.recording.inputs["image"], self.recording.inputs["deployment"])
             if notifications and "state_transfer_protocol" not in profile.qualification:
                 raise ValueError("physical notification samples require their measured transport protocol")
@@ -110,6 +230,9 @@ class CostSamples:
             duration_ns, copy, collective = services.service(piece)
             if duration_ns is None:
                 absent[piece["kind"]] += 1
+                continue
+            if collective is not None and "transport" not in features:
+                absent["undeclared_peer_operand"] += 1
                 continue
             if "copy" in piece:
                 if copy != [features["axes"]["transfer.bytes"], piece["copy"]["direction"]]:

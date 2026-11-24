@@ -31,13 +31,12 @@ class ScopedTasks:
         return row["args"]["Task Type"], row["name"]
 
     @classmethod
-    def source(cls, capture, work, rank, catalog, scopes):
+    def source(cls, capture, trace, rank, catalog, scopes, facts):
         native = json.loads((capture / f"rank-{rank}.json").read_text())
         profile, = (capture / "native" / f"rank-{rank}").glob("*_ascend_pt")
-        source = AscendTrace(profile, capture / "runtime", native, work / f"{rank}-sdk/trace.json")
+        source = AscendTrace(profile, capture / "runtime", native, trace)
         tasks = {(command.stream, command.begin, command.end): cls.identity(command.source.record)
                  for command in StreamCommands(source).payload}
-        facts = json.loads((work / f"{rank}-facts.json").read_text())
         graph = catalog.graph
         if graph["evidence"]["window_ns"] != facts["measurements"]["window_ns"]:
             raise ValueError("source task partitions and template work use different observation windows")

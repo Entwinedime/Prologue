@@ -8,7 +8,7 @@ class NativeHostCalls:
     batch_roles = {"run_batch", "launch", "output_prepare", "output_skip"}
     local_batch_axes = {"batch.members", "batch.query_tokens"}
 
-    def __init__(self, scopes, excluded=()):
+    def __init__(self, scopes):
         self.scopes = scopes
         self.calls = {0: None}
         self.children = defaultdict(list)
@@ -17,7 +17,7 @@ class NativeHostCalls:
         self.dimensions = {0: {}}
         for scope in scopes[1:]:
             identity, parent = scope["id"], scope["parent"]
-            if parent not in self.calls or identity in excluded or "service" in scope:
+            if parent not in self.calls or "service" in scope:
                 continue
             self.calls[identity] = self.identity(scope)
             self.children[parent].append(identity)

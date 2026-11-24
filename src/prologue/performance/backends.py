@@ -77,8 +77,12 @@ class AxisRegression(ModelBackend):
     rate: float
 
     @classmethod
+    def supports(cls, axes):
+        return cls.axis in axes
+
+    @classmethod
     def fit(cls, points):
-        if cls.axis not in points[0][0]:
+        if not all(cls.supports(axes) for axes, _ in points):
             return None
         coordinates = [values[cls.axis] for values, _ in points]
         if min(coordinates) <= 0:
@@ -107,14 +111,19 @@ class StartupTransfer(AxisRegression):
     rate_field = "ns_per_byte"
 
     @classmethod
-    def fit(cls, points):
-        for axes, _ in points:
-            if axes.keys() != {cls.axis} or type(axes[cls.axis]) is not int or axes[cls.axis] <= 0:
-                raise ValueError("a local copy requires a positive byte count from the target operand")
-        return super().fit(points)
+    def supports(cls, axes):
+        if axes.keys() != {cls.axis} or type(axes[cls.axis]) is not int or axes[cls.axis] <= 0:
+            raise ValueError("a local copy requires a positive byte count from the target operand")
+        return True
 
 
 class AttentionPairs(AxisRegression):
     family = "attention_pairs"
     axis = "batch.attention_pairs"
     rate_field = "ns_per_pair"
+
+
+class LayerTokens(AxisRegression):
+    family = "layer_tokens"
+    axis = "parameter.model_tokens"
+    rate_field = "ns_per_token"

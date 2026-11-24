@@ -34,7 +34,7 @@ class ModelingCommand:
         self.operation = operation
         self.output, self.inputs = output.parent.resolve() / output.name, inputs
 
-    def arguments(self, allowance):
+    def arguments(self, allowance, options=()):
         command = ["docker", "run", "--rm", "--init", "--runtime", "runc", "--network", "none", "--name", self.name,
                    "--entrypoint", "/usr/bin/timeout", "--mount", f"type=bind,src={self.binary},dst=/app/prologue,readonly",
                    "--mount", f"type=bind,src={self.output.parent},dst=/output"]
@@ -45,7 +45,7 @@ class ModelingCommand:
             command.extend(("--mount", f"type=bind,src={source.resolve(strict=True)},dst={path},readonly"))
 
         command.extend((self.image, "--signal=KILL", f"{allowance}s", "/app/prologue", self.operation, *paths,
-                        f"/output/{self.output.name}"))
+                        f"/output/{self.output.name}", *options))
         return command
 
 
@@ -57,12 +57,12 @@ class ModelingProcess:
         self.image = subprocess.check_output(["docker", "image", "inspect", "--format", "{{.Id}}", image], text=True).strip()
         self.deadline = time.monotonic() + allowance
 
-    def run_model(self, operation, output, *inputs):
+    def run_model(self, operation, output, *inputs, options=()):
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("modeling allowance exhausted")
         command = ModelingCommand(self.binary, self.image, operation, output, *inputs)
         try:
-            subprocess.run(command.arguments(remaining), check=True, timeout=remaining)
+            subprocess.run(command.arguments(remaining, options), check=True, timeout=remaining)
         finally:
             OwnedContainers([command.name]).close()

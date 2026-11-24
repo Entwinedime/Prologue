@@ -23,6 +23,9 @@ def main() -> None:
     observation.add_argument("--local-attention", action="store_true", help="measure Decode on a native ModelRunner and KV pool")
     observation.add_argument("--local-prebuilt", action="store_true", help="observe the receiver assembling a native PD batch")
     observation.add_argument("--local-embedding", action="store_true", help="observe a vocabulary lookup across native TP shards")
+    observation.add_argument("--local-worker", action="store_true", help="read the initialized scheduler, model and pools")
+    observation.add_argument("--local-host", action="store_true", help="measure local scheduler work with the independent CPU probe")
+    observation.add_argument("--local-host-pair", action="store_true", help="capture and independently time one local worker cut")
     observation.add_argument("--attention", action="store_true", help="measure selected native Decode attention calls")
     interpret = commands.add_parser("interpret", help="interpret an SDK-exported worker recording")
     interpret.add_argument("--trace", type=Path, required=True)
@@ -36,7 +39,12 @@ def main() -> None:
         command.add_argument("--rank", type=int, required=True)
         command.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
-    if arguments.command == "capture" and arguments.local_copy:
+    if arguments.command == "capture" and arguments.local_host_pair:
+        import os
+        from prologue.integrations.frameworks.sglang.ascend.scheduler_runner import WorkerProbes
+
+        WorkerProbes(os.environ["PROLOGUE_SGLANG_REVISION"]).pair(arguments.input, arguments.output)
+    elif arguments.command == "capture" and arguments.local_copy:
         import os
 
         from prologue.integrations.platforms.ascend.copy_sampling import TensorCopySamples
@@ -48,8 +56,15 @@ def main() -> None:
         from prologue.integrations.frameworks.sglang.ascend.attention_runner import AttentionRunner
 
         AttentionRunner(json.loads(arguments.input.read_bytes()), arguments.output).run(os.environ["PROLOGUE_SGLANG_REVISION"])
-    elif arguments.command == "capture" and (arguments.local_prebuilt or arguments.local_embedding):
+    elif arguments.command == "capture" and (arguments.local_prebuilt or arguments.local_embedding or arguments.local_worker or arguments.local_host):
         import os
+
+        job = json.loads(arguments.input.read_bytes())
+        if arguments.local_worker and "calibration" in job:
+            from prologue.integrations.frameworks.sglang.ascend.scheduler_runner import WorkerProbes
+
+            WorkerProbes(os.environ["PROLOGUE_SGLANG_REVISION"]).calibration(job, arguments.output)
+            return
 
         # Queue allocation can precede the measured calls, including during native module initialization.
         runtime = arguments.output / "runtime"
@@ -57,10 +72,14 @@ def main() -> None:
         os.environ["PROLOGUE_NATIVE_RUNTIME_DIR"] = str(runtime)
         if arguments.local_embedding:
             from prologue.integrations.frameworks.sglang.ascend.embedding_runner import EmbeddingRunner as Runner
+        elif arguments.local_worker or arguments.local_host:
+            from prologue.integrations.frameworks.sglang.ascend.scheduler_runner import SchedulerRunner as Runner
         else:
             from prologue.integrations.frameworks.sglang.ascend.prebuilt_runner import PrebuiltRunner as Runner
 
-        Runner(json.loads(arguments.input.read_bytes()), arguments.output).run(os.environ["PROLOGUE_SGLANG_REVISION"])
+        runner = Runner(job, arguments.output)
+        options = {"host_timing": True} if arguments.local_host else {}
+        runner.run(os.environ["PROLOGUE_SGLANG_REVISION"], **options)
     elif arguments.command == "capture":
         from prologue.integrations.frameworks.sglang.observation.session import NativeServingSession
 

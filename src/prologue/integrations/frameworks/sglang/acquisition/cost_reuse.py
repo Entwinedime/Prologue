@@ -1,6 +1,7 @@
 """Qualify measured local batch bookkeeping across SGLang worker roles."""
 
 from collections import defaultdict
+from dataclasses import replace
 
 from prologue.performance.requirements import WorkPoint, cost_identity
 
@@ -27,7 +28,7 @@ class BatchHostReuse:
         needed = defaultdict(list)
         for point in missing:
             if point.domain in environments and cls.local(demand.definitions[point.definition], point.interval):
-                key = WorkPoint(environments[point.domain], point.definition, point.interval, point.phase, point.axes)
+                key = replace(point, domain=environments[point.domain])
                 needed[key].append(point)
         if not needed:
             return []

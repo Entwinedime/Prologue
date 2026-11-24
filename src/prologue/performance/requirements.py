@@ -62,6 +62,11 @@ class CostRequirements:
         self.points[point][target] += 1
         return point
 
+    def work_query(self, point):
+        definition = self.definitions[point.definition]
+        return {"domain": self.domains[point.domain], "definition": definition, "interval": point.interval,
+                "work": definition["work"][point.interval]["kind"], "features": point.features()}
+
     def graph(self, target, catalog):
         for _ in self.observe_graph(target, catalog):
             pass
@@ -83,7 +88,7 @@ class CostRequirements:
         self.targets[target] = "first_prediction_gap"
         domain = self.intern(self.domains, gap["domain"])
         definition = self.intern(self.definitions, gap["definition"])
-        self.add(target, domain, definition, gap["interval"], gap["features"])
+        return self.add(target, domain, definition, gap["interval"], gap["features"])
 
     def samples(self, target, source, *, basis):
         self.targets[target] = basis
@@ -146,14 +151,16 @@ class CostRequirements:
             domain = domains.setdefault(point.domain, {"definitions": {}, "work": {}})
             definitions = domain["definitions"]
             index = definitions.setdefault(point.definition, len(definitions))
-            key = index, point.interval, point.phase, status
-            definition = self.definitions[point.definition]
+            query = self.work_query(point)
+            value = query["features"]
+            choice = ModelBindings.for_interval(query["definition"], point.interval)
+            candidates = tuple(family.family for family in choice.candidates(value["axes"]))
+            key = index, point.interval, point.phase, status, candidates
             row = domain["work"].setdefault(key, {
                 "definition": index, "interval": point.interval, "phase": point.phase, "status": status,
-                "kind": definition["work"][point.interval]["kind"], "points": [],
-                "candidate_models": [family.family for family in ModelBindings.for_interval(definition, point.interval).candidates],
+                "kind": query["work"], "points": [],
+                "candidate_models": list(candidates),
             })
-            value = point.features()
             del value["phase"]
             value["targets"] = dict(self.points[point])
             if reasons is not None:

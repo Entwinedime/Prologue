@@ -8,7 +8,6 @@ from prologue.integrations.frameworks.sglang.calls import CallSegments
 from prologue.integrations.frameworks.sglang.clocks import DecisionClocks
 from prologue.integrations.frameworks.sglang.disaggregated_calls import DisaggregatedCalls
 from prologue.integrations.frameworks.sglang.host_reads import HostReads
-from prologue.integrations.frameworks.sglang.kv_layout import MhaKvLayout
 from prologue.integrations.frameworks.sglang.metadata_collectives import MetadataCollectives
 from prologue.integrations.frameworks.sglang.observation.receiver_table import ReceiverTableCopies
 from prologue.integrations.frameworks.sglang.resources import ResourceCalls
@@ -74,26 +73,32 @@ class ServingCuts(CallSegments):
                 ]
             return original(sender, output, *args, **kwargs)
 
-    def bind(self, result, server_args):
+    def bind(self, result):
         allocator = result.token_to_kv_pool_allocator
         allocator_type = type(allocator)
         allocator._prologue_allocation = AllocationABI(f"{allocator_type.__module__}.{allocator_type.__qualname__}")
 
-        # Diagnostics retain original readers before semantic cuts are installed.
-        if self.effects:
-            self.observe_pools(result, server_args)
         self.resources.bind(result.tree_cache, allocator, result.req_to_token_pool)
 
     def build(self, original, *args, **kwargs):
         result = original(*args, **kwargs)
-        self.bind(result, kwargs["server_args"])
+
+        # Diagnostics retain the original readers before attaching the same cuts used on an initialized worker.
+        if self.effects:
+            self.observe_pools(result, kwargs["server_args"])
+        self.bind(result)
         return result
 
     def install(self) -> None:
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
+        HookRegistry.register("sglang.srt.mem_cache.kv_cache_builder.build_kv_cache", self.build, HookType.AROUND)
+        self.install_calls()
+
+    def install_calls(self) -> None:
+        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
+
         for target, hook in (
-            ("sglang.srt.mem_cache.kv_cache_builder.build_kv_cache", self.build),
             ("sglang.srt.managers.scheduler.Scheduler.process_batch_result", self.result),
             ("sglang.srt.managers.scheduler_components.output_sender.SenderWrapper.send_output", self.publication),
         ):
@@ -120,10 +125,7 @@ class FlowScopes(ServingCuts):
 
     @property
     def protocol_enabled(self):
-
-        # Protocol facts cover every worker, independently of representative device profiling.
-        window = self.observation.window
-        return window.phase == "source" and not window.drained
+        return self.observation.protocol_enabled
 
     @property
     def scheduler(self):
@@ -263,18 +265,10 @@ class FlowScopes(ServingCuts):
 
     def observe_pools(self, result, server_args):
         allocator = result.token_to_kv_pool_allocator
-        cache_type = type(result.tree_cache)
-        self.observation.implementation["allocator"] = allocator._prologue_allocation.implementation
-
-        # Record the effective native choice, including model-driven cache disabling.
-        self.observation.implementation["cache"] = {
-            "type": f"{cache_type.__module__}.{cache_type.__qualname__}",
-            "disabled": result.disable_radix_cache,
-            "eviction_policy": server_args.radix_eviction_policy.lower(),
-        }
 
         # A PD receiver can finish without a model call; pool geometry belongs to construction, not attention.
-        self.observation.kv_layout = MhaKvLayout.from_pool(allocator.get_kvcache())
+        self.observation.worker.pools(result, server_args)
+        self.observation.kv_layout = self.observation.worker.kv_layout
         self.observation.prepare_roles()
         if self.observation.resource_history is not None:
             self.observation.resource_history.bind(result.tree_cache, allocator, result.req_to_token_pool)

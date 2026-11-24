@@ -39,13 +39,15 @@ class LocalPrebuilt:
         return members
 
     @classmethod
+    def session_key(cls, query, deployment):
+        return query["domain"], {k: query["parameters"][k] for k in cls.capacity}
+
+    @classmethod
     def prepare(cls, queries, deployment, arguments, limit):
-        first = queries[0]
-        domain = first["domain"]
-        capacity = {k: first["parameters"][k] for k in cls.capacity}
+        domain, capacity = cls.session_key(queries[0], deployment)
         if any(type(value) is not int or value <= 0 for value in capacity.values()):
             raise ValueError("receiver pool capacities must be positive integers")
-        if any(q["domain"] != domain or any(q["parameters"][k] != v for k, v in capacity.items()) for q in queries):
+        if any(cls.session_key(q, deployment) != (domain, capacity) for q in queries):
             raise EvidenceGap("different_sessions_required", conditions=["worker", "pool_geometry"])
         impl = domain["implementation"]
         if (not impl["cache"]["disabled"] or capacity["page_size"] != impl["page_size"]
@@ -67,7 +69,7 @@ class LocalPrebuilt:
         )
 
     @classmethod
-    def qualify(cls, queries, recording):
+    def qualify(cls, queries, recording, timeout=None):
         answers = []
         measurements = json.loads((recording.source / recording.manifest["measurements"]).read_bytes())
         facts = json.loads((recording.source / recording.manifest["facts"]).read_bytes())

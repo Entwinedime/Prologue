@@ -54,13 +54,19 @@ class NativeAttempt:
             if self.state["inputs"] != self.inputs or job != self.inputs["job"]:
                 raise ValueError("capture inputs, deployment or image changed; use a new task directory")
             return
-        if any(path.name != ".lock" for path in self.output.iterdir()):
+        job = self.output / "input.json"
+        if any(path.name not in {".lock", job.name} for path in self.output.iterdir()):
             raise ValueError("new capture task requires an empty directory")
         self.state = {"inputs": self.inputs, "attempts": []}
-        write_json(self.output / "input.json", self.inputs["job"], indent=2, replace=False)
+        if not job.exists():
+            write_json(job, self.inputs["job"], indent=2, replace=False)
+        elif json.loads(job.read_bytes()) != self.inputs["job"]:
+            raise ValueError("interrupted capture preparation belongs to a different job")
         self.save()
 
-    def recover(self, attempt: dict) -> None:
+    @staticmethod
+    def recover(directory, state):
+        attempt = state["attempts"][-1]
         owned = OwnedContainers([attempt["container"]])
         if attempt["exit_code"] is None and owned.remaining():
             status = json.loads(subprocess.check_output([
@@ -74,7 +80,17 @@ class NativeAttempt:
         attempt["status"] = "exited" if attempt["exit_code"] == 0 else "failed"
         attempt["error"] = (None if attempt["status"] == "exited"
                             else "interrupted native attempt; reserved time remains charged")
-        self.save()
+        write_json(directory / "execution.json", state, indent=2)
+
+    @classmethod
+    def recover_pending(cls, directory):
+        if not (attempts := cls.attempts(directory)) or attempts[-1]["status"] != "running":
+            return
+        with (directory / ".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            state = json.loads((directory / "execution.json").read_bytes())
+            if state["attempts"][-1]["status"] == "running":
+                cls.recover(directory, state)
 
     def capture(self, allowance_ns: int) -> None:
         number = len(self.state["attempts"]) + 1
@@ -125,7 +141,7 @@ class NativeAttempt:
             self.prepare()
             attempts = self.state["attempts"]
             if attempts and attempts[-1]["status"] == "running":
-                self.recover(attempts[-1])
+                self.recover(self.output, self.state)
             spent_ns = sum(attempt["charged_ns"] for attempt in attempts)
             if not attempts or attempts[-1]["status"] != "exited":
                 if len(attempts) >= self.arguments.attempt_limit or spent_ns >= self.limit_ns:

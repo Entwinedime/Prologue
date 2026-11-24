@@ -1,6 +1,5 @@
 """Translate simulated arrivals at the native tokenizer receive boundary."""
 
-from array import array
 import sys
 
 import zmq
@@ -8,9 +7,7 @@ from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
 from prologue.contracts.workload.routing import RoutedContent
 from sglang.srt.disaggregation.utils import DisaggregationMode
-from sglang.srt.managers.io_struct import BatchTokenizedGenerateReqInput, TokenizedGenerateReqInput
-from sglang.srt.observability.req_time_stats import APIServerReqTimeStats
-from sglang.srt.sampling.sampling_params import SamplingParams
+from sglang.srt.managers.io_struct import BatchTokenizedGenerateReqInput
 
 
 class RequestInput:
@@ -60,26 +57,11 @@ class RequestInput:
 
     def tokenize(self, index):
         request = self.submissions.requests[index]
-        parameters = SamplingParams(**self.submissions.sampling(index))
-        parameters.normalize(None)
-        parameters.verify(self.vocab_size)
-        return TokenizedGenerateReqInput(
-            rid=self.submissions.native_id(self.submissions.observed, index),
-            input_text=None,
-            input_ids=array("q", self.submissions.content.prompt(request["id"])),
-            input_embeds=None,
-            mm_inputs=None,
-            token_type_ids=None,
-            sampling_params=parameters,
-            return_logprob=False,
-            logprob_start_len=-1,
-            top_logprobs_num=0,
-            token_ids_logprob=None,
-            stream=True,
+        return self.submissions.tokenized(
+            self.submissions.native_id(self.submissions.observed, index), self.submissions.content.prompt(request["id"]),
+            self.submissions.sampling(index), self.vocab_size, self.mode,
             extra_key=request["id"] if self.routing is not None else None,
-            bootstrap_host="prologue-prefill" if self.mode != DisaggregationMode.NULL else None,
-            bootstrap_room=index + 1 if self.mode != DisaggregationMode.NULL else None,
-            time_stats=APIServerReqTimeStats(disagg_mode=self.mode),
+            room=index + 1 if self.mode != DisaggregationMode.NULL else None,
         )
 
     def request_id(self, identity):

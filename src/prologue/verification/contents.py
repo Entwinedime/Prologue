@@ -273,7 +273,7 @@ class GraphContents(ActionScopes):
                         boundary["tensor"].update(
                             storage_alias=storages[storage], version=tensor["version"] - versions[storage],
                             writer=paths.get(tensor["writer"], "external"),
-                            allocation="internal" if tensor["allocation"] in paths else "external",
+                            allocation=paths.get(tensor["allocation"], "external"),
                             buffer=tensor["buffer"],
                         )
                 ports[f"{port['direction']}:{port['name']}"] = boundary

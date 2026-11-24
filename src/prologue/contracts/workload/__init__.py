@@ -65,7 +65,7 @@ class WorkloadContent:
         if self.vocabulary > size:
             raise ValueError(f"content needs {self.vocabulary} distinct sibling tokens, model vocabulary has {size}")
 
-    def prompt(self, identity: str) -> list[int]:
+    def prompt_runs(self, identity: str) -> list[tuple[int, int]]:
         request = self.requests[identity]
         path = []
         parent = request.get("prefix_id")
@@ -74,9 +74,14 @@ class WorkloadContent:
             path.append((self.prefix_tokens[parent], prefix["tokens"]))
             parent = prefix.get("parent")
 
-        tokens = [token for token, length in reversed(path) for _ in range(length)]
-        tokens.extend([self.output_token(identity)] * (request["prompt_tokens"] - len(tokens)))
-        return tokens
+        path.reverse()
+        private = request["prompt_tokens"] - self.lengths[request.get("prefix_id")]
+        if private:
+            path.append((self.output_token(identity), private))
+        return path
+
+    def prompt(self, identity: str) -> list[int]:
+        return [token for token, length in self.prompt_runs(identity) for _ in range(length)]
 
     def output_token(self, identity: str) -> int:
 

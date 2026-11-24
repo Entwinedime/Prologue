@@ -2,6 +2,7 @@
 
 import json
 from collections import defaultdict
+from itertools import pairwise
 from pathlib import Path
 
 from prologue.integrations.frameworks.sglang.kv_layout import KvBufferAddresses, MhaKvLayout
@@ -204,7 +205,7 @@ class NativeKvFacts:
             services.sort(key=lambda scope: scope["host_interval"]["begin_counter"])
             if (any(scope["parent"] != parent or scope["thread"] != services[0]["thread"] for scope in services)
                     or any(a["host_interval"]["end_counter"] > b["host_interval"]["begin_counter"]
-                           for a, b in zip(services, services[1:]))):
+                           for a, b in pairwise(services))):
                 raise ValueError("native chunk services lack one serial synchronous caller")
             self.recording["scopes"][parent]["ports"].append({
                 "name": "transfer.complete", "direction": "output", "use": "signal",
@@ -214,7 +215,7 @@ class NativeKvFacts:
 
     def protocol_timings(self):
         recording = self.recording
-        if recording["kv_session"] is None:
+        if recording["environment"]["implementation"]["disaggregation_mode"] == "null" or recording["kv_session"] is None:
             return None
 
         reservations, transfers = [], []

@@ -36,12 +36,11 @@ class ModelScopes:
     }
 
     @staticmethod
-    def install_engine_hooks(observer) -> None:
+    def install_batch_hooks(observer) -> None:
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
         for target, hook in (
             ("sglang.srt.managers.scheduler.Scheduler.run_batch", observer.run_batch),
-            ("sglang.srt.model_executor.model_runner.ModelRunner.load_model", observer.load_model),
             ("sglang.srt.model_executor.model_runner.ModelRunner.forward", observer.forward),
             ("sglang.srt.model_executor.model_runner.ModelRunner.sample", observer.sample),
         ):

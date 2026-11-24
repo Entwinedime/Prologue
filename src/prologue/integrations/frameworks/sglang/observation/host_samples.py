@@ -151,14 +151,17 @@ class NativeHostSamples(ServingCuts):
 
     def load_model(self, original, runner):
         result = original(runner)
-        modules = dict(runner.model.named_modules())
+        self.attach_model(runner.model)
+        return result
+
+    def attach_model(self, model):
+        modules = dict(model.named_modules())
         for site, role in ModelScopes.selected(modules).items():
             module = modules[site]
             implementation = f"{type(module).__module__}.{type(module).__qualname__}"
             forward = module.forward
             body_signature = signature(forward) if role == "model_body" else None
             module.forward = update_wrapper(partial(self.module, role, site, implementation, body_signature, forward), forward)
-        return result
 
     def observe_expert_layers(self, experts):
         for site, module in experts.items():
@@ -225,7 +228,8 @@ class NativeHostSamples(ServingCuts):
         if self.protocol is not None:
             for target, hook in self.protocol.hooks():
                 HookRegistry.register(target, hook, HookType.AROUND)
-        ModelScopes.install_engine_hooks(self)
+        HookRegistry.register("sglang.srt.model_executor.model_runner.ModelRunner.load_model", self.load_model, HookType.AROUND)
+        ModelScopes.install_batch_hooks(self)
         self.communications.install(self.observe_expert_exchange if self.ep_size > 1 else None)
         if self.mode != "null":
             NativeKvScopes(self).install()

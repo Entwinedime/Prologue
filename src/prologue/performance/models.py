@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from statistics import mean, median
 
-from .backends import AttentionPairs, BoundedCurve, StartupTransfer
+from .backends import AttentionPairs, BoundedCurve, LayerTokens, StartupTransfer
 
 
 class ServiceMeasurements:
@@ -47,15 +47,15 @@ class ModelChoice:
     alternatives: tuple = ()
     comparison_axis: str | None = None
 
-    @property
-    def candidates(self):
-        return (*self.alternatives, self.default)
+    def candidates(self, axes):
+        return [family for family in self.alternatives if family.supports(axes)] + [self.default]
 
     def fit(self, points, report):
         selected = self.default.fit(points)
-        if not self.alternatives:
+        *alternatives, _ = self.candidates(points[0][0])
+        if not alternatives:
             return selected
-        fits = {family: family.fit(points) for family in self.alternatives}
+        fits = {family: family.fit(points) for family in alternatives}
         axis = self.comparison_axis
         if axis not in points[0][0]:
             return selected
@@ -99,12 +99,15 @@ class ModelBindings:
     rules = {
         ("transfer", "local_copy"): ModelChoice(alternatives=(StartupTransfer,), comparison_axis=StartupTransfer.axis),
         ("device", "attention"): ModelChoice(alternatives=(AttentionPairs,), comparison_axis=AttentionPairs.axis),
+        ("device", "layer"): ModelChoice(alternatives=(LayerTokens,), comparison_axis=LayerTokens.axis),
     }
 
     @classmethod
     def for_interval(cls, definition, interval):
         work = definition["work"][interval]
-        role = "local_copy" if "copy" in work else definition.get("external", {}).get("operation", definition.get("role"))
+        role = definition.get("role")
+        if "copy" in work or definition.get("external", {}).get("operation") == "local_copy":
+            role = "local_copy"
         return cls.rules.get((work["kind"], role), cls.default)
 
     @classmethod

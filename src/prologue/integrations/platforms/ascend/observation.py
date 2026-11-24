@@ -428,7 +428,7 @@ class AscendObservation:
                 self.span(scope, resource, begin, end, "collective")
             self.collectives[scope] = (resource, begin, end, self.trace.dequeue[correlation])
             if self.evidence and (signals := self.trace.notifications.observed(tasks, self.trace.clock)):
-                self.collective_notifications[scope] = signals
+                self.collective_notifications[str(scope)] = signals
         self.device_index = self.span_index("stream")
 
     def auxiliary_stream_spans(self) -> None:
@@ -799,7 +799,7 @@ class AscendObservation:
                 stream = task.stream
                 if stream not in tails or task.end > tails[stream].end:
                     tails[stream] = task
-            for stream, task in tails.items():
+            for task in tails.values():
 
                 # Payload submission belongs to its coarse interval, not to the fence's last internal kernel.
                 if "Event" in row["api"]:

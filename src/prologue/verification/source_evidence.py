@@ -270,7 +270,7 @@ class ProductionEvidence:
             return result | {"status": "worker_count_mismatch"}
         for name, shard in zip(paths, observation["shards"], strict=True):
             native = json.loads(asset_path(production, name).read_bytes())
-            body = json.loads(asset_path(catalog.directory, shard["body"]).read_bytes())
+            body = catalog.read_shard(shard)
 
             # A portable definition keeps its original ID even if its position in the file changes.
             definitions = body.pop("definitions")

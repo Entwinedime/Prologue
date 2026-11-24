@@ -8,20 +8,33 @@ from prologue.acquisition.recording import PublishedCapture
 from prologue.artifacts import write_json
 from prologue.integrations.frameworks.sglang.acquisition.host_scopes import NativeHostCalls
 from prologue.integrations.frameworks.sglang.ascend.launch import SGLangAscendLaunch
-from prologue.integrations.platforms.ascend.host_alignment import AscendHostAlignment
+from prologue.integrations.platforms.ascend.host_alignment import AscendHostAlignment, ThreadService
 from prologue.integrations.platforms.ascend.trace import AscendTrace
 from prologue.integrations.runtimes.pytorch.protocol_work import CpuProtocolWork
 from prologue.performance.samples import ServiceSamples, WorkCatalog
 
 
 class HostCostSamples:
-    def __init__(self, arguments):
+    def __init__(self, arguments=None):
         self.arguments = arguments
         self.qualification = Counter()
 
     @staticmethod
     def read(path):
         return json.loads(path.read_text())
+
+    @classmethod
+    def local(cls, original, timed, catalog):
+        inputs = ("image", "physical_devices", "framework_revision")
+        if (original.job != timed.job or original.rank != timed.rank or original.boundary() != timed.boundary()
+                or any(original.recording.inputs[k] != timed.recording.inputs[k] for k in inputs)):
+            raise ValueError("independent CPU probe changed the qualified native cut or its placement")
+        probe = timed.read("host")
+        rank = original.rank
+        raw = cls.read(original.source / f"rank-{rank}.json")
+        if raw["environment"] != probe["environment"] or probe["rank"] != rank or probe["clock"] != "monotonic_raw_ns":
+            raise ValueError("local CPU probe differs from the observed native worker or clock")
+        return cls().measure(catalog, {rank: probe}, rank, raw, original.source, original.source / "sdk/trace.json", timed.source)
 
     @staticmethod
     def records(path):
@@ -42,12 +55,13 @@ class HostCostSamples:
             if not active:
                 raise ValueError("post-warmup specialization lies outside the observed native calls")
 
-            # A parent interval may include the load even when the allocator runs before model execution.
-            excluded.update(scope for scope, parent in active.items() if parent not in active)
-        return excluded
+            # The hook identifies the containing call, not the compiler's own end. Exclude that complete leaf window.
+            excluded.update(active.keys() - active.values())
+        return {s["id"]: (s["thread"], *s["raw_interval"]) for s in probe["scopes"] if s["id"] in excluded}
 
-    def collectives(self, records, rank):
+    def collectives(self, records, rank, cold):
         channels = defaultdict(lambda: defaultdict(list))
+        by_thread = {actor: ThreadService.by_thread(windows.values()) for actor, windows in cold.items()}
         for actor, record in records.items():
             for scope in record["scopes"]:
                 group = scope.get("group")
@@ -64,6 +78,9 @@ class HostCostSamples:
                 continue
             local = members.index(rank)
             for participants in zip(*(actors[actor] for actor in members), strict=True):
+                if any(ThreadService.within(by_thread[actor].get(scope["thread"], ()), *scope["raw_interval"])
+                       for actor, scope in zip(members, participants, strict=True)):
+                    continue
                 if len({NativeHostCalls.identity(scope) for scope in participants}) != 1:
                     self.qualification["collective_operands"] += 1
                     continue
@@ -128,7 +145,6 @@ class HostCostSamples:
         paths = {int(actor): host_root / relative for actor, relative in instance["host_samples"].items()}
         path = paths[rank]
         records = {actor: self.read(measurement) for actor, measurement in paths.items()}
-        probe = records[rank]
         facts = self.read(self.arguments.facts)
         original = self.read(source_root / f"rank-{rank}.json")
         if (facts["measurements"]["window_ns"] != catalog.window
@@ -138,25 +154,32 @@ class HostCostSamples:
                 or any(record["rank"] != actor or record["clock"] != "monotonic_raw_ns" for actor, record in records.items())):
             raise ValueError("host timing requires all CPU participants from one run on the common RAW clock")
 
-        excluded = self.cold_scopes(probe)
+        report = self.measure(catalog, records, rank, original, source_root, self.arguments.trace, path.parent)
+        report["observation"] = {"detailed": str(detailed.resolve()), "host": str(lightweight.resolve()), "rank": rank}
+        report["native_recordings"] = [source_recording.attempt_id, host_recording.attempt_id]
+        write_json(self.arguments.output, report, replace=False)
+
+    def measure(self, catalog, records, rank, original, source_root, trace_path, directory):
+        probe = records[rank]
+        graph = catalog.graph
+        cold = {actor: self.cold_scopes(record) for actor, record in records.items()}
         source_calls = NativeHostCalls(original["scopes"])
-        observed_calls = NativeHostCalls(probe["scopes"], excluded)
+        observed_calls = NativeHostCalls(probe["scopes"])
         pairs, unmatched = source_calls.exact_pairs(observed_calls)
         self.qualification["unmatched_calls"] += unmatched
         local_pairs = source_calls.local_pairs(observed_calls, pairs)
 
         # A host-only window runs all CPU ranks together even when device shards share a card.
-        collectives = self.collectives(records, rank)
+        collectives = self.collectives(records, rank, cold)
         timing = probe["timing"]
-        directory = path.parent
         queues = self.read(directory / timing["queues"])
         if queues["clock"] != "monotonic_raw_ns" or queues["unpaired"]:
             raise ValueError("native CPU timing requires paired queue evidence on the RAW clock")
         profile, = (source_root / "native" / f"rank-{rank}").glob("*_ascend_pt")
-        trace = AscendTrace(profile, source_root / "runtime", original, self.arguments.trace)
+        trace = AscendTrace(profile, source_root / "runtime", original, trace_path)
         alignment = AscendHostAlignment(
             trace, original["scopes"], probe["scopes"], queues["commands"], self.records(directory / timing["runtime"]),
-            self.records(directory / timing["activity"]), probe["auxiliary_intervals"],
+            self.records(directory / timing["activity"]), probe["auxiliary_intervals"], cold[rank].values(),
         )
         exact = alignment.cuts(pairs, original["state_queries"])
         local = alignment.cuts(local_pairs, original["state_queries"], strict_runtime=True) if local_pairs else None
@@ -197,8 +220,6 @@ class HostCostSamples:
                 if actor == rank and duration is not None:
                     samples.add_external(identity, "transfer", features, duration)
         report = samples.document({"host": sum(missing.values())})
-        report["observation"] = {"detailed": str(detailed.resolve()), "host": str(lightweight.resolve()), "rank": rank}
-        report["native_recordings"] = [source_recording.attempt_id, host_recording.attempt_id]
         batches = {"detailed": 0, "host": 0, "matched": 0}
         for scope in original["scopes"]:
             if scope["role"] == "run_batch":
@@ -207,9 +228,9 @@ class HostCostSamples:
         batches["host"] = sum(scope["role"] == "run_batch" for scope in probe["scopes"])
         report["qualification"] = {
             "native_batches": batches,
-            "excluded_cold_scopes": sorted(excluded),
+            "excluded_cold_scopes": sorted(cold[rank]),
             "queue_correction_ns": queues["raw_correction_ns"],
             "measured": dict(measured), "missing": dict(missing),
             "alignment": dict(self.qualification + exact.misses), "lost_threads": alignment.service.loss,
         }
-        write_json(self.arguments.output, report, replace=False)
+        return report

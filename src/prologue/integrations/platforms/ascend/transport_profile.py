@@ -13,11 +13,11 @@ class AscendTransportProfile:
     uniform = {"all_reduce", "all_gather", "all_gather_into_tensor", "reduce_scatter", "reduce_scatter_tensor",
                "broadcast", "transfer"}
 
-    def __init__(self, capture, peers, trace, observation, image, deployment):
+    def __init__(self, worker_sources, peers, trace, observation, image, deployment):
         self.qualification = {"observation": observation, "source_image": image}
         placement = {}
         for actor in peers:
-            device, = (capture / "native" / f"rank-{actor}").glob("*/PROF_*/device_*")
+            device, = (worker_sources[actor] / "native" / f"rank-{actor}").glob("*/PROF_*/device_*")
             number = int(device.name.removeprefix("device_"))
             info = json.loads((device / f"info.json.{number}").read_text())
             placement[str(actor)] = {"host": info["hostname"], "device": number, "driver": info["drvVersion"]}

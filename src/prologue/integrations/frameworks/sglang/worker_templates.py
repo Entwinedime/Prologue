@@ -15,6 +15,12 @@ class WorkerDomain:
         return domain | {name: role[name] for name in cls.role_fields if name in role}
 
     @staticmethod
+    def execution_domain(environment):
+        domain = {k: v for k, v in environment.items() if k not in {"device_index", "initial_state", "closure"}}
+        domain["parallel"] = {k: v for k, v in domain["parallel"].items() if k != "rank"}
+        return domain
+
+    @staticmethod
     def rank(domain):
         matches = [role["parallel"]["rank"] for role in domain["worker_roles"].values()
                    if all(role["parallel"].get(key) == value for key, value in domain["parallel"].items())]

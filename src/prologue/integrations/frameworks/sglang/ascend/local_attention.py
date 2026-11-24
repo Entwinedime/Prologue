@@ -28,11 +28,15 @@ class LocalAttention:
                 and parallel["logical_tp"] == parallel["logical_pp"] == parallel["logical_ep"] == 1
                 and definition.get("role") == "attention" and not definition["children"])
 
+    @staticmethod
+    def session_key(query, deployment):
+        return query["domain"], query["definition"]
+
     def prepare(self, queries, deployment, arguments, limit):
-        domain, definition = queries[0]["domain"], queries[0]["definition"]
+        domain, definition = self.session_key(queries[0], deployment)
         contexts = set()
         for q in queries:
-            if q["domain"] != domain or q["definition"] != definition:
+            if self.session_key(q, deployment) != (domain, definition):
                 raise EvidenceGap("different_sessions_required", conditions=["worker", "attention_cut"])
             lengths = AttentionCuts.contexts(q["features"]["axes"])
             if not lengths:
@@ -78,7 +82,7 @@ class LocalAttention:
                 and decode["written"] == [row[-1] for row in decode["locations"]])
 
     @classmethod
-    def qualify(cls, queries, recording):
+    def qualify(cls, queries, recording, timeout=None):
         inputs = recording.inputs
         domain, cut = inputs["domain"], inputs["cut"]
         record = json.loads((recording.source / recording.manifest["measurements"]).read_bytes())

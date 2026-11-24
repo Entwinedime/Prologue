@@ -36,6 +36,14 @@ class StagedWork:
 
 
 class ShardTransport:
+    @staticmethod
+    def world(size, rank, rendezvous):
+        from sglang.srt.distributed import parallel_state
+
+        # SGLang reuses this host group for real logical shards placed together on device zero.
+        distributed.init_process_group("gloo", init_method=rendezvous, world_size=size, rank=rank)
+        parallel_state.init_distributed_environment(size, rank, rendezvous, local_rank=0, backend="gloo")
+
     def __init__(self, directory, auxiliary, record=None):
         self.device = Path(directory) / ".shard-device.lock"
         self.auxiliary = auxiliary

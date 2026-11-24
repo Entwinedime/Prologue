@@ -79,7 +79,10 @@ class AscendMarkers:
                 "device": torch_npu.npu.get_device_name(), "device_index": torch_npu.npu.current_device()}
 
     def timing_evidence(self):
-        result = {"device_clock": self.clock_samples, "host_observation": self.host_observation()}
+
+        # A submitted operation can finish after the host window closes. Every caller exports after its device fence.
+        drained = AscendClock.sample(torch_npu.npu.current_device())
+        result = {"device_clock": [*self.clock_samples, drained], "host_observation": self.host_observation()}
         if self.specializations is not None:
             result["specialization_loads"] = self.specializations.loads
         return result

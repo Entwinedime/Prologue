@@ -5,19 +5,17 @@ from __future__ import annotations
 import json
 import os
 import time
-from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 from prologue.artifacts import write_json
-from prologue.integrations.frameworks.sglang.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.configuration import NativeConfiguration
-from prologue.integrations.frameworks.sglang.observation.call_scopes import NativeCallObservation
+from prologue.integrations.frameworks.sglang.observation.model_calls import NativeModelObservation
 from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
 
 
-class SGLangObservation(NativeCallObservation):
+class SGLangObservation(NativeModelObservation):
     def __init__(self, description: dict[str, Any], markers) -> None:
         from prologue.integrations.frameworks.sglang.observation.content import NativeContent
         from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
@@ -42,38 +40,23 @@ class SGLangObservation(NativeCallObservation):
             self.routing = NativeExpertRoutes(description, self.content.execution_aliases, metadata=self.tensors.metadata,
                                              auxiliary=self.tensors.auxiliary)
 
-    def load_model(self, original: Any, runner: Any) -> Any:
-        from sglang.srt.layers.radix_attention import RadixAttention
-        from sglang.srt.runtime_context import get_parallel
+    @property
+    def protocol_enabled(self):
 
-        from prologue.integrations.frameworks.sglang.groups import ParallelGroups
+        # Nonrepresentative workers still supply protocol evidence until the source group drains.
+        return self.window.phase == "source" and not self.window.drained
+
+    def load_model(self, original: Any, runner: Any) -> Any:
         from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
+        from prologue.integrations.frameworks.sglang.observation.role_plan import NativeWorkerLayout
 
         result = original(runner)
-        self.model = runner.model
         self.content.content.check_vocabulary(runner.model_config.vocab_size)
-        layers = [module.layer_id for module in self.model.modules() if isinstance(module, RadixAttention)]
-        topology = get_parallel()
-        self.parallel = {
-            "rank": self.description["rank_offset"] + runner.pp_rank * runner.tp_size + runner.tp_rank,
-            "tp_rank": runner.tp_rank, "pp_rank": runner.pp_rank,
-            "logical_tp": runner.tp_size, "logical_pp": runner.pp_size,
-            "logical_ep": topology.moe_ep_size, "ep_rank": topology.moe_ep_rank,
-            "layer_range": [min(layers), max(layers) + 1],
-        }
+        self.worker = NativeWorkerLayout(runner, self.framework_revision, self.description["rank_offset"])
+        self.parallel, self.groups, self.implementation = self.worker.parallel, self.worker.groups, self.worker.implementation
         self.tensors.namespace = f"rank/{self.parallel['rank']}/"
-
-        self.groups = ParallelGroups()
-        self.implementation = {
-            "framework_revision": self.framework_revision,
-            "model": runner.model_config.hf_config.to_dict(), "dtype": str(runner.model_config.dtype),
-            "attention_backend": runner.server_args.attention_backend,
-            "page_size": runner.server_args.page_size,
-            "load_format": runner.server_args.load_format,
-            "disaggregation_mode": self.description["mode"],
-        }
         self.modules = ModelScopes(self)
-        self.modules.attach_model(self.model)
+        self.modules.attach_model(runner.model)
         if self.routing is not None:
             from prologue.integrations.frameworks.sglang.observation.expert_scopes import ExpertScopes
 
@@ -82,21 +65,12 @@ class SGLangObservation(NativeCallObservation):
         return result
 
     def prepare_roles(self) -> None:
-        from prologue.integrations.frameworks.sglang.observation.role_plan import WorkerRolePlan
-
         # All model stages are initialized together; a later scheduler request cannot run a world collective.
         sites = set(self.modules.bindings)
         if self.routing is not None:
             sites.update(self.experts.sites)
-        facts = {
-            "parallel": self.parallel,
-            "groups": self.groups.document(self.description["rank_offset"]),
-            "kv_layout": self.kv_layout.document(),
-            "modules": [path for path, _ in self.model.named_modules() if path in sites],
-            "expert_layers": self.modules.expert_layers,
-        }
         conditions = () if self.routing is None else self.routing.geometry.observation_conditions(self.routing.input["requests"])
-        self.roles = WorkerRolePlan(self.model, facts, conditions)
+        self.roles = self.worker.roles(sites, self.modules.expert_layers, conditions)
         if any(worker["expert_layers"] for worker in self.roles.workers) != (self.routing is not None):
             raise ValueError("MoE models require a declared expert topology and routes; dense models do not accept them")
         self.content.configure(self.roles.workers)
@@ -163,91 +137,6 @@ class SGLangObservation(NativeCallObservation):
         self.window.receive(identities, received_ns, ingress=ingress, attempt=attempt)
         return requests
 
-    def batch_work(self, batch: Any) -> dict[str, Any]:
-        return self.calls.batch_work(batch)
-
-    @contextmanager
-    def model_call(self, role, original, batch, *, stream=None):
-        work = self.batch_work(batch)
-        parameters = BatchTensors.parameters(batch, sum(member["new_tokens"] for member in work["members"]))
-        parameters.update(BatchTensors.model_parameters(batch, parameters["input_tokens"]))
-        bindings = self.routing.geometry.bind_batch(parameters, work["members"]) if self.routing is not None else {}
-
-        with self.call(role, original, parameters=parameters, work=work, device=True, stream=stream) as call:
-            yield call
-
-            # Children inherit batch inputs while running. Only the model call owns the peer bindings.
-            call.record["work"].update(bindings)
-
-    def run_batch(self, original: Any, scheduler: Any, batch: Any, *args: Any, **kwargs: Any) -> Any:
-        if not self.active:
-            return original(scheduler, batch, *args, **kwargs)
-        with self.request_state.members(batch), self.model_call("run_batch", original, batch) as call:
-            if self.resource_history is not None:
-                self.resource_history.batch(call.record["id"], batch)
-            parent = self.capture.scopes[call.record["parent"]]
-            if parent["role"] == "launch":
-
-                # PP launch and its run_batch child share the same declared batch ABI.
-                call.record["arguments"] = {name: name for name in call.record["parameters"] if name not in call.record["constants"]}
-            result = original(scheduler, batch, *args, **kwargs)
-            self.result_outputs(call, result)
-            return result
-
-    def batch_ports(
-        self, call: Any, batch: Any, direction: str,
-        *, names=("request_slots", "sequence_lengths", "cache_locations"),
-    ) -> None:
-        columns = BatchTensors.boundaries(batch)
-        for name in names:
-            tensor, shape = columns[name]
-            call.port(name, direction, self.tensors.observe(tensor, shape), use="device")
-
-    def sample(self, original: Any, runner: Any, *args: Any, **kwargs: Any) -> Any:
-        if not self.active:
-            return original(runner, *args, **kwargs)
-        with self.call("sample", original, device=True):
-            return original(runner, *args, **kwargs)
-
-    def forward(self, original: Any, runner: Any, batch: Any, *args: Any, **kwargs: Any) -> Any:
-        if not self.active:
-            return original(runner, batch, *args, **kwargs)
-
-        # The initialized native registry owns these allocations across calls; a module path does not.
-        with self.tensors.metadata():
-            registry = runner.eager_runner._eager_registry
-            owners = {}
-            for name in sorted(registry.slot_names()):
-                tensor = registry.get_slot(name).buffer
-                if tensor is not None:
-                    owner = owners.setdefault(tensor.untyped_storage()._cdata, f"eager/{name}")
-                    self.tensors.bind_buffer(tensor, owner)
-        with self.call("model", original, device=True) as call:
-            call.record["parameters"].update(BatchTensors.input_dimensions(batch.input_ids.numel(), batch.batch_size))
-            self.batch_ports(call, batch, "input")
-            result = original(runner, batch, *args, **kwargs)
-        self.capture.runtime.checkpoint()
-        return result
-
-    def model_geometry(self, dimensions: dict[str, int]) -> None:
-
-        # Check actual model tensors against the shared native padding contract, without replacing predicted features.
-        parameters = self.capture.scopes[self.capture.current.get()]["parameters"]
-        if any(parameters[name] != actual for name, actual in dimensions.items()):
-            raise ValueError("native model geometry differs from the declared eager batch layout")
-
-    def result_outputs(self, call: Any, output: Any) -> None:
-        tensor = output.next_token_ids
-        if tensor is not None:
-            use = "host" if tensor.device.type == "cpu" else "device"
-            call.port("next_token_ids", "output", self.tensors.observe(tensor, ["members"]), use=use)
-
-        proxy = output.pp_hidden_states_proxy_tensors
-        if proxy is not None:
-            for name, tensor in PipelineABI.proxy_tensors(proxy).items():
-                rule = self.tensors.shape_rule(tensor)
-                call.port(f"proxy.{name}", "output", self.tensors.observe(tensor, rule), use="device")
-
     def can_flush(self) -> bool:
         if not self.scheduler.is_fully_idle() or PipelineABI.pending_model_sends(self.scheduler):
             return False
@@ -291,21 +180,11 @@ class SGLangObservation(NativeCallObservation):
             if self.window.phase == "source" and self.selected:
                 self.active = False
                 self.communications.bind_returned_operands()
-                self.implementation["scheduling"] = {
-                    "chunked_prefill": scheduler.chunked_prefill_size is not None,
-                    "mixed_batches": scheduler.is_mixed_chunk,
-                }
                 recording = self.capture.document({
-                    "framework": "sglang", **self.capture.runtime.environment(),
-                    "parallel": self.parallel, "implementation": self.implementation, "kv_layout": self.kv_layout.document(),
-                    "worker_roles": self.worker_roles,
+                    **self.worker.environment(scheduler, self.worker_roles, self.capture.runtime.environment()),
                     "initial_state": {"logical_kv": "empty_after_native_flush", "workspace": "uniform_native_warmup"},
                     "closure": {"native_idle": True, "device_drained": True, "pending_native_transfers": 0},
                 })
-                role = self.worker_roles[str(self.parallel["rank"])]
-                for name in ("expert_layers", "kv_peers"):
-                    if name in role:
-                        recording["environment"][name] = role[name]
                 recording["request_receipts"] = self.window.receipts
                 recording.update(self.capture.runtime.timing_evidence())
                 recording["request_receive_rounds"] = self.window.receive_rounds
@@ -343,6 +222,7 @@ class SGLangObservation(NativeCallObservation):
         from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
 
         targets = {
+            "sglang.srt.model_executor.model_runner.ModelRunner.load_model": self.load_model,
             "sglang.srt.managers.scheduler.Scheduler.handle_generate_request": self.request,
             "sglang.srt.managers.scheduler_components.request_receiver.SchedulerRequestReceiver.recv_requests": self.receive,
             "sglang.srt.managers.scheduler_components.request_receiver.SchedulerRequestReceiver._pull_raw_reqs": partial(self.receive, ingress=True),
@@ -352,7 +232,7 @@ class SGLangObservation(NativeCallObservation):
         }
         for target, hook in targets.items():
             HookRegistry.register(target, hook, HookType.AROUND)
-        ModelScopes.install_engine_hooks(self)
+        ModelScopes.install_batch_hooks(self)
         self.request_state.install()
         self.calls = FlowScopes(self)
         self.communications = NativeCommunications(self)

@@ -18,6 +18,7 @@ class ClockNamespace:
 
 
 class DecisionClocks:
+    wait_queue_entry = "SchedulerReqTimeStats.set_wait_queue_entry_time"
     receiver_publication = "sglang.srt.disaggregation.mooncake.conn.MooncakeKVReceiver.send_metadata"
 
     def __init__(self, calls) -> None:
@@ -43,7 +44,7 @@ class DecisionClocks:
                 "Scheduler._abort_on_running_timeout", "Scheduler._abort_on_waiting_timeout",
             ),
             "observability.req_time_stats": (
-                "SchedulerReqTimeStats.set_wait_queue_entry_time", "SchedulerReqTimeStats.set_forward_entry_time",
+                self.wait_queue_entry, "SchedulerReqTimeStats.set_forward_entry_time",
             ),
             "disaggregation.decode": ("DecodePreallocQueue._ensure_prefill_info",),
             "disaggregation.common.conn": (

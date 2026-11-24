@@ -108,14 +108,14 @@ class CollectiveClock:
 
 
 class CollectiveServices:
-    def __init__(self, facts, capture, ranks):
+    def __init__(self, facts, worker_sources, ranks):
         channels = defaultdict(dict)
         measurements = {}
         for actor, document in facts.items():
             for channel, posts in self.posts(document):
                 channels[channel][actor] = posts
 
-            native = json.loads((capture / f"rank-{actor}.json").read_text())
+            native = json.loads((worker_sources[actor] / f"rank-{actor}.json").read_bytes())
             if native["environment"] != document["environment"]:
                 raise ValueError("collective calibration and worker facts come from different environments")
             measurements[actor] = self.intervals(document, DeviceCalibration(native["device_clock"]))

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from prologue.acquisition.recording import PublishedCapture
 from prologue.acquisition.rules import EvidenceGap, LocalAcquisition
-from prologue.artifacts import write_json
+from prologue.artifacts import content_id, write_json
 from prologue.integrations.frameworks.sglang.ascend.attention_cuts import AttentionCuts
 from prologue.integrations.frameworks.sglang.ascend.host_samples import HostCostSamples
 from prologue.integrations.frameworks.sglang.ascend.local_attention import LocalAttention
@@ -51,7 +51,7 @@ class SourceRuleWindow:
         state = arguments.output / "execution.json"
         resuming = state.is_file()
         points = self.points if resuming else requested
-        known = {LocalAcquisition.identity(self.points[p]): self.points[p] for p in points}
+        known = {content_id(self.points[p]): self.points[p] for p in points}
         if resuming:
 
             # Partial fits may have reduced current demand; recover the original observations for this session.
@@ -114,9 +114,10 @@ class SGLangSampling:
                 operand = LocalCopies.operand(definition, point.interval, json.loads(point.transport))
                 if operand:
                     self.copies[point.domain, operand] = card
-            elif (work["kind"] == "device" and point.phase == "decode" and definition["role"] == "attention"
-                  and not definition["children"] and self.runner_input is not None):
-                self.attention.setdefault((point.domain, point.definition), len(self.attention))
+            elif work["kind"] == "device" and self.runner_input is not None:
+                key = point.domain, point.definition
+                if key not in self.attention and LocalAttention.matches(demand.work_query(point)):
+                    self.attention[key] = len(self.attention)
         for identity, kind, features in self.external[rank]:
             point = demand.external(target, catalog.domain, identity, kind, features)
             self.host_points.add(point)
@@ -150,8 +151,7 @@ class SGLangSampling:
                 name, rule = f"decode-attention-{index}", attention
             else:
                 continue
-            query = {"domain": demand.domains[point.domain], "definition": definition, "interval": point.interval,
-                     "work": definition["work"][point.interval]["kind"], "features": point.features()}
+            query = demand.work_query(point)
             if not rule.matches(query):
                 continue
             if rule is LocalCopies:

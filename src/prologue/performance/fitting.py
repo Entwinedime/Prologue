@@ -25,13 +25,26 @@ class DomainCosts:
             indices.append(self.indices[key])
 
         for location, row in rows:
-            key = indices[row["definition"]], row["interval"], row["features"]["phase"]
+            index = indices[row["definition"]]
+            features = row["features"]
+            operand = features.get("transport")
+            external = self.definitions[index].get("external")
+            if "collective" in row and operand is None and external is None:
+                raise ValueError("a hardware collective sample must identify its peer group and operands")
+            if external is not None and operand is not None and operand != external:
+                raise ValueError("sample operand differs from its declared external service")
+
+            # A shared graph definition may execute against different physical peers or reduction layouts.
+            transport = cost_identity(operand) if operand is not None and external is None else ""
+            key = index, row["interval"], features["phase"], transport
             self.groups[key].append((location, row))
 
     def document(self):
         accepted, unresolved = [], []
-        for (definition, interval, phase), rows in sorted(self.groups.items()):
+        for (definition, interval, phase, transport), rows in sorted(self.groups.items()):
             model = ModelBindings.fit(self.definitions[definition], interval, rows)
+            if transport:
+                model["transport"] = json.loads(transport)
             destination = accepted if model["points"] else unresolved
             destination.append({"definition": definition, "interval": interval, "phase": phase, **model})
 

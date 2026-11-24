@@ -19,6 +19,10 @@ class NativeCallObservation:
         self.active = False
         self.resource_history = None
 
+    @property
+    def protocol_enabled(self):
+        return self.active
+
     @contextmanager
     def call(self, role: str, original: Any, *, parameters=None, arguments=None, work=None, device=False, stream=None):
         outer = self.capture.current.get() == 0

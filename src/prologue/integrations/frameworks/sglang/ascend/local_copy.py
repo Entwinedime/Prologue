@@ -55,16 +55,20 @@ class LocalCopies:
         }
 
     @classmethod
+    def session_key(cls, query, deployment):
+        domain = query["domain"]
+        target = AscendDeployment(deployment, max(map(int, domain["worker_roles"])) + 1, False)
+        card = target.devices[0 if target.single_device else WorkerDomain.rank(domain)]
+        return card, domain["implementation"]["framework_revision"], {k: domain[k] for k in cls.runtime_fields}
+
+    @classmethod
     def prepare(cls, queries, deployment, arguments, limit):
         session = None
         operands = defaultdict(lambda: defaultdict(set))
         for query in queries:
             domain = query["domain"]
             rank = WorkerDomain.rank(domain)
-            target = AscendDeployment(deployment, max(map(int, domain["worker_roles"])) + 1, False)
-            card = target.devices[0 if target.single_device else rank]
-            runtime = {k: domain[k] for k in cls.runtime_fields}
-            conditions = card, domain["implementation"]["framework_revision"], runtime
+            conditions = cls.session_key(query, deployment)
             if session is not None and session != conditions:
                 raise EvidenceGap("different_sessions_required", conditions=["physical_device", "framework_revision", "runtime"])
             session = conditions
@@ -104,7 +108,7 @@ class LocalCopies:
         return samples.document({"unmatched_calls": unmatched, "unverified_operands": unverified})
 
     @classmethod
-    def qualify(cls, queries, recording):
+    def qualify(cls, queries, recording, timeout=None):
         rows = cls.measurements(recording)
         inputs = recording.inputs
         ranks = {(op["caller"], op["dtype"], op["element_bytes"], p["bytes"]): p["ranks"]

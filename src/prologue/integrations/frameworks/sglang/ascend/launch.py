@@ -16,48 +16,59 @@ class SGLangAscendLaunch:
     sampling_input = staticmethod(AttentionCuts.runner)
 
     @classmethod
-    def local_acquisition(cls, release=None):
+    def local_acquisition(cls, release, arguments):
         from prologue.acquisition.rules import LocalAcquisition
         from prologue.integrations.frameworks.sglang.ascend.local_attention import LocalAttention
         from prologue.integrations.frameworks.sglang.ascend.local_copy import LocalCopies
         from prologue.integrations.frameworks.sglang.ascend.local_embedding import LocalEmbedding
         from prologue.integrations.frameworks.sglang.ascend.local_prebuilt import LocalPrebuilt
+        from prologue.integrations.frameworks.sglang.ascend.local_scheduler import LocalSchedulerBatch, LocalWorkerBinding
+        from prologue.integrations.frameworks.sglang.ascend.local_work import LocalDeviceWork, LocalHostWork, LocalPeerWork
+        from prologue.integrations.frameworks.sglang.ascend.worker_capture import WorkerCapture
 
         attention = LocalAttention(release.templates.sampling_sources if release else None)
-        return LocalAcquisition((LocalCopies, attention, LocalPrebuilt, LocalEmbedding), cls.check_local_placement,
-                                release.identity if release else None)
+        rules = (LocalWorkerBinding, LocalSchedulerBatch(arguments), LocalHostWork(arguments), LocalDeviceWork(arguments), LocalPeerWork(arguments),
+                 LocalCopies, attention, LocalPrebuilt, LocalEmbedding)
+        return LocalAcquisition(rules, cls.check_local_placement, WorkerCapture.template_resources, release.identity if release else None)
 
     @classmethod
-    def local_attempt(cls, arguments, limit, deployment, cards, revision, job, worker, *, runtime_trace, model=None, **evidence):
+    def local_attempt(cls, arguments, limit, deployment, cards, revision, job, worker, *, runtime_trace, model=None, host_timing=False, **evidence):
         from prologue.acquisition.rules import EvidenceGap
 
         platform = AscendDeployment({"acquisition_mode": deployment.get("acquisition_mode", "full"),
                                      "physical_devices": cards}, len(cards), False)
         image = NativeAttempt.image(arguments.source_image)
-        if cls.domain.image_revision(image) != revision:
+        upstream = cls.domain.image_revision(image)
+        if revision is not None and upstream != revision:
             raise EvidenceGap("framework_revision_mismatch", required=revision, image=image["Id"])
         inputs = {"job": job, "deployment": deployment, "physical_devices": platform.devices,
-                  "image": image["Id"], "framework_revision": revision, **evidence}
+                  "image": image["Id"], "framework_revision": upstream, **evidence}
         mounts = []
         if model is not None:
             path = Path(model).resolve(strict=True)
             if arguments.output.resolve().is_relative_to(path):
                 raise ValueError("local sample output must be outside the native model directory")
             mounts = ["--mount", f"type=bind,src={path},dst={Path(model).absolute()},readonly"]
-        return NativeAttempt(arguments, inputs, platform.options(latency_only=not runtime_trace), [worker], mounts, limit)
+        options = platform.options(latency_only=not runtime_trace, host_timing=host_timing)
+        return NativeAttempt(arguments, inputs, options, [worker], mounts, limit)
 
     @staticmethod
     def check_local_placement(query, deployment):
         from prologue.acquisition.rules import EvidenceGap
 
         platform = AscendDeployment(deployment, 1, False)
-        if query.get("work") != "collective" or "torch_npu" not in query["domain"]:
-            return
-        operand = query["features"].get("transport")
+        operand = query.get("features", {}).get("transport") if query.get("work") == "collective" else None
         if operand and len(operand["required"]) > 1 and (
             platform.single_device or max(operand["required"]) >= len(deployment["physical_devices"])
         ):
             raise EvidenceGap("missing_physical_peers", required_ranks=operand["required"],
+                              physical_devices=deployment["physical_devices"])
+        roles = query["domain"].get("worker_roles", {})
+        ranks = sorted(map(int, roles))
+        if query.get("action") == "initialize_workers":
+            ranks = [rank for instance in query["instances"] for rank in range(instance["rank_begin"], instance["rank_end"])]
+        if ranks and not platform.single_device and max(ranks) >= len(deployment["physical_devices"]):
+            raise EvidenceGap("missing_physical_workers", required_ranks=ranks,
                               physical_devices=deployment["physical_devices"])
 
     def sampling(self, source):

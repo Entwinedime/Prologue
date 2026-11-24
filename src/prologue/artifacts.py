@@ -3,8 +3,14 @@
 import json
 import os
 import tempfile
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
+
+
+def content_id(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return sha256(encoded.encode()).hexdigest()
 
 
 def write_json(path: Path, value: Any, *, indent: int | None = None, replace: bool = True) -> None:

@@ -171,8 +171,9 @@ class EmbeddingRunner:
         torch.npu.set_device(device)
         rendezvous = (self.output / "rendezvous").as_uri()
         if staged:
-            distributed.init_process_group("gloo", init_method=rendezvous, world_size=world, rank=rank)
-        parallel_state.init_distributed_environment(world, rank, rendezvous, local_rank=device, backend="gloo" if staged else "hccl")
+            ShardTransport.world(world, rank, rendezvous)
+        else:
+            parallel_state.init_distributed_environment(world, rank, rendezvous, local_rank=device, backend="hccl")
         try:
             parallel_state.initialize_model_parallel(tensor_model_parallel_size=world)
             self.observe(rank)

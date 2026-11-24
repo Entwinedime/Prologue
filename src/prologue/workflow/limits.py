@@ -50,14 +50,17 @@ def retained_bytes(root):
 
 
 class OperationLimit:
-    def __init__(self, root=None, storage_bytes=None):
+    def __init__(self, root=None, storage_bytes=None, published_bytes=None):
         self.root, self.storage_bytes = root, storage_bytes
+        self.published_bytes = published_bytes
         self.sampled_peak_bytes = None
 
     def sample(self):
         if self.root is None:
             return None
         size = retained_bytes(self.root)
+        if self.published_bytes:
+            size += self.published_bytes()
         self.sampled_peak_bytes = max(size, self.sampled_peak_bytes or 0)
         return size
 

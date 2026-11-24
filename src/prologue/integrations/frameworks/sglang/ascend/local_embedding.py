@@ -26,6 +26,11 @@ class LocalEmbedding:
                 and impl["disaggregation_mode"] == "null" and impl["load_format"] == "dummy"
                 and not impl["model"].get("quantization_config") and not domain["expert_layers"])
 
+    @staticmethod
+    def session_key(query, deployment):
+        common = {k: v for k, v in query["domain"].items() if k not in WorkerDomain.role_fields}
+        return common, query["condition"], query["parameters"]
+
     @classmethod
     def prepare(cls, queries, deployment, arguments, limit):
         first = queries[0]
@@ -93,7 +98,7 @@ class LocalEmbedding:
                 raise ValueError("physical embedding reduction lacks an observed device service")
 
     @classmethod
-    def qualify(cls, queries, recording):
+    def qualify(cls, queries, recording, timeout=None):
         job = recording.inputs["job"]
         assets, answers = {}, []
         for query in queries:

@@ -20,9 +20,10 @@ def merged(ranges):
 
 
 class ThreadService:
-    def __init__(self, rows, dequeues, excluded):
+    def __init__(self, rows, dequeues, excluded, unavailable=()):
         self.activity = {}
         self.excluded = self.by_thread(excluded)
+        self.unavailable = self.by_thread(unavailable)
         self.dequeues = self.by_thread(dequeues)
         self.loss = []
         for row in rows:
@@ -84,6 +85,8 @@ class ThreadService:
         return self.intersect(self.within(active, begin, end), [(begin, end)])
 
     def duration(self, thread, begin, end, submission):
+        if self.within(self.unavailable.get(thread, ()), begin, end):
+            return None
         covered = self.running_intervals(thread, begin, end)
         if covered is None:
             return None
@@ -122,7 +125,7 @@ class HostCuts:
 
 
 class AscendHostAlignment:
-    def __init__(self, trace, source_scopes, scopes, commands, runtime, activity, auxiliary):
+    def __init__(self, trace, source_scopes, scopes, commands, runtime, activity, auxiliary, cold):
         self.trace = trace
         self.posts = {scope["id"]: scope["local_exchanges"] for scope in source_scopes if scope.get("local_exchanges")}
         self.observed = {scope["id"]: Interval(*scope["raw_interval"], scope["thread"], scope) for scope in scopes[1:]}
@@ -131,6 +134,8 @@ class AscendHostAlignment:
         self.owners = ThreadIntervals(list(self.observed.values()))
         auxiliary = [Interval(begin, end, thread, {}) for thread, begin, end in auxiliary]
         excluded = ThreadIntervals(auxiliary)
+        unavailable = list(cold)
+        by_thread = ThreadService.by_thread(unavailable)
         filtered = []
         for command in commands:
             name, enqueue, dequeue = command
@@ -139,6 +144,8 @@ class AscendHostAlignment:
                 auxiliary.append(Interval(dequeue[1], dequeue[2], dequeue[0], {}))
             else:
                 filtered.append(command)
+                if ThreadService.within(by_thread.get(entered.thread, ()), entered.begin, entered.end):
+                    unavailable.append(dequeue)
         excluded_time = [(row.thread, row.begin, row.end) for row in auxiliary]
         for row in runtime:
             thread = row["thread"]
@@ -147,7 +154,7 @@ class AscendHostAlignment:
                 excluded_time.append((thread, before, after))
             else:
                 excluded_time.extend(((thread, before, row["begin_raw_ns"]), (thread, row["end_raw_ns"], after)))
-        self.service = ThreadService(activity, (dequeue for _, _, dequeue in filtered), excluded_time)
+        self.service = ThreadService(activity, (dequeue for _, _, dequeue in filtered), excluded_time, unavailable)
         runtime_intervals = []
         for row in runtime:
             call = Interval(row["begin_raw_ns"], row["end_raw_ns"], row["thread"], row)
