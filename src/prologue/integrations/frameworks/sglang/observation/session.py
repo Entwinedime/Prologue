@@ -23,10 +23,10 @@ class Session:
         self.placement = placement
         self.content = PromptContent.declared(workload, configuration.prefix_cache)
         self.ranked = configuration.worker_count > 1
-        if self.ranked and mode == "host-timing":
-            raise ValueError("host timing requires one native worker")
-        if self.ranked and mode == "light" and placement != "full":
-            raise ValueError("parallel publication timing requires full physical placement")
+        if mode == "host-timing" and configuration.pp > 1:
+            raise ValueError("host timing requires a single scheduler stage")
+        if self.ranked and mode != "detailed" and placement != "full":
+            raise ValueError("parallel timing requires full physical placement")
 
     @property
     def profile_ranks(self):
@@ -74,12 +74,15 @@ class Session:
 
     async def warmup(self, engine):
         requests = self.workload["requests"]
-        pending = enumerate(requests)
+        first_arrival = requests[0]["arrival_ns"]
+        first_group = next((index for index, request in enumerate(requests)
+                            if request["arrival_ns"] != first_arrival), len(requests))
 
-        # Finish one request at startup before slow initialization can merge its Decode with later arrivals.
-        await self.generate(engine, "warmup", [next(pending)])
-        if len(requests) > 1:
-            origin = clock_gettime_ns(CLOCK_MONOTONIC_RAW) - requests[1]["arrival_ns"]
+        # Complete the first arrival group before startup compilation can merge later arrivals into it.
+        await self.generate(engine, "warmup", list(enumerate(requests[:first_group])))
+        if first_group < len(requests):
+            pending = enumerate(requests[first_group:], first_group)
+            origin = clock_gettime_ns(CLOCK_MONOTONIC_RAW) - requests[first_group]["arrival_ns"]
             await self.dispatch_at(engine, "warmup", origin, pending)
 
     def finish_warmup(self, engine):
@@ -141,7 +144,7 @@ class Session:
 
     def check_publications(self, engine, directory):
         path = directory / "worker.json"
-        if self.ranked and self.mode == "light":
+        if self.ranked and not self.profile_ranks:
             self.await_files([path], engine.server_args.watchdog_timeout)
         worker = json.loads(path.read_text(encoding="utf-8"))
         for request in self.workload["requests"]:

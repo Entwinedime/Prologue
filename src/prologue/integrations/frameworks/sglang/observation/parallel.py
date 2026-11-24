@@ -33,11 +33,6 @@ class RankProfiles:
         self.selected = False
         self.window = None
 
-    def channels(self, original, scheduler, port_args):
-        result = original(scheduler, port_args)
-        self.publication_owner = scheduler.ipc_channels.send_to_detokenizer.socket is not None
-        return result
-
     def loaded(self, runner):
         from sglang.srt.distributed import get_pp_group, get_tp_group
 
@@ -48,7 +43,7 @@ class RankProfiles:
         heads = sorted({(layer.self_attn.attn.tp_q_head_num, layer.self_attn.attn.tp_k_head_num,
                          layer.self_attn.attn.tp_v_head_num) for layer in model.model.layers[start:end]})
         layout = {
-            "publication_owner": self.publication_owner, "tp_leader": tp.is_first_rank,
+            "publication_owner": self.observation.publication_owner, "tp_leader": tp.is_first_rank,
             "stage": pp.rank_in_group, "layers": [start, end], "heads": heads,
             "modules": [(name, type(module).__qualname__) for name, module in model.named_modules()],
             "parameters": [(name, list(tensor.shape), str(tensor.dtype)) for name, tensor in model.named_parameters()],
@@ -79,7 +74,7 @@ class RankProfiles:
             # The scheduler forwards the original request to the next stage after this hook.
             request = copy(request)
             request.output_dir = str(self.window / "profile")
-        elif self.selected or self.publication_owner or self.observation.pd is not None:
+        elif self.selected or self.observation.publication_owner or self.observation.pd is not None:
             self.observation.save()
 
         if self.selected:
@@ -131,8 +126,6 @@ class RankProfiles:
     def install(self):
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
-        scheduler = "sglang.srt.managers.scheduler.Scheduler."
-        HookRegistry.register(scheduler + "init_ipc_channels", self.channels, HookType.AROUND)
         manager = "sglang.srt.managers.scheduler_components.profiler_manager.SchedulerProfilerManager._profile"
         HookRegistry.register(manager, self.profile, HookType.AROUND)
         group = "sglang.srt.distributed.parallel_state.GroupCoordinator."

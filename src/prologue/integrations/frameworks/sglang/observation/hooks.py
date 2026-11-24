@@ -131,7 +131,14 @@ class Observation:
         pending.write_text(json.dumps(document, separators=(",", ":")) + "\n", encoding="utf-8")
         pending.replace(path)
 
+    def channels(self, original, scheduler, port_args):
+        result = original(scheduler, port_args)
+        self.publication_owner = scheduler.ipc_channels.send_to_detokenizer.socket is not None
+        return result
+
     def prepare(self, original, scheduler, *args, **kwargs):
+        if not self.publication_owner:
+            return original(scheduler, *args, **kwargs)
         began = thread_time_ns()
         batch = original(scheduler, *args, **kwargs)
         self.prepare_cpu_ns = thread_time_ns() - began
@@ -179,6 +186,8 @@ class Observation:
             return original(scheduler, batch, pp_proxy_tensors)
         if self.mode == "detailed" and not self.capture_calls:
             return original(scheduler, batch, pp_proxy_tensors)
+        if self.mode == "host-timing" and not self.publication_owner:
+            return original(scheduler, batch, pp_proxy_tensors)
 
         requests = [self.requests.get(request.rid) for request in batch.reqs]
         if not any(request is not None for request in requests):
@@ -195,6 +204,8 @@ class Observation:
             began = thread_time_ns()
             value = original(scheduler, batch, pp_proxy_tensors)
             call["forward_cpu_ns"] = thread_time_ns() - began
+            if self.experts is not None:
+                call["expert_routes"] = self.experts.bindings
             return value
 
         parameters = {"phase": phase, "members": len(requests)}
@@ -327,6 +338,8 @@ class Observation:
         if self.sampling is not None:
             HookRegistry.register("sglang.srt.model_executor.model_runner.ModelRunner.sample",
                                   self.sample, HookType.AROUND)
+        if self.parallel is not None or self.mode == "host-timing":
+            HookRegistry.register(scheduler + "init_ipc_channels", self.channels, HookType.AROUND)
         if self.mode == "host-timing":
             HookRegistry.register(scheduler + "get_next_batch_to_run", self.prepare, HookType.AROUND)
         if self.measure_arrivals:

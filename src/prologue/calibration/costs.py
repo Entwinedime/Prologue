@@ -110,8 +110,10 @@ class Calibration:
         worker = json.loads((directory / "worker.json").read_text(encoding="utf-8"))
         for row in worker["host_work"]:
             members = row["members"]
-            self.batches.append({"action": {"phase": row["phase"], "members": members},
-                                 "graph": {"calls": [], "work": []}})
+            action = {"phase": row["phase"], "members": members}
+            if "expert_routes" in row:
+                action["expert_routes"] = row["expert_routes"]
+            self.batches.append({"action": action, "graph": {"calls": [], "work": []}})
             sample = {
                 "prepare_ns": row["prepare_cpu_ns"], "forward_ns": row["forward_cpu_ns"],
                 "result_ns": row["result_cpu_ns"],
