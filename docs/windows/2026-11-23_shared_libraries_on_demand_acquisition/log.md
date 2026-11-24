@@ -743,3 +743,33 @@
 **验证：** 七个目标的 14 项结构对照全部匹配。Qwen TP2 两类来源各匹配 9 个动作，覆盖 204 个成本坐标，TTFT 和 TPOT 各 3/3 可评分，MAPE 分别为 10.95% 和 6.37%。两项 PP 配置共核对 126 个接收端和 54 次唤醒，EP2 核对 144 次只接收行为，PD 核对三条 KV 交接。默认发布的 TP2 预测完成 3 条请求，采集与完整 Engine 次数均为零。[独立结果](../../../data/shared-libraries-on-demand-acquisition/s19/independent/evaluation-summary.json) · [通信证据](../../../data/shared-libraries-on-demand-acquisition/s19/independent/communication-evidence.json) · [默认入口](../../../data/shared-libraries-on-demand-acquisition/s19/delivery/explore-summary.json)
 
 **结论与限制：** S19 完成。EP2 的 897 个设备与通信坐标可回放，缺六个宿主坐标。Mistral TP2 和 EP1 仍缺合格成本域，PP 和 PD 当前固定图路径限于能力状态。PD 同刻到达的两条请求在本轮分别准入，同批准入的证据来自开发批。下一阶段按实际触发核对分块、混批、缓存和组合。
+
+## 2026-11-24 — S20 调度机制独立验收准备
+
+**范围**从 `e456082` 开始。沿用 S14 的分块边界、S15 的小池及单卡组合来源、S17 的完整组合来源。先在 Mistral TP1 补一个开发来源，包含长度相同的分开到达和同刻到达，观察两种进件下首次不同的原生批次。
+
+**开发取证**沿用 S14 的 16 token 页和 32 token 分块配置。采一次详细记录，上限 210 卡秒、1 GiB 及 10 分钟离线处理。按原生动作确认是否混批，取得对应子图后结束补采。开发请求与之后的留出分别登记。
+
+**独立验收**预排分块边界、相同长度下的混批正反例、小池前缀复用与驱逐、TP2 三机制组合。沿三个公开入口报告实际触发的作用、可评分请求及成本资格。
+
+Mistral 开发来源完成，错开到达组无混批，同刻到达组有两轮混批，新请求先写至 31 token 再续至 33 token。实耗 132.525 卡秒、115.4 MiB。[开发采集回执](../../../data/shared-libraries-on-demand-acquisition/s20/development/mistral-mixed/receipt.json)
+
+成本取证复用物理开发参考中的设备和通信样本。Qwen 分块配置缺宿主成本，登记一次同配置宿主训练，上限 210 卡秒和 256 MiB，用 31、32、33 token 的错开到达请求覆盖有首 token、仅在续块后发布及有后续 token 的宿主路径。其余配置按独立实测设备样本的覆盖报告。
+
+## 2026-11-24 — S20 调度机制留出冻结
+
+**范围**冻结五个目标及两套来源。TP1 的 Qwen 分块来源来自两次独立单 rank 记录。Mistral 两个到达条件使用同一开发来源。小池及 TP2 组合比较单卡来源和完整放置来源。原生上限十次、2,640 卡秒和 4 GiB，离线上限 30 分钟。[冻结清单](../../../data/shared-libraries-on-demand-acquisition/s20/independent/freeze.json)
+
+**改动**正式自主评分增加适用请求数。独立分块组各来源要求 TTFT 计入 3 条、TPOT 计入 2 条。宿主训练取得六类调用，每类三次，共计 159.671 卡秒，含一次提交参数被拒。其余三个成本域复用开发记录中的设备和通信时间。
+
+**边界**两种来源共用各自目标的一对原生参考。冻结后收齐再归因，以原生首次不同批次、续块范围、命中页和驱逐效果核对机制。
+
+## 2026-11-24 — S20 调度机制独立验收交付
+
+**范围**五个目标、17 条请求、十份原生参考全部完成。实耗 1,527.908 卡秒，保留 832.4 MiB。八项离线评价共耗 7 分钟 36 秒。十个参考起点与 13 个建库及训练起点各自独立。[来源隔离](../../../data/shared-libraries-on-demand-acquisition/s20/independent/source-scope-audit.json)
+
+**验证**八项结构对照共匹配 87 个动作，固定图实测基线及仅替换设备成本的回放全部完成。Qwen 分块组确认 31、32 token 单段写入，33 token 分两段并只在续块后发布。Mistral 首次批次差异在第二个动作，同刻组两轮混批，分开组分别执行。小池和 TP2 组合均命中 32 token 前缀，保留两页被驱逐后的重算证据。TP2 两个来源各匹配 20 个动作、28,924 项工作、17 次缓存效果，覆盖 922 个设备及 56 个通信成本坐标。[核对结果](../../../data/shared-libraries-on-demand-acquisition/s20/delivery/qualified-summary.json)
+
+**性能边界**Qwen 分块组的 TTFT 为 3/3 可评分、MAPE 22.74%，TPOT 为 2/2 可评分、MAPE 5.12%。超界请求在两段预填充之间实测约 2.57 秒；保留宿主时序时其首 token 回放偏差 2.36 微秒，完整成本回放提前 2.69 秒。误差主要落在续块开始前，等待内部的具体来源仍待定位。其余组在对应配置中缺宿主成本，本批保留完整结构和设备层回放结论。[分块时序](../../../data/shared-libraries-on-demand-acquisition/s20/independent/chunk-timing-diagnostics.json)
+
+**阶段审查与交付**从 `e456082` 检查观测、结构匹配、成本查询和评分边界。评分计数只在验证层，业务净增 4 行，示例无改动。实际读取证据按普通 Decode 的已提交长度补足隐式读区间，原冻结输出保留。默认发布 `8d868d49-f2e1-4960-b228-8e0d92f68995` 新增 Mistral 八个调用几何及四个物理成本域，沿用原规则。默认发布的 Qwen 分块组完成三条预测，采集与完整 Engine 启动均为零。S20 完成。[发布回执](../../../data/shared-libraries-on-demand-acquisition/s20/delivery/current-release.json) · [公开入口结果](../../../data/shared-libraries-on-demand-acquisition/s20/delivery/explore-summary.json)
