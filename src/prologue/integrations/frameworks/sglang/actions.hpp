@@ -26,7 +26,7 @@ public:
 
 private:
     TemplateEntry select(std::string_view action, const nlohmann::json & condition, const Parameters & parameters,
-                         const std::map<std::string, StateBindings> & state_inputs = {}) const;
+                         const std::map<std::string, StateBindings> & state_inputs = {}, const nlohmann::json & work = nullptr) const;
     std::set<std::string> bind_values(const TemplateEntry & entry, const nlohmann::json & values, Direction direction, GraphInvocation & call) const;
     void bind_inputs(const TemplateFrame & frame, const std::map<std::string, StorageBinding> & fields, const std::set<std::string> & explicit_inputs,
                      GraphInvocation & call) const;

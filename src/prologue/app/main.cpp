@@ -320,7 +320,7 @@ int main(int argc, char ** argv) {
             const auto library = prologue::TemplateLibrary::read(read_json(argv[2]));
             const auto call = invocation(read_json(argv[3]));
             const prologue::TemplateSelection selection(library);
-            output = library.instantiate(selection.select(call.action, call.condition, call.parameters, call.state_inputs), call).document();
+            output = library.instantiate(selection.select(call.action, call.condition, call.parameters, call.state_inputs, call.work), call).document();
         }
         else if (command == "serve" && argc >= 5 && (argc - 5) % 2 == 0) {
             destination = argv[4];

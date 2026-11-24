@@ -39,7 +39,6 @@ public:
         prologue::GraphInvocation call{ action.action, action.condition, parameters, library_.resources, std::move(graph_work),
                                       "local/" + std::to_string(action.scope), environment_, library_.domain, {} };
         for (auto & resource : call.resources) resource.rank = environment_.at("parallel").at("rank").get<std::int64_t>();
-        for (const auto & [name, _] : entry.frame.constants) call.parameters.erase(name);
         if (!states.empty()) {
             for (const auto & [name, state] : entry.frame.state_inputs()) call.state_inputs.emplace(name, states.at(name));
         }

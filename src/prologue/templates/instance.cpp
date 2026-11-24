@@ -87,9 +87,9 @@ private:
         const auto & definition = library_.definitions[frame.definition];
         Parameters parameters = frame.constants;
         for (const auto & [name, value] : arguments) {
-            if (!definition.parameters.contains(name) || definition.fixed.contains(name))
-                throw std::invalid_argument("invocation overrides a fixed or unknown parameter: " + name);
-            parameters.emplace(name, value);
+            if (!definition.parameters.contains(name)) throw std::invalid_argument("unknown invocation parameter: " + name);
+            const auto [bound, added] = parameters.emplace(name, value);
+            if (!added && bound->second != value) throw std::invalid_argument("invocation overrides a fixed parameter: " + name);
         }
         if (parameters.size() != definition.parameters.size()) throw std::invalid_argument("invocation has missing dynamic parameters at " + frame.site);
 

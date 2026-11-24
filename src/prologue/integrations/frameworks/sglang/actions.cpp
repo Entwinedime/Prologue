@@ -99,8 +99,8 @@ void NativeActionGraphs::bind_buffers(const TemplateFrame & frame, GraphInvocati
 }
 
 TemplateEntry NativeActionGraphs::select(std::string_view action, const nlohmann::json & condition, const Parameters & parameters,
-                                        const std::map<std::string, StateBindings> & state_inputs) const {
-    auto entry = selection_.select(action, NativeTemplates::condition(action, condition), parameters, state_inputs);
+                                        const std::map<std::string, StateBindings> & state_inputs, const nlohmann::json & work) const {
+    auto entry = selection_.select(action, NativeTemplates::condition(action, condition), parameters, state_inputs, work);
     const auto & expected = library_.definitions[entry.frame.definition].parameters;
 
     // Native descriptions include fixed parameters too; the shared selector already checks names and values.
@@ -122,7 +122,7 @@ CoarseGraph NativeActionGraphs::build(const ServingAction & action, const nlohma
                                       std::vector<TemplateInterval> * origins) {
     if (action.task.group != group_) throw std::invalid_argument("action sent to another participant's graph provider");
     const auto state_inputs = worker_.state_inputs(bindings, action.work);
-    auto entry = select(action.name, action.condition, action.parameters, state_inputs);
+    auto entry = select(action.name, action.condition, action.parameters, state_inputs, action.work);
     auto graph_work = action.work;
     worker_.bind(entry.frame, instance_, graph_work);
     graph_work["bindings"] = bindings;
@@ -149,7 +149,6 @@ CoarseGraph NativeActionGraphs::build(const ServingAction & action, const nlohma
             call.signals.emplace(name, signal);
         }
     }
-    for (const auto & [name, _] : entry.frame.constants) call.parameters.erase(name);
     values_ = action.work.at("live_values").get<std::set<std::string>>();
     const auto explicit_inputs = bind_values(entry, action.work.at("values"), Direction::Input, call);
     bind_values(entry, action.work.at("allocations"), Direction::Output, call);

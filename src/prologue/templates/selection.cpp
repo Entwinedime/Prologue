@@ -326,7 +326,7 @@ TemplateSelection::TemplateSelection(const TemplateLibrary & library) : library_
 }
 
 TemplateEntry TemplateSelection::select(std::string_view action, const nlohmann::json & condition, const Parameters & parameters,
-                                       const std::map<std::string, StateBindings> & state_inputs) const {
+                                       const std::map<std::string, StateBindings> & state_inputs, const nlohmann::json & work) const {
     const auto roots = roots_.find({ std::string(action), condition });
     FrameChoice chosen;
     if (roots != roots_.end()) {
@@ -344,6 +344,9 @@ TemplateEntry TemplateSelection::select(std::string_view action, const nlohmann:
         nlohmann::json details{
             { "status", status }, { "action", action }, { "condition", condition }, { "parameters", parameters }, { "domain", library_.domain }
         };
+
+        // A local observation needs each admitted member's extent; aggregate dimensions cannot recover their order.
+        if (work.contains("members")) details["members"] = work.at("members");
         if (chosen.ambiguity) details["site"] = *chosen.ambiguity;
         if (chosen.rejected_parameters) details["rejected_parameter_contract"] = std::move(*chosen.rejected_parameters);
         if (chosen.rejected_guard) details["rejected_local_candidate"] = std::move(*chosen.rejected_guard);
