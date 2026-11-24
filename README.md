@@ -1,10 +1,10 @@
 # Prologue
 
-Prologue predicts LLM serving performance for one model across a set of configurations and request workloads. It builds reusable execution templates and cost assets from representative SGLang runs on Ascend, then reports prediction status, TTFT, TPOT, throughput, and configuration comparisons. Each workload supplies output lengths and any expert routes required by the configurations.
+Prologue predicts LLM serving performance for one model across a set of configurations and request workloads. It expands serving actions from a published template library and assigns duration from a performance library. Results include prediction status, TTFT, TPOT, throughput, and configuration comparisons. Each workload supplies output lengths and any expert routes required by the configurations.
 
 ## Build
 
-Run these commands from the checkout on an Ascend host with Docker Compose, Docker BuildKit enabled, the Ascend container runtime, access to `/var/run/docker.sock`, and Python 3.9 or newer. The example needs one available physical NPU and Qwen3-8B model files at `/models/Qwen3-8B`. It runs with BF16 dummy weights.
+Run these commands from the checkout on an Ascend host with Docker Compose, Docker BuildKit enabled, the Ascend container runtime, access to `/var/run/docker.sock`, and Python 3.9 or newer. Native observation needs the model files and the physical devices specified by its deployment. The offline example uses the control and modeling images, the compiled executable, and a published Qwen3-8B library release.
 
 ```bash
 git submodule update --init third_party/sglang
@@ -22,50 +22,26 @@ You can reuse the base image if it is already available under the specified tag.
 
 ## Run the example
 
-Set `physical_devices` in the deployment JSON to the physical card reserved for this run. The default [example input](example/coarse_graph/input.json) combines two TP1 configurations with two short workloads.
+The example evaluates two Qwen3-8B TP1 configurations against two workloads. Supply a published release directory containing `release.json`. You can copy it to another location before running the command.
 
 ```bash
-mkdir -p data
-printf '{"physical_devices": [0]}\n' > data/example-deployment.json
-job="data/$(date -u +%Y%m%dT%H%M%SZ)_exploration"
-python3 example/coarse_graph/run.py --deployment data/example-deployment.json --output "$job" \
-  --timeout 420 --native-budget-seconds 2100 --postprocessing-budget-seconds 1200 \
-  --attempt-limit 5 --storage-bytes 25769803776
+python3 example/coarse_graph/run.py --libraries /path/to/qwen-release --timeout 180
 ```
 
-Open `summary.md` in the job directory for per-combination results. A successful cold run reports four completed predictions and records the assets and evidence for each combination in `result.json`. Use `--details` to retain the source intermediates and target execution traces.
+The command creates `data/<UTC-timestamp>_exploration/`. Open `summary.md` for the comparison and `result.json` for each target's result or first missing requirement. Use `--input` for a different exploration, `--output` to choose the task directory, and `--details` to retain the expanded graphs and event timeline. Predictions use the published model identity and worker state on CPU. An empty library reports the missing worker binding for each target.
 
-The second run uses the same configurations, deployment, and build. Keep the first job directory at its original path so the recorded assets remain available. The second workload set changes the request identities and arrival times and adds a later request with the same lengths to the single-request workload.
+To publish from an existing compatible training collection and fitted cost asset, run the importer once in the control image. Mount any external recording directories at their original absolute paths. The resulting release holds the worker templates, model bounds, samples, and native recording identities needed for reuse.
 
 ```bash
-reuse_input="${job}-reuse-input.json"
-python3 - > "$reuse_input" <<'PY'
-import json
-from pathlib import Path
-
-task = json.loads(Path("example/coarse_graph/input.json").read_text())
-for workload in task["workloads"]:
-    workload["id"] += "-rerun"
-    for request in workload["requests"]:
-        request["id"] += "-rerun"
-        request["arrival_ns"] += 4_000_000
-
-    if workload["id"] == "single-rerun":
-        first = workload["requests"][0]
-        workload["requests"].append({**first, "id": "followup", "arrival_ns": first["arrival_ns"] + 2_000_000_000})
-print(json.dumps(task, indent=2))
-PY
-python3 example/coarse_graph/run.py --deployment data/example-deployment.json \
-  --input "$reuse_input" --reuse "$job" --output "${job}-reuse" \
-  --timeout 420 --native-budget-seconds 0 --postprocessing-budget-seconds 0 \
-  --attempt-limit 0 --storage-bytes 25769803776
+docker run --rm --runtime runc --network none -v "$PWD:$PWD" -w "$PWD" \
+  -e PYTHONPATH=src --entrypoint python3 prologue-control:ubuntu22.04 \
+  example/coarse_graph/import_assets.py --collection data/training/collection \
+  --costs data/training/performance/costs.json --output data/libraries/qwen
 ```
-
-The reuse run should also report four completed predictions. In its `result.json`, every target should have `asset_use` set to `reused`, and `usage.native_attempts`, `usage.native_charged_ns`, and `usage.postprocessing_ns` should all be zero. The results include the status and evidence for any combination that could not be predicted.
 
 ## Validated configurations
 
-The Ascend delivery used SGLang, dummy weights, and workloads with fixed output lengths. Each entry describes a measured configuration and workload mechanism. The Prologue release check runs the TP1 example above from a clean checkout.
+The Ascend delivery used SGLang, dummy weights, and workloads with fixed output lengths. Each entry describes a measured configuration and workload mechanism. The listed evidence comes from earlier native measurements. The four-target example above exercises the offline reader on TP1.
 
 | Model | Dtype | Configuration | Checked cases |
 | --- | --- | --- | --- |
