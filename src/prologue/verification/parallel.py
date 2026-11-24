@@ -80,6 +80,9 @@ class ParallelStructureReference(ScheduledReference):
         manifest = {**recording.manifest, "delivery": recording.delivery}
         owner = physical.ranks[publisher]
         super().__init__(recording.domain, owner.publications, manifest, owner.evidence)
+        self.publisher = publisher
+        self.hardware = {**physical.hardware, "transport_links": physical.transport_links}
+        self.clock_alignment_width_ns = max(rank.clock_alignment_width_ns for rank in physical.ranks)
 
         if any(rank.evidence.get("cache_effects") != self.cache_effects for rank in physical.ranks):
             raise ValueError("the TP ranks disagree on cache residency effects")
@@ -95,6 +98,19 @@ class ParallelStructureReference(ScheduledReference):
                 raise ValueError("the TP ranks disagree on replicated request and resource state")
             self.record(owner.action(), observed.graph, owner.call, observed.measurements,
                         observed.begin_ns, observed.end_ns)
+
+    def fixed_work(self):
+        batches = []
+        for begin, measurement in zip(self.starts, self.measurements, strict=True):
+            work = measurement["work"]
+
+            # Ranked samples provide measured execution and collective readiness on each device lane.
+            intervals = []
+            for row in work:
+                start = begin + row["submitted_after_ns"]
+                intervals.append([start, start + row["duration_ns"]])
+            batches.append((work, intervals))
+        return self.clock_alignment_width_ns, batches
 
     @staticmethod
     def consumed_conditions(actual, measured):

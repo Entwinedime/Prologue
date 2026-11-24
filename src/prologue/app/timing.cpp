@@ -153,7 +153,7 @@ json replay(const json& job) {
         }
 
         timeline.advance_to(std::max(timeline.now(), row.at("input_ready_ns").get<Nanoseconds>()));
-        const auto publisher = modeled ? structure::publication_lane(graph) : std::nullopt;
+        const auto publisher = structure::publication_lane(graph);
         const auto execution = timeline.begin_action(timing, !costs, publisher);
         const auto started = execution.began_ns;
         if (!modeled) {

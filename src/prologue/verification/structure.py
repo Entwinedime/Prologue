@@ -129,10 +129,12 @@ class StructureComparison:
 
 
 class ScheduledReference(StructureComparison):
+    publisher = None
+
     def __init__(self, domain, publications, manifest, evidence):
         super().__init__(domain, publications, manifest)
         self.origin = manifest["delivery"]["origin_raw_ns"]
-        self.starts = {}
+        self.starts = []
         self.resident = {}
         configuration = domain["configuration"]
         self.page_size = configuration["page_size"]
@@ -151,8 +153,7 @@ class ScheduledReference(StructureComparison):
 
     def record(self, action, graph, call, work, begin_ns, end_ns, *, outputs=None):
         super().record(action, graph, call, work, begin_ns, end_ns, outputs=outputs)
-        if self.ingress is not None:
-            self.starts[action_identity(action)] = begin_ns - self.origin
+        self.starts.append(begin_ns - self.origin)
         if self.record_cache:
             self.apply_cache_effects(len(self.actions) - 1)
             self.check_state(action, call)
@@ -214,7 +215,7 @@ class ScheduledReference(StructureComparison):
         if self.ingress is None or "failure" in timing:
             return timing
         action = query["action"]
-        start = self.starts[action_identity(action)]
+        start = self.starts[self.indices[action_identity(action)]]
         return {**timing, "prepare_ns": max(0, start - action["clock_ns"])}
 
     def compare(self, result):
@@ -245,3 +246,18 @@ class StructureReference(ScheduledReference):
             call = batch.call
             self.record(batch.action(), batch.graph, call, batch.measurements(), call["begin_ns"],
                         call["result_processing"]["end_ns"])
+
+    def fixed_work(self):
+        lower = max(batch.call["end_ns"] - batch.profile_end_ns for batch in self.observed)
+        upper = min(batch.call["begin_ns"] - batch.profile_begin_ns for batch in self.observed)
+        if lower > upper:
+            raise ValueError("native action markers do not share a clock alignment")
+
+        batches = []
+        offset = lower - self.origin
+        for batch, measured in zip(self.observed, self.measurements, strict=True):
+            shift = lower + batch.profile_begin_ns - batch.call["begin_ns"]
+            work = [{**row, "submitted_after_ns": row["submitted_after_ns"] + shift} for row in measured["work"]]
+            intervals = [[row["begin_ns"] + offset, row["end_ns"] + offset] for row in batch.device]
+            batches.append((work, intervals))
+        return upper - lower, batches

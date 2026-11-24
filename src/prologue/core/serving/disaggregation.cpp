@@ -126,7 +126,7 @@ void Simulation::Disaggregation::reserve(const json& call) {
     const json member{{"request", request}, {"kv_committed_tokens", tokens}, {"output_tokens", 0}};
     const json action{{"phase", query.at("phase")}, {"query", query}, {"clock_ns", now()},
                       {"members", json::array({member})}};
-    const auto timing = session_.timing_source_.for_action(action, {{"work", json::array()}});
+    const auto timing = session_.timing_source_.for_action(action, {{"calls", json::array()}, {"work", json::array()}});
 
     auto& clock = session_.actors_.at(decode).clock;
     clock.advance_by(timing.prepare_ns);

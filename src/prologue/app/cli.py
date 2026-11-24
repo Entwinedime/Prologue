@@ -3,6 +3,7 @@
 import argparse
 import json
 import subprocess
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from prologue.app import explore
@@ -217,7 +218,7 @@ def predict(args):
                "release": release["release"]}
     if revision not in revisions:
         gap = {"status": "template_domain_gap", "domain": domain, "reason": "no published source for the target domain"}
-        return {**context, **gap, "gap": gap}
+        return {**context, **gap, "actions": [], "finished_requests": 0, "gap": gap}
 
     job = {"domain": domain, "cost_domain": cost_domain, "workload": workload,
            "costs": costs, "templates": templates, **control_inputs(templates, domain, workload),
@@ -228,18 +229,32 @@ def predict(args):
 
 def verify_performance(args):
     from prologue.verification.fixed_graph import FixedGraph
+    from prologue.verification.structure import ScheduledReference
 
     store, release, rules = pinned(args)
     recording = AscendRecording(args.reference)
-    reference = detailed_reference(recording)
+    reference = structure_reference(recording, rules)
+    if not isinstance(reference, ScheduledReference):
+        return {"status": "unsupported_fixed_graph", "reason": "fixed replay requires one scheduler timeline",
+                "release": release["release"]}
+    hardware = (AscendEvidence.hardware(args.reference) if recording.windows is None else reference.hardware)
     costs = store.asset(release, "performance")
-    graph = FixedGraph(reference, recording.manifest, AscendEvidence.hardware(args.reference))
+    graph = FixedGraph(reference, hardware)
     if any(row["origin_raw_ns"] == recording.delivery["origin_raw_ns"] for row in cost_sources(costs, graph.domain)):
         raise ValueError("the fixed-graph reference was used in calibration")
     baseline = graph.check_baseline(run_core("replay", graph.job()))
     report = {"status": baseline["status"], "baseline": baseline, "release": release["release"]}
     if baseline["status"] != "matched":
         return report
+
+    groups = run_core("coordinates", [{"action": row["action"], "graph": row["graph"]} for row in graph.batches])
+    coordinates = {json.dumps(row, sort_keys=True): row for group in groups
+                   for row in (group["host"], *group["device"])}
+    quotes = cost_quotes(costs, rules, {"domain": graph.domain, "coordinates": list(coordinates.values())})
+    coverage = defaultdict(Counter)
+    for row, quote in zip(coordinates.values(), quotes, strict=True):
+        coverage[row["family"]][quote["status"]] += 1
+    report["coverage"] = {"required_coordinates": len(coordinates), "families": dict(coverage)}
 
     device = graph.compare(run_core("replay", graph.job(costs, rules.document, device_only=True)))
     estimate = graph.compare(run_core("replay", graph.job(costs, rules.document)))

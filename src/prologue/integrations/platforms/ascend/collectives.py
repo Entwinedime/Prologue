@@ -33,9 +33,11 @@ class PhysicalRank:
         calls = self.evidence["calls"]
         starts = self.evidence["profile_scope_begins_ns"]
         ends = self.evidence["profile_scope_ends_ns"]
-        for call, begin, end in zip(calls, starts, ends, strict=True):
-            if begin + offset > call["begin_ns"] or end + offset < call["end_ns"]:
-                raise ValueError("the Ascend clock anchor does not enclose the observed calls")
+        lower = max(call["end_ns"] - end for call, end in zip(calls, ends, strict=True))
+        upper = min(call["begin_ns"] - begin for call, begin in zip(calls, starts, strict=True))
+        if not lower <= offset <= upper:
+            raise ValueError("the Ascend clock anchor does not enclose the observed calls")
+        self.clock_alignment_width_ns = upper - lower
         return offset
 
     def collective_gates(self):
