@@ -57,6 +57,19 @@ python3 example/coarse_graph/run.py --libraries /path/to/qwen-release --timeout 
 
 相同任务、构建与库发布可用相同 `--output` 恢复。已有目标的结论保留。空库从 worker 初始化报告首个模板缺项；有模板时由原生控制决定后续动作，成本超出拟合范围时给出具体工作与特征。一个组合缺项时其他组合继续评估，进程最终返回非零。
 
+### 按任务额度自动补库
+
+提供物理部署和可写库根后，协调器归并可共用原生会话的缺项，按本任务的累计原生次数、卡时、后处理和存储额度采集。发布新证据后，仅重算所选模板、初态或成本域发生变化的目标。四项额度置零可复用已有发布，结果会列出仍缺的工作。
+
+```bash
+python3 -m prologue.app explore --input /data/targets.json --output /data/exploration \
+  --deployment /data/placement.json --libraries /data/libraries --binary /build/prologue \
+  --timeout 300 --attempt-limit 2 --card-budget-seconds 400 \
+  --postprocessing-budget-seconds 120 --storage-bytes 3221225472
+```
+
+`explore --prediction-workers 4` 可让四个配置与请求组合在 CPU 上同时预测，默认依次执行。每个组合读取同一份发布并单独保存结果。所有目标返回后，协调器统一归并缺项、安排采集和发布。
+
 ### 给单卡任务提供物理通信样本
 
 Ascend 的单卡投影按原生进程组为同步设备集合通信分配串行服务队列。调用流保留操作数提交与结果可用的边界，跨卡通信服务时间由物理样本提供。对变长交换，SDK 唯一操作记录中的零计数须与实测发送行数一致。只收不发仍可有设备服务，区间继续按本次设备任务、对端就绪与校时证据确定。
@@ -70,6 +83,23 @@ python3 -m prologue.app cost-samples --transport-only \
 ```
 
 将导出的文件交给 `acquire-costs --transport-samples`，形成包含目标放置和通信实现的成本模型，再将拟合结果发布到所需性能库。CPU 提交、等待和设备计算各自保有测量依据。独立目标任务的可选 `observation` 字段可供验证矩阵复用已结束的原生运行；其历史费用归该运行，工作负载只包含推理输入。
+
+原生 worker 初始化直接读取角色、槽位、KV 容量和预热后的初态。常规的稠密调度器可按缺项中的队列、成员和生成进度准备一个原生批次，测量选批、模型前向或结果处理。独立 CPU 计时使用同一个原生切口，设备计时使用对应的设备工作和特征。
+
+并发 Prefill 首次需要实测时，采集器从这批成员的实际长度和可运行步数生成有限的局部输入。它测量最长成员单独执行的 Prefill。有两个可继续的成员组时，还测量它们合批后的 Decode 前向与结果处理。不同探针共享一次有额度的采集任务，收据列出 ModelRunner 启动数、卡时和各产物的原生测量位置。模板编译从指定的合并入口抽取子图。冷任务结束前，协调器核对这些实测切口涉及的同步搬运，将仍缺的载荷交给已有的就绪张量采样器。额度耗尽时，结果单列尚未定价的训练工作。
+
+### 发布与复用局部测量
+
+下面第一条命令核对原生收据和原查询后原子发布。第二条命令从合格的批次结构采集里取得与模板工作对应的设备样本。读者可以继续使用先前固定的发布。
+
+```bash
+python3 -m prologue.app publish-local --libraries /data/libraries \
+  --session /data/session --query /data/query.json \
+  --binary /build/prologue --timeout 300
+
+python3 -m prologue.app batch-cost-samples --session /training/local-batch \
+  --binary /build/prologue --timeout 300 --output /training/samples/batch.json
+```
 
 ## 从已编译来源发布双库
 
@@ -93,7 +123,7 @@ PYTHONPATH=src python3 -m prologue.app acquire-local \
   --output /path/to/local-session --timeout 60 --budget-seconds 60 --attempt-limit 1
 ```
 
-当前同步搬运规则从模板工作取得调用、方向、dtype 和字节数。在指定卡上执行原生张量操作，核对同步 ACL 调用的开始、成功返回及实际目标数据。这段时间归控制线程。结果的 `answers` 逐项给出状态和样本文件，`native` 保存执行和计费收据。样本沿 `fit-costs --samples ... --gap ...` 重新回答原查询。初始 worker 布局等尚无局部规则的需求会返回 `no_matching_rule`。单卡遇到需要真实多卡完成的集合通信会列出缺少的参与者。
+当前同步搬运规则从模板工作取得调用、方向、dtype 和字节数。在指定卡上执行原生张量操作，核对同步 ACL 调用的开始、成功返回及实际目标数据。这段时间归控制线程。结果的 `answers` 逐项给出状态和样本文件，`native` 保存执行和计费收据。样本沿 `fit-costs --samples ... --gap ...` 重新回答原查询。单卡遇到需要真实多卡完成的集合通信会列出缺少的参与者。
 
 稠密 TP1 的 Decode attention 查询还需传入 `--libraries <发布根>`。模板库提供原生模块位置、模型配置及各设备工作对应的任务序列。局部规则用一个 ModelRunner 为所选长度建立槽位，运行 Prefill 写入 KV，再运行到指定的 Decode attention 模块。适配器从原生池回读 K/V，并逐段核对实际任务、操作数和计时边界。同一次初始化可以交付多个长度和多段工作。样本丢失时，在原输出目录以相同输入恢复，可用零次新增尝试从已发布的原生记录重新取得证据。
 
