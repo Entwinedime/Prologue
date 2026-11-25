@@ -13,12 +13,21 @@ class PlatformDomain:
     collective_backend: str
     strided_attention: tuple[str, ...]
     pd_transfer: str
+    paged_extend_kernel_limit: int | None
     native_symbols: tuple[tuple[str, str, str], ...] = ()
+
+
+class DeviceAPI(Protocol):
+    def device_count(self) -> int: ...
+    def set_device(self, index: int) -> None: ...
+    def synchronize(self) -> None: ...
+    def current_stream(self) -> Any: ...
+    def Event(self, *, enable_timing: bool = False) -> Any: ...
 
 
 class DeviceRuntime(Protocol):
     domain: PlatformDomain
-    api: Any
+    api: DeviceAPI
     markers: type
     profiling: type
     host_profile: type
@@ -30,6 +39,7 @@ class DeviceRuntime(Protocol):
     tensor_layouts: Callable
     expert_environment: dict[str, str]
 
+    def kv_token_layout(self, key, value) -> tuple[str, int, int]: ...
     def load_weight_bridge(self) -> None: ...
     def move_weight(self, tensor, backing, to_device: bool) -> None: ...
 

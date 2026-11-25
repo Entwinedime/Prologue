@@ -3,7 +3,8 @@
 from bisect import bisect_right
 from dataclasses import asdict, dataclass
 from itertools import accumulate
-from math import prod
+
+from prologue.integrations.bindings import device_runtime
 
 
 @dataclass(frozen=True)
@@ -17,15 +18,8 @@ class MhaKvLayout:
 
     @classmethod
     def from_pool(cls, pool):
-        import torch
-
-        buffers = pool.k_buffer, pool.v_buffer
-        if any(not isinstance(buffer, torch.Tensor) or buffer.ndim != 5 for buffer in buffers):
-            raise NotImplementedError("KV transfer layout requires contiguous paged MHA buffers")
-        widths = [prod(buffer.shape[3:]) * buffer.element_size() for buffer in buffers]
-        return cls(
-            pool.start_layer, pool.start_layer + pool.layer_num, pool.head_num, str(pool.k_buffer.dtype), *widths
-        )
+        token_layout = device_runtime().kv_token_layout(pool.k_buffer, pool.v_buffer)
+        return cls(pool.start_layer, pool.start_layer + pool.layer_num, pool.head_num, *token_layout)
 
     @classmethod
     def read(cls, value):

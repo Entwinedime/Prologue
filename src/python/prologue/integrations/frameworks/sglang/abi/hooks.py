@@ -61,10 +61,12 @@ class HookTable:
             for spec in specs:
                 name = spec.target
                 original = getattr(instance, name)
-                if name in vars(instance):
-                    restore.callback(setattr, instance, name, vars(instance)[name])
-                else:
-                    restore.callback(delattr, instance, name)
+                local = vars(instance).get(name)
+                inherited = name not in vars(instance)
                 callback = spec.callback if spec.mode == "replace" else partial(spec.callback, original)
                 setattr(instance, name, callback)
+                if inherited:
+                    restore.callback(delattr, instance, name)
+                else:
+                    restore.callback(setattr, instance, name, local)
             yield

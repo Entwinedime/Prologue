@@ -2,6 +2,7 @@
 
 from functools import cached_property
 from importlib import import_module
+from math import prod
 
 from prologue.common.interfaces import PlatformDomain
 
@@ -20,7 +21,7 @@ class Component:
 
 
 class AscendDeviceRuntime:
-    domain = PlatformDomain("ascend", "npu", "torch_npu", "hccl", ("ascend",), "ascend")
+    domain = PlatformDomain("ascend", "npu", "torch_npu", "hccl", ("ascend",), "ascend", 200)
     markers = Component(".runtime.markers", "AscendMarkers")
     profiling = Component(".runtime.markers", "AscendProfiling")
     host_profile = Component(".runtime.host_profile", "AscendHostProfile")
@@ -38,6 +39,17 @@ class AscendDeviceRuntime:
         import torch_npu  # noqa: F401 -- installs the native torch device namespace
 
         return torch.npu
+
+    @staticmethod
+    def kv_token_layout(key, value):
+        import torch
+
+        if any(not isinstance(buffer, torch.Tensor) or buffer.ndim != 5 for buffer in (key, value)):
+            raise NotImplementedError("KV transfer layout requires contiguous paged MHA buffers")
+
+        # Native page and layer axes precede the per-token head dimensions.
+        key_bytes, value_bytes = (prod(buffer.shape[3:]) * buffer.element_size() for buffer in (key, value))
+        return str(key.dtype), key_bytes, value_bytes
 
     @staticmethod
     def load_weight_bridge():

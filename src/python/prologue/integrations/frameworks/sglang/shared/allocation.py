@@ -7,6 +7,7 @@ import inspect
 import sys
 import textwrap
 
+from prologue.integrations.bindings import platform_domain
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 
@@ -32,8 +33,8 @@ class AllocationABI:
 
     @staticmethod
     def extend_branch(pages):
-        # NPUPagedTokenToKVPoolAllocator.alloc_extend selects its native kernel below 200 new pages.
-        return "extend_kernel" if pages < 200 else "extend_naive"
+        limit = platform_domain().paged_extend_kernel_limit
+        return "extend_kernel" if limit is None or pages < limit else "extend_naive"
 
 
 class AllocationPrefixes:
