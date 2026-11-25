@@ -156,9 +156,8 @@ class CostAcquisition:
         if output.is_file():
             return
         output.parent.mkdir(parents=True, exist_ok=True)
-        name = command.name if isinstance(command, ModelingCommand) else None
-        with self.processing(name) as allowance, output.with_suffix(".log").open("a") as log:
-            arguments = command.arguments(allowance) if name else command
+        with self.processing(command.name) as allowance, output.with_suffix(".log").open("a") as log:
+            arguments = command.arguments(allowance)
             result = self.limit.run(arguments, log, allowance)
             if result:
                 raise subprocess.CalledProcessError(result, arguments)

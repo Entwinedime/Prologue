@@ -47,8 +47,7 @@ class TaskWorkspace:
         if ready.exists():
             self._publish(ready, marker)
         if (self.root / marker).exists():
-            if staging.exists():
-                staging.rmdir()
+            discard_path(staging)
             yield None
             return
         if any(p.name not in {".lock", ".staging"} for p in self.root.iterdir()):
