@@ -1,7 +1,6 @@
 """Native evidence operations and shared ABI types used by independent verification."""
 
 from prologue.runtime.io import read_json
-from prologue.integrations.frameworks.sglang.acquisition.worker_templates import SGLangTask
 from prologue.integrations.frameworks.sglang.shared.configuration import CaptureInput, ServingInput
 from prologue.integrations.frameworks.sglang.shared.kv_layout import KvBufferAddresses, MhaKvLayout
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
@@ -41,4 +40,4 @@ def device_effects(graph, capture, rank, native, facts, trace):
     return evidence, StreamEffects(evidence).inspect(graph)
 
 
-__all__ = ['CaptureInput', 'CpuProtocolWork', 'CpuTransfer', 'DeviceCalibration', 'Interval', 'ObservedServices', 'SGLangTask', 'ServingInput', 'ThreadIntervals', 'ThreadService', 'device_coordinates', 'device_effects', 'kv_buffers', 'observed_scopes', 'stream_declarations']
+__all__ = ['CaptureInput', 'CpuProtocolWork', 'CpuTransfer', 'DeviceCalibration', 'Interval', 'ObservedServices', 'ServingInput', 'ThreadIntervals', 'ThreadService', 'device_coordinates', 'device_effects', 'kv_buffers', 'observed_scopes', 'stream_declarations']

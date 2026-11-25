@@ -8,7 +8,7 @@ from pathlib import Path
 
 from prologue.contracts.workload import WorkloadContent
 from prologue.contracts.workload.expert_routes import ExpertRoutes
-from prologue.integrations.frameworks.sglang.shared.configuration import CaptureInput
+from prologue.app.registry import AdapterRegistry
 from prologue.runtime.io import write_json
 
 
@@ -111,7 +111,7 @@ class MatrixInputs:
             workload = self.workload(case, configuration["instances"], model["geometry"])
             common = {"model": model["model"], "instances": configuration["instances"], "workload": workload}
             native = {**common, "observe_all_workers": True}
-            CaptureInput(native)
+            AdapterRegistry.select().capture_input(native)
             inputs.append((case, native, common))
 
         # Freeze the whole request draw from its declared inputs, independently of template or cost coverage.

@@ -1,6 +1,5 @@
 """Verify a serving structure against one observed native case."""
 
-import argparse
 import json
 from pathlib import Path
 from subprocess import CalledProcessError, TimeoutExpired
@@ -122,30 +121,3 @@ class StructureVerification(VerificationRun):
         if report["condition_inputs"]["full_node_coverage"]:
             return self.finish("full_structure_matched")
         return self.finish("structure_matched_within_scope")
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--capture", type=Path, required=True, help="published detailed native capture task")
-    for name in ("reference", "libraries", "input", "binary", "output"):
-        parser.add_argument(f"--{name}", type=Path, required=True)
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        required=True,
-        help="allowance in seconds for each of layout preparation and prediction",
-    )
-    parser.add_argument("--control-image", default="prologue-control:ubuntu22.04")
-    parser.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
-    parser.add_argument("--details", action="store_true", help="retain all evidence findings")
-    parser.add_argument(
-        "--peer-handoffs",
-        action="store_true",
-        help="allow measured common ports when a single-device action has a different layout",
-    )
-    from ..core.adapters import SGLangTask
-    raise SystemExit(0 if StructureVerification(parser.parse_args(), SGLangTask).run() else 1)
-
-
-if __name__ == "__main__":
-    main()

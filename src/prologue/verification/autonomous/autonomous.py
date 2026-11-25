@@ -1,8 +1,6 @@
 """Verify cost-driven serving against an independent lightweight native run."""
 
-import argparse
 import json
-from pathlib import Path
 from subprocess import TimeoutExpired
 
 from prologue.acquisition.observation.workers import CapturedWorkers
@@ -101,20 +99,3 @@ class AutonomousVerification(VerificationRun):
             self.report["native"], self.output / "prediction/result.json"
         ).report()
         return self.finish("compared")
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--capture", type=Path, required=True, help="completed lightweight native capture task")
-    for name in ("libraries", "input", "binary", "output"):
-        parser.add_argument(f"--{name}", type=Path, required=True)
-    parser.add_argument("--timeout", type=float, required=True, help="prediction allowance in seconds")
-    parser.add_argument("--control-image", default="prologue-control:ubuntu22.04")
-    parser.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
-    parser.add_argument("--details", action="store_true", help="retain the execution trace")
-    from ..core.adapters import SGLangTask
-    raise SystemExit(0 if AutonomousVerification(parser.parse_args(), SGLangTask).run() else 1)
-
-
-if __name__ == "__main__":
-    main()

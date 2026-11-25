@@ -11,7 +11,7 @@ from pathlib import Path
 from run import TaskCommands
 
 from prologue.acquisition.recording import PublishedCapture
-from prologue.integrations.frameworks.sglang.acquisition.worker_templates import SGLangTask
+from prologue.app.registry import AdapterRegistry
 from prologue.libraries.release import LibraryRelease
 from prologue.runtime.docker import OwnedContainers
 from prologue.runtime.io import write_json
@@ -125,7 +125,7 @@ class MatrixRun:
             production = self.root / reference["production"]
             output = self.results / "sources" / name / str(index)
             command = self.commands.command(
-                "prologue.verification.core.source_evidence", "--production", production, "--capture", recording.source,
+                "verify", "source", "--production", production, "--capture", recording.source,
                 "--libraries", release.directory, "--output", output,
             )
             code = self.process(f"{name}/source-evidence-{index}", command)
@@ -138,7 +138,7 @@ class MatrixRun:
         if "checks" not in source:
             return {"source_status": source["status"]}
         release = LibraryRelease(Path(source["libraries"]))
-        task = SGLangTask(prediction, release.templates)
+        task = AdapterRegistry.select().prediction(prediction, release.templates)
         if task.binding is None:
             return {"source_status": "source-unavailable", "source_failure": task.missing_workers()}
 
@@ -227,8 +227,8 @@ class MatrixRun:
         code = self.process(
             step,
             self.commands.command(
-                "prologue.app",
-                "produce",
+                "capture",
+                "project",
                 "--capture",
                 recording.directory,
                 "--product",
@@ -251,8 +251,8 @@ class MatrixRun:
 
     def observe(self, step, domain, task, output, mode, timeout):
         command = self.commands.command(
-            "prologue.app",
             "capture",
+            "run",
             "--input",
             task,
             "--deployment",
@@ -285,7 +285,7 @@ class MatrixRun:
         output = self.results / "cases" / name
         timing = ("--peer-handoffs",) if case.get("peer_handoffs") else ()
         command = self.commands.command(
-            "prologue.verification.structure.structure",
+            "verify", "structure",
             "--capture",
             target["native"],
             "--reference",
@@ -323,7 +323,7 @@ class MatrixRun:
         if phase == "fixed":
             if target["status"] != "produced":
                 return result | {"status": "target-prerequisite-unqualified"}
-            module = "fixed.fixed_graph"
+            operation = "fixed-graph"
             release = LibraryRelease(self.root / domain["libraries"])
             if release.costs is None:
                 return result | {"status": "cost-asset-unavailable"}
@@ -331,7 +331,7 @@ class MatrixRun:
             if groups := case.get("fixed_work_groups"):
                 evidence += ("--work-groups", self.root / groups)
         else:
-            module = "autonomous.autonomous"
+            operation = "autonomous"
             latency = self.root / case.get("latency_observation", f"targets/{self.name}/{name}/latency")
             if "latency_observation" not in case:
                 timeout = case.get("latency_timeout_seconds", self.budget["task_seconds"])
@@ -354,7 +354,7 @@ class MatrixRun:
         output = self.results / phase / name
         timeout = self.budget["operation_seconds"]
         command = self.commands.command(
-            f"prologue.verification.{module}", *evidence, "--output", output,
+            "verify", operation, *evidence, "--output", output,
             "--binary", self.binary, "--modeling-image", self.images["modeling"], "--timeout", timeout,
         )
         allowance = (2 * timeout if phase == "fixed" else timeout) + 60

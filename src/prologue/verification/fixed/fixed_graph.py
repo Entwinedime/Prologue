@@ -1,6 +1,5 @@
 """Verify service costs without changing the observed serving execution."""
 
-import argparse
 import json
 from collections import Counter, defaultdict
 from contextlib import nullcontext
@@ -308,23 +307,3 @@ class FixedPerformance(VerificationRun):
             if reference.gaps or not input_ready:
                 return self.finish("reference_timing_incomplete")
             return self.finish("cost_gap" if None in estimated else "compared")
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--capture", type=Path, required=True, help="published native service-reference task")
-    for name in ("reference", "costs", "binary", "output"):
-        parser.add_argument(f"--{name}", type=Path, required=True)
-    parser.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
-    parser.add_argument("--timeout", type=float, required=True, help="cumulative modeling allowance in seconds")
-    parser.add_argument("--details", action="store_true", help="retain all reference evidence findings")
-    parser.add_argument(
-        "--work-groups",
-        type=Path,
-        help="replace only native work matching each named group and hold other services measured",
-    )
-    raise SystemExit(0 if FixedPerformance(parser.parse_args()).run() else 1)
-
-
-if __name__ == "__main__":
-    main()

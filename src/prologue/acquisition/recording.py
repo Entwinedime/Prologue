@@ -1,6 +1,8 @@
 """Read an immutable native task together with the conditions that produced its evidence."""
 
+from pathlib import Path
 
+from prologue.libraries.release import LibraryRelease, asset_path
 from prologue.runtime.io import read_json
 
 
@@ -60,3 +62,33 @@ class SourceProductions:
 
         # Explicit observations keep their original owners, which may live outside this collection.
         self.captures = {job["id"]: collection / name for job, name in zip(jobs, publication["captures"], strict=True)}
+
+    def publish(self, output, costs):
+        observations, identities = {}, {}
+        for job, directory in self.paths.items():
+            directory = directory.resolve(strict=True)
+            recording = PublishedCapture(self.captures[job], self.jobs[str(job)])
+            inputs = read_json(directory / "production.json")["inputs"]
+            if Path(inputs["capture_path"]).resolve(strict=True) != recording.source:
+                raise ValueError(f"template production belongs to another native recording: {directory}")
+
+            result = read_json(directory / "result.json")
+            paths = []
+            for rank, name in zip(result["observed_roles"], result["templates"], strict=True):
+                sampling = result.get("sampling", {}).get(str(rank))
+                paths.append((asset_path(directory, name), asset_path(directory, sampling) if sampling else None))
+            identity = identities[job] = recording.attempt_id
+            value = recording.inputs["deployment"], paths
+            if observations.setdefault(identity, value) != value:
+                raise ValueError(f"conflicting template productions for recording {identity}")
+
+        # Translate the archived collection's role declarations once; requests and capture budgets stay with the task.
+        bindings = []
+        jobs = [job for job in self.plan["sources"] if job["id"] in identities]
+        for job in jobs:
+            if not job["configurations"]:
+                continue
+            imports = [identities[local["id"]] for local in jobs
+                       if any(row["source"] == job["id"] for row in local.get("local_consumers", []))]
+            bindings.append({"domain": job["structure"], "workers": identities[job["id"]], "imports": imports})
+        return LibraryRelease.publish(output, observations, bindings, costs)

@@ -1,10 +1,8 @@
 """Prepare native execution conditions and independently check their actual consumption."""
 
-import argparse
 import json
 from collections import Counter, defaultdict
 from itertools import pairwise
-from pathlib import Path
 
 from prologue.runtime.io import read_json, write_json
 
@@ -594,18 +592,3 @@ class ConsumedInputs:
                 "measurements and one joint clock; logical witnesses leave completion to actual dependencies."
             ),
         }
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--capture", type=Path, required=True)
-    parser.add_argument("--graphs", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--layouts", type=Path, help="require every action endpoint from prologue action-layouts")
-    args = parser.parse_args()
-    report = NativeInputs(args.capture, args.graphs, args.output, args.layouts).run()
-    raise SystemExit(0 if report["status"] == "extracted" else 1)
-
-
-if __name__ == "__main__":
-    main()

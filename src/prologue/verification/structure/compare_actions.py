@@ -1,8 +1,6 @@
 """Compare action contents, causal boundaries and data/communication connections with a native case."""
 
-import argparse
 from collections import Counter
-from pathlib import Path
 
 from ..core.dependencies import ActionOrderComparison
 from ..core.native_case import NativeCase
@@ -337,22 +335,3 @@ class ActionComparison:
             },
             "scope": COMPARISON_SCOPE,
         }
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--capture", type=Path, required=True)
-    parser.add_argument("--graphs", type=Path, required=True)
-    parser.add_argument("--execution", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--details", action="store_true", help="retain every observed difference")
-    parser.add_argument("--peer-handoffs", action="store_true", help="check a trace timed through staged peer handoffs")
-    arguments = parser.parse_args()
-    reference = NativeCase.read(arguments.capture, arguments.graphs)
-    report = ActionComparison(reference, arguments.execution, arguments.output, arguments.details,
-                              peer_handoffs=arguments.peer_handoffs).run()
-    raise SystemExit(0 if report["status"] == "actions_matched" else 1)
-
-
-if __name__ == "__main__":
-    main()

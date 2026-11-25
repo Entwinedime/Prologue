@@ -3,7 +3,6 @@
 from prologue.verification.core.adapters import device_effects, stream_declarations
 
 
-import argparse
 import json
 from bisect import bisect_right
 from collections import Counter, defaultdict
@@ -11,7 +10,7 @@ from heapq import heappop, heappush
 from pathlib import Path
 
 from prologue.acquisition.recording import PublishedCapture
-from prologue.libraries.release import LibraryRelease, asset_path
+from prologue.libraries.release import asset_path
 
 from .actions import ActionScopes
 from .native_case import NativeCase
@@ -539,28 +538,3 @@ class ProductionEvidence:
         )
         (self.output / "source-evidence.md").write_text("\n".join(lines))
         return 0 if eligibility["joint_reference" if require_joint else "local_templates"] else 1
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--production", type=Path, required=True, help="published produce output with retained intermediates"
-    )
-    parser.add_argument(
-        "--capture", type=Path, required=True, help="original native source containing independent device clock samples"
-    )
-    parser.add_argument(
-        "--libraries", type=Path, help="also compare the released templates with this original production"
-    )
-    parser.add_argument("--output", type=Path, required=True, help="new report directory")
-    parser.add_argument("--details", action="store_true", help="include all timing findings")
-    arguments = parser.parse_args()
-    check = ProductionEvidence(arguments.production, arguments.capture, arguments.output, arguments.details)
-    _, document = check.inspect()
-    if arguments.libraries is not None:
-        document["published_templates"] = check.published_templates(LibraryRelease(arguments.libraries))
-    raise SystemExit(check.publish(document))
-
-
-if __name__ == "__main__":
-    main()

@@ -13,7 +13,7 @@ class TaskCommands:
     def __init__(self, repository, images):
         self.repository, self.images = repository, images
 
-    def command(self, module, *arguments, model=None, files=None):
+    def command(self, *arguments, model=None, files=None):
 
         # Independent experiments need their workspace. Prediction receives only its inputs and result directory.
         if files is None:
@@ -24,7 +24,9 @@ class TaskCommands:
         if model is not None:
             destination = Path(model).absolute()
             mounts.append((destination.resolve(strict=True), destination, True))
-            for name in ("/usr/local/Ascend/driver", "/etc/ascend_install.info", "/etc/hccn.conf"):
+            from prologue.integrations.platforms.ascend.host.deployment import AscendDeployment
+
+            for name in AscendDeployment.driver_mounts:
                 mounts.append((Path(name).resolve(strict=True), Path(name), True))
 
         mounts.extend([
@@ -37,7 +39,7 @@ class TaskCommands:
         command.extend([
             "--workdir", str(self.repository),
             "--env", "PYTHONPATH=src",
-            "--entrypoint", "python3", self.images["control"], "-m", module,
+            "--entrypoint", "python3", self.images["control"], "-m", "prologue",
         ])
         return command + [str(value) for value in arguments]
 
@@ -55,7 +57,7 @@ def main():
     images = {"control": options.control_image, "modeling": options.modeling_image}
     commands = TaskCommands(repository, images)
     if "--help" in remaining or "-h" in remaining:
-        raise SystemExit(subprocess.call(commands.command("prologue.app", "explore", "--help", files=())))
+        raise SystemExit(subprocess.call(commands.command("predict", "explore", "--help", files=())))
     if options.libraries is None:
         parser.error("--libraries is required")
 
@@ -71,7 +73,7 @@ def main():
         files.append((libraries, True))
 
     command = commands.command(
-        "prologue.app", "explore", "--input", source, "--libraries", libraries, "--output", output, "--binary", binary,
+        "predict", "explore", "--input", source, "--libraries", libraries, "--output", output, "--binary", binary,
         "--modeling-image", images["modeling"], "--control-image", images["control"], *remaining, files=files,
     )
     raise SystemExit(subprocess.call(command))

@@ -4,6 +4,8 @@ from pathlib import Path
 
 
 class AscendDeployment:
+    driver_mounts = ("/usr/local/Ascend/driver", "/etc/ascend_install.info", "/etc/hccn.conf")
+
     @staticmethod
     def source_docker_runtime() -> str:
         return "ascend"
@@ -66,7 +68,7 @@ class AscendDeployment:
             arguments.extend(["--cap-add", "PERFMON", "--ulimit", "memlock=-1:-1"])
 
         # Offline placement comparison needs only the declaration. Native execution needs the driver mounts.
-        for path in ("/usr/local/Ascend/driver", "/etc/ascend_install.info", "/etc/hccn.conf"):
+        for path in self.driver_mounts:
             mounted = Path(path).resolve(strict=True)
             arguments.extend(["--mount", f"type=bind,src={mounted},dst={path},readonly"])
 

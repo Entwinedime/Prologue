@@ -1,7 +1,5 @@
 """Compare independent predictions with native request submission and output times."""
 
-import argparse
-from pathlib import Path
 
 from prologue.runtime.io import read_json, write_json
 from prologue.serving.latency import RequestLatency, percentile95
@@ -153,21 +151,10 @@ class LatencyComparison:
                 "cost_queries": result["cost_queries"], "cost_query_ns": result["cost_query_ns"]}
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--capture", type=Path, nargs="+", required=True)
-    parser.add_argument(
-        "--prediction", type=Path, nargs="+", help="existing result JSONs for a publication-only comparison"
-    )
-    parser.add_argument("--output", type=Path, required=True)
-    arguments = parser.parse_args()
-    rows = [NativeLatencyMetrics.from_source(path).report() for path in arguments.capture]
-    if arguments.prediction is not None:
-        for row, prediction in zip(rows, arguments.prediction, strict=True):
+def compare_publications(captures, predictions, output):
+    rows = [NativeLatencyMetrics.from_source(path).report() for path in captures]
+    if predictions is not None:
+        for row, prediction in zip(rows, predictions, strict=True):
             row["comparison_basis"] = "token_publications_only"
             row["prediction"] = LatencyComparison(row, prediction).report()
-    write_json(arguments.output, rows, indent=2, replace=False)
-
-
-if __name__ == "__main__":
-    main()
+    write_json(output, rows, indent=2, replace=False)

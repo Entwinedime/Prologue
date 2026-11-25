@@ -1,10 +1,8 @@
 """Find the first batch decision affected by autonomous execution."""
 
-import argparse
 import json
 from collections import defaultdict
 from itertools import zip_longest
-from pathlib import Path
 
 from prologue.runtime.io import write_json
 
@@ -165,22 +163,14 @@ class ScheduleComparison:
         return {"prediction_complete": complete, "groups": reports, "inputs": inputs}
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("capture", "graphs", "execution", "output"):
-        parser.add_argument(f"--{name}", type=Path, required=True)
-    args = parser.parse_args()
-    recording = ReferenceRecording(args.capture)
-    reference = NativeCase.read(recording.source, args.graphs)
+def compare_schedule(capture, graphs, execution, output):
+    recording = ReferenceRecording(capture)
+    reference = NativeCase.read(recording.source, graphs)
     target = {field: recording.inputs["job"][field] for field in recording.target_fields}
     if mismatch := recording.input_difference(recording.inputs["job"], target) or reference.input_difference(target):
         raise ValueError(f"native batch reference differs in {mismatch}")
     if reference.report(False)["status"] != "consistent":
         raise ValueError("native batch reference has unqualified observations")
-    report = ScheduleComparison(reference).run(args.execution)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    write_json(args.output, report, indent=2, replace=False)
-
-
-if __name__ == "__main__":
-    main()
+    report = ScheduleComparison(reference).run(execution)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    write_json(output, report, indent=2, replace=False)

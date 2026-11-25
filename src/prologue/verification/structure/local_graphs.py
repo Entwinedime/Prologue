@@ -1,9 +1,7 @@
 """Compare given-action expansion with observed local contents, separately from control and execution."""
 
-import argparse
 import json
 from collections import Counter
-from pathlib import Path
 
 from ..core.actions import ActionIdentity
 from ..core.contents import GraphContents
@@ -147,17 +145,3 @@ class LocalComparison(LocalActionComparison):
         ]
         (self.output / "local-graphs.md").write_text("\n".join(text))
         return 0 if report["status"] == "local_actions_matched" else 1
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--capture", type=Path, required=True)
-    parser.add_argument("--graphs", type=Path, required=True)
-    parser.add_argument("--expanded", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
-    raise SystemExit(LocalComparison(args.capture, args.graphs, args.expanded, args.output).run())
-
-
-if __name__ == "__main__":
-    main()

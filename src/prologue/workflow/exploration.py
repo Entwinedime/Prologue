@@ -18,13 +18,13 @@ from prologue.workflow.targets import ExplorationTarget
 
 
 class ExplorationTask:
-    def __init__(self, args: ExplorationOptions, adapter, framework: str):
+    def __init__(self, args: ExplorationOptions, adapter, framework: str, source):
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         self.root = (args.output or Path("data") / f"{stamp}_exploration").resolve()
         self.release = LibraryRelease(args.libraries)
         self.adapter = adapter
         self.binary = args.binary.resolve(strict=True)
-        self.source = read_json(args.input)
+        self.source = source
         if (
             self.source.keys() != {"framework", "model", "configurations", "workloads"}
             or self.source["framework"] != framework

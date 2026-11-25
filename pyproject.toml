@@ -6,7 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "prologue-collection"
 version = "0.0.0"
 requires-python = ">=3.10"
-description = "Native inference observations for Prologue"
+description = "Serving execution prediction, evidence acquisition and verification"
+
+[project.scripts]
+prologue-cli = "prologue.app.cli:main"
 
 [project.entry-points."sglang.srt.plugins"]
 prologue = "prologue.app.sglang_plugin:install"
@@ -16,28 +19,8 @@ include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = [
-    "prologue",
-    "prologue.acquisition",
-    "prologue.acquisition.observation",
-    "prologue.app",
-    "prologue.contracts",
-    "prologue.contracts.workload",
-    "prologue.integrations",
-    "prologue.integrations.frameworks",
-    "prologue.integrations.frameworks.sglang",
-    "prologue.integrations.frameworks.sglang.observation",
-    "prologue.integrations.frameworks.sglang.observation.local",
-    "prologue.integrations.frameworks.sglang.shared",
-    "prologue.integrations.platforms",
-    "prologue.integrations.platforms.ascend",
-    "prologue.integrations.platforms.ascend.analysis",
-    "prologue.integrations.platforms.ascend.runtime",
-    "prologue.integrations.runtimes",
-    "prologue.integrations.runtimes.pytorch",
-    "prologue.performance",
-    "prologue.runtime",
-]
+include = ["prologue", "prologue.*"]
+namespaces = false
 
 [tool.ruff]
 line-length = 120

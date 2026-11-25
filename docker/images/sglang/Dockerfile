@@ -49,7 +49,7 @@ RUN cmake -S /opt/prologue/native/pytorch -B /tmp/prologue-gloo -DCMAKE_BUILD_TY
 ENV LD_PRELOAD=/opt/prologue/lib/libprologue_ascend_observer.so:/opt/prologue/lib/libprologue_gloo.so
 
 WORKDIR /opt/prologue/collector
-COPY pyproject.toml .
+COPY docker/images/sglang/pyproject.toml .
 RUN --mount=type=bind,from=capture-domains,target=/domains \
     --mount=type=bind,source=src,target=/source \
     --mount=type=bind,source=docker/images/package_runtime.py,target=/package_runtime.py \
