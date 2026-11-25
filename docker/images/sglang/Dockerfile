@@ -1,4 +1,16 @@
 ARG BASE_IMAGE=prologue-sglang-env:ubuntu22.04
+FROM scratch AS capture-domains
+COPY src/prologue/app /prologue/app/
+COPY src/prologue/runtime /prologue/runtime/
+COPY src/prologue/performance /prologue/performance/
+COPY src/prologue/contracts/workload /prologue/contracts/workload/
+COPY src/prologue/acquisition/observation /prologue/acquisition/observation/
+COPY src/prologue/integrations/frameworks/sglang/shared /prologue/integrations/frameworks/sglang/shared/
+COPY src/prologue/integrations/frameworks/sglang/observation /prologue/integrations/frameworks/sglang/observation/
+COPY src/prologue/integrations/platforms/ascend/runtime /prologue/integrations/platforms/ascend/runtime/
+COPY src/prologue/integrations/platforms/ascend/analysis /prologue/integrations/platforms/ascend/analysis/
+COPY src/prologue/integrations/runtimes/pytorch /prologue/integrations/runtimes/pytorch/
+
 FROM ${BASE_IMAGE}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -17,12 +29,9 @@ RUN bash /opt/prologue/install-sglang.sh /opt/prologue/sglang && rm /opt/prologu
 ENV ASCEND_USE_FA=true ASCEND_USE_FIA=false
 
 # The SDK dumper must publish its running flag before starting the background thread.
-COPY src/prologue/integrations/platforms/ascend/runtime/native/profiler /opt/prologue/native/ascend/profiler
+COPY src/prologue/integrations/platforms/ascend/runtime/native /opt/prologue/native/ascend
 RUN bash /opt/prologue/native/ascend/profiler/install.sh
 
-COPY src/prologue/integrations/platforms/ascend/runtime/native/CMakeLists.txt \
-    src/prologue/integrations/platforms/ascend/runtime/native/*.cpp \
-    src/prologue/integrations/platforms/ascend/runtime/native/*.hpp /opt/prologue/native/ascend/
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh \
     && cmake -S /opt/prologue/native/ascend -B /tmp/prologue-ascend -DCMAKE_BUILD_TYPE=Release \
         -DPROLOGUE_ASCEND_INCLUDE_DIR=/usr/local/Ascend/ascend-toolkit/latest/include \
@@ -39,23 +48,16 @@ RUN cmake -S /opt/prologue/native/pytorch -B /tmp/prologue-gloo -DCMAKE_BUILD_TY
 
 ENV LD_PRELOAD=/opt/prologue/lib/libprologue_ascend_observer.so:/opt/prologue/lib/libprologue_gloo.so
 
-COPY --chmod=755 src/prologue/integrations/platforms/ascend/runtime/export.sh /opt/prologue/export-profile.sh
-COPY --chmod=755 src/prologue/integrations/platforms/ascend/runtime/capture.sh /opt/prologue/capture.sh
-# Package the native worker and its actual dependencies, independently of the coordinator and control backend.
 WORKDIR /opt/prologue/collector
 COPY pyproject.toml .
-COPY src/prologue/runtime/io.py src/prologue/runtime/
-COPY src/prologue/app/capture_worker.py src/prologue/app/sglang_plugin.py src/prologue/app/
-COPY src/prologue/contracts/workload src/prologue/contracts/workload/
-COPY src/prologue/acquisition/observation src/prologue/acquisition/observation/
-COPY src/prologue/performance/samples.py src/prologue/performance/
-COPY src/prologue/integrations/frameworks/sglang/shared src/prologue/integrations/frameworks/sglang/shared/
-COPY src/prologue/integrations/frameworks/sglang/observation src/prologue/integrations/frameworks/sglang/observation/
-COPY src/prologue/integrations/platforms/ascend/runtime src/prologue/integrations/platforms/ascend/runtime/
-COPY src/prologue/integrations/platforms/ascend/analysis src/prologue/integrations/platforms/ascend/analysis/
-COPY src/prologue/integrations/runtimes/pytorch/*.py src/prologue/integrations/runtimes/pytorch/
-RUN python3 -m pip install --no-deps --no-build-isolation . && rm -rf /opt/prologue/collector
+RUN --mount=type=bind,from=capture-domains,target=/domains \
+    --mount=type=bind,source=src,target=/source \
+    --mount=type=bind,source=docker/images/package_runtime.py,target=/package_runtime.py \
+    python3 /package_runtime.py /domains /source src prologue.app.capture_worker prologue.app.sglang_plugin \
+    && install /domains/prologue/integrations/platforms/ascend/runtime/capture.sh /opt/prologue/capture.sh \
+    && install /domains/prologue/integrations/platforms/ascend/runtime/export.sh /opt/prologue/export-profile.sh \
+    && python3 -m pip install --no-deps --no-build-isolation . && rm -rf /opt/prologue/collector
 
-WORKDIR /workspace/trace-sim
+WORKDIR /workspace/prologue
 
 CMD ["bash"]

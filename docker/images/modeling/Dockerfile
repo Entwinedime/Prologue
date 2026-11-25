@@ -47,6 +47,6 @@ ENV CC=gcc
 ENV CXX=g++
 ENV CMAKE_GENERATOR=Ninja
 
-WORKDIR /workspace/trace-sim
+WORKDIR /workspace/prologue
 
 CMD ["bash"]

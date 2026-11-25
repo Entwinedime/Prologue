@@ -8,12 +8,12 @@ x-build-proxy: &build-proxy
 
 x-profile-common: &profile-common
   init: true
-  working_dir: /workspace/trace-sim
+  working_dir: /workspace/prologue
   network_mode: host
   ipc: host
   privileged: true
   volumes:
-    - ../..:/workspace/trace-sim
+    - ../..:/workspace/prologue
     - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
     - /usr/local/Ascend/add-ons:/usr/local/Ascend/add-ons:ro
     - /usr/local/dcmi:/usr/local/dcmi:ro
@@ -58,7 +58,7 @@ services:
     command: bash
 
   modeling:
-    working_dir: /workspace/trace-sim
+    working_dir: /workspace/prologue
     network_mode: none
     build:
       context: ../..
@@ -69,5 +69,5 @@ services:
     image: ${PROLOGUE_IMAGE_PREFIX:-prologue}-modeling:ubuntu24.04
     pull_policy: never
     volumes:
-      - ../..:/workspace/trace-sim
+      - ../..:/workspace/prologue
     command: bash

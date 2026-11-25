@@ -88,6 +88,6 @@ RUN chmod +x /tmp/install_batch_invariant_ops.sh \
     && /tmp/install_batch_invariant_ops.sh \
     && rm -f /tmp/install_batch_invariant_ops.sh
 
-WORKDIR /workspace/trace-sim
+WORKDIR /workspace/prologue
 
 CMD ["bash"]
