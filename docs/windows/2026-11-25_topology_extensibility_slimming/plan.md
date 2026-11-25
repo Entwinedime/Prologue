@@ -403,9 +403,9 @@ flowchart LR
 - **改动与删除清单**：
   - 基于 `engine.py` 合并压缩 `verification/structure/`（11 Py 文件 → **≤ 5 文件**，严格保持 `compare_actions` 单方法 ≤ 100 行）、`verification/fixed/`（4 文件 → **≤ 3 文件**）与 `verification/autonomous/`（3 文件 → **≤ 2 文件**）；
   - **显式删除**：删除全部被合并的旧文件。
-- **验收（M5 路线 B 硬性瘦身总门禁）**：
-  - `verification/` 全目录 Python 文件数硬性压至 **≤ 18**（原 43 Py 文件）；
-  - 按路线 B（取消旧诊断 JSON/MD 细项逐字节锁定，严格保留全部核心验证结论与 SymPy 有理数时钟认证、训练来源隔离与动作因果锚点），将 `verification/` 从 10,357 非空行深度重写压缩至 **≤ 6,000 非空行**（M5 净减 **≥ 4,300 非空行**）；
+- **验收（M5 路线 B 硬性瘦身总门禁，按 M4 终版 `934c46f` 精确校准）**：
+  - `verification/` 全目录 Python 文件数硬性压至 **≤ 16**（原 43 Py 文件，含 `engine.py`/`runner.py`/`__init__.py`；R11 `core/` 21f → ≤ 8f，R12 `{structure,fixed,autonomous}/` 20f → ≤ 6f），推动全仓业务 Python 文件数由 162f 压至 **≤ 135**（较 `b500cbe` 244f 净减 **≥ 109 文件 / −45%**）；
+  - 按路线 B（取消旧诊断 JSON/MD 细项逐字节锁定，清理跨层重复类型/键集/写后读回重检，严格保留 SymPy 有理数时钟认证、训练来源隔离、动作因果锚点、PD/CPU 协议前提、固定图重算与自主评分红线），将 `verification/` 从 **10,390 非空行**深度引擎化重写至 **≤ 6,000 非空行**（M5 净减 **≥ 4,390 非空行**，冲刺 ≤ 5,500 非空行；推动全仓业务 Python 降至 **≤ 27,740 非空行**，较 `b500cbe` 净减 **≥ 4,968 非空行**，较 M2 净减 **≥ 5,846 非空行**）；
   - 在 M3/M4 新采真机资产与留存资产上全量运行 `verify {source, inputs, local-graphs, structure, fixed-graph, autonomous}` 全部 6 个验证子命令：留存 PD（配对 5,355 动作、复现 825 处端口差异）、留存 TP1 轻量自主闭环评分（1 请求 3 token、8,601 成本查询、核心指标一致）与 TP2/TP8 参考资格结论与 `b500cbe` 一致。
 - **交接**：R11 内核 → 精干且 0 不变量丢失的三路验证系统 → R13 文档同步与全仓真机闭环终验。
 
@@ -430,7 +430,7 @@ flowchart LR
 | --- | --- |
 | **顶层目录纯净度** | 仓库根仅含 `src/`、`docker/`、`example/`、`docs/`、`third_party/` 5 个受跟踪目录；`src/engine/` 0 个 `.py`/`.sh`/`.patch`；`src/probes/` 0 个 `.py`；`src/python/` 0 个 `.cpp`/`.hpp`/`.sh`/`.patch`；全仓 **0 个多语言混装目录**；原 `src/prologue/` 与 `docker/images/package_runtime.py` **彻底删除**。 |
 | **四维扩展边界** | `src/engine/core/` 0 越层 `#include` 且 0 框架/平台字样；`common/` 与 `host/{runtime,libraries,performance,acquisition,workflow}` 0 框架/平台硬编码；`frameworks/sglang/` 0 导入 `platforms.ascend`、0 裸调 `torch.npu`、`abi/` 外 0 原始 `sglang.srt.*` 路径；`platforms/ascend/` 0 提及 `sglang`、`reference/` 0 导入 `analysis/`；`workers/` 0 硬编码单框架；`verification/` 0 导入 `host/cli`/`workers/` 且除 `verification/core/adapters.py` 外 0 导入 `integrations/`；M2 四维扩展静态推演报告 0 漏口且生产代码 0 mock/stub。 |
-| **硬性瘦身与收敛指标** | **文件数硬底线**：业务 Python 文件数由 `b500cbe` 244 个（M2 后 263 个）压至 **≤ 130**（路线 B 目标 ≤ 120；分阶段：`common` ≤ 7f、`ascend + pytorch` ≤ 20f、`sglang` ≤ 36f、`verification` ≤ 18f）；**路线 B 非空行深度瘦身**：在死守物理因果/时钟认证/预测精度/来源隔离红线前提下，通过清理跨层重复防御与重写精简 `verification/`（10,357 → ≤ 6,000 NE）和 `sglang/acquisition/`（R10 净减 ≥ 550 NE），使全仓业务 Python 降至 **≤ 26,500 非空行**（较 `b500cbe` 净减 **≥ 6,000 非空行**，较 M2 净减 **≥ 7,000 非空行**）；C++ 保持精干不显著膨胀（净增 ≤ +150ne）。 |
+| **硬性瘦身与收敛指标** | **文件数硬底线**：业务 Python 文件数由 `b500cbe` 244 个（M2 后 263 个）压至 **≤ 135**（分阶段：`common` ≤ 7f、`ascend + pytorch` ≤ 20f、`sglang` ≤ 36f、`verification` ≤ 16f）；**路线 B 非空行深度瘦身**：在死守物理因果/时钟认证/预测精度/来源隔离红线前提下，通过清理跨层重复防御与重写精简 `sglang/acquisition/`（R10 已实测净减 554 NE）和 `verification/`（10,390 → ≤ 6,000 NE，净减 ≥ 4,390 NE），使全仓业务 Python 降至 **≤ 27,740 非空行**（较 `b500cbe` 净减 **≥ 4,968 非空行**，较 M2 净减 **≥ 5,846 非空行**；冲刺 ≤ 27,200 NE）；C++ 保持精干不显著膨胀（净增 ≤ +150ne）。 |
 | **构建、打包与卫生** | `modeling` Release 全目标编译 **0 error / 0 warning**；`./docker/build_inference.sh` 纯 `COPY` 重建 `sglang`/`control` 双镜像成功，实装核验 0 宿主/CLI/验证模块泄露、入口导入 0 报错；`ruff check src/python example` **0 errors**；全仓过期 `.pyc` **0 残留**；AST **0 导入环**；`compare_actions` 单方法 ≤ 100 行；`python3 -m prologue` 5 域 16 子命令与 `prologue-cli` 全部可用；不新增独立测试工程/mock 脚本。 |
 | **逐轮真机实采与多拓扑离线回归** | ① M1–M2 新增物理卡时 = 0；M3–M5 按本计划有界预算逐轮完成对应定向真机实采与闭环验证（R06 TP2 分片采集、R07 TP1 `--service-reference` + 轻量宿主/拷贝采样、R09 TP2+PD 观测实采、R10 `library acquire` 局部补采、R13 最终全链路闭环），每次采集严格单列初始化/预热、有效观测、后处理、导出量、保留量及峰值且失败重试不清零；② 全量离线基线对照与 `b500cbe` 逐字节一致：`predict explore` Qwen TP1 四目标 211,290 条轨迹与 16 次 token 发布（空库返回准确首缺项）、`library inspect`/`publish --from-collection`、`cost fit`（678 样本）+ `cost-points` + `work-costs`（43,276 项固定图工作），以及留存 TP1（1 请求 3 token 闭环评分）、PD（5,355 动作 / 825 端口差异）与 TP2/TP8 参考核验结论完全一致。 |
 

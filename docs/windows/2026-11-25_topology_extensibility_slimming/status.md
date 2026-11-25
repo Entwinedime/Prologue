@@ -4,7 +4,7 @@
 
 **进度**　已交付 11/14 轮（78.6%），完成 4/5 个阶段。分支为 `topology-extensibility-slimming`，功能对照基线为 `b500cbe`。
 
-**当前交接**　M4 已完成。R09 经 AGY 在 `5101722` 放行后，按已审源码提交为 `1aa58f2`。R10 业务提交为 `934c46f`。当前停在 M4/M5 边界，等待 AGY 审查与用户放行。[M4 验收汇总](../../../data/topology-extensibility-slimming/m4/acceptance.json)
+**当前交接**　AGY 已完成 M4 独立复核审查并通过放行（`934c46f` / `8b627bf`，22 项证据 SHA-256 验真通过，`sglang/` 105f → 36f、M4 净减 1,056 NE，全仓业务 Python 降至 162f / 32,130 NE），并基于 `verification/` 实测基线（43f / 10,390 NE / 350 `raise` / 29 `require` / 629 dict）校准 M5 路线 B 目标（`verification/` ≤ 16f / ≤ 6,000 NE，全仓 ≤ 135f / ≤ 27,740 NE）。现经用户确认准予启动 **M5（R11–R13）**；完成后停在最终交付审查点交回 AGY 终审，不要自行关窗。[M4 验收汇总](../../../data/topology-extensibility-slimming/m4/acceptance.json)
 
 | 阶段 | 轮次 | 已交付 | 状态 |
 | --- | --- | ---: | --- |
