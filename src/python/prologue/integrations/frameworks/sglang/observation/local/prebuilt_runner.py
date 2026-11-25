@@ -14,8 +14,8 @@ from prologue.integrations.frameworks.sglang.observation.call_scopes import Nati
 from prologue.integrations.frameworks.sglang.observation.flow_scopes import FlowScopes
 from prologue.integrations.frameworks.sglang.observation.local.worker_output import publish_capture, publish_facts
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
+from prologue.integrations.frameworks.sglang.shared.configuration import MhaKvLayout
 from prologue.integrations.frameworks.sglang.shared.disaggregated_calls import DisaggregatedCalls
-from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
 
 
 @dataclass(frozen=True, slots=True)

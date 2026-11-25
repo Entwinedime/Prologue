@@ -1,10 +1,19 @@
-"""Read native batch identity and token ranges without tensor-operation observation."""
+"""Observe request ingress and bind native batch and request state."""
 
 from __future__ import annotations
 
+import importlib
+import time
+from collections import defaultdict
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
+from prologue.common.workload import WorkloadContent
 from prologue.integrations.bindings import platform_domain
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 
 
@@ -120,3 +129,317 @@ class BatchTensors:
         page = parameters["page_size"]
         strided = page > 1 and longest > 1 and (parameters["model_members"] > 1 or longest > page)
         return {"block_table_strided": int(strided)}
+
+
+class RoutedCacheKeys:
+    def install_cache_keys(self):
+        HookTable.around(symbols().radix_key_init, self.cache_key)
+
+    def cache_key(self, original, key, token_ids, extra_key=None, is_bigram=False, limit=None):
+        if extra_key is not None:
+            token_ids = self.routing.key(extra_key, token_ids if limit is None else token_ids[:limit])
+            extra_key = None
+        original(key, token_ids, extra_key, is_bigram, limit)
+
+
+class ClockNamespace:
+    def __init__(self, owner, native, module) -> None:
+        self.owner, self.native, self.module = owner, native, module
+
+    def __getattr__(self, name):
+        consumer = self.owner.consumer.get()
+        if (
+            consumer is not None
+            and consumer.startswith(self.module + ".")
+            and name in {"time", "monotonic", "perf_counter"}
+        ):
+            return partial(self.owner.read, name, consumer)
+        return getattr(self.native, name)
+
+
+class DecisionClocks:
+    wait_queue_entry = "SchedulerReqTimeStats.set_wait_queue_entry_time"
+
+    def __init__(self, calls) -> None:
+        self.calls = calls
+        self.consumer = ContextVar("native_decision_clock", default=None)
+
+    def read(self, name, consumer):
+        return self.calls.clock_read(getattr(time, name), {"kind": "clock", "clock": name, "consumer": consumer})
+
+    def invoke(self, consumer, original, *args, **kwargs):
+        previous = self.consumer.set(consumer)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            self.consumer.reset(previous)
+
+    def install(self):
+        # These functions create or consume policy timestamps; metrics and background/watchdog clocks stay native.
+        consumers = {
+            symbols().scheduler_module: (
+                "Scheduler._abort_on_running_timeout", "Scheduler._abort_on_waiting_timeout",
+            ),
+            symbols().req_time_stats: (
+                self.wait_queue_entry, "SchedulerReqTimeStats.set_forward_entry_time",
+            ),
+            symbols().decode: ("DecodePreallocQueue._ensure_prefill_info",),
+            symbols().conn: (
+                "CommonKVSender._check_bootstrap_timeout", "CommonKVReceiver._check_waiting_timeout",
+            ),
+            symbols().mooncake_conn: (
+                "MooncakeKVSender.__init__", "MooncakeKVReceiver.send_metadata",
+            ),
+        }
+        for name, methods in consumers.items():
+            module = importlib.import_module(name)
+            module.time = ClockNamespace(self, module.time, module.__name__)
+            for method in methods:
+                target = module.__name__ + "." + method
+                HookTable.around(target, partial(self.invoke, target))
+
+
+class BatchOperands:
+    queues = ("running", "previous", "waiting", "chunked")
+
+    @classmethod
+    def queue_input(cls, query):
+        contexts = [parent["context"] for parent in query.get("callers", ()) if parent["owner"] == "selection"]
+        contexts.append(query.get("context", {}))
+        for context in contexts:
+            if all(name in context for name in cls.queues) and not context["chunked"]:
+                return {name: context[name] for name in cls.queues}
+
+    @classmethod
+    def cut(cls, query):
+        action = query.get("action")
+        condition = query.get("condition", {})
+        members = query.get("members", ())
+        owners = {parent["owner"] for parent in query.get("callers", ())}
+        if action == "segment":
+            owners.add(condition.get("owner"))
+
+        # Nested frees and publications run inside the same result call. Its batch supplies the phase and token
+        # progress.
+        if members and (action in {"run_batch", "host_read"} or owners & {"preparation", "result", "publication"}):
+            phase = members[0]["phase"]
+            if phase in {"prefill", "decode"} and all(member["phase"] == phase for member in members):
+                return phase, members
+        context = query.get("context", {})
+        if action == "batch_transform" and context.get("left") and context.get("operation") in {"filter", "merge"}:
+            return "selection", [*context["left"], *context.get("right", [])]
+        consumer = condition.get("read", {}).get("consumer")
+        if (
+            action == "query"
+            and consumer == f"{symbols().req_time_stats}.{DecisionClocks.wait_queue_entry}"
+            and condition.get("query") == "clock"
+            and context.get("waiting")
+            and all(context.get(key) == [] for key in ("running", "previous", "chunked"))
+        ):
+            return "admission", context["waiting"]
+
+        # Nested decisions carry the queue at entry to native selection. A request may also be in the previous batch.
+        if (queues := cls.queue_input(query)) is not None:
+            members = {}
+            for queue in queues.values():
+                for member in queue:
+                    if members.setdefault(member["id"], member) != member:
+                        raise ValueError("native queues give different progress for the same request")
+            return "scheduler", list(members.values())
+
+    @classmethod
+    def bind(cls, query, serving, domain):
+        cut = cls.cut(query)
+        if cut is None:
+            return False
+        mode = domain["implementation"]["disaggregation_mode"]
+        instance, = (item for item in serving.instances if item.mode == mode)
+        content = WorkloadContent(serving.workload["requests"], serving.workload["prefixes"])
+        rows = []
+        _, members = cut
+        for member in members:
+            identity = member["id"]
+            rows.append(
+                {
+                    "id": identity,
+                    "prompt": content.prompt_runs(identity),
+                    "next_token": content.output_token(identity),
+                    "output_tokens": content.requests[identity]["output_tokens"],
+                }
+            )
+        query["native_inputs"] = {"configuration": instance.configuration.values, "requests": rows}
+        return True
+
+
+class RequestSubmissions:
+    observed = "capture"
+
+    def __init__(self, workload):
+        self.requests = workload["requests"]
+        self.content = WorkloadContent(self.requests, workload["prefixes"])
+
+    @staticmethod
+    def native_id(phase, index):
+        return f"{phase}/{index}"
+
+    @staticmethod
+    def index(identity):
+        return int(identity.rsplit("/", 1)[1])
+
+    def cohorts(self, indices):
+        arrivals = defaultdict(list)
+        for index in indices:
+            arrivals[self.requests[index]["arrival_ns"]].append(index)
+        return sorted(arrivals.items())
+
+    def sampling(self, index):
+        return {"max_new_tokens": self.requests[index]["output_tokens"], "temperature": 0, "ignore_eos": True}
+
+    @staticmethod
+    def tokenized(identity, tokens, sampling, vocab_size, mode, *, extra_key=None, room=None):
+        from array import array
+
+        TokenizedGenerateReqInput = resolve(symbols().tokenized_generate_req_input)
+        APIServerReqTimeStats = resolve(symbols().api_server_req_time_stats)
+        SamplingParams = resolve(symbols().sampling_params)
+
+        parameters = SamplingParams(**sampling)
+        parameters.normalize(None)
+        parameters.verify(vocab_size)
+        return TokenizedGenerateReqInput(
+            rid=identity, input_text=None, input_ids=array("q", tokens), input_embeds=None, mm_inputs=None,
+            token_type_ids=None, sampling_params=parameters, return_logprob=False, logprob_start_len=-1,
+            top_logprobs_num=0, token_ids_logprob=None, stream=True, extra_key=extra_key,
+            bootstrap_host="prologue-prefill" if room is not None else None, bootstrap_room=room,
+            time_stats=APIServerReqTimeStats(disagg_mode=mode),
+        )
+
+    def payload(self, phase, indices, prompts):
+        return {
+            "input_ids": [prompts[index] for index in indices],
+            "sampling_params": [self.sampling(index) for index in indices],
+            "rid": [self.native_id(phase, index) for index in indices],
+            "stream": True,
+        }
+
+
+@dataclass
+class StateRecord:
+    members: dict
+    values: list | None
+
+
+class RequestStateCalls:
+    fields = ("output_token", "metadata")
+
+    def __init__(self, observe=False) -> None:
+        self.observe = observe
+        self.batch = ContextVar("state_batch", default=None)
+        self.receiving = ContextVar("metadata_receiving", default=None)
+        self.accesses = ContextVar("request_state_accesses", default=None)
+
+    @contextmanager
+    def members(self, batch):
+        previous = self.batch.set(batch)
+        try:
+            yield
+        finally:
+            self.batch.reset(previous)
+
+    @contextmanager
+    def record(self):
+        access = StateRecord(
+            {f"{field}/{mode}": [] for field in self.fields for mode in ("read", "write")},
+            [] if self.observe else None,
+        )
+        previous = self.accesses.set(access)
+        try:
+            yield access
+        finally:
+            self.accesses.reset(previous)
+
+    def note(self, field, direction, requests):
+        access = self.accesses.get()
+        if access is not None:
+            key = f"{field}/{direction}"
+            access.members[key] = list(dict.fromkeys([*access.members[key], *(req.rid for req in requests)]))
+
+    @classmethod
+    def condition(cls, accesses):
+        return sorted(
+            f"{field}/{mode}" for field in cls.fields for mode in ("read", "write") if accesses.get(f"{field}/{mode}")
+        )
+
+    @contextmanager
+    def receive(self, decode_req):
+        previous = self.receiving.set(decode_req)
+        try:
+            yield
+        finally:
+            self.receiving.reset(previous)
+
+    def set_metadata(self, original, buffers, req):
+        self.note("metadata", "write", [req])
+        self.metadata_values("write", req, req.output_ids[0])
+        return original(buffers, req)
+
+    def metadata_values(self, operation, req, token):
+        record = self.accesses.get()
+        if record is None or record.values is None:
+            return
+
+        # These Python values enter set_buf or have already been read by native commit; never synchronize a device for
+        # diagnostics.
+        record.values.append(
+            {
+                "field": "metadata",
+                "operation": operation,
+                "request": req.rid,
+                "room": req.bootstrap_room,
+                "values": None
+                if token is None
+                else {
+                    "output_token": token,
+                    **{
+                        name: getattr(req, name)
+                        for name in (
+                            "cached_tokens",
+                            "cached_tokens_device",
+                            "cached_tokens_host",
+                            "cached_tokens_storage",
+                        )
+                    },
+                },
+            }
+        )
+
+    def get_metadata(self, original, buffers, index):
+        if self.accesses.get() is not None:
+            request = self.receiving.get()
+            if request is None or request.metadata_buffer_index != index:
+                raise ValueError("native metadata read has no matching request reservation")
+            self.note("metadata", "read", [request.req])
+        return original(buffers, index)
+
+    def stash(self, original, relay, indices, payload):
+        if self.accesses.get() is not None and indices.shape[0]:
+            batch = self.batch.get()
+            if batch is None or indices is not batch.req_pool_indices or not relay.spec_algo.is_none():
+                raise ValueError("native relay write has no matching non-speculative request binding")
+            self.note("output_token", "write", batch.reqs)
+        return original(relay, indices, payload)
+
+    def resolve(self, original, batch, relay):
+        # These are the native read conditions before resolve_forward_inputs mutates the batch.
+        if batch.prefill_input_ids_cpu is not None:
+            if batch.mix_running_indices is not None:
+                self.note("output_token", "read", batch.decoding_reqs)
+        elif batch.input_ids is None and relay.spec_algo.is_none():
+            self.note("output_token", "read", batch.reqs)
+        return original(batch, relay)
+
+    def install(self):
+        HookTable.around(symbols().future_map_stash, self.stash)
+        HookTable.around(symbols().resolve_forward_inputs, self.resolve)
+        HookTable.around(symbols().metadata_buffers_set_buf, self.set_metadata)
+        HookTable.around(symbols().metadata_buffers_get_buf, self.get_metadata)

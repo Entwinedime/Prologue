@@ -14,11 +14,9 @@ from prologue.integrations.frameworks.sglang.observation.flow_scopes import Serv
 from prologue.integrations.frameworks.sglang.observation.kv_scopes import NativeKvScopes
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 from prologue.integrations.frameworks.sglang.observation.pipeline_scopes import HostPipelineScopes
-from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
-from prologue.integrations.frameworks.sglang.shared.groups import ParallelGroups
-from prologue.integrations.frameworks.sglang.shared.metadata_transfers import MetadataTransfers
-from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
-from prologue.integrations.frameworks.sglang.shared.state_calls import RequestStateCalls
+from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors, RequestStateCalls
+from prologue.integrations.frameworks.sglang.shared.calls import MetadataTransfers, PipelineABI, native_implementation
+from prologue.integrations.frameworks.sglang.shared.configuration import ParallelGroups
 from prologue.integrations.runtimes.pytorch.capture import CpuProtocol
 
 
@@ -90,7 +88,7 @@ class NativeHostSamples(ServingCuts):
             self.parent.reset(previous)
 
     def native_call(self, role, original, *, implementation=None, **facts):
-        implementation = implementation or f"{original.__module__}.{original.__qualname__}"
+        implementation = implementation or native_implementation(original)
         return self.scope(role, original.__qualname__, implementation, **facts)
 
     @property

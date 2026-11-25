@@ -13,8 +13,8 @@ from prologue.integrations.bindings import route
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.model_calls import NativeModelObservation
+from prologue.integrations.frameworks.sglang.shared.calls import PipelineABI
 from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
-from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 
 
 class SGLangObservation(NativeModelObservation):
@@ -93,7 +93,7 @@ class SGLangObservation(NativeModelObservation):
     def plan_roles(self):
         peers = None
         if self.description["mode"] != "null":
-            from prologue.integrations.frameworks.sglang.shared.kv_peers import PdPeerBindings
+            from prologue.integrations.frameworks.sglang.shared.disaggregated_calls import PdPeerBindings
 
             workers = {}
             for path in self.kv_pools.glob("*.json"):
@@ -238,7 +238,7 @@ class SGLangObservation(NativeModelObservation):
         from prologue.integrations.frameworks.sglang.observation.kv_scopes import NativeKvScopes
         from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
         from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
-        from prologue.integrations.frameworks.sglang.shared.metadata_transfers import MetadataTransfers
+        from prologue.integrations.frameworks.sglang.shared.calls import MetadataTransfers
 
         receiver = symbols().scheduler_request_receiver
         targets = {

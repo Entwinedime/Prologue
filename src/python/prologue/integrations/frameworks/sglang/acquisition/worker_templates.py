@@ -6,13 +6,13 @@ import json
 from dataclasses import asdict
 
 from prologue.integrations.bindings import platform_domain, route
+from prologue.integrations.frameworks.sglang.shared.batches import BatchOperands
 from prologue.integrations.frameworks.sglang.shared.configuration import (
     InstanceConfiguration,
     NativeConfiguration,
     ServingInput,
+    WorkerRoles,
 )
-from prologue.integrations.frameworks.sglang.shared.groups import WorkerRoles
-from prologue.integrations.frameworks.sglang.shared.ingress import BatchOperands
 
 
 class WorkerDomain(WorkerRoles):

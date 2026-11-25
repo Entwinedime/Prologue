@@ -2,8 +2,8 @@
 
 from prologue.integrations.bindings import device_runtime
 from prologue.integrations.frameworks.sglang.observation.kv_facts import NativeKvFacts
-from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
-from prologue.integrations.frameworks.sglang.shared.source_layout import SourceLayout
+from prologue.integrations.frameworks.sglang.shared.calls import PipelineABI
+from prologue.integrations.frameworks.sglang.shared.resources import SourceLayout
 
 
 def serving_facts(directory, rank, trace, *, evidence):

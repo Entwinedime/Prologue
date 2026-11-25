@@ -20,7 +20,7 @@ from prologue.integrations.frameworks.sglang.observation.local.worker_output imp
     publish_facts,
 )
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
-from prologue.integrations.frameworks.sglang.shared.groups import ParallelGroups, WorkerRoles
+from prologue.integrations.frameworks.sglang.shared.configuration import ParallelGroups, WorkerRoles
 
 parallel_state = resolve(symbols().parallel_state)
 

@@ -1,4 +1,4 @@
-"""Expose native PD lifecycle calls equally to observation and device-free control."""
+"""Bind native PD admission, transfer peers and metadata visibility."""
 
 from functools import partial
 
@@ -6,9 +6,93 @@ import torch
 from torch.overrides import TorchFunctionMode
 
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
-from prologue.integrations.frameworks.sglang.abi.registry import symbols
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.shared.calls import ActionCall
+
+
+class NativeKvTopology:
+    def __init__(self, tp, pp, rank, stage) -> None:
+        self.attn_tp_size = tp
+        self.attn_cp_size = 1
+        self.attn_cp_rank = 0
+        self.pp_size = pp
+        self.pp_rank = stage
+        self.enable_all_cp_ranks_for_transfer = False
+        self.is_mla_backend = False
+        self.kv_args = resolve(symbols().kv_args)()
+        self.kv_args.engine_rank = rank
+
+    def prefill_sources(self, tp, pp, page_size, kv_dtype):
+        info = resolve(symbols().prefill_server_info)(tp, 1, 1, pp, page_size, kv_dtype, False)
+        resolve(symbols().common_kv_manager)._resolve_rank_mapping(self, info)
+        return info
+
+
+class PdPeerBindings:
+    def __init__(self, workers):
+        self.workers = workers
+        self.sources = {}
+        self.destinations = {rank: {} for rank, row in workers.items() if row["mode"] == "prefill"}
+        self.infos = {}
+        prefill = next(row for row in workers.values() if row["mode"] == "prefill")["parallel"]
+        ordered = sorted(
+            workers, key=lambda rank: (workers[rank]["parallel"]["pp_rank"], workers[rank]["parallel"]["tp_rank"])
+        )
+        for target in ordered:
+            row = workers[target]
+            if row["mode"] != "decode":
+                continue
+            parallel = row["parallel"]
+            mapping = NativeKvTopology(
+                parallel["logical_tp"], parallel["logical_pp"], parallel["tp_rank"], parallel["pp_rank"]
+            )
+            info = mapping.prefill_sources(
+                prefill["logical_tp"], prefill["logical_pp"], row["page_size"], row["layout"]["dtype"]
+            )
+            self.infos[target] = info
+            self.sources[target] = [
+                rank for tp_rank in info.target_tp_ranks for pp_rank in reversed(info.target_pp_ranks)
+                for rank in ordered if workers[rank]["mode"] == "prefill"
+                and workers[rank]["parallel"]["tp_rank"] == tp_rank and workers[rank]["parallel"]["pp_rank"] == pp_rank
+            ]
+            for source in self.sources[target]:
+                if workers[source]["page_size"] != row["page_size"]:
+                    raise ValueError("native PD transfer requires matching page sizes")
+                peers = self.destinations[source]
+                peers[target] = f"destination/{len(peers)}"
+
+    def layouts(self, source):
+        return {
+            binding: {
+                "layout": self.workers[target]["layout"],
+                "tp": self.workers[target]["parallel"]["logical_tp"],
+                "pp": self.workers[target]["parallel"]["logical_pp"],
+            }
+            for target, binding in self.destinations.get(source, {}).items()
+        }
+
+    def signature(self, local):
+        pairs = (
+            [(local, target) for target in self.destinations[local]]
+            if self.workers[local]["mode"] == "prefill"
+            else [(source, local) for source in self.sources[local]]
+        )
+        result = []
+        for source, target in pairs:
+            peer = target if source == local else source
+            layout = dict(self.workers[peer]["layout"])
+            layout.update(start_layer=0, end_layer=layout["end_layer"] - layout["start_layer"])
+
+            # Group position distinguishes unequal-TP shard duties even when every local tensor has the same shape.
+            destinations = list(self.destinations[source])
+            origins = self.sources[target]
+            result.append((
+                origins.index(source), len(origins), destinations.index(target), len(destinations), layout,
+                self.workers[source]["registration"]["metadata"]["row_bytes"],
+                self.workers[target]["registration"]["metadata"]["row_bytes"],
+            ))
+        return result
 
 
 class MetadataCalls(TorchFunctionMode):
@@ -44,6 +128,10 @@ class MetadataCalls(TorchFunctionMode):
         with self.calls.call(f"metadata.{direction}", self.access, parameters={"members": 1}, work=work):
             self.calls.request_state.note("metadata", direction, [request])
             return operation(*arguments, **keywords)
+
+
+    # The read and write share this published implementation across adapter package moves.
+    access.prologue_implementation = "prologue.integrations.frameworks.sglang.disaggregated_calls.MetadataCalls.access"
 
 
 class DisaggregatedCalls:
@@ -130,7 +218,11 @@ class DisaggregatedCalls:
         # Native serving copies this slice to the host; device-free control sees the same slice in its CPU view.
         work = dict(frame.work)
         parameters = {"elements": tensor.numel(), "element_bytes": tensor.element_size()}
-        boundary = ActionCall("reservation_indices", parameters, work, input_use="host")
+        boundary = ActionCall(
+            "reservation_indices", parameters, work, input_use="host",
+            implementation="prologue.integrations.frameworks.sglang.disaggregated_calls."
+                           "DisaggregatedCalls.read_reservation_indices",
+        )
         with calls.separate(boundary.operation, work), calls.boundary(self.read_reservation_indices, boundary):
             return original(tensor, *args, **kwargs)
 

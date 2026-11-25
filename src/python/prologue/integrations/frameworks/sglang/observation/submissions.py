@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
-from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
+from prologue.integrations.frameworks.sglang.shared.batches import RequestSubmissions
 
 
 class EngineSubmissions:

@@ -9,7 +9,7 @@ from prologue.integrations.bindings import device_runtime
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
-from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
+from prologue.integrations.frameworks.sglang.shared.configuration import MhaKvLayout
 
 
 class DecodeAttentionObservation:

@@ -7,7 +7,7 @@ import torch
 from prologue.common.workload import RoutedContent, WorkloadContent
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import symbols
-from prologue.integrations.frameworks.sglang.shared.cache_keys import RoutedCacheKeys
+from prologue.integrations.frameworks.sglang.shared.batches import RoutedCacheKeys
 
 
 class NativeContent(RoutedCacheKeys):

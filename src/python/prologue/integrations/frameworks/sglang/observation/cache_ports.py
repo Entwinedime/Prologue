@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
-from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
+from prologue.integrations.frameworks.sglang.shared.configuration import MhaKvLayout
 
 
 class AttentionCachePorts:

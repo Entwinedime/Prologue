@@ -6,8 +6,7 @@ from typing import Any
 
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.module_layout import ModuleStructure
-from prologue.integrations.frameworks.sglang.shared.groups import ParallelGroups
-from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
+from prologue.integrations.frameworks.sglang.shared.configuration import MhaKvLayout, ParallelGroups
 
 
 class NativeWorkerLayout:

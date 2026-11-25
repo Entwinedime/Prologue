@@ -4,7 +4,7 @@ from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import symbols
 from prologue.integrations.frameworks.sglang.observation.transfers import HostTransfers, NativeTransfers
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
-from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI, PipelineMessages
+from prologue.integrations.frameworks.sglang.shared.calls import PipelineABI, PipelineMessages
 from prologue.integrations.runtimes.pytorch.capture import NativeSignals
 
 

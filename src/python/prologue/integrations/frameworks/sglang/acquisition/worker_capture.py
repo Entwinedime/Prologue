@@ -6,7 +6,7 @@ from prologue.common.cost import WorkCatalog
 from prologue.common.io import write_json
 from prologue.host.libraries.release import asset_path
 from prologue.integrations.bindings import device_runtime
-from prologue.integrations.frameworks.sglang.shared.source_layout import SourceLayout
+from prologue.integrations.frameworks.sglang.shared.resources import SourceLayout
 
 
 class WorkerCapture:

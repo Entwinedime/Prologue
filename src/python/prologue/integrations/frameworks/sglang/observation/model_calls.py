@@ -8,7 +8,7 @@ from typing import Any
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.call_scopes import NativeCallObservation
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
-from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
+from prologue.integrations.frameworks.sglang.shared.calls import PipelineABI
 
 
 class NativeModelObservation(NativeCallObservation):

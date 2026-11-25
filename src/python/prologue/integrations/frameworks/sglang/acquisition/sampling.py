@@ -16,7 +16,7 @@ from prologue.integrations.frameworks.sglang.acquisition.host_cost_samples impor
 from prologue.integrations.frameworks.sglang.acquisition.local_attention import LocalAttention
 from prologue.integrations.frameworks.sglang.acquisition.local_copy import LocalCopies
 from prologue.integrations.frameworks.sglang.acquisition.worker_capture import WorkerCapture
-from prologue.integrations.frameworks.sglang.shared.attention import AttentionCatalog
+from prologue.integrations.frameworks.sglang.shared.configuration import AttentionCatalog
 
 
 class HostWindow:

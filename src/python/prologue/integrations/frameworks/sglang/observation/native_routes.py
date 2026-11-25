@@ -11,7 +11,7 @@ from prologue.common.workload import ExpertRoutes
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
-from prologue.integrations.frameworks.sglang.shared.experts import ExpertBatch
+from prologue.integrations.frameworks.sglang.shared.configuration import ExpertBatch
 
 
 class NativeExpertRoutes:

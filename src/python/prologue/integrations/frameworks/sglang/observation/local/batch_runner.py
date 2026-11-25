@@ -15,8 +15,7 @@ from prologue.integrations.frameworks.sglang.observation.host_samples import Nat
 from prologue.integrations.frameworks.sglang.observation.local.worker_output import publish_facts
 from prologue.integrations.frameworks.sglang.observation.model_calls import NativeModelObservation
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
-from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
-from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
+from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors, RequestSubmissions
 
 BatchTokenIDOutput = resolve(symbols().batch_token_id_output)
 sock_recv = resolve(symbols().sock_recv)

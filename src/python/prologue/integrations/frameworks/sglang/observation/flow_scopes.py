@@ -5,15 +5,11 @@ from contextlib import contextmanager, nullcontext
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.receiver_table import ReceiverTableCopies
-from prologue.integrations.frameworks.sglang.shared.allocation import AllocationABI
-from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
-from prologue.integrations.frameworks.sglang.shared.calls import CallSegments
-from prologue.integrations.frameworks.sglang.shared.clocks import DecisionClocks
+from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors, DecisionClocks
+from prologue.integrations.frameworks.sglang.shared.calls import CallSegments, HostReads, MetadataCollectives
 from prologue.integrations.frameworks.sglang.shared.disaggregated_calls import DisaggregatedCalls
-from prologue.integrations.frameworks.sglang.shared.host_reads import HostReads
-from prologue.integrations.frameworks.sglang.shared.metadata_collectives import MetadataCollectives
 from prologue.integrations.frameworks.sglang.shared.resources import ResourceCalls
-from prologue.integrations.frameworks.sglang.shared.selection import BatchSelection
+from prologue.integrations.frameworks.sglang.shared.selection import AllocationABI, BatchSelection
 from prologue.integrations.runtimes.pytorch.capture import TensorUpload
 
 
@@ -30,15 +26,6 @@ class ServingCuts(CallSegments):
 
     def request_id(self, native_id):
         return self.aliases[native_id]
-
-    def work(self, batch, members=None, *, phase="prefill"):
-        work = {} if batch is None else {"context": {"members": self.progress(batch.reqs)}}
-        if members is not None:
-            work.update(
-                phase=phase, rank=self.rank,
-                members=[{**member, "id": self.request_id(member["id"])} for member in members],
-            )
-        return work
 
     def batch_work(self, batch):
         return self.work(batch, BatchTensors.members(batch), phase=BatchTensors.phase(batch))

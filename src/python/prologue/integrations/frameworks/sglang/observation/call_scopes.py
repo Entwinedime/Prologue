@@ -4,7 +4,8 @@ from contextlib import ExitStack, contextmanager
 from typing import Any
 
 from prologue.common.observation import SemanticCapture
-from prologue.integrations.frameworks.sglang.shared.state_calls import RequestStateCalls
+from prologue.integrations.frameworks.sglang.shared.batches import RequestStateCalls
+from prologue.integrations.frameworks.sglang.shared.calls import native_implementation
 from prologue.integrations.runtimes.pytorch.capture import TensorBoundaries
 
 
@@ -30,7 +31,7 @@ class NativeCallObservation:
         try:
             with ExitStack() as contexts:
                 call = contexts.enter_context(self.capture.call(
-                    role, original.__qualname__, implementation or f"{original.__module__}.{original.__qualname__}",
+                    role, original.__qualname__, implementation or native_implementation(original),
                     parameters=parameters, arguments=arguments, work=work, device=device, stream=stream,
                     constants=None if parameters is None else {
                         name: parameters[name] for name in ("page_size", "sequence_capacity") if name in parameters

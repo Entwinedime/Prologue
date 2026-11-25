@@ -14,8 +14,8 @@ from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbol
 from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
 from prologue.integrations.frameworks.sglang.observation.submissions import EngineSubmissions
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
+from prologue.integrations.frameworks.sglang.shared.batches import RequestSubmissions
 from prologue.integrations.frameworks.sglang.shared.configuration import CaptureInput, InstanceConfiguration
-from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
 
 
 class NativeServingInstance:

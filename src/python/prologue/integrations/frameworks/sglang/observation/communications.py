@@ -14,7 +14,7 @@ from prologue.integrations.bindings import platform_domain
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.module_scopes import tensor_ports
-from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
+from prologue.integrations.frameworks.sglang.shared.calls import PipelineABI
 from prologue.integrations.runtimes.pytorch.capture import GatherLayout
 
 

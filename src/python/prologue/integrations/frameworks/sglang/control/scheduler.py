@@ -1,26 +1,436 @@
-"""Run the native scheduler loop against core resource and execution services."""
+"""Drive the native scheduler from core arrivals, pipeline signals and work boundaries."""
 
-from dataclasses import replace
+import sys
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
+from weakref import WeakValueDictionary
 
 import torch
+import zmq
 from torch.utils.weak import WeakIdKeyDictionary
 
-from prologue.common.workload import ExpertRoutes
+from prologue.common.workload import ExpertRoutes, RoutedContent
 from prologue.integrations.bindings import platform_domain
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
-from prologue.integrations.frameworks.sglang.control.flow import FlowExecution
-from prologue.integrations.frameworks.sglang.control.prefix_cache import PrefixCache
-from prologue.integrations.frameworks.sglang.control.requests import NativeRequestReceiver, RequestInput
-from prologue.integrations.frameworks.sglang.control.resources import AllocationDemand
-from prologue.integrations.frameworks.sglang.control.runner import MetadataRunner
-from prologue.integrations.frameworks.sglang.control.signals import PipelineSignals
-from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
-from prologue.integrations.frameworks.sglang.shared.experts import ExpertBatch
-from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI, PipelineMessages
-from prologue.integrations.frameworks.sglang.shared.state_calls import RequestStateCalls
+from prologue.integrations.frameworks.sglang.control.resources import AllocationDemand, MetadataRunner, PrefixCache
+from prologue.integrations.frameworks.sglang.shared.batches import (
+    BatchTensors,
+    DecisionClocks,
+    RequestStateCalls,
+    RequestSubmissions,
+    RoutedCacheKeys,
+)
+from prologue.integrations.frameworks.sglang.shared.calls import (
+    CallSegments,
+    HostReads,
+    MetadataCollectives,
+    PipelineABI,
+    PipelineMessages,
+)
+from prologue.integrations.frameworks.sglang.shared.configuration import ExpertBatch, ParallelGroups
+from prologue.integrations.frameworks.sglang.shared.disaggregated_calls import DisaggregatedCalls
+from prologue.integrations.frameworks.sglang.shared.resources import ResourceCalls
+from prologue.integrations.frameworks.sglang.shared.selection import BatchSelection
 from prologue.integrations.runtimes.pytorch.control import TensorValues
+
+
+@dataclass
+class ControlSignal:
+    identity: str
+    context: dict
+
+
+class PipelineSignals:
+    def __init__(self, scheduler) -> None:
+        self.scheduler = scheduler
+        self.live = WeakValueDictionary()
+        self.sequence = 0
+        self.enclosing = 0
+
+    @contextmanager
+    def producing(self):
+        self.enclosing += 1
+        try:
+            yield
+        finally:
+            self.enclosing -= 1
+
+    def record(self, original, event, stream=None):
+        result = original(event, stream)
+        if not self.scheduler.calls.enabled:
+            return result
+        work = self.scheduler.pipeline_messages.signal_work(stream)
+        identity = self.publish(event, work["context"])
+        if not self.enclosing:
+            work["signals"] = {"completion": identity}
+            self.scheduler.action("signal_record", {}, work, condition={"stream": work["context"]["record_stream"]})
+        return result
+
+    def publish(self, event, context):
+        # Re-recording a handle creates a fresh generation; old waits retain their already submitted graph edge.
+        identity = f"{self.scheduler.group}/signal/{self.sequence}"
+        self.sequence += 1
+        signal = ControlSignal(identity, context)
+        event._prologue_signal = signal
+
+        # Observe Python signal lifetimes, so the core retains completions only while native events own them.
+        self.live[identity] = signal
+        return identity
+
+    def wait(self, event, *, device, stream=None):
+        signal = event._prologue_signal
+        work = self.scheduler.pipeline_messages.wait_work(signal.context, device=device, stream=stream)
+        work["signals"] = {"completion": signal.identity}
+        condition = {"device_wait": device}
+        if device:
+            condition["stream"] = work["context"]["wait_stream"]
+        self.scheduler.action("signal_wait", {}, work, condition=condition)
+
+    def wait_stream(self, original, stream, other):
+        result = original(stream, other)
+        if self.scheduler.calls.enabled and not self.enclosing:
+            streams = PipelineABI.streams(self.scheduler, stream, other)
+            work = self.scheduler.pipeline_messages.work()
+            work["context"]["streams"] = streams
+            self.scheduler.action("stream_wait", {}, work, condition={"streams": streams})
+        return result
+
+    def query(self, original, event):
+        signal = getattr(event, "_prologue_signal", None)
+        if not self.scheduler.calls.enabled or signal is None:
+            return original(event)
+        work = self.scheduler.pipeline_messages.work()
+        work["context"]["producer"] = signal.context
+        with self.scheduler.calls.read("event", original, work) as query:
+            result = self.scheduler.peer.call("completed", signal=signal.identity, boundary=query["boundary"])
+            query["result"] = result
+            return result
+
+    def synchronize(self, original, event):
+        if not self.scheduler.calls.enabled or not hasattr(event, "_prologue_signal"):
+            return original(event)
+        self.wait(event, device=False)
+
+    def wait_event(self, original, stream, event):
+        if not self.scheduler.calls.enabled or not hasattr(event, "_prologue_signal"):
+            return original(stream, event)
+        self.wait(event, device=True, stream=stream)
+
+    def install(self):
+        HookTable.around("torch.cpu.Event.query", self.query)
+        HookTable.around("torch.cpu.Event.synchronize", self.synchronize)
+        HookTable.around("torch.cpu.Event.record", self.record)
+        HookTable.around("torch.cpu.Stream.wait_event", self.wait_event)
+        HookTable.around("torch.cpu.Stream.wait_stream", self.wait_stream)
+
+
+DisaggregationMode = resolve(symbols().disaggregation_mode)
+BatchTokenizedGenerateReqInput = resolve(symbols().batch_tokenized_generate_req_input)
+
+
+class RequestInput(RoutedCacheKeys):
+    def __init__(
+        self, peer, vocab_size: int, workload: dict, routes, mode: str, expert_layers: set[int]
+    ) -> None:
+        self.peer = peer
+        self.vocab_size = vocab_size
+        self.mode = DisaggregationMode(mode)
+        self.arrivals = None
+        self.waiting = False
+        self.poll_deadline_ns = None
+        self.context = None
+        self.in_flow = False
+        self.submissions = RequestSubmissions(workload)
+        self.submissions.content.check_vocabulary(vocab_size)
+        self.routing = (
+            RoutedContent(self.submissions.content, routes["assignments"], expert_layers)
+            if routes is not None
+            else None
+        )
+        if self.routing is not None:
+            self.install_cache_keys()
+
+    def recv_pyobj(self, flags):
+        if self.arrivals is None:
+            advance = self.peer.call("input", waiting=self.waiting, poll_deadline_ns=self.poll_deadline_ns,
+                                     context=self.context, in_flow=self.in_flow)
+            if advance["kind"] != "advance":
+                raise ValueError("Native control expected an advance boundary")
+            # One socket receive may read several dispatches. Each keeps its own tokenizer envelope.
+            self.arrivals = iter(self.submissions.cohorts(advance["arrivals"]))
+
+        cohort = next(self.arrivals, None)
+
+        # End this native receive poll; the next poll waits for core progress.
+        if cohort is None:
+            self.arrivals = None
+            raise zmq.Again()
+
+        _, indices = cohort
+        return BatchTokenizedGenerateReqInput(batch=[self.tokenize(index) for index in indices])
+
+    def tokenize(self, index):
+        request = self.submissions.requests[index]
+        return self.submissions.tokenized(
+            self.submissions.native_id(self.submissions.observed, index),
+            self.submissions.content.prompt(request["id"]),
+            self.submissions.sampling(index),
+            self.vocab_size,
+            self.mode,
+            extra_key=request["id"] if self.routing is not None else None,
+            room=index + 1 if self.mode != DisaggregationMode.NULL else None,
+        )
+
+    def request_id(self, identity):
+        return self.submissions.requests[self.submissions.index(identity)]["id"]
+
+    def output_token(self, identity: str) -> int:
+        return self.submissions.content.output_token(self.request_id(identity))
+
+
+class NativeRequestReceiver:
+    def __init__(self, receiver, scheduler) -> None:
+        self.receiver = receiver
+        self.scheduler = scheduler
+        self.round_started = False
+        self.model_ran = False
+        self.idle_reported = False
+        self.poll_deadline_ns = None
+
+    def poll(self, timeout):
+        # SGLang supplies the socket timeout. Simulated time advances at its next receive boundary.
+        if self.scheduler.calls.started and timeout >= 0:
+            self.poll_deadline_ns = self.scheduler.peer.call("clock") + timeout * 1_000_000
+
+    def recv_requests(self):
+        scheduler = self.scheduler
+
+        # The native loop owns this cursor. A PP round includes every slot, not each individual receive.
+        first_slot = scheduler.ps.pp_size == 1 or sys._getframe(1).f_locals["mb_id"] == 0
+        inbox = scheduler.request_input
+        inbox.waiting = False
+        inbox.poll_deadline_ns = None
+        if first_slot:
+
+            # Native on_idle can precede round-tail work; park only after that work reaches the next receive.
+            idle = self.idle_reported and scheduler.is_fully_idle() and not PipelineABI.pending_model_sends(scheduler)
+            self.idle_reported = False
+            if idle:
+                if scheduler.ps.pp_rank == 0 and scheduler.ps.tp_rank == 0:
+                    if scheduler.calls.started:
+
+                        # Between arrivals the native loop still polls. The read owns its return and wake conditions.
+                        inbox.waiting = True
+                        inbox.poll_deadline_ns = self.poll_deadline_ns
+                    else:
+                        scheduler.peer.call("idle", waiting=True)
+                else:
+                    scheduler.peer.send({"kind": "idle", "waiting": False})
+            self.poll_deadline_ns = None
+
+            # Pending transfers can bypass on_idle; completed rounds must still have a safe external wait.
+            inbox.waiting |= (
+                self.round_started and not self.model_ran
+                and not scheduler.waiting_queue and scheduler.chunked_req is None
+                and scheduler.pd is not None and scheduler.pd.waiting()
+            )
+            self.round_started = True
+            self.model_ran = False
+        inbox.context = scheduler.calls.scheduler_work()["context"]
+        inbox.in_flow = scheduler.calls.started
+        return self.receiver.recv_requests()
+
+
+class PublishedRequests:
+    def __init__(self, calls, enabled: bool) -> None:
+        self.calls = calls
+        self.enabled = enabled
+
+    def send_output(self, output, *args, **kwargs):
+        if not self.enabled or self.calls.current.get() is None:
+            return
+        with self.calls.call("publication", self.send_output) as frame:
+
+            # Prefill's response acknowledges its transfer; only Decode publishes the serving output.
+            if self.calls.scheduler.server_args.disaggregation_mode == "prefill":
+                return
+            frame.outputs = [
+                {
+                    "request": RequestSubmissions.index(request),
+                    "generated_tokens": tokens,
+                    "finished": reason is not None,
+                    "emits_output": True,
+                }
+                for request, tokens, reason in zip(
+                    output.rids, output.completion_tokens, output.finished_reasons, strict=True
+                )
+            ]
+
+
+class FlowExecution(CallSegments):
+    def __init__(self, scheduler) -> None:
+        super().__init__()
+        self.scheduler = scheduler
+        self.started = False
+        self.pending_inputs = set(range(len(scheduler.request_input.submissions.requests)))
+        self.request_state = scheduler.request_state
+        self.rank = scheduler.graph_rank
+        self.groups = ParallelGroups()
+        self.clocks = DecisionClocks(self)
+        self.clocks.install()
+        HostReads(self).install()
+        self.selection = BatchSelection(self)
+        self.selection.install()
+        self.resources = ResourceCalls(self)
+        self.resources.install()
+        self.resources.bind(
+            scheduler.tree_cache, scheduler.token_to_kv_pool_allocator, scheduler.req_to_token_pool, native=False,
+        )
+        scheduler.output_streamer.send_to_detokenizer = PublishedRequests(
+            self, scheduler.output_streamer.send_to_detokenizer.socket is not None,
+        )
+        if scheduler.server_args.disaggregation_mode != "null":
+            DisaggregatedCalls(self).install(scheduler.server_args.disaggregation_mode)
+
+    @property
+    def enabled(self):
+        return self.started
+
+    def input(self, request):
+        self.pending_inputs.remove(RequestSubmissions.index(request.rid))
+        self.started = True
+
+    def drained(self):
+        # Close at the same local idle boundary as capture, never between future arrivals or inside a call.
+        if not self.pending_inputs and self.current.get() is None:
+            self.started = False
+
+    def request_id(self, native_id):
+        return self.scheduler.request_input.request_id(native_id)
+
+    def work(self, batch, members=None, *, phase="prefill"):
+        return self.scheduler.batch_names.describe(batch) | super().work(batch, members, phase=phase)
+
+    @staticmethod
+    def completed(requests):
+        return [
+            {"request": RequestSubmissions.index(req.rid), "generated_tokens": len(req.output_ids),
+             "finished": req.finished(), "emits_output": False}
+            for req in requests
+        ]
+
+    def collective(self, original, boundary, arguments):
+        # Inputs are available at graph entry; consuming a result must not wait for peers' graph returns.
+        work = original(**{**arguments, "async_op": True})
+        returned = self.scheduler.action(
+            boundary.operation, boundary.parameters, boundary.work, condition=boundary.condition
+        )
+
+        # Native Work publishes into the tensor at wait; snapshot only when execution tracing requests evidence.
+        values, outputs = (
+            MetadataCollectives.snapshot(arguments, boundary.condition["collective"]["root"])
+            if "observation" in returned else (None, None)
+        )
+        work.wait()
+        if values is not None:
+            values["output"] = outputs.flatten().tolist()
+            self.scheduler.peer.call("action_values", boundary=returned["observation"], values={"collective": values})
+
+    def device_collective(self, original, arguments):
+        frame = self.current.get()
+        if frame.operation != "batch_sync_exchange":
+            return super().device_collective(original, arguments)
+
+        # This native method has one exchange and private tensor postprocessing; the whole declared graph owns both.
+        work = original(**{**arguments, "async_op": True})
+        self.suspend(frame, "call.return")
+        work.wait()
+
+    def clock_sample(self, original, query):
+        time_ns = self.scheduler.peer.call("clock") if query is None else query["time_ns"]
+
+        # Native policy uses zero as an unset timestamp; a shared positive epoch preserves elapsed durations.
+        ticks = time_ns + self.scheduler.clock_epoch_ns
+        return ticks / 1_000_000_000, ticks
+
+    @contextmanager
+    def read_boundary(self, kind, original, work, condition):
+        # Native nonblocking reads complete at this virtual instant, independently of optional tracing.
+        returned = self.scheduler.action("query", {}, work, condition=condition)
+        query = {"boundary": returned["read_boundary"], "time_ns": returned["completed_ns"]}
+        yield query
+
+        self.scheduler.peer.call(
+            "read_result", boundary=query["boundary"], result=query["result"], clocks=query["clocks"],
+        )
+
+    @contextmanager
+    def boundary(self, original, boundary):
+        with self.request_state.record() as accesses:
+            yield
+        self.scheduler.bind_state(boundary.work, accesses)
+        self.scheduler.action(
+            boundary.operation, boundary.parameters, boundary.work, condition=boundary.condition,
+            tensor_inputs={name: tensor for name, (tensor, _) in boundary.inputs.items()},
+            tensor_outputs={name: tensor for name, (tensor, _) in boundary.outputs.items()},
+        )
+
+    @contextmanager
+    def enclosing(self, frame):
+        yield
+        if frame.values:
+            self.scheduler.peer.call(
+                "action_values", boundary=frame.observations[-1],
+                values={**frame.values, "segments": frame.observations},
+            )
+
+    @contextmanager
+    def fragment(self, frame):
+        with self.request_state.record() as accesses:
+            yield
+
+        # Submission facts belong to this segment, not to the caller context inherited by later children.
+        work = {**frame.work, "continuation": frame.continuation}
+        self.scheduler.bind_state(work, accesses)
+        condition = {**frame.observed_condition, "owner": frame.operation}
+        if not frame.host_fragment:
+            condition.update(entry=frame.entry, exit=frame.exit)
+        outputs = frame.outputs if frame.terminal else ()
+        tensors = {name: tensor for name, (tensor, _) in frame.tensor_outputs.items()}
+        inputs = {name: tensor for name, (tensor, _) in {**frame.tensor_inputs, **frame.metadata_inputs}.items()}
+        returned = self.scheduler.action(
+            "segment",
+            frame.parameters,
+            work,
+            outputs,
+            condition=condition,
+            tensor_inputs=inputs,
+            tensor_outputs=tensors,
+            allocations=frame.tensor_allocations,
+        )
+        if self.request_state.observe:
+            frame.observations.append(returned["observation"])
+        if accesses.values:
+            self.scheduler.peer.call("action_values", boundary=returned["observation"], values={"state": [
+                {**value, "request": self.request_id(value["request"])} for value in accesses.values
+            ]})
+
+    def process(self, original, batch, result):
+        parameters, work = self.scheduler.description(batch)
+        if self.scheduler.ps.pp_size > 1:
+            work["observation_context"] = {"pipeline": PipelineABI.control_context(self)}
+        with self.call(
+            "result", original, parameters=parameters, work=work, host_inputs=HostReads.result_inputs(result)
+        ) as frame:
+            original(batch, result)
+
+            # Prebuilt has its own result boundary, also used directly during native Decode selection.
+            if not batch.forward_mode.is_prebuilt():
+                frame.outputs = self.completed(batch.reqs)
+
 
 _compute_parallelism_ranks = resolve(symbols().compute_parallelism_ranks)
 LogitsProcessorOutput = resolve(symbols().logits_processor_output)

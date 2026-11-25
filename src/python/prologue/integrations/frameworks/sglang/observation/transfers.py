@@ -6,7 +6,7 @@ from functools import partial
 
 from prologue.integrations.bindings import platform_domain
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
-from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
+from prologue.integrations.frameworks.sglang.shared.calls import PipelineABI
 
 
 class TransferWork:

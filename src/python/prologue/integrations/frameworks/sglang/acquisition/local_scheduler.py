@@ -14,9 +14,8 @@ from prologue.integrations.frameworks.sglang.acquisition.local_base import Local
 from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangPlacement
 from prologue.integrations.frameworks.sglang.acquisition.worker_capture import WorkerCapture
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
-from prologue.integrations.frameworks.sglang.shared.attention import AttentionCatalog
-from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
-from prologue.integrations.frameworks.sglang.shared.ingress import BatchOperands
+from prologue.integrations.frameworks.sglang.shared.batches import BatchOperands
+from prologue.integrations.frameworks.sglang.shared.configuration import AttentionCatalog, NativeConfiguration
 
 
 class LocalWorkerBinding(LocalRule):

@@ -1,14 +1,80 @@
-"""Adapt native PD transport interfaces to graph completion and local control messages."""
+"""Drive native PD admission and transfer using the core resource and delivery protocol."""
 
 from collections import defaultdict
 from functools import partial
 from threading import Lock
 
+import torch
+
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
-from prologue.integrations.frameworks.sglang.control.kv_transfer import MetadataRows, PdTopology
 from prologue.integrations.frameworks.sglang.control.resources import StateSlots
-from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
+from prologue.integrations.frameworks.sglang.shared.batches import RequestSubmissions
+from prologue.integrations.frameworks.sglang.shared.disaggregated_calls import PdPeerBindings
+
+
+class PdTopology:
+    def __init__(self, workers, local):
+        instances = {source["id"]: source for source, _, _, _ in workers}
+        prefill, = [source for source in instances.values() if source["mode"] == "prefill"]
+        decode, = [source for source in instances.values() if source["mode"] == "decode"]
+        if (
+            len(instances) != 2
+            or prefill["model_config"] != decode["model_config"]
+            or prefill["dtype"] != decode["dtype"]
+        ):
+            raise ValueError("PD requires one Prefill and one Decode instance of the same model and dtype")
+        rows = {
+            index: {
+                "mode": source["mode"],
+                "parallel": {
+                    "logical_tp": source["tp"], "logical_pp": source["pp"],
+                    "tp_rank": rank % source["tp"], "pp_rank": rank // source["tp"],
+                },
+                "layout": source["workers"][rank]["kv_layout"], "page_size": settings["page_size"],
+            }
+            for index, (source, settings, _, rank) in enumerate(workers)
+        }
+        members = [source["workers"][rank] for source, _, _, rank in workers]
+        bindings = PdPeerBindings(rows)
+        self.peers = {}
+        self.info = bindings.infos.get(local)
+        for origin, targets in bindings.destinations.items():
+            layouts = bindings.layouts(origin)
+            for target, binding in targets.items():
+                if local not in (origin, target):
+                    continue
+                if members[origin]["kv_peers"][binding] != layouts[binding]:
+                    raise ValueError("PD destination geometry differs from the observed transfer template")
+                peer = target if local == origin else origin
+                self.peers[peer] = {
+                    "pool": members[target]["group"], "binding": binding, "group": members[peer]["group"],
+                }
+                if local == target:
+                    self.peers[peer]["publishers"] = [members[index]["group"] for index in targets]
+
+        if local in bindings.sources:
+
+            # Use the native bootstrap order: TP order, then higher PP stages first.
+            self.peers = {peer: self.peers[peer] for peer in bindings.sources[local]}
+
+
+class MetadataRows:
+    def __init__(self, buffers):
+        pointers, _, _ = buffers.get_buf_infos()
+        tensors = {value.data_ptr(): value for value in vars(buffers).values() if isinstance(value, torch.Tensor)}
+        self.buffers = [tensors[pointer] for pointer in pointers]
+
+    def read(self, index):
+        # Preserve native values, including its room gate; copying them here does not make them ready in simulated time.
+        return [buffer[index].tolist() for buffer in self.buffers]
+
+    def write(self, index, values):
+        for buffer, row in zip(self.buffers, values, strict=True):
+            if len(row) != buffer.shape[1]:
+                raise ValueError("PD metadata row layout differs between native participants")
+            buffer[index].copy_(buffer.new_tensor(row))
+
 
 BaseKVManager = resolve(symbols().base_kv_manager)
 KVArgs = resolve(symbols().kv_args)
@@ -63,25 +129,21 @@ class NativePdBackend:
             else:
                 raise ValueError(f"unknown PD control message: {kind}")
 
+    def publish(self, deliveries, req, notice, *, signals=(), after=()):
+        self.exchange(deliveries, completion={
+            "request": RequestSubmissions.index(req.rid), "notification": notice,
+            "signals": list(signals), "after": list(after),
+        })
+
+    @staticmethod
+    def notice(group, name, request, **work):
+        return {"group": group, "name": name, "work": {"request": request, **work}}
+
     def live_signals(self):
-        signals = {signal for value in self.published.values() for signal in value["signals"]}
-        for sender in self.senders.values():
-            signals.update(sender.signals)
-        for receiver in self.receivers.values():
-            signals.update(receiver.signals)
+        signals = {signal for record in self.published.values() for signal in record["signals"]}
+        for transport in (*self.senders.values(), *self.receivers.values()):
+            signals.update(transport.signals)
         return signals
-
-    @staticmethod
-    def reservation_signal(publisher, request, recipient):
-        return f"{publisher}/pd-reservation/{request}/{recipient}"
-
-    @staticmethod
-    def reservation_receipt(publisher, request, recipient):
-        return {
-            "group": recipient,
-            "name": "kv_reservation_received",
-            "work": {"request": request, "publisher": publisher},
-        }
 
     def waiting(self):
         transports = (*self.senders.values(), *self.receivers.values())
@@ -183,6 +245,9 @@ class NativeKvManager(BaseKVManager):
 
 
 class NativeKvPolling:
+    def packet(self, target, kind, **fields):
+        return {"target": target, "value": {"kind": kind, "room": self.bootstrap_room, **fields}}
+
     def poll(self):
         calls = self.backend.scheduler.calls
         if not calls.enabled:
@@ -248,15 +313,13 @@ class NativeKvSender(NativeKvPolling, MooncakeKVSender):
                 raise ValueError("native PD sender chunk exceeds its receiver's page reservation")
             pools[peer["binding"]] = peer["pool"]
             if last:
-                packets.append({"target": target, "value": {
-                    "kind": "transfer", "room": self.bootstrap_room, "publication": identity, "metadata": metadata,
-                }})
+                packets.append(self.packet(target, "transfer", publication=identity, metadata=metadata))
         self.signals.update(signals.values())
 
         # Native Success is published after the whole destination group finishes, not each destination independently.
         if last:
             completion_signals = sorted(self.signals)
-            packets.append({"target": backend.local, "value": {"kind": "sender_visible", "room": self.bootstrap_room}})
+            packets.append(self.packet(backend.local, "sender_visible"))
 
             # The native transport only notifies after the final chunk; retain all chunks until that notice is consumed.
             backend.published[identity] = {"signals": completion_signals, "pending": set(backend.topology.peers)}
@@ -270,12 +333,9 @@ class NativeKvSender(NativeKvPolling, MooncakeKVSender):
         # Register before the call returns: background publication can finish while its enclosing CPU work is still
         # running.
         if last:
-            backend.exchange(packets, completion={
-                "request": RequestSubmissions.index(req.rid),
-                "notification": {"group": scheduler.group, "name": "kv_success",
-                                 "work": {"request": scheduler.calls.progress((req,))[0]["id"]}},
-                "signals": completion_signals, "after": [],
-            })
+            request = scheduler.calls.progress((req,))[0]["id"]
+            backend.publish(packets, req, backend.notice(scheduler.group, "kv_success", request),
+                            signals=completion_signals)
         with scheduler.calls.call("kv_enqueue", self.send, parameters=parameters, work=work):
             if last:
                 scheduler.request_state.note("metadata", "read", [req])
@@ -314,54 +374,31 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
     def send_metadata(self, kv_indices, aux_index=None, state_indices=None, decode_prefix_len=None):
         if state_indices:
             raise ValueError("PD transfer template has no auxiliary state-pool contract")
-        calls = self.backend.scheduler.calls
-        self.backend.scheduler.req_to_metadata_buffer_idx_allocator.bind(self._prologue_request, aux_index)
+        backend = self.backend
+        scheduler, req = backend.scheduler, self._prologue_request
+        calls = scheduler.calls
+        scheduler.req_to_metadata_buffer_idx_allocator.bind(req, aux_index)
         work = calls.work(None)
-        work["context"] = {"request": calls.progress((self._prologue_request,))[0]}
+        work["context"] = {"request": calls.progress((req,))[0]}
+        request = work["context"]["request"]["id"]
         with calls.call("kv_reserve", self.send_metadata, parameters={"transfer_pages": len(kv_indices)}, work=work):
             self.aux_index = aux_index
             pages = kv_indices.tolist()
-            request = work["context"]["request"]["id"]
-            scheduler, backend = self.backend.scheduler, self.backend
             for index, (peer, target) in enumerate(backend.topology.peers.items()):
-                signal = backend.reservation_signal(scheduler.group, request, target["group"])
+                recipient = target["group"]
+                signal = f"{scheduler.group}/pd-reservation/{request}/{recipient}"
                 self.signals.add(signal)
-                packet = {
-                    "target": peer,
-                    "value": {
-                        "kind": "reservation",
-                        "room": self.bootstrap_room,
-                        "pages": pages,
-                        "prefix": decode_prefix_len or 0,
-                    },
-                }
-                backend.exchange([packet], completion={
-                    "request": RequestSubmissions.index(self._prologue_request.rid),
-                    "notification": backend.reservation_receipt(scheduler.group, request, target["group"]),
-                    "signals": [signal], "after": [],
-                })
+                receipt = partial(backend.notice, recipient, "kv_reservation_received", request)
+                packet = self.packet(peer, "reservation", pages=pages, prefix=decode_prefix_len or 0)
+                backend.publish([packet], req, receipt(publisher=scheduler.group), signals=[signal])
+
+                # Native readiness follows receipt of every reservation in publisher order.
                 if scheduler.group == target["publishers"][0]:
+                    backend.publish([self.packet(peer, "reservation_visible")], req,
+                                    backend.notice(recipient, "kv_ready", request),
+                                    after=[receipt(publisher=publisher) for publisher in target["publishers"]])
 
-                    # The destination consumes reservations in delivery order and enters readiness after the whole
-                    # group.
-                    backend.exchange(
-                        [{"target": peer, "value": {"kind": "reservation_visible", "room": self.bootstrap_room}}],
-                        completion={
-                            "request": RequestSubmissions.index(self._prologue_request.rid),
-                            "notification": {
-                                "group": target["group"],
-                                "name": "kv_ready",
-                                "work": {"request": request},
-                            },
-                            "signals": [],
-                            "after": [
-                                backend.reservation_receipt(publisher, request, target["group"])
-                                for publisher in target["publishers"]
-                            ],
-                        },
-                    )
-
-                publication = calls.request_work(self._prologue_request)
+                publication = calls.request_work(req)
                 publication["context"]["reservation_peer"] = index
                 publication["signals"] = {"reservation.ready": signal}
                 with calls.separate("kv_reservation", publication):
@@ -369,19 +406,10 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
             self.init_time = calls.clocks.read("time", symbols().mooncake_kv_receiver_send_metadata)
 
         # Register before polling: native receive-side publication progresses independently of the next scheduler turn.
-        request = work["context"]["request"]["id"]
-        self.backend.exchange(
-            [{"target": self.backend.local, "value": {"kind": "receiver_visible", "room": self.bootstrap_room}}],
-            completion={
-                "request": RequestSubmissions.index(self._prologue_request.rid),
-                "notification": {"group": scheduler.group, "name": "kv_success", "work": {"request": request}},
-                "signals": [],
-                "after": [
-                    {"group": peer["group"], "name": "kv_success", "work": {"request": request}}
-                    for peer in self.backend.topology.peers.values()
-                ],
-            },
-        )
+        backend.publish([self.packet(backend.local, "receiver_visible")], req,
+                        backend.notice(scheduler.group, "kv_success", request),
+                        after=[backend.notice(peer["group"], "kv_success", request)
+                               for peer in backend.topology.peers.values()])
 
     def _poll(self):
         if self.backend.failed(self.bootstrap_room):

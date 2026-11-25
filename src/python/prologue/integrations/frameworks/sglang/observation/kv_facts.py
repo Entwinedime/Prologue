@@ -5,7 +5,7 @@ from collections import defaultdict
 from itertools import pairwise
 from pathlib import Path
 
-from prologue.integrations.frameworks.sglang.shared.kv_layout import KvBufferAddresses, MhaKvLayout
+from prologue.integrations.frameworks.sglang.shared.configuration import KvBufferAddresses, MhaKvLayout
 
 
 class NativeKvFacts:

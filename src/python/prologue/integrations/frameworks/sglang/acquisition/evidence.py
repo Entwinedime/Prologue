@@ -1,9 +1,13 @@
 """Translate native SGLang evidence into the independent verifier's input contracts."""
 
-from prologue.integrations.frameworks.sglang.shared.configuration import CaptureInput, ServingInput
-from prologue.integrations.frameworks.sglang.shared.kv_layout import KvBufferAddresses, MhaKvLayout
-from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
-from prologue.integrations.frameworks.sglang.shared.source_layout import SourceLayout
+from prologue.integrations.frameworks.sglang.shared.calls import PipelineABI
+from prologue.integrations.frameworks.sglang.shared.configuration import (
+    CaptureInput,
+    KvBufferAddresses,
+    MhaKvLayout,
+    ServingInput,
+)
+from prologue.integrations.frameworks.sglang.shared.resources import SourceLayout
 from prologue.integrations.runtimes.pytorch.shared import CpuProtocolWork, CpuTransfer
 
 capture_input = CaptureInput

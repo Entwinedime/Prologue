@@ -1,4 +1,4 @@
-"""Native-shaped metadata views backed by the core's unique slot and page ledger."""
+"""Expose core-owned slots, pages and cache state to the native scheduler and model runner."""
 
 from contextlib import contextmanager
 
@@ -6,10 +6,10 @@ import torch
 
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
-from prologue.integrations.frameworks.sglang.shared.allocation import AllocationABI
-from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
-from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
+from prologue.integrations.frameworks.sglang.shared.batches import RequestSubmissions
+from prologue.integrations.frameworks.sglang.shared.configuration import MhaKvLayout
 from prologue.integrations.frameworks.sglang.shared.resources import PoolCoordinates
+from prologue.integrations.frameworks.sglang.shared.selection import AllocationABI
 
 BaseTokenToKVPoolAllocator = resolve(symbols().base_token_to_kv_pool_allocator)
 
@@ -223,3 +223,214 @@ class PageAllocator:
         pages = torch.unique(PoolCoordinates.page(indices, self.page_size)).tolist()
         destination_empty = self.peer.call("release_pages", pages=pages)
         return destination_empty, len(pages)
+
+
+DecLockRefResult = resolve(symbols().dec_lock_ref_result)
+EvictResult = resolve(symbols().evict_result)
+IncLockRefResult = resolve(symbols().inc_lock_ref_result)
+InsertResult = resolve(symbols().insert_result)
+MatchResult = resolve(symbols().match_result)
+RadixCache = resolve(symbols().radix_cache)
+default_radix_cache_factory = resolve(symbols().default_radix_cache_factory)
+
+
+class PrefixCache(RadixCache):
+    @staticmethod
+    def build(context, *, expected):
+        # Native chunk-only storage retains its request bookkeeping and never builds a content index.
+        if context.disable_radix_cache and context.effective_chunked_prefill_size is not None:
+            cache = default_radix_cache_factory(context)
+            native_type = type(cache)
+        else:
+            cache = PrefixCache(context.params)
+            native_type = RadixCache
+
+        # The resource view replaces RadixCache storage, not the source implementation or policy.
+        actual = {
+            "type": f"{native_type.__module__}.{native_type.__qualname__}",
+            "disabled": context.disable_radix_cache,
+            "eviction_policy": context.params.eviction_policy.lower(),
+        }
+        if actual != expected:
+            raise ValueError(f"native control cache differs from template implementation: {actual} != {expected}")
+        return cache
+
+    def __init__(self, params) -> None:
+        if params.is_eagle or params.eviction_policy != "lru":
+            raise ValueError("core prefix resources require ordinary token keys and LRU eviction")
+        self.disable = params.disable
+        self.req_to_token_pool = params.req_to_token_pool
+        self.token_to_kv_pool_allocator = params.token_to_kv_pool_allocator
+        self.peer = self.token_to_kv_pool_allocator.peer
+        self.page_size = params.page_size
+        self.disable_finished_insert = params.disable_finished_insert
+        self.is_eagle = False
+        self.device = torch.device("cpu")
+
+        # Native request methods remain inherited; no native tree, allocator or eviction state is created.
+        self.root_node = 0
+        self._reset_session_radix_state()
+        self._empty_match_result = MatchResult(torch.empty(0, dtype=torch.int64), 0, 0, 0)
+
+    def reset(self):
+        # Each simulation starts with its own resource pool; native flush must not create a second tree.
+        raise NotImplementedError("reset prefix state by starting a new simulation resource pool")
+
+    def key_tokens(self, key):
+        if key.extra_key is not None:
+            raise ValueError("request cache namespaces are outside the declared workload content contract")
+        return list(key.page_aligned(self.page_size).raw_token_ids())
+
+    def match_prefix(self, params):
+        if self.disable:
+            return self._empty_match_result
+        result = self.peer.call("prefix", operation="match", tokens=self.key_tokens(params.key))
+        self.record_split(*result["split"])
+
+        # The core supplies the current binding, including splits; no mirrored native tree is maintained.
+        indices = self.token_to_kv_pool_allocator.page_indices(result["pages"])
+        node = result["node"]
+        return MatchResult(indices, node, node, node)
+
+    def insert(self, params):
+        if self.disable:
+            return InsertResult(prefix_len=0)
+        tokens = self.key_tokens(params.key)
+        indices = params.value[: len(tokens)]
+        pages = PoolCoordinates.page(indices[:: self.page_size], self.page_size).tolist()
+        result = self.peer.call("prefix", operation="insert", tokens=tokens, pages=pages)
+        self.record_split(*result["split"])
+        return InsertResult(prefix_len=result["existing_tokens"], last_device_node=result["node"])
+
+    def inc_lock_ref(self, node):
+        delta = 0 if self.disable else self.peer.call("prefix", operation="lock", node=node, acquire=True)
+        return IncLockRefResult(delta=delta)
+
+    def dec_lock_ref(self, node, params=None):
+        delta = 0 if self.disable else self.peer.call("prefix", operation="lock", node=node, acquire=False)
+        return DecLockRefResult(delta=delta)
+
+    def evict(self, params):
+        if self.disable:
+            return EvictResult()
+        evicted = 0
+        for pages in self.peer.call("prefix", operation="evict", tokens=params.num_tokens):
+
+            # Keep each native leaf release separate so allocator ordering remains native-visible.
+            indices = self.token_to_kv_pool_allocator.page_indices(pages)
+            self.token_to_kv_pool_allocator.free(indices)
+            evicted += indices.numel()
+        return EvictResult(num_tokens_evicted=evicted)
+
+    def cache_unfinished_req(self, req, chunked=False):
+        super().cache_unfinished_req(req, chunked=chunked)
+        if not self.disable:
+            self.peer.call(
+                "bind_prefix",
+                request=RequestSubmissions.index(req.rid),
+                node=req.last_node,
+                tokens=len(req.prefix_indices),
+            )
+
+    def evictable_size(self):
+        return 0 if self.disable else self.peer.call("capacity", resource="evictable_tokens")
+
+    def protected_size(self):
+        return 0 if self.disable else self.peer.call("capacity", resource="protected_tokens")
+
+
+parallel_state = resolve(symbols().parallel_state)
+get_pp_indices = resolve(symbols().get_pp_indices)
+get_attention_tp_group = resolve(symbols().get_attention_tp_group)
+initialize_dp_attention = resolve(symbols().initialize_dp_attention)
+get_req_to_token_extra_context_len = resolve(symbols().get_req_to_token_extra_context_len)
+ModelRunner = resolve(symbols().model_runner)
+MemoryPoolConfig = resolve(symbols().memory_pool_config)
+
+
+class UnexecutedModel(torch.nn.Module):
+    def forward(self, *args, pp_proxy_tensors=None, **kwargs):
+        raise RuntimeError("Model execution belongs to the core graph")
+
+
+class MetadataRunner(ModelRunner):
+    def __init__(self, *args, peer, rendezvous: str, kv_layout, allocator: str, **kwargs):
+        self.peer = peer
+        self.rendezvous = rendezvous
+        self.kv_layout = kv_layout
+        self.allocator_implementation = allocator
+        super().__init__(*args, **kwargs)
+
+    def load_model(self):
+        self.model = UnexecutedModel()
+        self.model.start_layer, self.model.end_layer = get_pp_indices(
+            self.model_config.num_hidden_layers, self.pp_rank, self.pp_size
+        )
+        self.dtype = self.model_config.dtype
+        self.sliding_window_size = self.model_config.sliding_window_size
+        self.weight_load_mem_usage = 0
+        self.load_config = None
+
+    def init_threads_binding(self):
+        torch.set_num_threads(1)
+
+    def init_torch_distributed(self):
+        # Native request/control collectives run on CPU; model collectives belong to the simulated graph.
+        parallel_state.init_distributed_environment(
+            backend="gloo",
+            world_size=self.tp_size * self.pp_size,
+            rank=self.pp_rank * self.tp_size + self.tp_rank,
+            local_rank=0,
+            distributed_init_method=self.rendezvous,
+        )
+        parallel_state.initialize_model_parallel(
+            tensor_model_parallel_size=self.tp_size,
+            pipeline_model_parallel_size=self.pp_size,
+            expert_model_parallel_size=self.moe_ep_size,
+        )
+        initialize_dp_attention(self.server_args, self.model_config)
+        self.tp_group = parallel_state.get_tp_group()
+        self.pp_group = parallel_state.get_pp_group()
+        self.attention_tp_group = get_attention_tp_group()
+        return 0
+
+    def _resolve_memory_pool_config(self, pre_model_load_memory):
+        return MemoryPoolConfig(
+            max_total_num_tokens=self.server_args.max_total_tokens,
+            max_running_requests=self.server_args.max_running_requests,
+        )
+
+    def _init_pools(self):
+        context = self.model_config.context_len + get_req_to_token_extra_context_len(self.server_args)
+        extra = (
+            self.server_args.disaggregation_decode_extra_slots
+            if self.server_args.disaggregation_mode == "decode" else 0
+        )
+
+        # The observed worker uses paged allocation even at page_size=1; only PD defers and sorts returned pages.
+        reuse = "deferred_sorted" if self.server_args.disaggregation_mode in {"prefill", "decode"} else "prepend"
+        self.peer.call("declare_resources", slots=self.max_running_requests + extra,
+                       page_reuse=reuse, fields=["output_token"])
+        self.req_to_token_pool = RequestSlots(self.peer, self.max_running_requests, context, extra)
+        self.token_to_kv_pool_allocator = PageAllocator(
+            self.peer,
+            self.max_total_num_tokens,
+            self.server_args.page_size,
+            self.kv_layout,
+            self.allocator_implementation,
+        )
+        self.token_to_kv_pool = self.token_to_kv_pool_allocator.storage
+
+    def init_shared_mooncake_transfer_engine(self):
+        # The transfer adapter submits graph work; prediction never opens a physical transport engine.
+        self.shared_mooncake_transfer_engine = None
+
+    def init_attention_backends(self):
+        self.prefill_attention_backend_str = "torch_native"
+        self.decode_attention_backend_str = "torch_native"
+
+    def init_cuda_graphs(self, capture_decode_cuda_graph=True):
+        self.eager_runner = None
+        self.prefill_cuda_graph_runner = None
+        self.decode_cuda_graph_runner = None
+        self.graph_mem_usage = 0
