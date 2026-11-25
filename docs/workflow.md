@@ -89,3 +89,15 @@ Qwen3-8B 的两个 TP1 容量都完成了单请求与并发请求预测。冷任
 ## 2026-11-25 — 顶层物理分层、四维扩展收口与深度瘦身窗口开启
 
 从 `main` 基线 `b500cbe` 切出开发分支 `topology-extensibility-slimming`，分五阶段推进：① 将混装的多语言与多运行域源码统一归口于 `src/` 下并彻底拆分为 `src/engine/`（纯 C++23 仿真引擎）、`src/probes/`（原生探针/Patch/Shell）、`src/shared/`（跨语言单一真源）与 `src/python/`（按运行域隔离的纯 Python），淘汰构建期 AST 裁剪脚本回归纯目录镜像打包；② 抽出设备运行时、宿主平台与框架多版本 ABI/声明式 Hook 适配边界，彻底解耦 SGLang 与 Ascend 并完成换框架、同框架多版本、换 NVIDIA 后端与换硬件代际四维扩展的零副作用静态推演（M1–M2 新增物理卡时为 0）；③ 自 M3 起按 `ascend/pytorch`、`sglang`、`verification` 逐块开展激进范式瘦身，并在锁死全部真机不变量的前提下建立“逐轮瘦身 + 有界真机实采 + 多拓扑离线回归”的验证闭环，确保大幅压缩源码体量与文件碎片的同时不损功能正确性。
+
+## 2026-11-26 — 顶层物理分层、四维扩展收口与深度瘦身窗口提前结束
+
+本窗口（2026-11-25 至 2026-11-26，分支 `topology-extensibility-slimming`，基线 `b500cbe`，截止代码提交 `cbea08e`）完成 M1–M4 及 M5 首轮 R11 共 12/14 轮（85.7%、4/5 阶段）后经用户确认提前结束，未提交的 R12 工作区改动已清理，窗口文档原地保留。
+
+主要成果与已验证范围：① 完成仓库顶层物理归口（根仅留 `src/`、`docker/`、`example/`、`docs/`、`third_party/` 5 个受跟踪目录），`src/` 内按 `engine/`、`probes/`、`shared/`、`python/` 物理隔离，彻底删除 `docker/images/package_runtime.py`，`sglang` 与 `control` 双镜像回归纯目录 `COPY`；② 落地 `DeviceRuntime`/`PlatformBackend` 平台契约、`frameworks/sglang/abi/` 多版本边界（157 项符号集中管理）与显式 `(framework, version, platform)` 作业路由，`sglang/` 消除对 `ascend`/`torch.npu` 与散落 `sglang.srt.*` 的直连耦合，完成四维扩展零副作用静态推演；③ 完成 M3（`common`/`pytorch`/`ascend`，单卡 TP2 分片与 TP1 `--service-reference` 实采并修复持久化调用身份漂移，107/107 动作全匹配）、M4（`sglang/{shared,control,observation,acquisition}`，单卡 TP1/TP2/PD 观测及同步拷贝 `library acquire` 增量发布闭环通过，全量离线对照 Qwen3-8B TP1 四目标 211,290 轨迹、16 次 token 发布、678 样本拟合、43,276 项固定图成本与 58 份集合发布资产逐字节一致）及 R11（`verification/core/` 收口与 11 组录制 22 项 `verify {source,inputs}` 对照通过，SymPy 有理数时钟认证 AST 无变化）。全仓业务 Python 由 `b500cbe` 的 244f / 32,708 NE 降至 `cbea08e` 的 150f / 31,836 NE。
+
+复盘与遗留去向：本窗口暴露两项结构性问题——① 硬性文件数收敛压力导致多个单文件被过度合并至 660–1,286 行，单文件承担过多职责并扰乱了分层逻辑与模块交互；② 增量推进偏重目录拓扑与局部合并，缺乏全局视角下的逻辑交互重梳，局部采集规则互斥硬编码、容器 `entry.py` 静态 `if/elif` 分发与跨层重复防御等问题仍然偏硬。未完成的 R12–R13（三路验证重构、公开文档同步、收官全链路真机终验）及上述架构根因统一转入新窗口解决。
+
+## 2026-11-26 — 全仓逻辑交互重构、职责内聚拆分与柔性可扩展体系升级窗口开启
+
+从 `cbea08e` 切出新开发分支 `architecture-cohesion-extensibility`，废除硬性文件数指标，采用 **Codex 全窗口端到端自主交付 + 完成后 AGY 一次性终审** 模式推进：① 先做全仓全局逻辑交互与所有权总览分析，明确“统一核心逻辑”与“可插拔扩展策略”的边界；② 拆解过度合并的超大文件，恢复单一职责与清晰分层交互；③ 重构僵硬硬编码链路（优先打通采集规则优先级/自动回退链、容器 `--probe` 注册表与通用切点原语，并同步清理验证/观测/平台层重复状态机与跨层冗余防御）；④ 完成三路验证整理、公开文档同步、双镜像与 C++ Release 构建，在有界单卡预算内通过端到端真机闭环实测及全量离线基线对照后交回 AGY 终审。

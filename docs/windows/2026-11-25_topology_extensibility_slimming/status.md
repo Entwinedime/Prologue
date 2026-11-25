@@ -2,9 +2,9 @@
 
 **更新日期**　2026-11-26
 
-**进度**　已交付 12/14 轮（85.7%），完成 4/5 个阶段。分支为 `topology-extensibility-slimming`，功能对照基线为 `b500cbe`。
+**进度**　**已关闭（提前结束）**。已交付 12/14 轮（85.7%），完成 4/5 个阶段（M1–M4 全部验收通过，M5 交付 R11 `cbea08e`）。分支为 `topology-extensibility-slimming`，功能对照基线为 `b500cbe`。
 
-**当前交接**　AGY 已完成 M4 独立复核审查并通过放行（`934c46f` / `8b627bf`，22 项证据 SHA-256 验真通过，`sglang/` 105f → 36f、M4 净减 1,056 NE，全仓业务 Python 降至 162f / 32,130 NE），并基于 `verification/` 实测基线（43f / 10,390 NE / 350 `raise` / 29 `require` / 629 dict）校准 M5 路线 B 目标（`verification/` ≤ 16f / ≤ 6,000 NE，全仓 ≤ 135f / ≤ 27,740 NE）。现经用户确认准予启动 **M5（R11–R13）**；完成后停在最终交付审查点交回 AGY 终审，不要自行关窗。[M4 验收汇总](../../../data/topology-extensibility-slimming/m4/acceptance.json)
+**当前交接**　经用户确认提前终止本窗口：保留已提交的 R11（`cbea08e`），丢弃未提交的 R12 半成品工作区；本窗口产出的顶层物理分层、纯 `COPY` 镜像与四维接口解耦作为已稳定基础保留，而瘦身过程中因硬性文件数指标导致的超大文件职责混杂、层次交互扰动，以及局部采集/验证/观测中仍存在的刚性硬编码逻辑，统一转入下一自主窗口 `2026-11-26_architecture_cohesion_flexible_extensibility` 全局重构解决。[M4 验收汇总](../../../data/topology-extensibility-slimming/m4/acceptance.json)
 
 | 阶段 | 轮次 | 已交付 | 状态 |
 | --- | --- | ---: | --- |
@@ -12,7 +12,7 @@
 | M2　源码归口、平台与框架接口、作业路由 | R02b、R03–R05 | 4/4 | 完成 |
 | M3　Ascend、PyTorch 与公共代码瘦身 | R06–R07 | 2/2 | 完成 |
 | M4　SGLang 实现瘦身 | R08–R10 | 3/3 | 完成 |
-| M5　验证代码瘦身与全仓验收 | R11–R13 | 1/3 | R12 开发中 |
+| M5　验证代码瘦身与全仓验收 | R11–R13 | 1/3 | 暂停（提前结束，R12–R13 转入新窗口） |
 
 **R11 结果**　验证核心从 21 个 Python 文件收至 8 个。11 组录制各做来源和输入两项对照，22 项与基线一致。验证全目录现有 31 个文件、10,097 个非空行。R12 继续处理结构、固定图和自主闭环三条路径。[对照明细](../../../data/topology-extensibility-slimming/m5/r11/source-comparison.json)
 

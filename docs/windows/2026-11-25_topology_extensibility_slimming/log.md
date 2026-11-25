@@ -218,3 +218,13 @@
 **验证**　22 项对照的退出码、资格、计数与输入核验结论一致。成功提取的条件文件逐字节一致。对来源报告只归一计时示例的字段层次，逐项核对端点、时间与原始工作身份。Ruff 通过，150 个活动 Python 模块的导入无环、无缺失，验证边界检查通过。SciPy 候选基与 SymPy 有理数认证涉及的四个时钟类，其规范化 AST 与原版逐一相同。[对照明细](../../../data/topology-extensibility-slimming/m5/r11/source-comparison.json) · [守卫和边界](../../../data/topology-extensibility-slimming/m5/r11/guards-and-boundaries.json)
 
 **结论与限制**　R11 交付。TP8 与宿主/传输录制保留原有的资格限制，分轮 PD 只具备本地 worker 证据。首轮冻结副本缺少共享成本目录，已保留启动失败记录；补齐原目录并核对摘要后重新执行。此次离线对照新增物理卡时为零。M5 剩余三条路径的重构和最终真机验收。[证据清单](../../../data/topology-extensibility-slimming/m5/r11/acceptance.json)
+
+## 2026-11-26 — 窗口提前结束与复盘交接
+
+**范围**　经用户确认提前终止本窗口，保留已验收的 M1–M4（`934c46f` / `8b627bf`）及已提交的 R11（`cbea08e`，共 12/14 轮 = 85.7%），清理未提交的 R12 半成品工作区并执行关窗收尾。
+
+**改动**　清理未提交的 R12 工作区变更（恢复已跟踪文件至 `cbea08e` 并删除 5 个未提交合并文件，未触碰 `docs/note.md` 与 `.personal/`）；在 `plan.md` 标记 `**已关闭**` 并更新 `status.md` 关窗快照。复盘明确两项核心教训：① 以硬性文件数上限驱动瘦身，导致多个单文件膨胀至 660–1,286 行（如 `verification/core/{protocol,connections,actions,state}.py`、`ascend/analysis/observation.py`、`sglang/observation/layout.py`、`sglang/acquisition/{evidence,rules}.py`），单文件承担过多职责并扰乱了分层逻辑与模块间交互；② 增量式推进仅关注目录结构与文件收口，未从全局视角重梳各模块间的逻辑交互与扩展点，导致采集规则互斥/硬编码元组、容器 `entry.py` 静态 `if/elif`、跨层重复防御等“表层可扩展、内核仍僵硬”的问题尚未根治。
+
+**验证**　核验 `cbea08e` 业务源码规模为 255 文件 / 50,450 物理行 / 44,280 非空行（Python 150f / 36,190L / 31,836 NE），识别出全仓 22 个 ≥ 450 NE 的偏重 Python 模块；核验工作区清理后除受保护的未跟踪路径外与 `cbea08e` 完全一致，窗口文档 0 跨层引用与 0 断链。
+
+**结论与限制**　本窗口提前关闭，原地保留历史记录。未完成的 R12–R13（三路验证整理、公开文档同步、收官全链路真机终验）与上述两项架构根因问题一并转入新窗口 `2026-11-26_architecture_cohesion_flexible_extensibility`，由 Codex 端到端自主完成全局架构重梳与重构后统一交 AGY 终审。
