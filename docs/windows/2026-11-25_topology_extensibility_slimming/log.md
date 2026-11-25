@@ -147,3 +147,13 @@
 **验证**　官方入口在物理卡 4 上完成两轮结构与轻量 CPU 采集，按“初始化/预热/有效观测”计秒依次为初次结构 26.1/44.4/3.9、初次 CPU 24.7/44.4/1.5、最终结构 26.5/45.2/3.9、最终 CPU 24.8/44.7/1.4。累计卡时 459.8/600 秒，全部后处理 133.2/420 秒。两轮 SDK 导出分别为 10.74 和 10.74 MiB。真机目录最终保留 92.51 MiB 文件，目录采样峰值 92.86 MiB，上限 6 GiB。首轮输入预检在启动前终止，后处理首次求解缺少 SciPy，改用带求解器的 CPU 容器重用原录制。各次均计入账本。最终镜像来源核验通过，实测时间下 107 个动作完整匹配，提取 165 个设备样本和 591 个 CPU 样本。两个镜像的 100/60 个实装模块 SHA-256 与源码相符，两个探针全部 48/12 个导出符号可加载。四种安装方式读取同一份成本模型定义，均有 5 域 16 子命令。[真机账本](../../../data/topology-extensibility-slimming/m3/r07/budget.json) · [安装与探针](../../../data/topology-extensibility-slimming/m3/r07/installation.json)
 
 **结论与限制**　M3 完成。TP1、TP2、TP8、PD、三段 PP 的 Host/Transport 共 17 个 rank 录制，63 份解释、来源报告与成本产物逐字节匹配 `b500cbe`。TP8 和三段 PP 的历史图两版核验均拒绝，分别从同一原录制重新投影后，双方核验均通过，另有 15 份图和报告逐字节一致。单卡 TP1 单独提取对端传输时，两版均拒绝。冻结库的四个 TP1 目标共 211,290 条轨迹、16 次 token 发布、四份请求时延，库检查、678 样本拟合、成本点与 43,276 项工作成本均与基线一致，其中 15,223 项在两版均无已绑定的耗时。新实采覆盖单卡 TP1，其他拓扑使用留存录制。停在 M3/M4 边界。[多拓扑对照](../../../data/topology-extensibility-slimming/m3/r07/offline-comparison.json) · [预测与拟合](../../../data/topology-extensibility-slimming/m3/r07/regression.json) · [阶段汇总](../../../data/topology-extensibility-slimming/m3/acceptance.json)
+
+## 2026-11-25 — AGY 审查 M3 放行并实测校准 M4 目标
+
+**范围**　独立复核 M3（`0114420..c080478`，业务终版 `5f33571`）全部代码、AST 边界、守卫账本、真机实采与五拓扑离线回归证据，并逐目录实测 `frameworks/sglang/` 现有 105 个文件以校准 M4（R08–R10）务实目标。
+
+**改动**　AGY 修订 `plan.md` 与 `status.md` 登记 M3 审查通过并放行 M4：保持硬性文件收敛上限 `frameworks/sglang/` `105 → ≤ 38` 文件（含根与 `abi/` 7f 及 `__init__.py`），将 M4 务实无损非空行净减目标校准为 **≥ 700 非空行**（R08 ≥ 150、R09 ≥ 350、R10 ≥ 200，冲刺 ≥ 1,000 行），明确保留 6 个动态路由入口路径与 `HostReads.invoke` 持久化身份，并在 R08 增加 1 次轻量单卡 TP1 采集冒烟以覆盖 `shared/` 采集路径。本轮仅更新窗口文档，未修改业务源码。
+
+**验证**　独立复核 M3 达成 `common` 7f、`pytorch` 4f、`ascend` 16f（`ascend + pytorch = 20f`）、全仓业务 Python 231f / 33,186 NE（较 M2 `−32f / −400 NE`）；231 模块 0 环 0 越层（`reference -> analysis = 0`）、`DeviceRuntime`/`PlatformBackend` 100% 对齐、`backend.py` 20 个延迟组件全有效、双镜像纯 `COPY` 100/60 模块 SHA-256 零差异、`ruff` 0 错误、`.pyc` 0 残留；[reference-guards.json](../../../data/topology-extensibility-slimming/m3/r07/reference-guards.json) 与独立 AST `raise` 差异核验确认 0 守卫流失；[acceptance.json](../../../data/topology-extensibility-slimming/m3/acceptance.json) 11 项证据 SHA-256 验真通过，且实采捕获修复了 `5f33571` 持久化身份漂移并实现 107/107 动作全匹配；实测 `frameworks/sglang/` 现有 105f / 14,765L / 12,858 NE / 299 条显式 `raise` / 720 行顶层 import；核验修改后文档无跨层引用与断链。
+
+**结论与限制**　M3 验收通过，准予进入 M4（R08–R10）。M4 仍坚持功能正确性与真机不变量高于行数指标，合并时注意控制单模块均衡粒度（避免单个文件超过 ~800–900 行），完成后停在 M4/M5 边界交回 AGY 审查。

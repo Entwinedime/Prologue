@@ -323,49 +323,52 @@ flowchart LR
 
 ### M4　激进瘦身 #2：`frameworks/sglang/` 全域范式压缩（R08–R10）
 
-**阶段约定暂停点**：完成 `sglang/` 四个子域（`shared`、`control`、`observation`、`acquisition`）的声明式重构与激进瘦身，逐轮通过**有界真机实采回归 + 多拓扑离线对照**，达成瘦身与正确性双门禁，分层推送后**立即暂停**交由 AGY 审查。
+> **M4 启动前实测校准（2026-11-25，基于 M3 终版 `5f33571`）**：`frameworks/sglang/` 现有 **105 文件 / 14,765 物理行 / 12,858 非空行**（299 条显式 `raise`、720 行顶层 import）：`abi/` + 根 7f（442 NE，不动）、`shared/` 22f（2,424 NE）、`control/` 13f（1,971 NE）、`observation/` 29f + `local/` 12f = 41f（5,377 NE）、`acquisition/` 22f（2,644 NE）。经逐目录代码密度实测，M4 保持硬性文件数收敛上限 **`frameworks/sglang/` ≤ 38 文件**（含根与 `abi/` 7f 及全部 `__init__.py`），并将务实无损非空行净减目标校准为 **M4 合计 ≥ 700 非空行**（R08 ≥ 150、R09 ≥ 350、R10 ≥ 200；冲刺 ≥ 1,000 行，功能正确性与真机不变量绝对高于行数指标）。合并时注意保持单模块粒度均衡（避免将不相关职责堆成千行巨文件），且必须保持 6 个动态路由入口模块路径不变：`abi.registry`、`acquisition.bindings`、`acquisition.evidence`、`control.entry`、`observation.entry`、`observation.plugin`。
+
+**阶段约定暂停点**：完成 `sglang/` 四个子域（`shared`、`control`、`observation`、`acquisition`）的声明式重构与瘦身，逐轮通过**有界真机实采回归 + 多拓扑离线对照**，达成瘦身与正确性双门禁，分层推送后**立即暂停**交由 AGY 审查。
 
 > **M4 必须锁死的真机不变量（严禁偷删或弱化，正确性绝对高于行数指标）**：
 > - `PoolCoordinates` 0/1-based 页与槽位偏移换算、`RadixKey` 路由键构造与 prefix cache 分裂/驱逐守卫；
 > - 模型层/注意力/KV 布局守卫（`FutureMap` 维数剥离、多行 packed value、MoE 逐层 router/expert 配对）；
 > - PD 预填充/解码分离传输顺序、接收端 KV 页表与元数据写入顺序校验；
-> - 单卡顺序分片重放（`profile_windows`、主机暂存交换、超显存按层暂存）与全部 9 条局部采集规则的真实资格核验语义（不删减有效局部采集规则，而是通过声明式基座压缩其 9 份重复样板）。
+> - 单卡顺序分片重放（`profile_windows`、主机暂存交换、超显存按层暂存）与全部 9 条局部采集规则的真实资格核验语义（不删减有效局部采集规则，而是通过声明式基座压缩其重复样板）；
+> - 持久化身份不漂移（保持 `HostReads.invoke` 等自有适配器边界显式声明的 `implementation` 身份不随模块合并改变）。
 
-#### R08　深度合并压缩 `sglang/shared/`（22f → ≤ 8f）与 `sglang/control/`（12f → ≤ 6f）
+#### R08　深度合并压缩 `sglang/shared/`（22f → ≤ 8f）与 `sglang/control/`（13f → ≤ 6f）
 
-- **为什么做**：`shared/`（2,868L / 22 文件）与 `control/`（2,274L / 12 文件）存在大量 14L–130L 碎片文件与重复参数/守卫/RPC 包装代码。
+- **为什么做**：`shared/`（2,424 NE / 22 文件）与 `control/`（1,971 NE / 13 文件）存在大量 15L–130L 碎片文件（`cache_keys.py` 15L、`host_reads.py` 46L、`attention.py` 50L、`groups.py` 55L 等）与跨文件 import / 重复 RPC/slot 包装。
 - **改动与删除清单**：
-  - 合并压缩 `sglang/shared/` 为 ≤ 8 个清晰模块：`config.py`、`batches.py`、`resources.py`、`calls.py`、`kv.py`、`pipeline.py`、`disaggregation.py`；
-  - 合并压缩 `sglang/control/` 为 ≤ 6 个清晰模块：`workers.py`、`scheduler.py`、`resources.py`、`runner.py`、`pipeline.py`、`pd.py`；统一 RPC 往返与状态校验辅助；
+  - 合并压缩 `sglang/shared/` 为 ≤ 8 文件（`__init__.py` + ≤ 7 业务模块，如 `config.py`、`batches.py`、`resources.py`、`calls.py`、`kv.py`、`pipeline.py`、`disaggregation.py`），确保保留 `HostReads.invoke` 的显式持久化 `implementation` 身份；
+  - 合并压缩 `sglang/control/` 为 ≤ 6 文件（`__init__.py` + ≤ 5 业务模块，保持 `control/entry.py` 动态入口完整），统一 RPC 往返与状态校验辅助；
   - **显式删除**：删除全部 20+ 个被合并的旧文件，零转发壳。
 - **本轮验证回归**：
-  - `shared/` ≤ 8 文件、`control/` ≤ 6 文件；按真实重复度充分净减非空行（原预估 ≥ 1,000 行，进入 M4 前由 AGY 结合实测代码复核校准）；
-  - 重建双镜像后，运行真实 CPU `control` 容器端到端完成 **TP1 四目标预测（211,290 轨迹 + 空库首缺项）+ 留存 TP1/PD 的 `verify structure` 与 `verify autonomous`**，与 `b500cbe` 逐字节一致；若 `shared/` 改动涉及在线采集端解析（如 KV 布局/配置/批次合同），补跑 1 次单卡 TP1 采集冒烟（预算 ≤ 360s）。
-- **交接**：M3 平台层 → 紧凑的 SGLang 共享与控制层 → R09 攻克最重的 `observation/`。
+  - `shared/` ≤ 8 文件、`control/` ≤ 6 文件；按真实重复度务实净减非空行 **≥ 150 行**，保留既有 fail-closed 守卫；
+  - 重建双镜像后，运行真实 CPU `control` 容器端到端完成 **TP1 四目标预测（211,290 轨迹 + 空库首缺项）+ 留存 TP1/PD 的 `verify structure` 与 `verify autonomous`**，与 `b500cbe` 逐字节一致；因 `shared/` 同时服务采集端，须在空闲单卡补跑 1 次轻量 TP1 采集 + `capture project` + `verify source` + `verify structure` 冒烟（预算上限：单卡 ≤ 360s、后处理 ≤ 300s、存储 ≤ 4 GiB，失败重试不清零），确认采集侧与控制侧契约同步无漂移。
+- **交接**：M3 平台层 → 经真机与控制闭环实证的紧凑 SGLang 共享与控制层 → R09 攻克最重的 `observation/`。
 
-#### R09　深度范式压缩 `sglang/observation/`（39f → ≤ 14f，含 `local/`）
+#### R09　深度范式压缩 `sglang/observation/`（41f → ≤ 14f，含 `local/`）
 
-- **为什么做**：`sglang/observation/` 达 5,983 行（39 文件），充斥大量命令式手写 around-hook 包装、重复上下文栈、手动 scope/port 字典拼装，以及 5 个 `*_runner.py` 重复的局部探针生命周期。
+- **为什么做**：`sglang/observation/` 高达 5,377 NE（核心 29f + `local/` 12f），顶层 import 就占 329 行，存在大量小文件（12L–99L）及 5 个 `*_runner.py` 重复的 `ServerArgs`/`ModelConfig`/观测上下文生命周期与重复 `resolve(symbols().*)` 样板。
 - **改动与删除清单**：
-  - 依托 M2 的 `abi/hooks.py` 声明式 `HookTable` 与统一 `ScopeBuilder` 装饰器/上下文原语，将 27 个核心观察文件合并压缩至 **≤ 10 个模块**，彻底消除重复 hook 注册、重复张量端口打包与重复资源历史记录样板；
-  - 将 `observation/local/` 12 个文件（1,543L）重构为 **≤ 4 个模块**：统一 `LocalRunner` 通用生命周期驱动 + 精简探针体 + 合并 `shard_staging.py`；
+  - 依托 M2 的 `abi/hooks.py` 声明式 `HookTable` 与统一观察上下文原语，将 29 个核心观察文件合并压缩至 **≤ 10 个模块**（保持 `observation/entry.py` 与 `observation/plugin.py` 动态入口，单文件粒度均衡），消除重复 hook 注册、重复张量端口打包与重复 `resolve(symbols().*)` 样板；
+  - 将 `observation/local/` 12 个文件（1,360 NE）重构收敛至 **≤ 4 个模块**（或合理压扁入 `observation/` 省去空 `__init__.py`）：抽取共用 `LocalRunner` / `ServerArgs`+`ModelConfig` 初始化与发布生命周期 + 合并 `shard_staging.py`；
   - **显式删除**：删除全部被合并的 25+ 个旧观察与 runner 微文件。
 - **本轮验证回归（真机 + 离线）**：
-  - `sglang/observation/`（含 `local/`）总文件数 ≤ 14；按真实重复度充分净减非空行（原预估 ≥ 1,400 行，进入 M4 前由 AGY 结合实测代码复核校准）；
-  - **有界真机实采**（预算上限：单卡运行 ≤ 720s、后处理 ≤ 480s、存储 ≤ 8 GiB，失败重试不清零）：重建双镜像后，单卡真机实跑 ① **TP2 `--local-shards --resource-trace`**（直击 `SGLangObservation`、`HookTable`、`shard_staging`、`resource_history`）；② **PD `--local-shards` 或 `--latency-only`**（覆盖 PD 观测与无探针延迟路径）→ `capture project` → `verify source` → `verify structure`，确认真机采集与结构验证全部通过；
+  - `sglang/observation/`（含 `local/`）总文件数 ≤ 14；按真实重复度务实净减非空行 **≥ 350 行**；
+  - **有界真机实采**（预算上限：单卡运行 ≤ 720s、后处理 ≤ 480s、存储 ≤ 8 GiB，失败重试不清零）：重建双镜像后，单卡真机实跑 ① **TP2 `--local-shards --resource-trace`**（直击 `SGLangObservation`、`HookTable`、`shard_staging`、`resource_history`）；② **PD `--local-shards`（如 `f1/pd-shards/single_device/native/input.json`）或 `--latency-only`**（覆盖 PD 观测与无探针延迟路径）→ `capture project` → `verify source` → `verify structure`，确认真机采集与结构验证全部通过；
   - **多拓扑离线对照**：留存 TP1/TP2/PD `interpret` + `verify source` + 四目标预测 + `cost fit` 与 `b500cbe` 逐字节一致。
 - **交接**：R08 共享/控制层 → 经真机实证的声明式轻量化 SGLang 观测层 → R10 压缩宿主采集与局部规则。
 
-#### R10　深度范式压缩 `sglang/acquisition/`（20f → ≤ 8f）
+#### R10　深度范式压缩 `sglang/acquisition/`（22f → ≤ 9f）
 
-- **为什么做**：`sglang/acquisition/`（2,839L / 20 文件）中 6 个 `local_*.py`（9 条规则 1,083L）和样本提取/采样模块存在大量重复的域/rank 校验、临时模型调用、会话打包与样本构造样板。
+- **为什么做**：`sglang/acquisition/`（2,644 NE / 22 文件）中 6 个 `local_*.py` + `local_base.py`（1,051 NE）和样本提取/采样模块存在大量重复的 `environment` 剥离比对、`missing_root`+`framework`+`runtime_domain_key` 匹配、临时模型调用、会话打包与 `local_attempt` 组装样板。
 - **改动与删除清单**：
   - 升级声明式 `LocalRule` 基座，统一承接域/rank/环境校验、会话键归一、`local_attempt` 组装、样本资产打包与通用资格应答，将 6 个 `local_*.py` + `local_base.py` 合并压缩至 **≤ 3 个文件**；
-  - 合并收敛其余宿主文件至 **≤ 5 个文件**（`launch.py`、`worker_templates.py`、`sampling.py`、`samples.py` 等）；
-  - **显式删除**：删除全部 12+ 个被合并的旧文件。
+  - 合并收敛其余 15 个宿主文件至 **≤ 5 个业务文件**（保持 `acquisition/bindings.py` 与 `acquisition/evidence.py` 动态入口）；
+  - **显式删除**：删除全部 13+ 个被合并的旧文件。
 - **本轮验证回归与 M4 硬门禁（真机 + 离线）**：
-  - **瘦身门禁**：`frameworks/sglang/` 全目录 Python 文件数硬性压至 **≤ 38**（原 95 文件）；M4（R08–R10）非空行按进入 M4 前 AGY 结合源码重复度校准的务实目标充分压缩（原预估 ≥ 3,200 行，绝不删守卫）；
-  - **有界真机实采**（预算上限：单卡运行 ≤ 600s、后处理 ≤ 420s、存储 ≤ 6 GiB，失败重试不清零）：重建双镜像后，经官方 CLI 在单卡上执行 1 次有界 **`library acquire`** 局部补采会话（直击新 `LocalRule` 基座与 `LocalRunner` 生命周期）→ `library publish --from-session` → 增量库 `predict run` 验证；
+  - **瘦身门禁**：`frameworks/sglang/` 全目录 Python 文件数（含根、`abi/` 与全部 `__init__.py`）硬性压至 **≤ 38**（当前 105 文件）；M4（R08–R10）累计较 M3 终版 `5f33571`（33,186 非空行）务实净减 Python 非空行 **≥ 700 行**（冲刺 ≥ 1,000 行，绝不删守卫）；
+  - **有界真机实采**（预算上限：单卡运行 ≤ 600s、后处理 ≤ 420s、存储 ≤ 6 GiB，失败重试不清零）：重建双镜像后，经官方 CLI 在单卡上执行 1 次有界 **`library acquire`** 局部补采会话（直击新 `LocalRule` 基座与 `LocalRunner` 生命周期，如 `f2/binding/` 查询）→ `library publish --from-session` → 增量库 `predict run` 验证；
   - **多拓扑离线对照**：四目标 211,290 条轨迹、空库首缺项、678 离线样本、`cost extract`（device/transport/host/batch）、`cost fit` 与 `library publish --from-collection` 全部与 `b500cbe` 逐字节一致。
 - **交接**：R09 观测层 → 经真机闭环验证的高度精干 SGLang 适配层 → M5 攻克最后一块万行大户 `verification/`。
 
@@ -424,7 +427,7 @@ flowchart LR
 | --- | --- |
 | **顶层目录纯净度** | 仓库根仅含 `src/`、`docker/`、`example/`、`docs/`、`third_party/` 5 个受跟踪目录；`src/engine/` 0 个 `.py`/`.sh`/`.patch`；`src/probes/` 0 个 `.py`；`src/python/` 0 个 `.cpp`/`.hpp`/`.sh`/`.patch`；全仓 **0 个多语言混装目录**；原 `src/prologue/` 与 `docker/images/package_runtime.py` **彻底删除**。 |
 | **四维扩展边界** | `src/engine/core/` 0 越层 `#include` 且 0 框架/平台字样；`common/` 与 `host/{runtime,libraries,performance,acquisition,workflow}` 0 框架/平台硬编码；`frameworks/sglang/` 0 导入 `platforms.ascend`、0 裸调 `torch.npu`、`abi/` 外 0 原始 `sglang.srt.*` 路径；`platforms/ascend/` 0 提及 `sglang`、`reference/` 0 导入 `analysis/`；`workers/` 0 硬编码单框架；`verification/` 0 导入 `host/cli`/`workers/` 且除 `verification/core/adapters.py` 外 0 导入 `integrations/`；M2 四维扩展静态推演报告 0 漏口且生产代码 0 mock/stub。 |
-| **硬性瘦身与收敛指标** | **文件数硬底线**：业务 Python 文件数由 `b500cbe` 244 个（M2 后 263 个）压至 **≤ 130**（分阶段：`common` ≤ 7f、`ascend + pytorch` ≤ 20f、`sglang` ≤ 38f、`verification` ≤ 20f），彻底消除空壳子目录与碎片微文件；**非空行务实压缩**：按各子系统真实代码重复度充分消除平行解析、手写样板与过渡包装（M3 目标较 `d48605f` 净减 ≥ 400 非空行，M4/M5 按实测重复度在阶段启动前由 AGY 校准预期）；C++ 保持精干不显著膨胀（净增 ≤ +150ne）。**正确性与真机不变量绝对高于行数指标**。 |
+| **硬性瘦身与收敛指标** | **文件数硬底线**：业务 Python 文件数由 `b500cbe` 244 个（M2 后 263 个）压至 **≤ 130**（分阶段：`common` ≤ 7f、`ascend + pytorch` ≤ 20f、`sglang` ≤ 38f、`verification` ≤ 20f），彻底消除空壳子目录与碎片微文件；**非空行务实压缩**：按各子系统真实代码重复度充分消除平行解析、手写样板与过渡包装（M3 已达 −400 NE，M4 校准目标 ≥ 700 NE，M5 启动前由 AGY 结合实测代码校准）；C++ 保持精干不显著膨胀（净增 ≤ +150ne）。**正确性与真机不变量绝对高于行数指标**。 |
 | **构建、打包与卫生** | `modeling` Release 全目标编译 **0 error / 0 warning**；`./docker/build_inference.sh` 纯 `COPY` 重建 `sglang`/`control` 双镜像成功，实装核验 0 宿主/CLI/验证模块泄露、入口导入 0 报错；`ruff check src/python example` **0 errors**；全仓过期 `.pyc` **0 残留**；AST **0 导入环**；`compare_actions` 单方法 ≤ 100 行；`python3 -m prologue` 5 域 16 子命令与 `prologue-cli` 全部可用；不新增独立测试工程/mock 脚本。 |
 | **逐轮真机实采与多拓扑离线回归** | ① M1–M2 新增物理卡时 = 0；M3–M5 按本计划有界预算逐轮完成对应定向真机实采与闭环验证（R06 TP2 分片采集、R07 TP1 `--service-reference` + 轻量宿主/拷贝采样、R09 TP2+PD 观测实采、R10 `library acquire` 局部补采、R13 最终全链路闭环），每次采集严格单列初始化/预热、有效观测、后处理、导出量、保留量及峰值且失败重试不清零；② 全量离线基线对照与 `b500cbe` 逐字节一致：`predict explore` Qwen TP1 四目标 211,290 条轨迹与 16 次 token 发布（空库返回准确首缺项）、`library inspect`/`publish --from-collection`、`cost fit`（678 样本）+ `cost-points` + `work-costs`（43,276 项固定图工作），以及留存 TP1（1 请求 3 token 闭环评分）、PD（5,355 动作 / 825 端口差异）与 TP2/TP8 参考核验结论完全一致。 |
 
