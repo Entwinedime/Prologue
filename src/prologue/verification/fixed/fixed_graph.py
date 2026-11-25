@@ -11,22 +11,20 @@ from prologue.performance.requirements import CostRequirements
 from prologue.runtime.docker import ModelingProcess
 from prologue.runtime.io import write_json
 
+from .fixed_context import FixedHostContext
 from .fixed_reference import FixedReference
-from .latency_metrics import compare_request_metrics
-from .reference import ReferenceRecording
-from .source_evidence import ProductionEvidence
+from ..core.metrics import compare_request_metrics
+from prologue.verification.runner import VerificationRun
+from ..core.source_evidence import ProductionEvidence
 
 
-class FixedPerformance:
+class FixedPerformance(VerificationRun):
+    recording_conditions = {"service_reference": True}
+
     def __init__(self, arguments):
-        self.arguments = arguments
-        self.output = arguments.output.resolve()
+        super().__init__(arguments)
         self.report = {"capture": str(arguments.capture.resolve()), "reference": str(arguments.reference.resolve()),
                        "cost_asset": str(arguments.costs.resolve())}
-
-    def finish(self, status):
-        write_json(self.output / "result.json", {"status": status, **self.report}, indent=2, replace=False)
-        return status == "compared"
 
     def estimate(self, reference, model, scratch):
         estimates, domains, first_gaps = {}, {}, {}
@@ -236,23 +234,20 @@ class FixedPerformance:
         self.report["scenarios"] = outcomes
         return outcomes.get("modeled", {}).get("status") != "input_readiness_unverified"
 
-    def run(self):
+    def verify(self):
         args = self.arguments
-        self.output.mkdir(parents=True)
-        recording = ReferenceRecording(args.capture, conditions={"service_reference": True})
-        training = self.report["training"] = recording.training(costs=args.costs)
-        if training["status"] != "separate":
-            return self.finish(training["status"])
+        recording = self.recording
+        if status := self.training_gap(costs=args.costs):
+            return self.finish(status)
         checker = ProductionEvidence(args.reference, recording.source, self.output / "source-evidence", args.details)
-        case, evidence = checker.inspect(retain_measurements=True)
+        case, evidence = checker.inspect(retain_measurements=FixedHostContext.retain)
         self.report["reference_status"] = evidence["native_case"]["status"]
         if checker.publish(evidence, require_joint=True) or case.groups.keys() != case.sources.keys():
             return self.finish("reference_unqualified")
 
         job = recording.inputs["job"]
         target = {field: job[field] for field in recording.target_fields}
-        if difference := recording.input_difference(job, target) or case.input_difference(target):
-            self.report["input_difference"] = difference
+        if self.input_mismatch(target) or self.input_mismatch(target, case=case):
             return self.finish("input_mismatch")
 
         reference = FixedReference(case)

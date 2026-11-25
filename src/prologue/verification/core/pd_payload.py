@@ -1,8 +1,10 @@
 """Compare declared PD state footprints with actual registered buffers and copied bytes."""
 
+from prologue.verification.core.adapters import kv_buffers
+
+
 from collections import Counter, defaultdict
 
-from prologue.integrations.frameworks.sglang.shared.kv_layout import KvBufferAddresses, MhaKvLayout
 
 
 class PdPayloadEvidence:
@@ -12,11 +14,7 @@ class PdPayloadEvidence:
         self.sessions = {group: session for session, group in sessions.items()}
         self.buffers = {}
         for session, recording in registrations.items():
-            native = recording["registration"]
-            self.buffers[session] = KvBufferAddresses(
-                MhaKvLayout.read(recording["layout"]), recording["page_size"],
-                native["pointers"], native["lengths"], native["page_bytes"],
-            )
+            self.buffers[session] = kv_buffers(recording)
         self.findings, self.counts = [], Counter()
 
     def ownership(self, contents, parent, call, source, target):

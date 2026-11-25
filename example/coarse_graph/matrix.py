@@ -17,7 +17,7 @@ from prologue.runtime.docker import OwnedContainers
 from prologue.runtime.io import write_json
 from prologue.runtime.limits import OperationLimit
 from prologue.runtime.workspace import file_lock
-from prologue.verification.reference import ReferenceRecording
+from prologue.verification.core.reference import ReferenceRecording
 
 
 class MatrixRun:
@@ -125,7 +125,7 @@ class MatrixRun:
             production = self.root / reference["production"]
             output = self.results / "sources" / name / str(index)
             command = self.commands.command(
-                "prologue.verification.source_evidence", "--production", production, "--capture", recording.source,
+                "prologue.verification.core.source_evidence", "--production", production, "--capture", recording.source,
                 "--libraries", release.directory, "--output", output,
             )
             code = self.process(f"{name}/source-evidence-{index}", command)
@@ -285,7 +285,7 @@ class MatrixRun:
         output = self.results / "cases" / name
         timing = ("--peer-handoffs",) if case.get("peer_handoffs") else ()
         command = self.commands.command(
-            "prologue.verification.structure",
+            "prologue.verification.structure.structure",
             "--capture",
             target["native"],
             "--reference",
@@ -323,7 +323,7 @@ class MatrixRun:
         if phase == "fixed":
             if target["status"] != "produced":
                 return result | {"status": "target-prerequisite-unqualified"}
-            module = "fixed_graph"
+            module = "fixed.fixed_graph"
             release = LibraryRelease(self.root / domain["libraries"])
             if release.costs is None:
                 return result | {"status": "cost-asset-unavailable"}
@@ -331,7 +331,7 @@ class MatrixRun:
             if groups := case.get("fixed_work_groups"):
                 evidence += ("--work-groups", self.root / groups)
         else:
-            module = "autonomous"
+            module = "autonomous.autonomous"
             latency = self.root / case.get("latency_observation", f"targets/{self.name}/{name}/latency")
             if "latency_observation" not in case:
                 timeout = case.get("latency_timeout_seconds", self.budget["task_seconds"])

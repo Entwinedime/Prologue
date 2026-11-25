@@ -8,11 +8,11 @@ from pathlib import Path
 
 from prologue.runtime.io import write_json
 
-from .actions import ActionIdentity
-from .context_values import ContextValues
-from .ingress import IngressEvidence
-from .native_case import NativeCase
-from .reference import ReferenceRecording
+from ..core.actions import ActionIdentity
+from ..core.context_values import ContextValues
+from ..core.ingress import IngressEvidence
+from ..core.native_case import NativeCase
+from ..core.reference import ReferenceRecording
 
 
 class ScheduleComparison:

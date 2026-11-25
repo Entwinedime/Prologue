@@ -1,16 +1,17 @@
 """Project independently observed host conditions onto serial steps of a fixed graph."""
 
+from prologue.verification.core.adapters import Interval, ThreadIntervals, ThreadService
+
+
 import json
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import pairwise
 
-from prologue.integrations.platforms.ascend.analysis.host_alignment import ThreadService
-from prologue.integrations.platforms.ascend.analysis.trace import Interval, ThreadIntervals
 
 from .host_queues import HostQueueEvidence
-from .ingress import IngressEvidence
+from ..core.ingress import IngressEvidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +202,44 @@ class FixedThreadActivity(ThreadService):
 
 
 class FixedHostContext:
+    @classmethod
+    def retain(cls, native_case, rank, facts, graph, native_evidence, host_fences, launches, payload_times, report, details):
+        records = {key: facts[key] for key in ("resources", "environment", "measurements")}
+        # Timed work and published physical signals retain their actual measured endpoints.
+        timed = {piece[side] for piece in graph["work"] for side in ("start", "finish")}
+        timed.update(port["event"] for scope in graph["scopes"] for port in scope["ports"]
+                     if port["use"] == "signal" and port["signal"].startswith("event/"))
+        records["observer_joins"] = native_evidence.observer_joins - timed
+        releases = native_evidence.sdk.release_evidence(
+            graph, launches, native_evidence.queues, native_case.clocks[rank], records["observer_joins"]
+        )
+        omitted = {record for release in releases.values() for record in release.omitted}
+        owner = native_case.ranks[rank]
+        deliveries = zip(native_case.manifest["instances"], native_case.submissions, strict=True)
+        delivery = next(submitted for instance, submitted in deliveries if instance["id"] == owner)
+        context = cls(native_case.capture, rank, native_evidence, delivery)
+        calls = native_case.cpu.native_calls[rank]
+        measured = context.project(
+            native_evidence, graph, host_fences, omitted, details, calls, native_case.cpu.native_times
+        )
+        delays, waits, idle_inputs, posts, queues, protocol = measured
+        records["fixed_cpu_calls"] = protocol
+        report["native_host_queues"] = queues
+        records["fixed_host_delays"] = delays
+        records["fixed_idle_inputs"] = idle_inputs
+        records["host_fences"] = host_fences
+        records["fixed_driver_posts"] = posts
+        records["device_releases"] = releases
+        records["device_payload_times"] = payload_times
+        records["fixed_host_waits"] = waits
+        records["fixed_host_context"] = context
+        records["kernel_threads"] = context.active.kernel_threads
+        records["unbound_queue_notifications"] = (
+            queues["queue_completion_notifications"] - queues["bound_to_fixed_work"]
+        )
+
+        native_case.measurements[rank] = records
+
     def __init__(self, capture, rank, evidence, delivery):
         self.rank = rank
         self.native = evidence.native

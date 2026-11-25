@@ -1,5 +1,8 @@
 """Check retained source evidence independently of template production and prediction."""
 
+from prologue.verification.core.adapters import device_effects, stream_declarations
+
+
 import argparse
 import json
 from bisect import bisect_right
@@ -8,9 +11,6 @@ from heapq import heappop, heappush
 from pathlib import Path
 
 from prologue.acquisition.recording import PublishedCapture
-from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
-from prologue.integrations.platforms.ascend.reference.reference import NativeEffectEvidence
-from prologue.integrations.platforms.ascend.reference.stream_effects import StreamEffects
 from prologue.libraries.release import LibraryRelease, asset_path
 
 from .actions import ActionScopes
@@ -304,10 +304,9 @@ class ProductionEvidence:
         graph = json.loads((self.production / f"work/{rank}-graph.json").read_text())
         native = json.loads((self.capture / f"rank-{rank}.json").read_text())
         SourceEvidence.require(native["environment"] == facts["environment"], "clock source environment differs")
-        native_evidence = NativeEffectEvidence(
+        native_evidence, effects = device_effects(graph,
             self.capture, rank, native, facts, self.production / f"work/{rank}-sdk/trace.json",
         )
-        effects = StreamEffects(native_evidence).inspect(graph)
         host_fences = native_evidence.inspect_host_fences(graph)
         effects["host_fences"] = len(host_fences)
         contents = native_case.observe(rank, graph, native, logical_coordinates=native_evidence.logical_coordinates)
@@ -327,7 +326,7 @@ class ProductionEvidence:
         )
         generations = native_evidence.event_generations
         signals = native_evidence.inspect_signals(contents, native_case.dependencies[rank], generations)
-        stream_roles = native_evidence.inspect_stream_roles(*PipelineABI.stream_declarations(native), generations[1])
+        stream_roles = native_evidence.inspect_stream_roles(*stream_declarations(native), generations[1])
         report = SourceEvidence(
             facts, graph, native_case.clocks[rank], native_case.logical[rank], self.details,
         ).inspect()
@@ -340,46 +339,10 @@ class ProductionEvidence:
         report["native_submissions"] = submissions
         report["native_signals"] = signals
         if retain_measurements:
-            from .fixed_context import FixedHostContext
-
-            records = {key: facts[key] for key in ("resources", "environment", "measurements")}
-            # Timed work and published physical signals retain their actual measured endpoints.
-            timed = {piece[side] for piece in graph["work"] for side in ("start", "finish")}
-            timed.update(port["event"] for scope in graph["scopes"] for port in scope["ports"]
-                         if port["use"] == "signal" and port["signal"].startswith("event/"))
-            records["observer_joins"] = native_evidence.observer_joins - timed
-            releases = native_evidence.sdk.release_evidence(
-                graph, launches, native_evidence.queues, native_case.clocks[rank], records["observer_joins"]
-            )
-            omitted = {record for release in releases.values() for record in release.omitted}
-            owner = native_case.ranks[rank]
-            deliveries = zip(native_case.manifest["instances"], native_case.submissions, strict=True)
-            delivery = next(submitted for instance, submitted in deliveries if instance["id"] == owner)
-            context = FixedHostContext(self.capture, rank, native_evidence, delivery)
-            calls = native_case.cpu.native_calls[rank]
-            measured = context.project(
-                native_evidence, graph, host_fences, omitted, self.details, calls, native_case.cpu.native_times
-            )
-            delays, waits, idle_inputs, posts, queues, protocol = measured
-            records["fixed_cpu_calls"] = protocol
-            report["native_host_queues"] = queues
-            records["fixed_host_delays"] = delays
-            records["fixed_idle_inputs"] = idle_inputs
-            records["host_fences"] = host_fences
-            records["fixed_driver_posts"] = posts
-            records["device_releases"] = releases
-            records["device_payload_times"] = payload_times
-            records["fixed_host_waits"] = waits
-            records["fixed_host_context"] = context
-            records["kernel_threads"] = context.active.kernel_threads
-            records["unbound_queue_notifications"] = (
-                queues["queue_completion_notifications"] - queues["bound_to_fixed_work"]
-            )
-
-            native_case.measurements[rank] = records
+            retain_measurements(native_case, rank, facts, graph, native_evidence, host_fences, launches, payload_times, report, self.details)
         return report
 
-    def inspect(self, *, retain_measurements=False):
+    def inspect(self, *, retain_measurements=None):
         publication = json.loads((self.production / "result.json").read_text())
         capture = json.loads((self.capture / "capture.json").read_text())
         native_case = NativeCase(self.capture, capture, self.production / "work")
@@ -399,7 +362,7 @@ class ProductionEvidence:
             try:
                 facts = json.loads((native_case.graphs / f"{rank}-facts.json").read_text())
                 report = self.observe_rank(
-                    native_case, rank, facts, retain_measurements and native_case.joint_execution
+                    native_case, rank, facts, retain_measurements if native_case.joint_execution else None
                 )
             except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
                 # A malformed or absent source is a finding; continue the remaining independent ranks.

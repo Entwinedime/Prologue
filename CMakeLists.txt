@@ -69,7 +69,7 @@ add_executable(prologue src/prologue/app/main.cpp src/prologue/app/commands.cpp 
 target_link_libraries(prologue PRIVATE prologue_sglang)
 
 # Local verification expands supplied native actions without running the serving controller.
-add_executable(prologue_local_graphs src/prologue/verification/local_graphs.cpp)
+add_executable(prologue_local_graphs src/prologue/verification/structure/local_graphs.cpp)
 target_link_libraries(prologue_local_graphs PRIVATE prologue_sglang)
 foreach(target prologue_core prologue_sglang prologue prologue_local_graphs)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)

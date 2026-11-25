@@ -1,11 +1,13 @@
 """Join each run's actual CPU P2P facts without cross-run message matching."""
 
+from prologue.verification.core.adapters import CpuProtocolWork, CpuTransfer
+
+
 import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from math import prod
 
-from prologue.integrations.runtimes.pytorch.protocol_work import CpuProtocolWork, CpuTransfer
 
 from .actions import ActionIdentity
 from .dependencies import CausalGraph

@@ -5,10 +5,10 @@ import json
 from collections import Counter
 from pathlib import Path
 
-from .actions import ActionIdentity
-from .contents import GraphContents
-from .dependencies import ActionBoundaries, CausalGraph
-from .native_case import NativeCase
+from ..core.actions import ActionIdentity
+from ..core.contents import GraphContents
+from ..core.dependencies import ActionBoundaries, CausalGraph
+from ..core.native_case import NativeCase
 
 
 class LocalActionComparison:

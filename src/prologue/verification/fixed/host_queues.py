@@ -1,11 +1,12 @@
 """Find actual software-queue notifications independently of the projected graph."""
 
+from prologue.verification.core.adapters import Interval, ThreadIntervals, ThreadService
+
+
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from itertools import pairwise
 
-from prologue.integrations.platforms.ascend.analysis.host_alignment import ThreadService
-from prologue.integrations.platforms.ascend.analysis.trace import Interval, ThreadIntervals
 
 
 class HostQueueEvidence:

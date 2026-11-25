@@ -6,44 +6,37 @@ from pathlib import Path
 from subprocess import TimeoutExpired
 
 from prologue.acquisition.observation.workers import CapturedWorkers
-from prologue.app.prediction import PredictionProcess
+from prologue.workflow.prediction import PredictionProcess
 from prologue.libraries.release import LibraryRelease
-from prologue.runtime.io import write_json
 from prologue.workflow.options import PredictionOptions
 
 from .latency_metrics import LatencyComparison, NativeLatencyMetrics
-from .reference import ReferenceRecording
+from prologue.verification.runner import VerificationRun
 
 
-class AutonomousVerification:
-    def __init__(self, arguments):
-        self.arguments = arguments
-        self.output = arguments.output.resolve()
+class AutonomousVerification(VerificationRun):
+    def __init__(self, arguments, adapter):
+        super().__init__(arguments)
+        self.adapter = adapter
         self.report = {
             "input": str(arguments.input.resolve()),
             "native_task": str(arguments.capture.resolve()),
             "libraries": str(arguments.libraries.resolve()),
         }
 
-    def finish(self, status):
-        write_json(self.output / "result.json", {"status": status, **self.report}, indent=2, replace=False)
-        return status == "compared"
-
     def qualify_reference(self, recording, source):
         recorded = recording.inputs
         if (not recorded.get("latency_only") or recorded.get("host_timing") or "attention_sites" in recorded["job"]
                 or not all("latency" in instance for instance in recording.manifest["instances"])):
             return "reference_requires_latency_capture"
-        if difference := recording.input_difference(recorded["job"], source):
-            self.report["input_difference"] = difference
+        if self.input_mismatch(source):
             return "input_mismatch"
 
         instances = recording.manifest["instances"]
         if not CapturedWorkers(instances).joint_execution:
             return "reference_requires_joint_execution"
         sessions = recording.sessions(recording.source, instances)
-        if difference := recording.session_difference(source, instances, sessions):
-            self.report["input_difference"] = difference
+        if self.input_mismatch(source, sessions=sessions):
             return "input_mismatch"
 
         native = NativeLatencyMetrics(recording.source, instances, sessions).report()
@@ -72,7 +65,7 @@ class AutonomousVerification:
         output = process.arguments.output
         try:
             if not process.run():
-                status, path = process.gap(output)
+                status, path = process.gap()
                 self.report["evidence"] = str(path)
                 return status
         except (RuntimeError, TimeoutError, TimeoutExpired) as error:
@@ -81,22 +74,20 @@ class AutonomousVerification:
         self.report["prediction_result"] = str(output / "result.json")
         return "completed"
 
-    def run(self):
+    def verify(self):
         args = self.arguments
-        self.output.mkdir(parents=True)
         source = json.loads(args.input.read_text())
         release = LibraryRelease(args.libraries)
         options = PredictionOptions(output=self.output / "prediction", timeout=args.timeout, binary=args.binary,
                                   modeling_image=args.modeling_image, control_image=args.control_image,
                                   execution_inputs=None, execution_trace=args.details)
-        process = PredictionProcess(options, release, source)
+        process = PredictionProcess(options, release, source, self.adapter)
         if process.task.binding is None:
             self.report["gap"] = process.task.missing_workers()
             return self.finish("template_gap")
-        recording = ReferenceRecording(args.capture)
-        training = self.report["training"] = recording.training(templates=process.task.binding, costs=release.costs)
-        if training["status"] != "separate":
-            return self.finish(training["status"])
+        recording = self.recording
+        if status := self.training_gap(templates=process.task.binding, costs=release.costs):
+            return self.finish(status)
 
         # Only the scoring step consumes native timing. A cold reference still leaves a real prediction outcome.
         prediction = self.report["prediction_status"] = self.predict(process)
@@ -121,7 +112,8 @@ def main():
     parser.add_argument("--control-image", default="prologue-control:ubuntu22.04")
     parser.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
     parser.add_argument("--details", action="store_true", help="retain the execution trace")
-    raise SystemExit(0 if AutonomousVerification(parser.parse_args()).run() else 1)
+    from ..core.adapters import SGLangTask
+    raise SystemExit(0 if AutonomousVerification(parser.parse_args(), SGLangTask).run() else 1)
 
 
 if __name__ == "__main__":

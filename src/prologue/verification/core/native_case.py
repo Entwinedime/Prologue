@@ -1,12 +1,13 @@
 """Assemble one observed case independently of prediction and cross-run pairing."""
 
+from prologue.verification.core.adapters import device_coordinates
+
+
 import json
 from collections import Counter, defaultdict
 from functools import cached_property
 
 from prologue.acquisition.observation.workers import CapturedWorkers
-from prologue.integrations.platforms.ascend.reference.recording import SdkRecording
-from prologue.integrations.platforms.ascend.reference.stream_effects import StreamEffects
 
 from .actions import ActionIdentity
 from .bindings import BindingComparison
@@ -85,13 +86,8 @@ class NativeCase:
         self.logical[rank] = set()
         if any(point["time_ns"] is None for point in graph["evidence"]["events"]):
             if logical_coordinates is None:
-                facts = json.loads((self.graphs / f"{rank}-facts.json").read_text())
-                runtime = SdkRecording(self.capture, rank, raw, facts, self.graphs / f"{rank}-sdk/trace.json")
-                StreamEffects(runtime).inspect(graph)
-                logical_coordinates = runtime.logical_coordinates
+                logical_coordinates = device_coordinates(self.capture, self.graphs, rank, raw, graph)
 
-                # SDK dictionaries are no longer needed while projecting the retained causal graph.
-                del runtime, facts
             logical = {}
             for event, point in enumerate(graph["evidence"]["events"]):
                 coordinate = graph["events"][event]["resource"], point["order"]

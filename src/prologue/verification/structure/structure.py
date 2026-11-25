@@ -7,54 +7,49 @@ from subprocess import CalledProcessError, TimeoutExpired
 from tempfile import TemporaryDirectory
 from time import monotonic_ns
 
-from prologue.app.prediction import PredictionProcess
+from prologue.workflow.prediction import PredictionProcess
 from prologue.libraries.release import LibraryRelease
 from prologue.runtime.docker import ModelingProcess
-from prologue.runtime.io import write_json
 from prologue.workflow.options import PredictionOptions
 
 from .compare_actions import ActionComparison
 from .execution_inputs import NativeInputs
-from .reference import ReferenceRecording
-from .source_evidence import ProductionEvidence
+from prologue.verification.runner import VerificationRun
+from ..core.source_evidence import ProductionEvidence
 
 
-class StructureVerification:
-    def __init__(self, arguments):
-        self.arguments = arguments
-        self.output = arguments.output.resolve()
+class StructureVerification(VerificationRun):
+    success = {"full_structure_matched", "structure_matched_within_scope"}
 
-    def finish(self, status, stages):
-        write_json(self.output / "result.json", {"status": status, **stages}, indent=2, replace=False)
-        return status in {"full_structure_matched", "structure_matched_within_scope"}
+    def __init__(self, arguments, adapter):
+        super().__init__(arguments)
+        self.adapter = adapter
 
-    def run(self):
+    def verify(self):
         args = self.arguments
-        self.output.mkdir(parents=True)
-        recording = ReferenceRecording(args.capture)
+        recording = self.recording
         capture = recording.source
         wall_ns = {}
-        stages = {
+        stages = self.report = {
             "capture": str(recording.directory), "reference": str(args.reference.resolve(strict=True)),
             "libraries": str(args.libraries.resolve()), "wall_ns": wall_ns,
         }
         source = json.loads(args.input.read_text())
-        if difference := recording.input_difference(recording.inputs["job"], source):
-            return self.finish("input_mismatch", stages | {"input_difference": difference})
+        if self.input_mismatch(source):
+            return self.finish("input_mismatch")
         prediction = self.output / "prediction"
         timing = self.output / "timing"
         options = PredictionOptions(output=prediction, timeout=args.timeout, binary=args.binary,
                                   modeling_image=args.modeling_image, control_image=args.control_image,
                                   execution_inputs=timing / "execution-inputs.json", execution_trace=True)
-        process = PredictionProcess(options, LibraryRelease(args.libraries), source)
+        process = PredictionProcess(options, LibraryRelease(args.libraries), source, self.adapter)
         binding = process.task.binding
         if binding is None:
-            return self.finish("template_gap", stages | {"gap": process.task.missing_workers()})
+            return self.finish("template_gap", gap=process.task.missing_workers())
         if args.peer_handoffs and binding.worker_deployment.get("acquisition_mode", "full") != "single_device":
-            return self.finish("peer_handoff_source_unqualified", stages)
-        training = stages["training"] = recording.training(templates=binding)
-        if training["status"] != "separate":
-            return self.finish(training["status"], stages)
+            return self.finish("peer_handoff_source_unqualified")
+        if status := self.training_gap(templates=binding):
+            return self.finish(status)
 
         started = monotonic_ns()
         checker = ProductionEvidence(args.reference, capture, self.output / "source-evidence", args.details)
@@ -63,10 +58,10 @@ class StructureVerification:
         status = checker.publish(evidence, require_joint=True)
         wall_ns["reference"] = monotonic_ns() - started
         if status:
-            return self.finish("reference_unqualified", stages)
+            return self.finish("reference_unqualified")
 
-        if difference := reference.input_difference(source):
-            return self.finish("input_mismatch", stages | {"input_difference": difference})
+        if self.input_mismatch(source, case=reference):
+            return self.finish("input_mismatch")
 
         started = monotonic_ns()
         with TemporaryDirectory(prefix=".action-layouts-", dir=self.output) as temporary:
@@ -78,14 +73,14 @@ class StructureVerification:
                         "action-layouts", layouts / f"{rank}-layouts.json", reference.graphs / f"{rank}-graph.json"
                     )
             except (CalledProcessError, TimeoutError, TimeoutExpired, RuntimeError) as error:
-                return self.finish("action_layout_unavailable", stages | {"layout_error": str(error)})
+                return self.finish("action_layout_unavailable", layout_error=str(error))
             inputs = NativeInputs(capture, reference.graphs, timing, layouts, peer_handoffs=args.peer_handoffs)
             extracted = inputs.run(reference)
         wall_ns["timing"] = monotonic_ns() - started
         stages["timing_status"] = extracted["status"]
         stages["timing_scope"] = extracted["timing_scope"]
         if extracted["status"] != "extracted":
-            return self.finish("timing_unavailable", stages)
+            return self.finish("timing_unavailable")
 
         started = monotonic_ns()
         try:
@@ -96,10 +91,10 @@ class StructureVerification:
         wall_ns["prediction"] = monotonic_ns() - started
         trace = prediction / ("execution.partial.jsonl" if "prediction_error" in stages else "execution.jsonl")
         if not trace.is_file():
-            if gap := process.gap(prediction):
+            if gap := process.gap():
                 status, path = gap
-                return self.finish(status, stages | {"evidence": str(path)})
-            return self.finish("prediction_no_trace", stages)
+                return self.finish(status, evidence=str(path))
+            return self.finish("prediction_no_trace")
 
         # Compare against the original reference, including actual condition consumption and independent causal
         # evidence.
@@ -109,7 +104,7 @@ class StructureVerification:
                                       realization=inputs.realization, peer_handoffs=args.peer_handoffs).run()
         except ValueError as error:
             wall_ns["comparison"] = monotonic_ns() - started
-            return self.finish("comparison_unverified", stages | {"comparison_error": str(error)})
+            return self.finish("comparison_unverified", comparison_error=str(error))
         wall_ns["comparison"] = monotonic_ns() - started
         stages["comparison_status"] = report["status"]
         stages["coverage"] = report["coverage"]
@@ -117,16 +112,16 @@ class StructureVerification:
         if "prediction_error" in stages:
             if rejected := report["first_rejected_action"]:
                 stages["first_rejected_action"] = rejected
-                return self.finish("measured_layout_difference", stages)
-            if gap := PredictionProcess.gap(prediction):
+                return self.finish("measured_layout_difference")
+            if gap := process.gap():
                 status, path = gap
-                return self.finish(status, stages | {"evidence": str(path)})
-            return self.finish("prediction_failed", stages)
+                return self.finish(status, evidence=str(path))
+            return self.finish("prediction_failed")
         if report["status"] != "actions_matched":
-            return self.finish(report["status"], stages)
+            return self.finish(report["status"])
         if report["condition_inputs"]["full_node_coverage"]:
-            return self.finish("full_structure_matched", stages)
-        return self.finish("structure_matched_within_scope", stages)
+            return self.finish("full_structure_matched")
+        return self.finish("structure_matched_within_scope")
 
 
 def main():
@@ -148,7 +143,8 @@ def main():
         action="store_true",
         help="allow measured common ports when a single-device action has a different layout",
     )
-    raise SystemExit(0 if StructureVerification(parser.parse_args()).run() else 1)
+    from ..core.adapters import SGLangTask
+    raise SystemExit(0 if StructureVerification(parser.parse_args(), SGLangTask).run() else 1)
 
 
 if __name__ == "__main__":

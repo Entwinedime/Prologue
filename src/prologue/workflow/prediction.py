@@ -8,9 +8,6 @@ import time
 from contextlib import ExitStack
 from uuid import uuid4
 
-from prologue.integrations.frameworks.sglang.acquisition.worker_templates import SGLangTask, WorkerDomain
-from prologue.integrations.frameworks.sglang.shared.configuration import ServingInput
-from prologue.integrations.frameworks.sglang.shared.ingress import BatchOperands
 from prologue.runtime.docker import DockerImage, OwnedContainers
 from prologue.runtime.io import content_id, write_json
 from prologue.runtime.limits import OperationLimit
@@ -18,7 +15,7 @@ from prologue.workflow.options import PredictionOptions
 
 
 class PredictionProcess:
-    def __init__(self, arguments: PredictionOptions, release, source, limit=None) -> None:
+    def __init__(self, arguments: PredictionOptions, release, source, adapter, limit=None) -> None:
         self.arguments = arguments
         self.release = release
         self.limit = limit if limit is not None else OperationLimit()
@@ -31,7 +28,7 @@ class PredictionProcess:
                 "given_work_ns requires nonnegative signed 64-bit nanoseconds and no measured timing input"
             )
         self.source = {key: value for key, value in source.items() if key != "given_work_ns"}
-        self.task = SGLangTask(self.source, release.templates)
+        self.task = adapter(self.source, release.templates)
 
     @staticmethod
     def recover(output):
@@ -40,24 +37,23 @@ class PredictionProcess:
             OwnedContainers(json.loads(path.read_text())).close()
 
     @staticmethod
-    def basis(source, release):
-        task = SGLangTask(source, release.templates)
+    def basis(source, release, adapter):
+        task = adapter(source, release.templates)
         if task.binding is None:
             return content_id(["missing_workers", task.domain])
 
-        workers = {content_id(WorkerDomain.execution_domain(person["environment"]))
-                   for instance in task.serving.instances for person in task.participants(instance)}
+        workers = {content_id(domain) for domain in task.execution_domains()}
         costs = {worker: release.cost_identities.get(worker) for worker in workers}
         return content_id([release.templates.program_identity(task.binding), costs])
 
-    @staticmethod
-    def gap(output, source):
+    def gap(self):
+        output = self.arguments.output
         for status, name in (("template_gap", "template-gap.json"), ("cost_gap", "cost-gap.json")):
             evidence = output / name
             if evidence.is_file():
                 detail = json.loads(evidence.read_bytes())
                 action = detail.get("invocation", detail)
-                if "native_inputs" not in action and BatchOperands.bind(action, ServingInput(source), detail["domain"]):
+                if "native_inputs" not in action and self.task.bind_gap(action, detail["domain"]):
                     write_json(evidence, detail)
                 return status, evidence
         return None
@@ -91,7 +87,7 @@ class PredictionProcess:
             role: DockerImage.inspect(image, timeout=max(0, deadline - time.monotonic()))
             for role, image in (("modeling", args.modeling_image), ("control", args.control_image))
         }
-        WorkerDomain.require_control(descriptions["control"], self.task.workers)
+        self.task.require_control(descriptions["control"])
         images = {role: image["Id"] for role, image in descriptions.items()}
         definitions = self.task.binding.definitions
         definition_mount = (
@@ -111,76 +107,29 @@ class PredictionProcess:
             if remaining <= 0:
                 raise TimeoutError("Prediction preparation exhausted its time allowance")
 
-            # The core alone receives the selected timing asset.
+            # Both peers run on CPU, under the same deadline. Only the core can read the selected assets.
+            docker = ["docker", "run", "--rm", "--init", "-i", "--runtime", "runc", "--network", "none"]
+            entry = ["--entrypoint", "/usr/bin/timeout"]
+            timeout = ["--signal=KILL", f"{remaining}s"]
+            template_mounts = []
+            for index, source in enumerate(self.task.binding.paths):
+                mount = f"type=bind,src={source},dst=/inputs/templates/{index}.json,readonly"
+                template_mounts.extend(("--mount", mount))
+
             commands = [
-                [
-                    "docker",
-                    "run",
-                    "--rm",
-                    "--init",
-                    "-i",
-                    "--runtime",
-                    "runc",
-                    "--network",
-                    "none",
-                    "--name",
-                    names[0],
-                    "--entrypoint",
-                    "/usr/bin/timeout",
-                    "--mount",
-                    f"type=bind,src={binary},dst=/app/prologue,readonly",
-                    *[
-                        item
-                        for index, path in enumerate(self.task.binding.paths)
-                        for item in ("--mount", f"type=bind,src={path},dst=/inputs/templates/{index}.json,readonly")
-                    ],
-                    *definition_mount,
-                    "--mount",
-                    f"type=bind,src={task},dst=/inputs/task.json,readonly",
-                    *timing_mount,
-                    "--mount",
-                    f"type=bind,src={output},dst=/output",
-                    images["modeling"],
-                    "--signal=KILL",
-                    f"{remaining}s",
-                    "/app/prologue",
-                    "serve",
-                    "/inputs/templates",
-                    "/inputs/task.json",
-                    "/output/.result.json",
-                    *(["--trace", "/output/execution.partial.jsonl"] if args.execution_trace else []),
-                    *timing_option,
-                ],
-                [
-                    "docker",
-                    "run",
-                    "--rm",
-                    "--init",
-                    "-i",
-                    "--runtime",
-                    "runc",
-                    "--network",
-                    "none",
-                    "--shm-size",
-                    "512m",
-                    "--name",
-                    names[1],
-                    "--entrypoint",
-                    "/usr/bin/timeout",
-                    images["control"],
-                    "--signal=KILL",
-                    f"{remaining}s",
-                    "python3",
-                    "-m",
-                    "prologue.app.control_worker",
-                    "--kernel-python",
-                    "/opt/prologue/sglang/sgl-kernel/python",
-                ],
+                [*docker, "--name", names[0], *entry,
+                 "--mount", f"type=bind,src={binary},dst=/app/prologue,readonly", *template_mounts, *definition_mount,
+                 "--mount", f"type=bind,src={task},dst=/inputs/task.json,readonly", *timing_mount,
+                 "--mount", f"type=bind,src={output},dst=/output", images["modeling"], *timeout,
+                 "/app/prologue", "serve", "/inputs/templates", "/inputs/task.json", "/output/.result.json",
+                 *(["--trace", "/output/execution.partial.jsonl"] if args.execution_trace else []), *timing_option],
+                [*docker, "--shm-size", "512m", "--name", names[1], *entry, images["control"], *timeout,
+                 *self.task.control_command],
             ]
             try:
                 self.execute(commands, names, output, deadline)
             except RuntimeError:
-                if self.gap(output, self.source):
+                if self.gap():
                     return False
                 raise
             self.limit.check()

@@ -2,7 +2,7 @@
 
 from collections import Counter, defaultdict
 
-from .actions import ActionIdentity
+from ..core.actions import ActionIdentity
 
 
 class StateValueComparison:

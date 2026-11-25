@@ -1,17 +1,18 @@
 """Bind same-run service evidence and request boundaries to observed execution."""
 
+from prologue.verification.core.adapters import CpuProtocolWork, ObservedServices
+
+
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from itertools import chain
 
-from prologue.integrations.platforms.ascend.analysis.services import ObservedServices
-from prologue.integrations.runtimes.pytorch.protocol_work import CpuProtocolWork
 
-from .cpu_protocol import NativeCpuCall
+from ..core.cpu_protocol import NativeCpuCall
 from .fixed_context import CpuReadinessWake, ExternalWake, KernelWake, LocalCallWake, WorkProgress
-from .ingress import IngressEvidence
-from .publications import FixedPublications
-from .source_clock import ClockRealization, CounterPoint
+from ..core.ingress import IngressEvidence
+from ..core.publications import FixedPublications
+from ..core.source_clock import ClockRealization, CounterPoint
 
 
 @dataclass(frozen=True, slots=True)

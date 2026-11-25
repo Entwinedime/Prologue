@@ -288,10 +288,10 @@ def main() -> None:
         CostAcquisition(parsed(CostAcquisitionOptions, arguments), SGLangAscendLaunch, BatchHostReuse.match,
                         transport_samples=profiles, sample_adapter=SGLangAscendLaunch).run()
     elif arguments.command == "explore":
-        from prologue.app.prediction import PredictionProcess
+        from prologue.integrations.frameworks.sglang.acquisition.worker_templates import SGLangTask
         from prologue.workflow.exploration import ExplorationTask
 
-        task = ExplorationTask(parsed(ExplorationOptions, arguments), PredictionProcess, framework="sglang")
+        task = ExplorationTask(parsed(ExplorationOptions, arguments), SGLangTask, framework="sglang")
         acquisition = None
         if arguments.deployment:
             from prologue.acquisition.replenishment import Replenishment
@@ -309,11 +309,12 @@ def main() -> None:
         if not task.run(acquisition):
             raise SystemExit(1)
     else:
-        from prologue.app.prediction import PredictionProcess
+        from prologue.integrations.frameworks.sglang.acquisition.worker_templates import SGLangTask
+        from prologue.workflow.prediction import PredictionProcess
         from prologue.libraries.release import LibraryRelease
 
         process = PredictionProcess(parsed(PredictionOptions, arguments), LibraryRelease(arguments.libraries),
-                                    json.loads(arguments.input.read_bytes()))
+                                    json.loads(arguments.input.read_bytes()), SGLangTask)
         raise SystemExit(0 if process.run() else 1)
 
 

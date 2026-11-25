@@ -8,6 +8,7 @@ from prologue.integrations.frameworks.sglang.shared.configuration import (
     ServingInput,
 )
 from prologue.integrations.frameworks.sglang.shared.groups import WorkerRoles
+from prologue.integrations.frameworks.sglang.shared.ingress import BatchOperands
 
 
 class WorkerDomain(WorkerRoles):
@@ -65,6 +66,19 @@ class WorkerDomain(WorkerRoles):
 
 
 class SGLangTask:
+    control_command = ("python3", "-m", "prologue.app.control_worker", "--kernel-python", "/opt/prologue/sglang/sgl-kernel/python")
+
+    def execution_domains(self):
+        for instance in self.serving.instances:
+            for worker in self.participants(instance):
+                yield WorkerDomain.execution_domain(worker["environment"])
+
+    def require_control(self, image):
+        WorkerDomain.require_control(image, self.workers)
+
+    def bind_gap(self, action, domain):
+        return BatchOperands.bind(action, self.serving, domain)
+
     def __init__(self, source, catalog) -> None:
         if source.keys() != {"model", "instances", "workload"}:
             raise ValueError("prediction requires model, instances and workload")

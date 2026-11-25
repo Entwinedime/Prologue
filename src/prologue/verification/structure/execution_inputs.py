@@ -8,12 +8,12 @@ from pathlib import Path
 
 from prologue.runtime.io import read_json, write_json
 
-from .actions import ActionIdentity
-from .context_values import ContextValues
-from .dependencies import ActionBoundaries
-from .ingress import IngressEvidence
-from .native_case import NativeCase
-from .source_clock import ClockRealization
+from ..core.actions import ActionIdentity
+from ..core.context_values import ContextValues
+from ..core.dependencies import ActionBoundaries
+from ..core.ingress import IngressEvidence
+from ..core.native_case import NativeCase
+from ..core.source_clock import ClockRealization
 
 
 class NativeInputs:

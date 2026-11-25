@@ -7,6 +7,7 @@ from dataclasses import replace
 from prologue.runtime.io import read_json, write_json
 from prologue.runtime.limits import AllowanceExhausted
 from prologue.serving.latency import RequestLatency
+from prologue.workflow.prediction import PredictionProcess
 
 
 class ExplorationTarget:
@@ -16,7 +17,7 @@ class ExplorationTarget:
         self.source = source
         self.identity = {"configuration": configuration, "workload": source["workload"]["id"]}
 
-    def predict(self, predictor, options, release, limit, basis):
+    def predict(self, adapter, options, release, limit, basis):
         outcome = self.root / "outcome.json"
         if outcome.is_file():
             row = read_json(outcome)
@@ -30,9 +31,10 @@ class ExplorationTarget:
         result, evidence, elapsed = None, None, None
         if previous:
             output = self.root / "attempts" / str(previous["number"])
-            predictor.recover(output)
+            PredictionProcess.recover(output)
             if previous["basis"] == basis:
-                result, evidence = self.evidence(predictor, output)
+                process = PredictionProcess(replace(options, output=output), release, self.source, adapter, limit)
+                result, evidence = self.evidence(process)
         if result is None:
             number = previous["number"] + 1 if previous else 0
             output = self.root / "attempts" / str(number)
@@ -40,8 +42,9 @@ class ExplorationTarget:
             write_json(journal, previous)
             start = time.monotonic_ns()
             try:
-                predictor(replace(options, output=output), release, self.source, limit).run()
-                result, evidence = self.evidence(predictor, output)
+                process = PredictionProcess(replace(options, output=output), release, self.source, adapter, limit)
+                process.run()
+                result, evidence = self.evidence(process)
             except AllowanceExhausted:
                 raise
             except (ValueError, RuntimeError, subprocess.SubprocessError, TimeoutError) as failure:
@@ -56,13 +59,14 @@ class ExplorationTarget:
         write_json(outcome, row, indent=2)
         return row
 
-    def evidence(self, predictor, output):
+    def evidence(self, process):
+        output = process.arguments.output
         result = output / "result.json"
         if result.is_file():
             metrics = RequestLatency.predicted(read_json(result), self.source["workload"]["requests"]).report()
             write_json(output / "request-latency.json", metrics.pop("requests"))
             return {"status": "predicted", **metrics}, result
-        if gap := predictor.gap(output, self.source):
+        if gap := process.gap():
             status, path = gap
             return {"status": status}, path
         return None, None

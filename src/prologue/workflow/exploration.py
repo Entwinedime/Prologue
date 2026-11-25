@@ -12,16 +12,17 @@ from prologue.runtime.io import read_json, write_json
 from prologue.runtime.limits import OperationLimit, Usage, retained_bytes
 from prologue.runtime.workspace import BinarySnapshot, TaskWorkspace, file_lock
 from prologue.workflow.options import ExplorationOptions, PredictionOptions
+from prologue.workflow.prediction import PredictionProcess
 from prologue.workflow.report import ExplorationReport
 from prologue.workflow.targets import ExplorationTarget
 
 
 class ExplorationTask:
-    def __init__(self, args: ExplorationOptions, predictor, framework: str):
+    def __init__(self, args: ExplorationOptions, adapter, framework: str):
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         self.root = (args.output or Path("data") / f"{stamp}_exploration").resolve()
         self.release = LibraryRelease(args.libraries)
-        self.predictor = predictor
+        self.adapter = adapter
         self.binary = args.binary.resolve(strict=True)
         self.source = read_json(args.input)
         if (
@@ -104,10 +105,10 @@ class ExplorationTask:
             while True:
                 pending = []
                 for target in targets:
-                    basis = self.predictor.basis(target.source, self.release) if acquisition else self.release.identity
+                    basis = PredictionProcess.basis(target.source, self.release, self.adapter) if acquisition else self.release.identity
                     pending.append(
                         workers.submit(
-                            target.predict, self.predictor, self.run_options, self.release, self.limit, basis
+                            target.predict, self.adapter, self.run_options, self.release, self.limit, basis
                         )
                     )
 

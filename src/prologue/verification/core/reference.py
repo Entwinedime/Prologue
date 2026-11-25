@@ -1,9 +1,11 @@
 """Qualify the target input and its separation from the recordings used for training."""
 
+from prologue.verification.core.adapters import CaptureInput, ServingInput
+
+
 import json
 
 from prologue.acquisition.recording import PublishedCapture
-from prologue.integrations.frameworks.sglang.shared.configuration import CaptureInput, ServingInput
 
 
 class RecordedSubmissions:

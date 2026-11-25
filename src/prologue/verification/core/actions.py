@@ -1,10 +1,11 @@
 """Identify observed actions by logical work, independently of template selection."""
 
+from prologue.verification.core.adapters import observed_scopes
+
+
 import json
 from collections import Counter, defaultdict
 
-from prologue.integrations.frameworks.sglang.shared.source_layout import SourceLayout
-from prologue.integrations.platforms.ascend.analysis.scoped_tasks import tensor_layouts
 
 
 class QueryResults:
@@ -226,7 +227,7 @@ class ActionScopes:
     def validate_source(self, raw, rank):
         if raw["environment"]["parallel"]["rank"] != rank or self.graph["environment"] != raw["environment"]:
             raise ValueError("graph and recording belong to different worker environments")
-        raw = {**raw, "scopes": SourceLayout(raw["environment"], tensor_layouts).lower(raw["scopes"])}
+        raw = {**raw, "scopes": observed_scopes(raw)}
         self.source_ids = {}
         for index, scope in enumerate(self.graph["scopes"]):
             origins = scope["bindings"]["source_scopes"]
