@@ -78,8 +78,21 @@ Codex 可在守住上述准则与红线的前提下自主规划细化步骤与�
 
 ---
 
-## 四、交付门禁、熔断与停机条件
+## 四、交付门禁、防偷懒机审硬指标、熔断与停机条件
 
-1. **全仓工程品质门禁**：全仓所有子系统（非仅个别示例模块）均达到职责清晰、无“千行大杂烩”、无密集无空行代码墙、注释清晰、扩展机制灵活优雅，且全部科学/物理与四维隔离红线 100% 完好。
-2. **失败熔断**：同一根因连续尝试 2 轮无新进展，或真机累计预算耗尽时立即止损，保留完整证据与账本记入 `log.md`/`status.md` 交回 AGY 复盘，严禁静默扩预算或降标。
-3. **最终交付**：将全窗口证据归档至 `data/architecture-cohesion-extensibility/`，更新本窗口 `status.md` 与 `log.md`，按清晰职责分层提交并推送至 `origin/architecture-cohesion-extensibility`（同时把已关闭窗口的 `topology-extensibility-slimming` 推齐）后停止，交回 AGY 终审（不自行关窗）。
+本窗口不设中途暂停点，为防止端到端自主推进中出现“只改点名示例、假拆文件、敷衍补空行、套壳假灵活或拿旧证据充数”，AGY 终审时将**独立运行脚本与逐文件抽检**核验以下 5 项硬性防偷懒门禁，**任一项不达标即整批打回返工，绝不迁就放行**：
+
+1. **全仓逐域覆盖门禁（杜绝只改 2 个点名模块）**：
+   - 必须产出 `data/architecture-cohesion-extensibility/audit-matrix.json`，逐一覆盖 `common`、`host`、`workers`、`runtimes/pytorch`、`platforms/ascend`、`frameworks/sglang/{abi,shared,control,observation,acquisition}`、`verification`、`src/engine` 全部业务子系统；
+   - 每个子系统必须给出改前/改后文件数、最大文件 NE、函数内 > 25 行无空行代码墙数、空行占比、注释占比以及具体消除的硬编码/僵硬点清单（若某子系统判断无需结构改动，必须逐文件给出审计依据）。
+2. **超大过载文件清零门禁（杜绝挑软柿子）**：
+   - 基线 `cbea08e` 全仓存在 **18 个 > 550 NE** 的过载 Python 模块；交付时除纯数据/符号表文件外，**> 550 NE 的业务 Python 模块须清零**（确有极个别不可拆原子模块须在 `audit-matrix.json` 单列理由交 AGY 裁决），且 > 80 行嵌套长函数显著压降（`compare_actions` 单方法仍硬性 ≤ 100 行）。
+3. **空行呼吸感与高价值注释机审门禁（杜绝敷衍塞空行或写水注释）**：
+   - 基线 `cbea08e` 实测：Python 36,190 行中空行仅 4,354 行（**12.0%**）、`#` 注释仅 839 行（**2.3%**）、> 25 行连续无空行代码墙 **141 处**（> 40 行 31 处）；
+   - 交付硬门禁：**业务函数/方法体内 > 25 行连续无空行代码墙压至 0**（全仓仅允许纯常量/符号定义表例外），全仓 Python 空行占比提升至 **≥ 18%**，每个业务模块、核心类与关键非平凡方法均有高信号 docstring / “为什么与不变量”注释（AGY 终审抽检源码 Diff，严禁 `# add 1` 类水注释）。
+4. **真柔性零副作用扩展证明（杜绝套壳假可扩展）**：
+   - 交付 `data/architecture-cohesion-extensibility/extensibility-proof.json` 与实际回退链验证日志：以“新增一种全新采集规则/采集方式 + 新增一种验证检查项”为例，结合真实源码路径与注册表证明核心分发器、旧规则 `matches()`、宿主编排与入库层改动 = 0 行，并实证优先级排序与 `EvidenceGap` 自动回退链生效。
+5. **最终源码树绑定与 SHA-256 验真（杜绝旧证据充数）**：
+   - 所有静态审计、双镜像实装、真机账本与离线对照产物均须记录最终提交的 `src` 树哈希并提供 SHA-256 清单，AGY 终审将独立复算验真。
+6. **失败熔断**：同一根因连续尝试 2 轮无新进展，或真机累计预算耗尽时立即止损，保留完整证据与账本记入 `log.md`/`status.md` 交回 AGY 复盘，严禁静默扩预算或降标。
+7. **最终交付**：将全窗口证据归档至 `data/architecture-cohesion-extensibility/`，更新本窗口 `status.md` 与 `log.md`，按清晰职责分层提交并推送至 `origin/architecture-cohesion-extensibility`（同时把已关闭窗口的 `topology-extensibility-slimming` 推齐）后停止，交回 AGY 终审（不自行关窗）。
