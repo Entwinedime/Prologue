@@ -1,4 +1,4 @@
-"""Observe native device collectives, keeping their participant contract outside graph algorithms."""
+"""Record collectives and pipeline transfers at their native completion boundaries."""
 
 from __future__ import annotations
 
@@ -9,13 +9,264 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
+import torch.distributed as distributed
+
 from prologue.common.observation import ScopeParameters
 from prologue.integrations.bindings import platform_domain
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
-from prologue.integrations.frameworks.sglang.observation.module_scopes import tensor_ports
-from prologue.integrations.frameworks.sglang.shared.calls import PipelineABI
-from prologue.integrations.runtimes.pytorch.capture import GatherLayout
+from prologue.integrations.frameworks.sglang.observation.model import enabled_hook, tensor_ports
+from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
+from prologue.integrations.frameworks.sglang.shared.calls import PipelineABI, PipelineMessages
+from prologue.integrations.runtimes.pytorch.capture import GatherLayout, NativeSignals
+
+
+class TransferWork:
+    def __init__(self, transfers, native, producer, direction, context) -> None:
+        self.transfers = transfers
+        self.native = native
+        self.producer = producer
+        self.direction = direction
+        self.context = context
+
+    def wait(self, *args, **kwargs):
+        from torch.distributed import Work
+
+        transfers = self.transfers
+        if not transfers.calls.enabled:
+            return self.native.wait(*args, **kwargs)
+        work = transfers.messages.wait_work(self.context, device=False)
+        implementation = f"{Work.__module__}.{Work.__qualname__}.wait"
+        with transfers.consume(f"transfer_{self.direction}_wait", implementation, work, self.producer):
+            return self.native.wait(*args, **kwargs)
+
+
+class TensorTransfers:
+    def __init__(self, messages, current, rank_offset) -> None:
+        self.messages = messages
+        self.calls = messages.calls
+        self.current = current
+        self.rank_offset = rank_offset
+
+    def invoke(self, signature, original, *args, **kwargs):
+
+        if not self.calls.enabled:
+            return original(*args, **kwargs)
+        arguments = signature.bind(*args, **kwargs)
+        arguments.apply_defaults()
+        values = arguments.arguments
+        tensor = values["tensor"]
+        if tensor.device.type != platform_domain().device_type:
+            return original(*args, **kwargs)
+        if self.current.get() != 0:
+            raise ValueError("pipeline tensor transfer must expose its own action boundary")
+        group = distributed.group.WORLD if values["group"] is None else values["group"]
+        receiving = original.__name__ == "irecv"
+        endpoint = "src" if receiving else "dst"
+        peer = values[endpoint]
+        if values.get(f"group_{endpoint}") is not None:
+            peer = distributed.get_global_rank(group, values[f"group_{endpoint}"])
+        if peer is None:
+            raise ValueError("pipeline tensor receive requires an explicit sender")
+        rank = distributed.get_rank()
+        source, target = (peer, rank) if receiving else (rank, peer)
+        offset = self.rank_offset
+        members = [offset + source, offset + target]
+        direction = "receive" if receiving else "send"
+        parameters = PipelineABI.tensor_parameters(tensor)
+        work = self.messages.work()
+        communication = {
+            "channel": f"{group.group_name}/{members[0]}>{members[1]}/{values['tag']}",
+            "operation": "transfer", "members": members, "required": members,
+            "rank": offset + rank, "order": 0,
+        }
+
+        # This boundary sees the actual transmitted slice, after the native send-allgather transformation.
+        with self.submit(original, direction, tensor, parameters, work, communication) as producer:
+            result = original(*args, **kwargs)
+        return TransferWork(self, result, producer, direction, work["context"])
+
+    def install(self):
+
+        for name in ("isend", "irecv"):
+            HookTable.around(
+                f"torch.distributed.{name}", partial(self.invoke, inspect.signature(getattr(distributed, name))),
+            )
+
+
+class NativeTransfers(TensorTransfers):
+    def __init__(self, observation, messages) -> None:
+        super().__init__(messages, observation.capture.current, observation.description["rank_offset"])
+        self.observation = observation
+
+    @contextmanager
+    def submit(self, original, direction, tensor, parameters, work, communication):
+        owner = self.observation
+        with owner.capture.call(
+            f"transfer_{direction}", original.__qualname__, f"{original.__module__}.{original.__qualname__}",
+            parameters=parameters, work=work, device=True,
+        ) as call:
+            call.record["bindings"]["dtype"] = str(tensor.dtype)
+            call.record["asynchronous"] = True
+            call.record["communication"] = communication
+            if direction == "send":
+                call.port("payload", "input", owner.tensors.observe(tensor, list(parameters)), use="device")
+            yield call.identity
+            if direction == "receive":
+                owner.tensors.written(tensor)
+                call.port("payload", "output", owner.tensors.observe(tensor, list(parameters)), use="device")
+            call.work_signal("completion", "output", call.identity)
+        owner.tensors.retire()
+
+    @contextmanager
+    def consume(self, role, implementation, work, producer):
+        with self.observation.capture.call(
+            role, "Work.wait", implementation, parameters={}, work=work, device=True
+        ) as call:
+            call.work_signal("completion", "input", producer)
+            yield
+
+
+class HostTransfers(TensorTransfers):
+    def __init__(self, host, messages) -> None:
+        super().__init__(messages, host.parent, host.rank_offset)
+
+    def submit(self, original, direction, tensor, parameters, work, communication):
+        return self.calls.native_call(
+            f"transfer_{direction}", original, work=work, parameters=parameters, bindings={"dtype": str(tensor.dtype)},
+        )
+
+    def consume(self, role, implementation, work, producer):
+        return self.calls.scope(role, "Work.wait", implementation, work=work)
+
+
+class PipelineCuts:
+    def __init__(self, calls, current, runtime=None) -> None:
+        self.calls = calls
+        self.current = current
+        self.messages = PipelineMessages(calls)
+        self.signals = NativeSignals(current, self.site_scope, self.messages, runtime)
+
+    def wait_stream(self, original, stream, other):
+        if not self.calls.enabled or self.current.get() != 0:
+            return original(stream, other)
+        streams = PipelineABI.streams(self.calls.scheduler, stream, other)
+        work = self.messages.work()
+        work["context"]["streams"] = streams
+        with self.site_scope(
+            "stream_wait", original, work=work, bindings={"streams": streams}, device=True, stream=stream
+        ):
+            return original(stream, other)
+
+    def install(self, device_api):
+        self.messages.install()
+        self.transfers.install()
+        scheduler = symbols().scheduler + "."
+        hooks = {"_pp_launch_batch": self.launch, "_pp_prep_batch_result": self.prepare,
+                 "_pp_make_skip_output_result": self.skip_output}
+        HookTable.group({
+            scheduler + name: enabled_hook(self.observation, hook) for name, hook in hooks.items()
+        }).install()
+        for name in ("record", "wait", "synchronize", "query"):
+            HookTable.around(f"{device_api}.Event.{name}", getattr(self.signals, name))
+        HookTable.around(f"{device_api}.Stream.wait_stream", self.wait_stream)
+
+
+class PipelineScopes(PipelineCuts):
+    def __init__(self, observation) -> None:
+        super().__init__(observation.calls, observation.capture.current, observation.capture.runtime)
+        self.observation = observation
+        self.transfers = NativeTransfers(observation, self.messages)
+
+    def site_scope(self, role, original, *, work, device, stream, bindings=None):
+        return self.observation.capture.call(
+            role, original.__qualname__, f"{original.__module__}.{original.__qualname__}", parameters={},
+            work=work, bindings=bindings, device=device, stream=stream,
+        )
+
+    def launch(self, original, scheduler, mb_id, pp_proxy_tensors, mb_metadata, last_rank_comm_queue):
+        owner = self.observation
+
+        with (
+            owner.model_call("launch", original, scheduler.cur_batch, stream=scheduler.forward_stream) as call,
+            self.signals.observe(),
+        ):
+            if pp_proxy_tensors is not None:
+                for name, tensor in PipelineABI.proxy_tensors(pp_proxy_tensors).items():
+
+                    # Launch forwards handles before its stream wait; the model body owns the actual device read.
+                    call.port(
+                        f"proxy.{name}",
+                        "input",
+                        owner.tensors.observe(tensor, owner.modules.proxy_shape(tensor)),
+                        use="metadata",
+                    )
+            result, event = original(scheduler, mb_id, pp_proxy_tensors, mb_metadata, last_rank_comm_queue)
+            self.signals.publish(call, event, "completion")
+            owner.result_outputs(call, result)
+            return result, event
+
+    def prepare(self, original, scheduler, batch, mb_metadata, pp_outputs):
+        owner = self.observation
+        work = owner.batch_work(batch)
+        parameters = BatchTensors.parameters(batch, sum(member["new_tokens"] for member in work["members"]))
+        with (
+            owner.request_state.members(batch),
+            owner.call(
+                "output_prepare", original, parameters=parameters, work=work, device=True, stream=scheduler.copy_stream
+            ) as call,
+        ):
+            call.port(
+                "next_token_ids",
+                "input",
+                owner.tensors.observe(pp_outputs["next_token_ids"], ["members"]),
+                use="device",
+            )
+            result = original(scheduler, batch, mb_metadata, pp_outputs)
+            owner.result_outputs(call, result)
+            return result
+
+    def skip_output(self, original, scheduler, batch, mb_metadata):
+        owner = self.observation
+        work = owner.batch_work(batch)
+        parameters = BatchTensors.parameters(batch, sum(member["new_tokens"] for member in work["members"]))
+        with (
+            owner.call("output_skip", original, parameters=parameters, work=work, device=True) as call,
+            self.signals.observe(),
+        ):
+            outputs, result, event = original(scheduler, batch, mb_metadata)
+            owner.result_outputs(call, result)
+            self.signals.publish(call, event, "completion")
+            return outputs, result, event
+
+
+class HostPipelineScopes(PipelineCuts):
+    def __init__(self, host) -> None:
+        super().__init__(host, host.parent)
+        self.observation = host
+        self.transfers = HostTransfers(host, self.messages)
+
+    def site_scope(self, role, original, *, work, device, stream, bindings=None):
+        return self.calls.native_call(role, original, work=work, bindings=bindings)
+
+    def launch(self, original, scheduler, mb_id, pp_proxy_tensors, mb_metadata, last_rank_comm_queue):
+        args = scheduler, mb_id, pp_proxy_tensors, mb_metadata, last_rank_comm_queue
+        work = self.calls.batch_work(scheduler.cur_batch)
+        with self.calls.native_call("launch", original, work=work) as call, self.signals.observe():
+            result, event = original(*args)
+            self.signals.publish(call, event, "completion")
+            return result, event
+
+    def prepare(self, original, scheduler, batch, mb_metadata, pp_outputs):
+        with self.calls.native_call("output_prepare", original, work=self.calls.batch_work(batch)):
+            return original(scheduler, batch, mb_metadata, pp_outputs)
+
+    def skip_output(self, original, scheduler, batch, mb_metadata):
+        work = self.calls.batch_work(batch)
+        with self.calls.native_call("output_skip", original, work=work) as call, self.signals.observe():
+            outputs, result, event = original(scheduler, batch, mb_metadata)
+            self.signals.publish(call, event, "completion")
+            return outputs, result, event
 
 
 @dataclass
@@ -81,8 +332,6 @@ class DeviceCollectiveCuts:
         if arguments.arguments["async_op"]:
             raise ValueError("asynchronous native collectives need an explicit work-completion boundary")
 
-        import torch.distributed as distributed
-
         group = arguments.arguments["group"]
         if group is None:
             group = distributed.group.WORLD
@@ -111,9 +360,7 @@ class DeviceCollectiveCuts:
             self.enclosing.reset(token)
 
     def install(self, expert_exchange=None) -> None:
-        import torch.distributed as distributed
         GroupCoordinator = resolve(symbols().group_coordinator)
-
 
         for name in (
             "all_reduce",
@@ -349,7 +596,6 @@ class NativeCommunications:
 
     @contextmanager
     def exchange(self, original, group, *, root_rank=None, role="communication", parameters=None, arguments=None):
-        import torch.distributed as distributed
 
         owner = self.observation
         root = owner.capture.current.get()
@@ -380,11 +626,9 @@ class NativeCommunications:
         if not owner.active or not owner.selected:
             return original(dispatcher, *args, **kwargs)
 
-        get_tp_group = resolve(symbols().get_tp_group)
-
         # SGLang supplies this process group to DeepEP; dispatch/combine include their local preparation and
         # completion waits.
-        group = get_tp_group()
+        group = resolve(symbols().get_tp_group)()
         implementation = dispatcher._get_impl()
         if implementation.group is not group.device_group:
             raise ValueError("DeepEP dispatcher uses a different native communication group")

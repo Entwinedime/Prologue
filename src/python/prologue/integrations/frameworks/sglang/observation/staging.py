@@ -1,18 +1,104 @@
-"""Run distributed model shards on one device and exchange their real operands through Gloo."""
+"""Run logical native ranks on one device with host-staged transport and layer weights."""
 
 import fcntl
 import inspect
 import os
+from collections import defaultdict
 from contextlib import ExitStack, contextmanager, nullcontext
-from functools import partial
+from functools import partial, update_wrapper
+from itertools import chain
 from pathlib import Path
 
 import torch
 import torch.distributed as distributed
 
-from prologue.integrations.bindings import device_runtime
+from prologue.common.io import write_json
+from prologue.integrations.bindings import device_runtime, platform_domain
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
+from prologue.integrations.frameworks.sglang.observation.model import ModelScopes
+
+
+class LayerWeights:
+    def __init__(self, tensors, auxiliary):
+        self.auxiliary = auxiliary
+        self.storage = [(tensor, torch.empty(tensor.untyped_storage().nbytes(), dtype=torch.uint8, device="cpu"))
+                        for tensor in tensors]
+
+    def move(self, to_device):
+        with self.auxiliary():
+            if not to_device:
+
+                # Kernels on other native streams can still be reading this layer after forward returns.
+                device_runtime().api.synchronize()
+            for tensor, backing in self.storage:
+                device_runtime().move_weight(tensor, backing, to_device)
+
+    def forward(self, original, *args, **kwargs):
+        self.move(True)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            self.move(False)
+
+
+class ShardWeights:
+    def __init__(self, directory, workers, auxiliary):
+        self.directory, self.workers, self.auxiliary = directory, workers, auxiliary
+
+    def measure(self, original, runner, *args, **kwargs):
+        available_gib = original(runner, *args, **kwargs)
+        self.share = int(available_gib * (1 << 30) * runner.mem_fraction_static) // self.workers
+        return available_gib
+
+    def load(self, original, *args, **kwargs):
+        model = original(*args, **kwargs)
+        weights = {
+            t.untyped_storage()._cdata: t
+            for t in model.parameters()
+            if t.device.type == platform_domain().device_type and t.numel()
+        }
+        footprint = sum(t.untyped_storage().nbytes() for t in weights.values())
+        if footprint <= self.share:
+            return model
+
+        modules = dict(model.named_modules())
+        layers = {name for name, role in ModelScopes.selected(modules).items() if role == "layer"}
+        owners = defaultdict(set)
+        for path, tensor in chain(
+            model.named_parameters(remove_duplicate=False), model.named_buffers(remove_duplicate=False)
+        ):
+            container = path.rpartition(".")[0]
+            while container and container not in layers:
+                container = container.rpartition(".")[0]
+            owners[tensor.untyped_storage()._cdata].add(container)
+
+        # Shared embeddings, cross-layer aliases and buffers outside a layer stay available to their actual consumers.
+        groups = defaultdict(list)
+        for key, tensor in weights.items():
+            if len(owners[key]) == 1:
+                owner, = owners[key]
+                if owner in layers:
+                    groups[owner].append(tensor)
+
+        device_runtime().load_weight_bridge()
+        parked = 0
+        for name, tensors in groups.items():
+            residence = LayerWeights(tensors, self.auxiliary)
+            residence.move(False)
+            layer = modules[name]
+            layer.forward = update_wrapper(partial(residence.forward, layer.forward), layer.forward)
+            parked += sum(backing.nbytes for _, backing in residence.storage)
+        write_json(
+            self.directory / "weight-residency" / f"{distributed.get_rank()}.json",
+            {
+                "native_weight_bytes": footprint,
+                "worker_share_bytes": self.share,
+                "parked_bytes": parked,
+                "layers": len(groups),
+            },
+        )
+        return model
 
 
 class StagedWork:
@@ -168,7 +254,6 @@ class ShardTransport:
             HookTable.replace("deep_ep.Buffer.__init__", self.expert_buffer)
 
     def install(self, description):
-        from prologue.integrations.frameworks.sglang.observation.local.shard_weights import ShardWeights
 
         self.install_collectives(description["ep_size"])
         weights = ShardWeights(Path(description["instance_directory"]), description["worker_count"], self.auxiliary)
@@ -186,3 +271,27 @@ class ShardTransport:
             symbols().model_runner_sample,
         ):
             HookTable.around(target, self.compute)
+
+
+def run_staged_scheduler(server_args, port_args, gpu_id, tp_rank, attn_cp_rank, moe_dp_rank, moe_ep_rank,
+                               pp_rank, dp_rank, pipe_writer):
+    run_scheduler_process = resolve(symbols().run_scheduler_process)
+
+    device = torch.get_device_module(server_args.device)
+    if device.device_count() != 1:
+        raise ValueError("logical shard workers require exactly one visible accelerator")
+    device.set_device(0)
+
+    world_size = server_args.tp_size * server_args.pp_size
+    rank = pp_rank * server_args.tp_size + tp_rank
+    ShardTransport.world(world_size, rank, "env://")
+
+    run_scheduler_process(server_args, port_args, 0, tp_rank, attn_cp_rank, moe_dp_rank, moe_ep_rank,
+                          pp_rank, dp_rank, pipe_writer)
+
+
+def staged_engine():
+    class StagedEngine(resolve(symbols().engine)):
+        run_scheduler_process_func = staticmethod(run_staged_scheduler)
+
+    return StagedEngine

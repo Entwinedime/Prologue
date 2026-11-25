@@ -1,4 +1,4 @@
-"""Install collection hooks for the framework and platform selected by the source image."""
+"""Select native observation hooks when the worker activates its framework plugin."""
 
 import ctypes
 from contextlib import nullcontext
@@ -12,18 +12,19 @@ def install(description):
     device_api = f"torch.{platform_domain().device_type}"
     shard_transport = None
     if description["local_shards"]:
-        from prologue.integrations.frameworks.sglang.observation.local.shard_transport import ShardTransport
+        from prologue.integrations.frameworks.sglang.observation.staging import ShardTransport
 
         shard_transport = ShardTransport
 
     # A latency-only worker must start without the observer bridge or a device profiler.
     if description["latency_only"]:
-        from prologue.integrations.frameworks.sglang.observation.timing import NativeTiming
+        from prologue.integrations.frameworks.sglang.observation.observers import NativeTiming
+
 
         if description["host_timing"]:
             timing = NativeTiming(description, host_profile=runtime.host_profile)
         elif "attention_sites" in description:
-            from prologue.integrations.frameworks.sglang.observation.local.attention_observation import (
+            from prologue.integrations.frameworks.sglang.observation.model_samples import (
                 DecodeAttentionObservation,
             )
 
@@ -39,8 +40,7 @@ def install(description):
         timing.install(device_api)
         return
 
-
-    from prologue.integrations.frameworks.sglang.observation.hooks import SGLangObservation
+    from prologue.integrations.frameworks.sglang.observation.observers import SGLangObservation
 
     HookTable.group(runtime.profiling.hooks()).install()
     markers = runtime.markers(detailed_timing=description["service_reference"])
