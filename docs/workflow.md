@@ -77,3 +77,11 @@ Qwen3-8B 的两个 TP1 容量都完成了单请求与并发请求预测。冷任
 ## 2026-11-25 — 全仓架构模块化重构与统一入口窗口开启
 
 新开发分支 `architecture-modular-refactor` 从 `c7020b3` 切出，聚焦纯架构重构与既有开发资产零新增卡时回归，分四阶段推进运行域 1:1 隔离、消除 11 模块循环导入、收口宿主底座与双库存储、加固 C++23 与可注册性能模型体系、解耦验证层并落地 5 域统一 CLI，为后续新框架/新平台扩展与独立留出验收建立整洁基线。
+
+## 2026-11-25 — 全仓架构模块化重构与统一入口窗口关闭
+
+本窗口（2026-11-25，分支 `architecture-modular-refactor`，源码起点 `499dd1e`，实现与回归交付 `4e9271a`）按 M1–M4 共 12/12 轮全部完成并通过终审关闭，全程新增原生采集与物理卡时均为 0。
+
+主要改造与架构收口：① 清除通用编排层全部框架/平台硬编码、反向子进程调用与 `SimpleNamespace`，以强类型 Options 与窄适配器协议替代，沉淀唯一宿主底座 `runtime/` 与唯一双库包 `libraries/`；② 解散混放 22 文件并形成 11 模块循环导入的 `sglang/ascend/`，按 `shared`/`observation`/`control`/`acquisition`/`cpp` 重组 SGLang 适配层，按 `runtime`/`analysis`/`host`/`reference` 重组 Ascend 适配层，拆解 972 行 `observation.py` 至 224 行，全仓补齐 `__init__.py` 并清理 `/workspace/trace-sim`，双镜像通过运行域整目录暂存与入口可达裁剪精确安装 111/53 个模块且分离宿主/镜像包元数据；③ 加固 C++23 契约与安全防卫（统一 `read_integer`/`json_io`/`Publication`/`ResourceClass`/`TensorBinding::document`/`link_serving_libraries`/`record_call`，消除 `CoarseProjection::project` `use-after-move`、补齐 `KvPool::plan` 负页校验与 `ExecutionTrace` 结构化索引），拆解 `main.cpp` 为表驱动 15 命令与框架派发口并拆分 `NativeController::plan` 与 `CoarseGraph::validate`；④ 建立跨语言单一真源 `families.json`、Python `ModelBackendRegistry`/`BindingRule`（含 Modified Gram-Schmidt 多轴拟合与独占轴透传）及 C++ `ServiceModelRegistry`（`-ffp-contract=off` 对齐 round-half-to-even 舍入）；⑤ 将 `PredictionProcess` 下沉至 `workflow/` 并修复结构与自主验证两处缺项签名缺陷，按 `core`/`structure`/`fixed`/`autonomous` 重组 `verification/` 并通过 `core/adapters.py` 唯一收口适配器依赖、`compare_actions.py` 拆解后单方法不超过 91 行；⑥ 落地全新 5 域 / 16 子命令统一 CLI（`python3 -m prologue {predict|library|capture|cost|verify}` 与 `prologue-cli`）及 `app/registry.py`，迁移 `example/coarse_graph/` 并删除全部旧平铺入口与 `import_assets.py`，同步更新操作与设计文档。
+
+验证与保留限制：全仓 249 个 Python 模块 0 导入环与 0 越层依赖、`ruff check src example` 0 错误、过期 `.pyc` 清零、`prologue_core` 36 个翻译单元 0 越层 include 且 Release 48 步 0 错误/0 告警、双镜像重建与实装逐文件核验通过。零新增卡时回归确认 Qwen3-8B TP1 四目标 211,290 条轨迹与 16 次 token 发布、678 离线成本样本拟合与 43,276 项固定图工作（其中原库缺 15,223 项与基线一致）、`library inspect`/`publish --from-collection` 及留存 TP1 轻量自主闭环评分均与 `499dd1e` 一致；留存 PD（5,355 动作 / 825 端口差异）与 TP2 历史记录保留各自参考资格。全窗口因全仓 E501 折行、强类型契约与大模块拆分，业务源码净增 Python +3,861/+3,553 行、C++ +205/+128 行（物理/非空），全部旧路径、转发壳与冗余代码已清零。新框架（如 vLLM）、新硬件平台（如 CUDA）实机接入，以及冻结发布后的多角色独立留出 6% MAPE 精度验收作为后续独立窗口目标推进。窗口文档原地保留。

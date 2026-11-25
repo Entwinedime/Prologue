@@ -213,7 +213,7 @@ PYTHONPATH=src python3 -m prologue verify autonomous \
 
 # 冻结矩阵抽样与分阶段运行
 PYTHONPATH=src python3 example/coarse_graph/prepare_matrix.py \
-  --root <运行根> --specification <覆盖声明.json> --stage <阶段> --seed <冻结种子> --phase sources|targets
+  --root <运行根> --specification <覆盖声明.json> --stage <阶段> --seed <冻结种子>
 python3 example/coarse_graph/matrix.py \
   --root <运行根> --matrix <固定矩阵.json> --phase sources|detailed|light|targets|compare|fixed|autonomous
 ```

@@ -199,3 +199,13 @@
 **结论与限制**　四目标预测与窗口起点的 211,290 条轨迹、16 次 token 发布逐字节一致；空库准确报告初始化 worker 缺项。678 个实测样本的成本拟合、点查询与 43,276 项固定图工作逐项保持一致，其中原库缺 15,223 项。自定义单轴模型从 8 和 16 字节实测拟合，Python 和 C++ 分别给出 20,460 与 20,640 ns，多余坐标被 C++ 拒绝。同一份 TP1 原生轻量记录通过自主闭环评分，两版本的一请求三 token、8,601 次成本查询及全部精度指标一致。TP2 旧记录缺原生释放字段，固定图成本来源也未获独立资格。PD 结构保留上述端口差异，独立自主预测仍受成本样本范围限制。[零卡时回归](../../../data/architecture-modular-refactor/m4/regression.json)
 
 **交接**　技术门禁已过，物理行与非空行净收缩目标未达。新增行主要落在拆开的验证职责和原来超长的证据、条件表达式。窗口保留开启，等待 AGY 决定验收。
+
+## 2026-11-25 — AGY 终审与窗口关闭
+
+**范围**　审查 M4（`c38c19f..4e9271a`）及全窗口（`499dd1e..4e9271a`）全部 4 阶段 / 12 轮交付，完成最终架构、卫生、文档与关窗收尾。
+
+**改动**　修正开发指南中 `prepare_matrix.py` 命令示例行尾多余的 `--phase sources|targets` 历史笔误；在计划页标记 `**已关闭**`，更新状态快照为已关闭终态，并向项目推进记录写入本窗口自足总结。本轮为纯文档与关窗整理，未改动任何业务源码与数据产物。
+
+**验证**　AGY 独立复核全仓静态门禁：`ruff check src example` 0 错误、`find src example -name '*.pyc'` 为 0、244 个 `src/prologue` 模块 0 循环导入与 0 缺失 `__init__.py`、核心 7 层 0 外层依赖、`acquisition`/`workflow` 0 硬编码与 0 反向导入、`verification` 0 `prologue.app` 依赖且全部 `integrations` 引用收口于 `core/adapters.py`、`compare_actions.py` 最大单方法 91 行、`analysis/observation.py` 224 行、`prologue_core` 0 越层 include、`package_runtime.py` 模拟 `sglang`/`control` 双镜像 111/53 模块 0 断链与 0 宿主 CLI 渗入、操作与设计文档 0 断链及 0 跨层引用；核对 [regression.json](../../../data/architecture-modular-refactor/m4/regression.json) 确认全窗口新增物理卡时为 0。
+
+**结论与限制**　全部技术、架构、卫生与零新增卡时回归门禁验收通过，窗口正式关闭。全窗口源码净行数增长（`src/` Python +3,861/+3,553、C++ +205/+128）经核实主要源于 E501 折行、强类型契约与大模块拆分，旧入口与冗余代码已彻底清零，属可接受结构化成本；新框架/新硬件实机接入与冻结留出精度验收转交后续独立窗口。
