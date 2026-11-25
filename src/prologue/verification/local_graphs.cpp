@@ -11,8 +11,8 @@
 #include <nlohmann/json.hpp>
 
 #include "prologue/contracts/json_io.hpp"
-#include "prologue/integrations/frameworks/sglang/templates.hpp"
-#include "prologue/integrations/frameworks/sglang/workers.hpp"
+#include "prologue/integrations/frameworks/sglang/cpp/templates.hpp"
+#include "prologue/integrations/frameworks/sglang/cpp/workers.hpp"
 #include "prologue/graph/graph.hpp"
 #include "prologue/templates/library.hpp"
 #include "prologue/templates/selection.hpp"

@@ -66,6 +66,11 @@ public:
     nlohmann::json cpu_summary() const;
 
 private:
+    void flush_inputs(std::int64_t now_ns);
+    bool try_shutdown();
+    std::optional<ServingAction> handle_message(const nlohmann::json & call, std::int64_t now_ns);
+    void receive_input(std::size_t call, const std::string & group, const nlohmann::json & message, std::int64_t now_ns);
+    void declare_notification(std::size_t call, const std::string & group, const nlohmann::json & message);
     nlohmann::json receive_call();
     void reply(std::size_t call, const nlohmann::json & result);
     void reach_idle(const std::string & group, std::size_t call, bool waiting);

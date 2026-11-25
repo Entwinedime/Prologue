@@ -13,18 +13,12 @@
 
 namespace prologue::sglang {
 
-struct TemplateDeclarations {
-    CoarseGraph graph;
-    std::vector<EntrySpecification> entries;
-
-    TemplateLibrary compile() const;
-    ObservedTemplateWork observed_work() const;
-};
-
 // Native facts select execution classes; capture and control share the same template contract.
 class NativeTemplates {
 public:
     static TemplateDeclarations describe(CoarseGraph graph);
+    static TemplateLibrary compile(const TemplateDeclarations & source);
+    static ObservedTemplateWork observed_work(const TemplateDeclarations & source);
     static nlohmann::json condition(std::string_view action, nlohmann::json facts);
     static nlohmann::json domain(const nlohmann::json & environment);
 };

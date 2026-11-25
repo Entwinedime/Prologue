@@ -1,4 +1,4 @@
-#include "prologue/integrations/frameworks/sglang/serving.hpp"
+#include "prologue/integrations/frameworks/sglang/cpp/serving.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -13,8 +13,8 @@
 #include <utility>
 #include <vector>
 
-#include "prologue/integrations/frameworks/sglang/actions.hpp"
-#include "prologue/integrations/frameworks/sglang/templates.hpp"
+#include "prologue/integrations/frameworks/sglang/cpp/actions.hpp"
+#include "prologue/integrations/frameworks/sglang/cpp/templates.hpp"
 #include "prologue/contracts/serving.hpp"
 #include "prologue/serving/controller/control_peer.hpp"
 #include "prologue/serving/controller/native.hpp"

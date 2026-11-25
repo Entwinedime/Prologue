@@ -51,14 +51,14 @@ target_include_directories(prologue_core PUBLIC src)
 target_link_libraries(prologue_core PUBLIC nlohmann_json::nlohmann_json PRIVATE OpenSSL::Crypto)
 
 add_library(prologue_sglang
-    src/prologue/integrations/frameworks/sglang/templates.cpp
-    src/prologue/integrations/frameworks/sglang/workers.cpp
-    src/prologue/integrations/frameworks/sglang/actions.cpp
-    src/prologue/integrations/frameworks/sglang/serving.cpp
+    src/prologue/integrations/frameworks/sglang/cpp/templates.cpp
+    src/prologue/integrations/frameworks/sglang/cpp/workers.cpp
+    src/prologue/integrations/frameworks/sglang/cpp/actions.cpp
+    src/prologue/integrations/frameworks/sglang/cpp/serving.cpp
 )
 target_link_libraries(prologue_sglang PUBLIC prologue_core)
 
-add_executable(prologue src/prologue/app/main.cpp src/prologue/app/execution_trace.cpp)
+add_executable(prologue src/prologue/app/main.cpp src/prologue/app/commands.cpp src/prologue/app/execution_trace.cpp)
 target_link_libraries(prologue PRIVATE prologue_sglang)
 
 # Local verification expands supplied native actions without running the serving controller.

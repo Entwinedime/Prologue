@@ -14,6 +14,11 @@ struct EntrySpecification {
     nlohmann::json condition;
 };
 
+struct TemplateDeclarations {
+    CoarseGraph graph;
+    std::vector<EntrySpecification> entries;
+};
+
 struct ObservedTemplateWork {
     nlohmann::json domain;
     std::vector<TemplateDefinition> definitions;

@@ -1,5 +1,5 @@
-#include "prologue/integrations/frameworks/sglang/actions.hpp"
-#include "prologue/integrations/frameworks/sglang/templates.hpp"
+#include "prologue/integrations/frameworks/sglang/cpp/actions.hpp"
+#include "prologue/integrations/frameworks/sglang/cpp/templates.hpp"
 
 #include <algorithm>
 #include <cstdint>

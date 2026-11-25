@@ -9,7 +9,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "prologue/integrations/frameworks/sglang/workers.hpp"
+#include "prologue/integrations/frameworks/sglang/cpp/workers.hpp"
 #include "prologue/serving/action_graphs.hpp"
 #include "prologue/templates/library.hpp"
 #include "prologue/templates/selection.hpp"

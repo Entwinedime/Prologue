@@ -1,4 +1,4 @@
-#include "prologue/integrations/frameworks/sglang/templates.hpp"
+#include "prologue/integrations/frameworks/sglang/cpp/templates.hpp"
 
 #include <algorithm>
 #include <array>
@@ -280,7 +280,8 @@ TemplateDeclarations NativeTemplates::describe(CoarseGraph graph) {
     return { std::move(graph), std::move(entries) };
 }
 
-ObservedTemplateWork TemplateDeclarations::observed_work() const {
+ObservedTemplateWork NativeTemplates::observed_work(const TemplateDeclarations & source) {
+    const auto & [graph, entries] = source;
     std::vector<TemplateInterval> origins;
     auto observed = TemplateCompiler::extract(graph, entries, NativeTemplates::domain(graph.environment), &origins);
 
@@ -289,7 +290,8 @@ ObservedTemplateWork TemplateDeclarations::observed_work() const {
     return {std::move(observed.domain), std::move(observed.definitions), std::move(origins)};
 }
 
-TemplateLibrary TemplateDeclarations::compile() const {
+TemplateLibrary NativeTemplates::compile(const TemplateDeclarations & source) {
+    const auto & [graph, entries] = source;
     const auto & environment = graph.environment;
     auto library = TemplateCompiler::extract(graph, entries, NativeTemplates::domain(environment));
 

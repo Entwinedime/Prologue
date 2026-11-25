@@ -288,12 +288,29 @@ const GraphPort & GraphScope::port(std::string_view name, Direction direction) c
 
 void CoarseGraph::validate() const {
     if (!environment.is_object() || scopes.empty()) throw std::invalid_argument("coarse graph requires an environment and a root scope");
+    validate_resources();
+    validate_events();
+    OrderedIntervals intervals;
+    validate_ports(intervals);
+    validate_state_access(intervals);
+    validate_edges(intervals);
+}
+
+void CoarseGraph::validate_resources() const {
     std::set<std::tuple<ResourceKind, std::int64_t, std::string>> resource_ids;
     for (const auto & resource : resources) {
         if (!resource_ids.emplace(resource.kind, resource.rank, resource.identity).second)
             throw std::invalid_argument("coarse graph declares the same native resource twice");
     }
-    std::set<std::pair<std::size_t, std::size_t>> ordered_intervals;
+}
+
+void CoarseGraph::validate_events() const {
+    for (const auto & event : events) {
+        if (event.scope >= scopes.size() || event.resource >= resources.size()) throw std::invalid_argument("graph event has an undefined scope or resource");
+    }
+}
+
+void CoarseGraph::validate_ports(OrderedIntervals & ordered_intervals) const {
     std::map<std::string, std::string> buffers;
     struct TableWrites {
         std::string source_storage;
@@ -361,6 +378,9 @@ void CoarseGraph::validate() const {
                 if (!scopes[scope].communication || *port.rendezvous >= events.size() || port.direction != Direction::Output || port.use != PortUse::Control
                     || port.relation != Relation::Communication || port.tensor || port.wait)
                     throw std::invalid_argument("invalid communication completion port");
+                if (resources[events[*port.rendezvous].resource].rank != scopes[scope].communication->rank
+                    || resources[events[port.event].resource].rank != scopes[scope].communication->rank)
+                    throw std::invalid_argument("communication boundary belongs to another rank");
                 ordered_intervals.emplace(*port.rendezvous, port.event);
             }
             if (port.wait) {
@@ -380,16 +400,10 @@ void CoarseGraph::validate() const {
         const auto & tensor = *scopes[output.first].port(output.second, Direction::Output).tensor;
         if (writers.members.size() != tensor.packing->slices.size()) throw std::invalid_argument("packed output has a member without a row writer");
     }
-    for (const auto & event : events) {
-        if (event.scope >= scopes.size() || event.resource >= resources.size()) throw std::invalid_argument("graph event has an undefined scope or resource");
-    }
+}
+
+void CoarseGraph::validate_state_access(OrderedIntervals & ordered_intervals) const {
     for (std::size_t scope = 0; scope < scopes.size(); ++scope) {
-        for (const auto & port : scopes[scope].ports) {
-            if (port.rendezvous
-                && (resources[events[*port.rendezvous].resource].rank != scopes[scope].communication->rank
-                    || resources[events[port.event].resource].rank != scopes[scope].communication->rank))
-                throw std::invalid_argument("communication boundary belongs to another rank");
-        }
         const auto check_interval = [&](const auto & access) {
             if (access.value.pool.empty()) throw std::invalid_argument("state access has no pool binding");
             if (access.start >= events.size() || access.finish >= events.size() || !contains(events[access.start].scope, scope)
@@ -408,7 +422,9 @@ void CoarseGraph::validate() const {
             check_interval(access);
         }
     }
+}
 
+void CoarseGraph::validate_edges(const OrderedIntervals & ordered_intervals) const {
     // A work interval contributes start -> finish; waiting itself contributes no additional cost.
     std::vector<std::set<std::size_t>> successors(events.size());
     std::vector<std::size_t> remaining(events.size());

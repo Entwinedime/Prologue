@@ -1,4 +1,4 @@
-#include "prologue/integrations/frameworks/sglang/workers.hpp"
+#include "prologue/integrations/frameworks/sglang/cpp/workers.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "prologue/integrations/frameworks/sglang/templates.hpp"
+#include "prologue/integrations/frameworks/sglang/cpp/templates.hpp"
 
 namespace prologue::sglang {
 

@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <set>
+#include <utility>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -101,6 +103,14 @@ public:
     std::vector<GraphEvent> events;
     std::vector<GraphWork> work;
     std::vector<GraphEdge> edges;
+
+private:
+    using OrderedIntervals = std::set<std::pair<std::size_t, std::size_t>>;
+    void validate_resources() const;
+    void validate_events() const;
+    void validate_ports(OrderedIntervals & intervals) const;
+    void validate_state_access(OrderedIntervals & intervals) const;
+    void validate_edges(const OrderedIntervals & intervals) const;
 };
 
 } // namespace prologue
