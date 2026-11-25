@@ -88,4 +88,4 @@ Qwen3-8B 的两个 TP1 容量都完成了单请求与并发请求预测。冷任
 
 ## 2026-11-25 — 顶层物理分层、四维扩展收口与深度瘦身窗口开启
 
-从 `main` 基线 `b500cbe` 切出开发分支 `topology-extensibility-slimming`，分五阶段推进：① 将混装的多语言与多运行域源码彻底拆分为 `engine/`（纯 C++23 仿真引擎）、`probes/`（原生探针/Patch/Shell）、`shared/`（跨语言单一真源）与 `python/`（按运行域隔离的纯 Python），淘汰构建期 AST 裁剪脚本回归纯目录镜像打包；② 抽出设备运行时、宿主平台与框架多版本 ABI/声明式 Hook 适配边界，彻底解耦 SGLang 与 Ascend 并完成换框架、同框架多版本、换 NVIDIA 后端与换硬件代际四维扩展的零副作用静态推演；③ 在锁死全部真机不变量与零新增卡时回归的前提下，按 `ascend/pytorch`、`sglang`、`verification` 逐块开展激进范式瘦身，显著压缩源码体量与文件碎片。
+从 `main` 基线 `b500cbe` 切出开发分支 `topology-extensibility-slimming`，分五阶段推进：① 将混装的多语言与多运行域源码统一归口于 `src/` 下并彻底拆分为 `src/engine/`（纯 C++23 仿真引擎）、`src/probes/`（原生探针/Patch/Shell）、`src/shared/`（跨语言单一真源）与 `src/python/`（按运行域隔离的纯 Python），淘汰构建期 AST 裁剪脚本回归纯目录镜像打包；② 抽出设备运行时、宿主平台与框架多版本 ABI/声明式 Hook 适配边界，彻底解耦 SGLang 与 Ascend 并完成换框架、同框架多版本、换 NVIDIA 后端与换硬件代际四维扩展的零副作用静态推演；③ 在锁死全部真机不变量与零新增卡时回归的前提下，按 `ascend/pytorch`、`sglang`、`verification` 逐块开展激进范式瘦身，显著压缩源码体量与文件碎片。

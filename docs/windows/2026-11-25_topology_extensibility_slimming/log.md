@@ -35,3 +35,13 @@
 | 根构建配置及其余 Docker 文件 | 11 / 576 / 494 | 11 / 511 / 433 | 11 / 512 / 436 | 0 / −64 / −58 |
 
 **交接**　M1 完成，停在 M2 入口，等待 AGY 审查与用户放行。
+
+## 2026-11-25 — AGY 审查 M1 与顶层 `src/` 归口计划修订
+
+**范围**　独立复核 M1（`b0796e9..aa49d03`）全部交付，并根据用户对仓库根目录整洁度的要求修订本窗口计划。
+
+**改动**　AGY 修订 `plan.md` 与 `status.md`：在 M2 开头增设前置切片 `R02b`，将 `engine/`、`probes/`、`shared/`、`python/` 统一收归 `src/` 下（`src/{engine,probes,shared,python}`），使仓库根仅保留 `src/`、`docker/`、`example/`、`docs/`、`third_party/` 五个受跟踪目录，同时保持 `src/` 内部 100% 语言与运行域物理隔离；窗口总轮次调整为 14 轮。本轮仅修订计划文档，未修改业务源码。
+
+**验证**　独立静态核验 M1 交付：`engine/` 与 `probes/` 0 个 `.py`、`python/` 0 个非 `.py`、`engine/core/` 0 越层 `#include` 与 0 框架/平台字样、246 个 Python 模块 0 导入环与 0 跨层违例、旧 `src/` 与 `package_runtime.py` 彻底清除、纯 `COPY` 模拟 `sglang`/`control` 双镜像 110/60 模块 0 泄露 0 断链、`ruff check python example` 0 错误、`.pyc` 0 残留；[regression.json](../../../data/topology-extensibility-slimming/m1/regression.json) 确认新增物理卡时为 0 且四目标 211,290 条轨迹与基线逐字节一致。
+
+**结论与限制**　M1 验收通过，准予进入 M2（`R02b + R03–R05`）。`R02b` 仅涉及目录归口与 5 处构建/打包/示例路径更新，不影响业务语义；后续阶段请沿用标准四段日志格式并同步更新双 Dockerfile 新增 `COPY` 路径。
