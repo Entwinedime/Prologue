@@ -157,3 +157,34 @@
 **验证**　独立复核 M3 达成 `common` 7f、`pytorch` 4f、`ascend` 16f（`ascend + pytorch = 20f`）、全仓业务 Python 231f / 33,186 NE（较 M2 `−32f / −400 NE`）；231 模块 0 环 0 越层（`reference -> analysis = 0`）、`DeviceRuntime`/`PlatformBackend` 100% 对齐、`backend.py` 20 个延迟组件全有效、双镜像纯 `COPY` 100/60 模块 SHA-256 零差异、`ruff` 0 错误、`.pyc` 0 残留；[reference-guards.json](../../../data/topology-extensibility-slimming/m3/r07/reference-guards.json) 与独立 AST `raise` 差异核验确认 0 守卫流失；[acceptance.json](../../../data/topology-extensibility-slimming/m3/acceptance.json) 11 项证据 SHA-256 验真通过，且实采捕获修复了 `5f33571` 持久化身份漂移并实现 107/107 动作全匹配；实测 `frameworks/sglang/` 现有 105f / 14,765L / 12,858 NE / 299 条显式 `raise` / 720 行顶层 import；核验修改后文档无跨层引用与断链。
 
 **结论与限制**　M3 验收通过，准予进入 M4（R08–R10）。M4 仍坚持功能正确性与真机不变量高于行数指标，合并时注意控制单模块均衡粒度（避免单个文件超过 ~800–900 行），完成后停在 M4/M5 边界交回 AGY 审查。
+
+## 2026-11-25 — R08 原生控制与共享执行边界
+
+**范围**　从 M3 业务终版核对 SGLang 共享、控制、采集消费者与已发布模板的调用身份。四目标预测、留存 TP1 与 PD 双验证路径以 `b500cbe` 为对照。
+
+**改动**　业务提交 `2fbd8c4`。共享包从 22 个文件收至 7 个，控制包从 13 个收至 6 个。收口 worker RPC 回复、PD 通知与批次工作描述。三个持久化适配器调用保留原模板中的实现标识。业务 Python 净减 152 个非空行，SGLang 的 299 条显式拒绝逐项保留。[规模与分项](../../../data/topology-extensibility-slimming/m4/r08/source-measurements.json)
+
+**验证**　采集与控制镜像实装的 85、38 个模块全部匹配源码。四个 TP1 目标共 211,290 条执行记录，16 次 token 发布，四份请求时延逐字节相同。空库四个目标均定位到首项 worker 绑定。卡 4 全新 Qwen3-8B TP1 来源核验一致，独立库在真实时间注入下完整匹配 107 个动作。[离线对照](../../../data/topology-extensibility-slimming/m4/r08/offline-comparison.json) · [真机费用](../../../data/topology-extensibility-slimming/m4/r08/budget.json)
+
+**结论与限制**　R08 达到门槛。留存 PD 的 5,355 个动作及 825 个端口差异报告一致，自主预测仍为相同的成本缺项。附加原始日志在虚拟时间零有三行独立 rank 的槽位声明互换了顺序，每行内容、各 rank 内部顺序及后续记录相同。单卡采集墙时 117.68 秒，其中初始化 26.21 秒、预热 45.32 秒、观测 3.90 秒。后处理 60.66 秒，SDK 导出 10.74 MiB，保留 43.53 MiB，采样峰值 43.65 MiB。
+
+
+## 2026-11-25 — R09 单卡观测与联合结构裁决
+
+**范围**　从 R08 的 `2fbd8c4` 整理 SGLang 原生观测、单卡顺序分片与局部取样。用单卡 4 采 Qwen3-8B 的 TP2 资源记录、Prefill TP1 与 Decode TP2 的 PD 记录。两份新库分别对照独立的完整拓扑记录。
+
+**改动**　观测目录由 41 个 Python 文件收为 12 个，删除 29 个文件、350 个非空行。观测窗口、模型调用、通信与 KV 边界分别维护，结构和 CPU 探针共用原生钩子与局部采样发布流程。首次镜像核验发现，发现插件即触发 PyTorch 设备初始化。将原生观测器延迟到插件启用时加载，重建采集与控制镜像后重新实采。候选源树为 `f9d5c9ec`。
+
+**验证**　最终镜像实装的 56 个采集模块与 38 个控制模块逐文件匹配源码，两项原生探针可加载。299 条显式守卫全部保留，导入检查与 Ruff 通过。相对 `b500cbe`，TP1、TP2、PD 的解释及来源报告、四个目标的 211,290 条轨迹、16 次 token 发布、四份请求时延及 678 样本拟合结果一致。单卡真机及镜像修正前的两次运行共用 565.73/720 秒。最终 TP2 的初始化、预热、观测分别为 27.71、48.09、10.61 秒，PD 的 Prefill 为 38.47、37.25、24.80 秒，Decode 为 39.17、48.62、12.88 秒。PD 两侧时间重叠。后处理共用 479.93/480 秒，实采证据树峰值为 392,278,904 字节。导出量、保留量和各次费用见账本。[真机账本](../../../data/topology-extensibility-slimming/m4/r09/budget.json) · [离线对照](../../../data/topology-extensibility-slimming/m4/r09/offline-comparison.json)
+
+**结论与限制**　TP2 的 2 个 rank、PD 的 3 个 rank 均有合格的本地模板来源。分轮录制缺少同时发生的跨 rank 事件，作为联合真值时核验器返回 `reference_unqualified`。选用独立并发真值后，两例均通过来源核验并提取实测时序。TP2 重新投影留存原始记录后比较到 88 个动作，Prefill 分配阶段的 `allocation_prefix` 片段没有候选。PD 比较到 288 个动作，Prefill 的 `ModelRunner.forward` 没有满足条件的模板。最后一个 TP2 核验已写出 `template_gap`，随后外层进程因累计后处理限时退出（143）。按用户裁决保留完整结构通过的门槛，R09 待 AGY 审查，业务候选保留在工作区，进度计至 R08。[审查记录](../../../data/topology-extensibility-slimming/m4/r09/review.json)
+
+## 2026-11-25 — AGY R09 裁决放行与路线 B 深度瘦身原则确立
+
+**范围**　复核 R09 候选树 `f9d5c9ec` 证据（`review.json`、`budget.json`）、全仓 32,684 非空行能力分布与 1,088 条 `raise`/`require` 守卫结构，经用户拍板放行 R09 并切换至路线 B，修订 `plan.md` 与 `status.md`。
+
+**改动**　① 确认 TP2（1 请求 128-token 模板 vs 2 请求 `allocation_prefix` 参考）与 PD（17-token 模板 vs 16-token `block_table_strided=0` 参考）的 `template_gap` 均属 workload 覆盖差异而非代码回归，批准 R09 候选提交放行；② 确立路线 B 瘦身边界：死守物理时钟/因果序、分布式协议一致性、预算熔断、来源隔离与核心预测/拟合精度红线，同时取消 `verification/` 与局部采集内部诊断细项的旧 JSON/MD 逐字节格式锁定，并按“边界校验一次、内部靠所有权”清理跨层重复防御；③ 将 R10 校准为 `sglang/acquisition/` `22f → ≤ 9f`、净减 **≥ 550 NE**（M4 总计 `sglang/` ≤ 36f、净减 ≥ 1,050 NE），将 M5 校准为 `verification/` `43f / 10,357 NE → ≤ 18f / ≤ 6,000 NE`（净减 ≥ 4,300 NE），推动全仓业务 Python 降至 ≤ 26,500 NE。本轮仅提交窗口文档，工作区已暂存的 R09 源码保持原样交由 Codex 提交。
+
+**验证**　独立核验 R09 输入 workload、全仓导入/逻辑净减拆解（R08 `shared` 仅减 2 行逻辑体、R09 `observation` 减 218 行逻辑体 + 132 行 import）及全仓守卫审计（970 `raise` + 118 `require` = 1,088 条，含 33 处 `exact_keys`、64 处 `type(x) is not int`、52 处 `readback/verified_*`、105 处 `differs/disagrees`）；核验修订后文档无跨层引用与断链。
+
+**结论与限制**　R09 放行，路线 B 生效。Codex 先提交工作区 R09 改动，再按路线 B 执行 R10 并完成 M4 收口停在 M4/M5 边界。
