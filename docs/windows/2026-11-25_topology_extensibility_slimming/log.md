@@ -87,3 +87,13 @@
 **验证**　独立静态核验仓库根仅剩 `src/`、`docker/`、`example/`、`docs/`、`third_party/` 五个受跟踪目录且 0 多语言混装；`DeviceRuntime`/`PlatformBackend` 协议与 `AscendDeviceRuntime`/`AscendPlatformBackend` 100% 一一对齐；`frameworks/sglang/` 0 处直连 `ascend`/`torch.npu`/`hccl`、`abi/` 外 0 处 `sglang.srt.` 或裸导入、157/157 个 `NativeSymbols` 全部被真实引用并对应上游模块/Mixin；`src/engine/core/` 0 越层 `#include` 且全仓 `src/` 0 硬件代际字面量；全仓无参 `AdapterRegistry.select()` 为 0、生产代码 0 个 mock/stub 文件；263 个业务 Python 模块 0 环 0 缺失导入、`ruff check src/python example` 0 错误、`.pyc` 0 残留；双镜像纯 `COPY` 模拟与 124/72 模块实装清单 SHA-256 零差异；[acceptance.json](../../../data/topology-extensibility-slimming/m2/acceptance.json) 15 项证据 SHA-256 验真通过且四目标 211,290 条轨迹与 `b500cbe` 逐字节一致，新增物理卡时为 0。
 
 **结论与限制**　M2 验收通过，用户已确认放行进入 M3（R06–R07）。当前业务 Python 为 263 文件 / 38,079 物理行 / 33,586 非空行（较 `b500cbe` 净增 +19 文件 / +878 非空行），M3–M5 需合计净砍 ≥ 8,378 非空行并缩减 ≥ 133 个文件以达窗口底线；M3 须严守真机不变量并刚性达成硬性瘦身门槛。
+
+## 2026-11-25 — M3–M5 计划修订：升级为“逐轮瘦身 + 有界真机实采与多拓扑回归”
+
+**范围**　按用户对 M3–M5 深度瘦身阶段功能正确性的要求，修订本窗口 `plan.md` 与 `status.md`（同步更新主工作流活动窗口说明），将 M3–M5 由零卡推进升级为逐轮有界真机实采加多拓扑离线回归。
+
+**改动**　保留 M1–M2 零卡时验收事实；为 M3（R06–R07）、M4（R08–R10）与 M5（R11–R13）逐轮明确对应在线代码路径的定向单卡真机实采闭环（R06 TP2 `--local-shards --resource-trace`、R07 TP1 `--service-reference` + 轻量宿主/拷贝采样、R08 CPU `control` 闭环与按需冒烟、R09 TP2+PD 观测实采、R10 `library acquire` 局部补采、R13 最终全链路闭环）、单轮累计卡时/后处理/存储硬预算（失败重试不清零）、多拓扑留存数据（TP1/TP2/TP8/PD/Host）与 `b500cbe` 逐字节对照，以及“功能正确性与真机不变量绝对高于行数指标”的最高红线。本轮仅修订计划文档，未修改业务源码。
+
+**验证**　核查本机具备 8 张 Ascend NPU（`/dev/davinci0..7`），确认历史单卡 TP1/TP2 采集实耗约 122–124s，且 `data/` 留存有 TP1、TP2、TP8、TP2+PP3、PD 与 Host/Transport 全套离线对照输入；核验修改后文档无跨层引用与断链。
+
+**结论与限制**　逐轮真机实采与多拓扑离线回归体系已写入计划，彻底消除在线采集侧验证盲区，同时严格遵守不新建独立测试工程/mock 与预算透明记账纪律；可立即以修订后的 M3 启动 Prompt 交由 Codex 执行 R06–R07。
