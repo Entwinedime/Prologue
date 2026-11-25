@@ -7,7 +7,6 @@ from tempfile import TemporaryDirectory
 
 from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.acquisition.recording import PublishedCapture
-from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.acquisition.pd_samples import PdNotificationSamples
 from prologue.integrations.frameworks.sglang.ascend.local_copy import LocalCopies
 from prologue.integrations.frameworks.sglang.ascend.local_embedding import LocalEmbedding
@@ -20,6 +19,7 @@ from prologue.integrations.platforms.ascend.transport_profile import AscendTrans
 from prologue.performance.fitting import FittedCosts
 from prologue.performance.requirements import CostRequirements
 from prologue.performance.samples import ServiceSamples, WorkCatalog
+from prologue.runtime.io import write_json
 
 
 class CostSamples:
@@ -102,8 +102,14 @@ class CostSamples:
         observed = {int(actor) for actor in recording.manifest.get("workers", {"0": "."})}
         peers = query["features"].get("transport", {}).get("members", ())
         physical = recording.inputs["deployment"].get("acquisition_mode", "full") == "full"
-        if (query["work"] == "collective" and rank in observed and len(peers) > 1 and physical and observed.issuperset(peers)
-                and (rule == LocalEmbedding.name or "peer_ranks" in recording.inputs["job"].get("batch", {}))):
+        if (
+            query["work"] == "collective"
+            and rank in observed
+            and len(peers) > 1
+            and physical
+            and observed.issuperset(peers)
+            and (rule == LocalEmbedding.name or "peer_ranks" in recording.inputs["job"].get("batch", {}))
+        ):
             return f"derived/peer-service-{rank}"
         return None
 
@@ -166,8 +172,10 @@ class CostSamples:
             sources = {worker.rank: worker.source for worker in WorkerCapture.observed(recording)}
             traces = {actor: source / "sdk/trace.json" for actor, source in sources.items()}
         rank = WorkerDomain.rank(queries[0]["domain"])
-        if any(WorkerDomain.rank(q["domain"]) != rank or not sources.keys() >= set(q["features"]["transport"]["members"])
-               for q in queries):
+        if any(
+            WorkerDomain.rank(q["domain"]) != rank or not sources.keys() >= set(q["features"]["transport"]["members"])
+            for q in queries
+        ):
             raise ValueError("transport service requires one worker and an observed physical peer group")
         return cls.peer_service(recording, sources, traces, rank, model, directory)
 
@@ -198,8 +206,14 @@ class CostSamples:
         if transport_only:
             if not self.peer_measurements:
                 raise ValueError("a transport profile requires a joint physical observation of the peer group")
-            profile = AscendTransportProfile(self.worker_sources(), self.facts, self.work / f"{rank}-sdk/trace.json",
-                                             observation, self.recording.inputs["image"], self.recording.inputs["deployment"])
+            profile = AscendTransportProfile(
+                self.worker_sources(),
+                self.facts,
+                self.work / f"{rank}-sdk/trace.json",
+                observation,
+                self.recording.inputs["image"],
+                self.recording.inputs["deployment"],
+            )
             if notifications and "state_transfer_protocol" not in profile.qualification:
                 raise ValueError("physical notification samples require their measured transport protocol")
             samples, absent = profile.samples(catalog, services)

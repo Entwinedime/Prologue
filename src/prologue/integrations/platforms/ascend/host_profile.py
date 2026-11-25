@@ -6,8 +6,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 
-from prologue.runtime.io import write_json
 from prologue.integrations.platforms.ascend.thread_activity import AscendThreadActivity
+from prologue.runtime.io import write_json
 
 
 class AscendSpecializations:

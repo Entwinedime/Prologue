@@ -5,15 +5,14 @@ from dataclasses import replace
 from pathlib import Path
 
 from prologue.acquisition.options import HostSampleOptions
-
 from prologue.acquisition.recording import PublishedCapture
 from prologue.acquisition.rules import EvidenceGap, LocalAcquisition
-from prologue.runtime.io import content_id, write_json
 from prologue.integrations.frameworks.sglang.ascend.attention_cuts import AttentionCuts
 from prologue.integrations.frameworks.sglang.ascend.host_samples import HostCostSamples
 from prologue.integrations.frameworks.sglang.ascend.local_attention import LocalAttention
 from prologue.integrations.frameworks.sglang.ascend.local_copy import LocalCopies
 from prologue.performance.requirements import cost_identity
+from prologue.runtime.io import content_id, write_json
 
 
 class HostWindow:
@@ -33,9 +32,15 @@ class HostWindow:
         source, work = self.owner.source, self.owner.source.projection / "work"
         for rank in source.ranks:
             path = source.output / f"{self.name}-{rank}-host.json"
-            options = HostSampleOptions(detailed=source.recording.directory, host=output, facts=work / f"{rank}-facts.json",
-                                        trace=work / f"{rank}-sdk/trace.json", graph=work / f"{rank}-graph.json",
-                                        work_identities=source.identities(rank), output=path)
+            options = HostSampleOptions(
+                detailed=source.recording.directory,
+                host=output,
+                facts=work / f"{rank}-facts.json",
+                trace=work / f"{rank}-sdk/trace.json",
+                graph=work / f"{rank}-graph.json",
+                work_identities=source.identities(rank),
+                output=path,
+            )
             acquisition.sample(path, acquisition.sample_adapter.host_samples, options)
             yield path, json.loads(path.read_bytes())
 
@@ -135,8 +140,9 @@ class SGLangSampling:
         if path:
             cut = json.loads((source.production / path).read_bytes())
         else:
-            cut = AttentionCuts.extract(source.recording.source, source.projection / "work", rank, source.identities(rank),
-                                        self.runner_input)
+            cut = AttentionCuts.extract(
+                source.recording.source, source.projection / "work", rank, source.identities(rank), self.runner_input
+            )
         yield source.recording.attempt_id, cut
 
     def local_windows(self, demand):
@@ -163,7 +169,9 @@ class SGLangSampling:
                     rule.point(query)
                 except EvidenceGap:
                     continue
-            elif not AttentionCuts.fits(self.launch.serving.instances[0].configuration, AttentionCuts.contexts(dict(point.axes))):
+            elif not AttentionCuts.fits(
+                self.launch.serving.instances[0].configuration, AttentionCuts.contexts(dict(point.axes))
+            ):
                 continue
             if name not in windows:
                 windows[name] = SourceRuleWindow(self, name, rule)

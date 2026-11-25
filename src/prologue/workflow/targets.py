@@ -5,8 +5,8 @@ import time
 from dataclasses import replace
 
 from prologue.runtime.io import read_json, write_json
-from prologue.serving.latency import RequestLatency
 from prologue.runtime.limits import AllowanceExhausted
+from prologue.serving.latency import RequestLatency
 
 
 class ExplorationTarget:

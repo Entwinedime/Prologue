@@ -83,9 +83,15 @@ class NativeServingInstance:
         required = {"id", "ingress_raw_ns", "first_publication_raw_ns", "last_publication_raw_ns", "output_tokens"}
         if any(row.keys() != required for row in requests.values()):
             raise ValueError("native request measurement did not join ingress, first token and final token")
-        loads = [{"rank": record["rank"], **event} for record in measurements for event in record["specialization_loads"]]
+        loads = [
+            {"rank": record["rank"], **event} for record in measurements for event in record["specialization_loads"]
+        ]
         path = self.directory / "latency.json"
-        write_json(path, {"clock": "monotonic_raw_ns", "requests": list(requests.values()), "specialization_loads": loads}, replace=False)
+        write_json(
+            path,
+            {"clock": "monotonic_raw_ns", "requests": list(requests.values()), "specialization_loads": loads},
+            replace=False,
+        )
         return {"latency": str(path.relative_to(self.output))}
 
     def observe(self, engine, capture, clock, barrier):
@@ -98,7 +104,9 @@ class NativeServingInstance:
                 ObservationWindow.wait(self.output, self.roles, "profiler", "complete")
                 if windows is None:
                     plan = json.loads((self.directory / "role-plan.json").read_text())
-                    windows = NativeProfiles.windows(self.output, plan["observed_roles"], self.local_shards, self.instance_count)
+                    windows = NativeProfiles.windows(
+                        self.output, plan["observed_roles"], self.local_shards, self.instance_count
+                    )
                 window = windows[round_index]
                 barrier.wait()
                 phase = f"capture/{window.observed[0]}" if window.replay else "capture"
@@ -130,7 +138,9 @@ class NativeServingInstance:
 
         # PD bootstrap rooms must stay distinct across the drain and logical cache reset.
         for ordinal, (phase, submissions) in enumerate(passes.items()):
-            submissions.prepare(RequestSubmissions.observed if phase == "source" else phase, bootstrap, 1 + ordinal * count)
+            submissions.prepare(
+                RequestSubmissions.observed if phase == "source" else phase, bootstrap, 1 + ordinal * count
+            )
         session = {
             "output": str(self.output), "instance_directory": str(self.directory), "mode": mode,
             "rendezvous": {"host": rendezvous["MASTER_ADDR"], "port": int(rendezvous["MASTER_PORT"])},
@@ -166,7 +176,9 @@ class NativeServingInstance:
             from sglang.srt.entrypoints.engine import Engine
 
         options = self.instance.configuration.runner_options(self.model)
-        options.update(base_gpu_id=0 if self.local_shards else self.rank_offset, nccl_port=int(rendezvous["MASTER_PORT"]))
+        options.update(
+            base_gpu_id=0 if self.local_shards else self.rank_offset, nccl_port=int(rendezvous["MASTER_PORT"])
+        )
         if mode != "null":
             options.update(
                 disaggregation_mode=mode, disaggregation_transfer_backend="ascend",
@@ -175,7 +187,8 @@ class NativeServingInstance:
             )
         from sglang.srt.plugins import load_plugins
 
-        # Native argument normalization can change EP size; reject that change before loading weights or launching workers.
+        # Native argument normalization can change EP size; reject that change before loading weights or
+        # launching workers.
         load_plugins()
         args = Engine.server_args_class(**options)
         if (args.tp_size, args.pp_size, args.ep_size) != (self.tp, self.pp, self.ep):

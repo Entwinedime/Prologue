@@ -8,7 +8,6 @@ from sglang.srt.managers.io_struct import BatchTokenIDOutput, sock_recv
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.utils.common import DynamicGradMode
 
-from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from prologue.integrations.frameworks.sglang.observation.communications import NativeCommunications
@@ -22,6 +21,7 @@ from prologue.integrations.platforms.ascend.host_profile import AscendHostProfil
 from prologue.integrations.platforms.ascend.markers import AscendMarkers
 from prologue.integrations.platforms.ascend.observation import AscendObservation
 from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
+from prologue.runtime.io import write_json
 
 
 class SchedulerBatchObservation(NativeModelObservation):
@@ -117,7 +117,9 @@ class SchedulerBatchHostTiming:
             self.calls.enabled = False
 
     def export(self):
-        write_json(self.output / "host.json", self.calls.document() | {"rank": self.rank, "environment": self.environment})
+        write_json(
+            self.output / "host.json", self.calls.document() | {"rank": self.rank, "environment": self.environment}
+        )
 
 
 class SchedulerBatch:
@@ -204,7 +206,12 @@ class SchedulerBatch:
             raise ValueError("native warmup did not complete every local request")
         if not scheduler.flush_cache(empty_cache=False) or (allocator.available_size(), slots.available_size()) != free:
             raise ValueError("native warmup did not restore the original free slots and KV capacity")
-        self.preparation = {"requests": len(requests), "native_batches": batches, "free_tokens": free[0], "free_slots": free[1]}
+        self.preparation = {
+            "requests": len(requests),
+            "native_batches": batches,
+            "free_tokens": free[0],
+            "free_slots": free[1],
+        }
 
     def prepare(self, inputs, receiver):
         scheduler = self.scheduler
@@ -220,7 +227,9 @@ class SchedulerBatch:
 
         result = None
         if not self.model_cut and inputs["phase"] in {"prefill", "decode"}:
-            result = GenerationBatchResult(next_token_ids=torch.tensor(list(tokens.values()), dtype=torch.int64, device=scheduler.device))
+            result = GenerationBatchResult(
+                next_token_ids=torch.tensor(list(tokens.values()), dtype=torch.int64, device=scheduler.device)
+            )
         return list(requests.values()), result
 
     def select(self, phase, ingress):
@@ -236,7 +245,8 @@ class SchedulerBatch:
             if batch is not None:
                 raise ValueError("native worker selected a batch after its idle-pool flush")
         elif phase not in {"selection", "scheduler"} and (
-                batch is None or [req.rid for req in batch.reqs] != list(self.aliases) or BatchTensors.phase(batch) != phase):
+            batch is None or [req.rid for req in batch.reqs] != list(self.aliases) or BatchTensors.phase(batch) != phase
+        ):
             raise ValueError("native selection differs from the requested phase or ordered members")
         return batch
 

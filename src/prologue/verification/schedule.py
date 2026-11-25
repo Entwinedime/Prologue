@@ -47,8 +47,13 @@ class ScheduleComparison:
             for row in history["events"]:
                 operation = row["operation"]
                 if operation["kind"] in releases and not operation.get("grouped"):
-                    self.native_releases[group].append({"operation": operation["kind"], "request": operation.get("request"),
-                                                        "time_ns": row["end_raw_ns"] - self.ingress.origin_ns})
+                    self.native_releases[group].append(
+                        {
+                            "operation": operation["kind"],
+                            "request": operation.get("request"),
+                            "time_ns": row["end_raw_ns"] - self.ingress.origin_ns,
+                        }
+                    )
 
     def observe_prediction(self, trace):
         contexts, pending = ContextValues(), {}
@@ -109,11 +114,19 @@ class ScheduleComparison:
             name for name, window in bounds.items()
             if window["submitted_ns"] <= predicted_input["time_ns"] < window["received_ns"]
         ]
-        return {"native_batch": left, "predicted_batch": right, "last_common_batch": previous,
-                "native_input": native_input, "predicted_input": predicted_input, "input_availability_bounds": bounds,
-                "readiness_unresolved_at_predicted_read": uncertain,
-                "native_prior_release": self.preceding(self.native_releases[group], left["entered_ns"]) if left else None,
-                "predicted_prior_release": self.preceding(self.predicted_releases[group], right["submitted_ns"]) if right else None}
+        return {
+            "native_batch": left,
+            "predicted_batch": right,
+            "last_common_batch": previous,
+            "native_input": native_input,
+            "predicted_input": predicted_input,
+            "input_availability_bounds": bounds,
+            "readiness_unresolved_at_predicted_read": uncertain,
+            "native_prior_release": self.preceding(self.native_releases[group], left["entered_ns"]) if left else None,
+            "predicted_prior_release": self.preceding(self.predicted_releases[group], right["submitted_ns"])
+            if right
+            else None,
+        }
 
     def run(self, trace):
         self.observe_native()
@@ -125,7 +138,11 @@ class ScheduleComparison:
             for left, right in zip_longest(native, predicted):
                 if right is None and not complete:
                     break
-                if left is None or right is None or (left["phase"], left["members"]) != (right["phase"], right["members"]):
+                if (
+                    left is None
+                    or right is None
+                    or (left["phase"], left["members"]) != (right["phase"], right["members"])
+                ):
                     difference = self.difference(group, left, right, last)
                     break
                 matched += 1
@@ -135,12 +152,16 @@ class ScheduleComparison:
         inputs = {}
         for instance, reads in self.ingress.native_reads.items():
             predicted = [row for row in self.ingress.actual_reads[instance] if row["in_flow"]]
-            inputs[instance] = {"native_attempts": self.ingress.input_attempts[instance], "predicted_attempts": len(predicted),
-                                "predicted_empty_timed_polls": [row["time_ns"] for row in predicted
-                                    if not row["requests"] and row["poll_deadline_ns"] is not None],
-                                "native_nonempty": [row for row in reads if row["requests"]],
-                                "predicted_nonempty": [row for row in predicted if row["requests"]],
-                                "availability_bounds": self.ingress.readiness(instance)}
+            inputs[instance] = {
+                "native_attempts": self.ingress.input_attempts[instance],
+                "predicted_attempts": len(predicted),
+                "predicted_empty_timed_polls": [
+                    row["time_ns"] for row in predicted if not row["requests"] and row["poll_deadline_ns"] is not None
+                ],
+                "native_nonempty": [row for row in reads if row["requests"]],
+                "predicted_nonempty": [row for row in predicted if row["requests"]],
+                "availability_bounds": self.ingress.readiness(instance),
+            }
         return {"prediction_complete": complete, "groups": reports, "inputs": inputs}
 
 

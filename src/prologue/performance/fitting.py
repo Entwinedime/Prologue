@@ -4,9 +4,9 @@ import json
 from collections import defaultdict
 from itertools import chain
 
-from prologue.runtime.io import write_json
 from prologue.performance.models import ModelBindings
 from prologue.performance.requirements import cost_identity
+from prologue.runtime.io import write_json
 
 
 class DomainCosts:

@@ -1,19 +1,16 @@
 """Predict each requested configuration and workload against the same immutable release."""
 
-import hashlib
 import math
-import shutil
-import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from itertools import product
 from pathlib import Path
 
-from prologue.runtime.workspace import BinarySnapshot, TaskWorkspace, file_lock
+from prologue.libraries.release import LibraryRelease
 from prologue.runtime.docker import DockerImage
 from prologue.runtime.io import read_json, write_json
-from prologue.libraries.release import LibraryRelease
 from prologue.runtime.limits import OperationLimit, Usage, retained_bytes
+from prologue.runtime.workspace import BinarySnapshot, TaskWorkspace, file_lock
 from prologue.workflow.options import ExplorationOptions, PredictionOptions
 from prologue.workflow.report import ExplorationReport
 from prologue.workflow.targets import ExplorationTarget
@@ -27,7 +24,10 @@ class ExplorationTask:
         self.predictor = predictor
         self.binary = args.binary.resolve(strict=True)
         self.source = read_json(args.input)
-        if self.source.keys() != {"framework", "model", "configurations", "workloads"} or self.source["framework"] != framework:
+        if (
+            self.source.keys() != {"framework", "model", "configurations", "workloads"}
+            or self.source["framework"] != framework
+        ):
             raise ValueError(f"exploration requires a {framework} model, configurations and workloads")
         if self.root.is_relative_to(self.release.root) or self.release.root.is_relative_to(self.root):
             raise ValueError("exploration output and published libraries must be separate")
@@ -42,10 +42,22 @@ class ExplorationTask:
             raise ValueError("prediction workers must be positive")
         if any(row.keys() != {"id", "instances"} for row in self.configurations):
             raise ValueError("each configuration needs an id and serving instances")
-        self.limit = OperationLimit(self.root, args.storage_bytes) if args.storage_bytes is not None and not args.deployment else OperationLimit()
-        self.runtime = {"control_image": DockerImage.id(args.control_image), "modeling_image": DockerImage.id(args.modeling_image)}
-        self.run_options = PredictionOptions(output=self.root, binary=self.root / "inputs/prologue", timeout=args.timeout,
-                                             execution_trace=args.details, **self.runtime)
+        self.limit = (
+            OperationLimit(self.root, args.storage_bytes)
+            if args.storage_bytes is not None and not args.deployment
+            else OperationLimit()
+        )
+        self.runtime = {
+            "control_image": DockerImage.id(args.control_image),
+            "modeling_image": DockerImage.id(args.modeling_image),
+        }
+        self.run_options = PredictionOptions(
+            output=self.root,
+            binary=self.root / "inputs/prologue",
+            timeout=args.timeout,
+            execution_trace=args.details,
+            **self.runtime,
+        )
 
     def named(self, key):
         rows = self.source[key]
@@ -63,7 +75,11 @@ class ExplorationTask:
         identity = {"input": self.source, "libraries": str(self.release.directory), "release_id": self.release.identity,
                     "images": self.runtime, "binary": snapshot.digest, "details": self.run_options.execution_trace}
         if acquisition:
-            identity.update(libraries=str(self.release.root), deployment=acquisition.deployment, source_image=acquisition.source_image)
+            identity.update(
+                libraries=str(self.release.root),
+                deployment=acquisition.deployment,
+                source_image=acquisition.source_image,
+            )
             del identity["release_id"]
 
         with TaskWorkspace(self.root).initialize(directory.name) as draft:
@@ -89,17 +105,28 @@ class ExplorationTask:
                 pending = []
                 for target in targets:
                     basis = self.predictor.basis(target.source, self.release) if acquisition else self.release.identity
-                    pending.append(workers.submit(target.predict, self.predictor, self.run_options, self.release, self.limit, basis))
+                    pending.append(
+                        workers.submit(
+                            target.predict, self.predictor, self.run_options, self.release, self.limit, basis
+                        )
+                    )
 
-                # Every target reads the same frozen release. Only the coordinator can schedule acquisition or publish the next one.
+                # Every target reads the same frozen release. Only the coordinator can schedule acquisition or
+                # publish the next one.
                 rows = [future.result() for future in pending]
                 updated = acquisition.advance(rows, self.release) if acquisition else None
                 if updated is None:
                     break
                 self.release = updated
 
-        usage = acquisition.budget.document() if acquisition else {**Usage().document(), "retained_bytes": retained_bytes(self.root)}
-        return ExplorationReport(rows, self.release.directory, usage, acquisition.unresolved_services if acquisition else {})
+        usage = (
+            acquisition.budget.document()
+            if acquisition
+            else {**Usage().document(), "retained_bytes": retained_bytes(self.root)}
+        )
+        return ExplorationReport(
+            rows, self.release.directory, usage, acquisition.unresolved_services if acquisition else {}
+        )
 
     def run(self, acquisition=None):
         with file_lock(self.root / ".lock"):

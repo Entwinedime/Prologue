@@ -17,7 +17,9 @@ class ObservationWindow:
         self.participants = description["native_participants"]
         self.requests = {phase: set(description[f"{phase}_requests"]) for phase in description["request_groups"]}
         self.pending = {phase: set(requests) for phase, requests in self.requests.items()}
-        self.groups = {phase: [set(group) for group in groups[:-1]] for phase, groups in description["request_groups"].items()}
+        self.groups = {
+            phase: [set(group) for group in groups[:-1]] for phase, groups in description["request_groups"].items()
+        }
         self.next_group = dict.fromkeys(self.groups, 0)
 
         self.phase: str | None = None
@@ -37,7 +39,9 @@ class ObservationWindow:
                 if phase == "source":
 
                     # This hook runs at native request dispatch, after receive and rank broadcast.
-                    self.receipts.append({"request": identity, "received_raw_ns": time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)})
+                    self.receipts.append(
+                        {"request": identity, "received_raw_ns": time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)}
+                    )
                 return
 
     def receive(self, requests: list[str], time_ns: int, *, ingress: bool, attempt=None) -> None:

@@ -8,16 +8,16 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
+from run import TaskCommands
+
 from prologue.acquisition.recording import PublishedCapture
 from prologue.integrations.frameworks.sglang.worker_templates import SGLangTask
 from prologue.libraries.release import LibraryRelease
-from prologue.runtime.io import write_json
 from prologue.runtime.docker import OwnedContainers
-from prologue.verification.reference import ReferenceRecording
+from prologue.runtime.io import write_json
 from prologue.runtime.limits import OperationLimit
 from prologue.runtime.workspace import file_lock
-
-from run import TaskCommands
+from prologue.verification.reference import ReferenceRecording
 
 
 class MatrixRun:
@@ -33,7 +33,9 @@ class MatrixRun:
         cases = [case["id"] for domain in self.matrix["domains"] for case in domain["targets"]]
         if (not domains or not cases or len(set(domains)) != len(domains) or len(set(cases)) != len(cases)
                 or any(re.fullmatch("[a-z0-9][a-z0-9-]*", name) is None for name in [self.name, *domains, *cases])):
-            raise ValueError("matrix needs unique domain/case identifiers containing lowercase letters, digits and hyphens")
+            raise ValueError(
+                "matrix needs unique domain/case identifiers containing lowercase letters, digits and hyphens"
+            )
         self.commands = TaskCommands(self.repository, self.images)
         self.logs = self.root / "logs/independent"
         self.steps = self.logs / self.name
@@ -92,8 +94,10 @@ class MatrixRun:
                 state = json.loads(owner.read_text())
                 if owner.name == "execution.json":
                     attempts = state["attempts"]
-                    record["charges"] = {"native_seconds": max(elapsed, sum(row["charged_ns"] for row in attempts) / 1e9),
-                                         "native_attempts": len(attempts)}
+                    record["charges"] = {
+                        "native_seconds": max(elapsed, sum(row["charged_ns"] for row in attempts) / 1e9),
+                        "native_attempts": len(attempts),
+                    }
                 else:
                     native = state["native_charged_ns"] / 1e9
                     record["charges"] = {"native_seconds": native, "native_attempts": state["native_attempts"],
@@ -220,19 +224,51 @@ class MatrixRun:
         identity = hashlib.sha256(f"{recording.directory}\0{recording.attempt_id}".encode()).hexdigest()
         step = f"graphs/{identity}"
         production = self.root / "targets" / self.name / step
-        code = self.process(step, self.commands.command(
-            "prologue.app", "produce", "--capture", recording.directory, "--product", "graphs", "--output", production, "--binary", self.binary,
-            "--source-image", self.images["source"], "--modeling-image", self.images["modeling"],
-            "--budget-seconds", self.budget["operation_seconds"], "--keep-intermediates",
-        ))
+        code = self.process(
+            step,
+            self.commands.command(
+                "prologue.app",
+                "produce",
+                "--capture",
+                recording.directory,
+                "--product",
+                "graphs",
+                "--output",
+                production,
+                "--binary",
+                self.binary,
+                "--source-image",
+                self.images["source"],
+                "--modeling-image",
+                self.images["modeling"],
+                "--budget-seconds",
+                self.budget["operation_seconds"],
+                "--keep-intermediates",
+            ),
+        )
         result.update(native=str(recording.directory), production=str(production), production_exit=code)
         return result | {"status": "target-production-failed" if code else "produced"}
 
     def observe(self, step, domain, task, output, mode, timeout):
         command = self.commands.command(
-            "prologue.app", "capture", "--input", task, "--deployment", self.root / domain["deployment"], "--output", output,
-            "--source-image", self.images["source"], "--timeout", timeout, "--budget-seconds", timeout,
-            "--attempt-limit", 1, f"--{mode}", model=json.loads(task.read_text())["model"]["path"],
+            "prologue.app",
+            "capture",
+            "--input",
+            task,
+            "--deployment",
+            self.root / domain["deployment"],
+            "--output",
+            output,
+            "--source-image",
+            self.images["source"],
+            "--timeout",
+            timeout,
+            "--budget-seconds",
+            timeout,
+            "--attempt-limit",
+            1,
+            f"--{mode}",
+            model=json.loads(task.read_text())["model"]["path"],
         )
         return self.step(step, command, {"native_seconds": timeout + 60, "native_attempts": 1},
                          timeout + 60, output / "execution.json")
@@ -249,10 +285,26 @@ class MatrixRun:
         output = self.results / "cases" / name
         timing = ("--peer-handoffs",) if case.get("peer_handoffs") else ()
         command = self.commands.command(
-            "prologue.verification.structure", "--capture", target["native"], "--reference", target["production"],
-            "--libraries", source["libraries"], "--input", self.root / case["prediction_input"], "--output", output,
-            "--binary", self.binary, "--modeling-image", self.images["modeling"], "--control-image", self.images["control"],
-            "--timeout", self.budget["task_seconds"], *timing,
+            "prologue.verification.structure",
+            "--capture",
+            target["native"],
+            "--reference",
+            target["production"],
+            "--libraries",
+            source["libraries"],
+            "--input",
+            self.root / case["prediction_input"],
+            "--output",
+            output,
+            "--binary",
+            self.binary,
+            "--modeling-image",
+            self.images["modeling"],
+            "--control-image",
+            self.images["control"],
+            "--timeout",
+            self.budget["task_seconds"],
+            *timing,
         )
 
         # One process holds the checked native case through extraction, prediction and comparison.
@@ -283,7 +335,9 @@ class MatrixRun:
             latency = self.root / case.get("latency_observation", f"targets/{self.name}/{name}/latency")
             if "latency_observation" not in case:
                 timeout = case.get("latency_timeout_seconds", self.budget["task_seconds"])
-                code = self.observe(f"{name}/latency", domain, self.root / case["capture_input"], latency, "latency-only", timeout)
+                code = self.observe(
+                    f"{name}/latency", domain, self.root / case["capture_input"], latency, "latency-only", timeout
+                )
                 if code:
                     return result | {"status": "native-capture-failed", "capture_exit": code}
 
@@ -328,8 +382,10 @@ class MatrixRun:
             sources, targets, records = (results[name] for name in ("sources", "targets", report))
             needs_native = (
                 phase in {"detailed", "light"}
-                or phase == "autonomous" and any("latency_observation" not in case for domain in domains for case in domain["targets"])
-                or phase == "targets" and any("observation" not in case for domain in domains for case in domain["targets"])
+                or phase == "autonomous"
+                and any("latency_observation" not in case for domain in domains for case in domain["targets"])
+                or phase == "targets"
+                and any("observation" not in case for domain in domains for case in domain["targets"])
             )
             if needs_native:
 
@@ -345,9 +401,12 @@ class MatrixRun:
                             target = targets.get(case["id"], {"status": "not-executed"})
                             result = self.evaluate(phase, domain, case, source, target)
                     except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
-
                         # Bad artifacts have a terminal finding; unresolved processes still stop above.
-                        result = {"id": case["id"], "status": "artifact-error", "error": f"{type(error).__name__}: {error}"}
+                        result = {
+                            "id": case["id"],
+                            "status": "artifact-error",
+                            "error": f"{type(error).__name__}: {error}",
+                        }
                     records[case["id"]] = result
                     write_json(output, records, indent=2)
 
@@ -356,8 +415,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True, help="existing investigation directory")
     parser.add_argument("--matrix", type=Path, required=True, help="frozen matrix beside environment.json and prologue")
-    parser.add_argument("--phase", choices=("sources", "detailed", "light", "targets", "compare", "fixed", "autonomous"),
-                        required=True)
+    parser.add_argument(
+        "--phase", choices=("sources", "detailed", "light", "targets", "compare", "fixed", "autonomous"), required=True
+    )
     parser.add_argument("--domain", help="one named domain; omit for the whole stage")
     arguments = parser.parse_args()
     MatrixRun(arguments.root, arguments.matrix).run(arguments.phase, arguments.domain)

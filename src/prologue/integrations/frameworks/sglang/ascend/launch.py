@@ -2,13 +2,13 @@
 
 from pathlib import Path
 
-from prologue.runtime.docker import DockerImage
 from prologue.acquisition.capture import NativeAttempt
 from prologue.integrations.frameworks.sglang.ascend.attention_cuts import AttentionCuts
 from prologue.integrations.frameworks.sglang.configuration import CaptureInput
 from prologue.integrations.frameworks.sglang.worker_templates import WorkerDomain
 from prologue.integrations.platforms.ascend.deployment import AscendDeployment
 from prologue.integrations.platforms.ascend.export import AscendExport
+from prologue.runtime.docker import DockerImage
 
 
 class SGLangAscendLaunch:
@@ -48,17 +48,49 @@ class SGLangAscendLaunch:
         from prologue.integrations.frameworks.sglang.ascend.local_copy import LocalCopies
         from prologue.integrations.frameworks.sglang.ascend.local_embedding import LocalEmbedding
         from prologue.integrations.frameworks.sglang.ascend.local_prebuilt import LocalPrebuilt
-        from prologue.integrations.frameworks.sglang.ascend.local_scheduler import LocalSchedulerBatch, LocalWorkerBinding
-        from prologue.integrations.frameworks.sglang.ascend.local_work import LocalDeviceWork, LocalHostWork, LocalPeerWork
+        from prologue.integrations.frameworks.sglang.ascend.local_scheduler import (
+            LocalSchedulerBatch,
+            LocalWorkerBinding,
+        )
+        from prologue.integrations.frameworks.sglang.ascend.local_work import (
+            LocalDeviceWork,
+            LocalHostWork,
+            LocalPeerWork,
+        )
         from prologue.integrations.frameworks.sglang.ascend.worker_capture import WorkerCapture
 
         attention = LocalAttention(release.templates.sampling_sources if release else None)
-        rules = (LocalWorkerBinding, LocalSchedulerBatch(arguments), LocalHostWork(arguments), LocalDeviceWork(arguments), LocalPeerWork(arguments),
-                 LocalCopies, attention, LocalPrebuilt, LocalEmbedding)
-        return LocalAcquisition(rules, cls.check_local_placement, WorkerCapture.template_resources, release.identity if release else None)
+        rules = (
+            LocalWorkerBinding,
+            LocalSchedulerBatch(arguments),
+            LocalHostWork(arguments),
+            LocalDeviceWork(arguments),
+            LocalPeerWork(arguments),
+            LocalCopies,
+            attention,
+            LocalPrebuilt,
+            LocalEmbedding,
+        )
+        return LocalAcquisition(
+            rules, cls.check_local_placement, WorkerCapture.template_resources, release.identity if release else None
+        )
 
     @classmethod
-    def local_attempt(cls, arguments, limit, deployment, cards, revision, job, worker, *, runtime_trace, model=None, host_timing=False, **evidence):
+    def local_attempt(
+        cls,
+        arguments,
+        limit,
+        deployment,
+        cards,
+        revision,
+        job,
+        worker,
+        *,
+        runtime_trace,
+        model=None,
+        host_timing=False,
+        **evidence,
+    ):
         from prologue.acquisition.rules import EvidenceGap
 
         platform = AscendDeployment({"acquisition_mode": deployment.get("acquisition_mode", "full"),
@@ -92,7 +124,9 @@ class SGLangAscendLaunch:
         roles = query["domain"].get("worker_roles", {})
         ranks = sorted(map(int, roles))
         if query.get("action") == "initialize_workers":
-            ranks = [rank for instance in query["instances"] for rank in range(instance["rank_begin"], instance["rank_end"])]
+            ranks = [
+                rank for instance in query["instances"] for rank in range(instance["rank_begin"], instance["rank_end"])
+            ]
         if ranks and not platform.single_device and max(ranks) >= len(deployment["physical_devices"]):
             raise EvidenceGap("missing_physical_workers", required_ranks=ranks,
                               physical_devices=deployment["physical_devices"])
@@ -127,8 +161,12 @@ class SGLangAscendLaunch:
             if not isinstance(attention_sites, dict) or not attention_sites or not attention_sites.keys() <= ranks:
                 raise ValueError("serving comparison requires module lists keyed by participating ranks")
             for sites in attention_sites.values():
-                if (not isinstance(sites, list) or not sites or not all(isinstance(site, str) and site for site in sites)
-                        or len(sites) != len(set(sites))):
+                if (
+                    not isinstance(sites, list)
+                    or not sites
+                    or not all(isinstance(site, str) and site for site in sites)
+                    or len(sites) != len(set(sites))
+                ):
                     raise ValueError("each selected rank requires distinct native module names")
 
         model = Path(self.serving.model["path"]).resolve(strict=True)

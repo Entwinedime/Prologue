@@ -205,10 +205,21 @@ class CausalGraph:
         boundaries = {name: before[position - begin] for name, position in zip(names, anchors, strict=True)}
         placement = defaultdict(Counter)
         for (scope, kind, resource), start, finish in work:
-            placement[resource][(scope, kind, before[start - begin], before[finish - begin], after[start - begin], after[finish - begin])] += 1
+            placement[resource][
+                (
+                    scope,
+                    kind,
+                    before[start - begin],
+                    before[finish - begin],
+                    after[start - begin],
+                    after[finish - begin],
+                )
+            ] += 1
 
         # Private submission threads need no public port. Compare their work as resource groups, not by thread ID.
-        placement = Counter((action.resources[resource], frozenset(items.items())) for resource, items in placement.items())
+        placement = Counter(
+            (action.resources[resource], frozenset(items.items())) for resource, items in placement.items()
+        )
         return BoundarySignature(names, boundaries, placement)
 
     def reaches(self, source, target):
@@ -314,15 +325,23 @@ class ActionOrderComparison:
             positions = [{tuple(value for name in names for value in masks[call.events[name]]) for call in calls}
                          for masks, calls in zip(frontiers, (native, targets), strict=True)]
             missing, extra = positions[0] - positions[1], positions[1] - positions[0]
-            self.repeated_counts.update(contexts_checked=1, native_positions=len(positions[0]), predicted_positions=len(positions[1]),
-                                        matched_positions=len(positions[0] & positions[1]), calls_checked=len(targets))
+            self.repeated_counts.update(
+                contexts_checked=1,
+                native_positions=len(positions[0]),
+                predicted_positions=len(positions[1]),
+                matched_positions=len(positions[0] & positions[1]),
+                calls_checked=len(targets),
+            )
             if not missing and not extra:
                 self.repeated_counts.update(contexts_matched=1, calls_matched=len(targets))
                 continue
 
             # Compare whole position sets. No member is selected to supply a source occurrence, body or duration.
             examples = {}
-            for label, differences, calls, masks in (("native", missing, native, frontiers[0]), ("predicted", extra, targets, frontiers[1])):
+            for label, differences, calls, masks in (
+                ("native", missing, native, frontiers[0]),
+                ("predicted", extra, targets, frontiers[1]),
+            ):
                 for call in calls:
                     signature = tuple(value for name in names for value in masks[call.events[name]])
                     if signature in differences:
@@ -367,8 +386,12 @@ class ActionOrderComparison:
         if self.findings:
             return
 
-        projections = [graph.projected([pair[side] for pair in pairs]) for side, graph in enumerate((actual, predicted))]
-        covers = [{(source, target) for source, targets in graph.next.items() for target in targets} for graph in projections]
+        projections = [
+            graph.projected([pair[side] for pair in pairs]) for side, graph in enumerate((actual, predicted))
+        ]
+        covers = [
+            {(source, target) for source, targets in graph.next.items() for target in targets} for graph in projections
+        ]
         names = [min(labels[pair]) for pair in pairs]
         differences = []
         for side, kind in enumerate(("missing", "extra")):
@@ -432,11 +455,16 @@ class BoundarySignature:
         for target in self.names:
             native, estimate = self.predecessors[target], predicted.predecessors[target]
             if native != estimate:
-                yield "boundary_order", {
-                    "target": target, "missing_predecessors": (native & ~estimate).bit_count(),
-                    "extra_predecessors": (estimate & ~native).bit_count(),
-                    "missing_examples": self.labels(native & ~estimate, 3), "extra_examples": self.labels(estimate & ~native, 3),
-                }
+                yield (
+                    "boundary_order",
+                    {
+                        "target": target,
+                        "missing_predecessors": (native & ~estimate).bit_count(),
+                        "extra_predecessors": (estimate & ~native).bit_count(),
+                        "missing_examples": self.labels(native & ~estimate, 3),
+                        "extra_examples": self.labels(estimate & ~native, 3),
+                    },
+                )
         if self.work != predicted.work:
             missing, extra = self.work - predicted.work, predicted.work - self.work
             yield "work_placement", {

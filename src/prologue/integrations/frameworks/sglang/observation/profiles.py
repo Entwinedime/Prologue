@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from prologue.acquisition.observation.workers import ProfileWindow
-from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
+from prologue.runtime.io import write_json
 
 
 class NativeProfiles:
@@ -56,8 +56,12 @@ class NativeProfiles:
 
             # All instances have drained warmup and published their real pool layouts before this request.
             if self.windows_by_round is None:
-                self.windows_by_round = self.windows(owner.directory, owner.plan_roles(), owner.description["local_shards"],
-                                                     owner.description["instance_count"])
+                self.windows_by_round = self.windows(
+                    owner.directory,
+                    owner.plan_roles(),
+                    owner.description["local_shards"],
+                    owner.description["instance_count"],
+                )
             else:
 
                 # The preceding request drained and flushed its KV. This replay owns fresh ingress and group receipts.
@@ -66,8 +70,8 @@ class NativeProfiles:
             owner.selected = owner.parallel["rank"] in window.observed
             self.protocol_root = window.protocol_directory(owner.directory)
             if window.replay:
-
-                # A later replay can reuse a registration with a different request slot. Keep this window's peer facts together.
+                # A later replay can reuse a registration with a different request slot. Keep this window's peer
+                # facts together.
                 owner.kv_pools = self.protocol_root / "kv-pools"
         if owner.selected:
             result = original(manager, request)
@@ -84,7 +88,9 @@ class NativeProfiles:
         elif request.req_type == ProfileReqType.STOP_PROFILE and result.success:
 
             # Protocol facts cover every participant, including workers represented by another device profile.
-            write_json(self.protocol_root / f"rank-{owner.parallel['rank']}.json", self.protocol.document(), replace=False)
+            write_json(
+                self.protocol_root / f"rank-{owner.parallel['rank']}.json", self.protocol.document(), replace=False
+            )
             self.round += 1
         return result
 

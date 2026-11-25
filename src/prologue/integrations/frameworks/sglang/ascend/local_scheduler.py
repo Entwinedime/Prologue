@@ -6,7 +6,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from prologue.acquisition.rules import EvidenceGap, missing_root
-from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.ascend.attention_cuts import AttentionCuts
 from prologue.integrations.frameworks.sglang.ascend.batch_calibration import BatchCalibration
 from prologue.integrations.frameworks.sglang.ascend.launch import SGLangAscendLaunch
@@ -16,6 +15,7 @@ from prologue.integrations.frameworks.sglang.ingress import BatchOperands
 from prologue.integrations.frameworks.sglang.worker_templates import WorkerDomain
 from prologue.integrations.platforms.ascend.deployment import AscendDeployment
 from prologue.runtime.docker import ModelingProcess
+from prologue.runtime.io import write_json
 
 
 class LocalWorkerBinding:
@@ -83,13 +83,19 @@ class LocalWorkerBinding:
         observed = WorkerDomain.observed([{"domain": env}])
         instance, = query["instances"]
         settings = instance["settings"]
-        if observed != query["domain"] or any(set(fields) - sections[key].keys() for key, fields in instance["readback"].items()):
+        if observed != query["domain"] or any(
+            set(fields) - sections[key].keys() for key, fields in instance["readback"].items()
+        ):
             raise ValueError("native worker does not satisfy the requested readback")
-        if (capacity["page_size"] != settings["page_size"] or asset["configured_settings"] != settings
-                or initial["logical_kv"] != "empty_after_native_flush" or initial["free_slots"] != capacity["slot_capacity"]
-                or initial["free_tokens"] != capacity["kv_pages"] * capacity["page_size"]
-                or initial["workspace"] != {"prefill_tokens": [1], "decode_steps": 1, "device_drained": True,
-                                             "device_cache_emptied": False}):
+        if (
+            capacity["page_size"] != settings["page_size"]
+            or asset["configured_settings"] != settings
+            or initial["logical_kv"] != "empty_after_native_flush"
+            or initial["free_slots"] != capacity["slot_capacity"]
+            or initial["free_tokens"] != capacity["kv_pages"] * capacity["page_size"]
+            or initial["workspace"]
+            != {"prefill_tokens": [1], "decode_steps": 1, "device_drained": True, "device_cache_emptied": False}
+        ):
             raise ValueError("native worker was not at the specified prepared, empty-pool boundary")
         return asset
 
@@ -104,10 +110,14 @@ class LocalWorkerBinding:
         count = first["domain"]["instances"]["null"]["tp"]
         if (set(map(int, roles)) != set(range(count)) or any(a["environment"]["worker_roles"] != roles for a in assets)
                 or {w.rank for w in workers} != {r["representative"] for r in roles.values()}):
-            raise ValueError("the initialized group must observe every native representative and bind every logical rank")
+            raise ValueError(
+                "the initialized group must observe every native representative and bind every logical rank"
+            )
         name = "workers/binding.json"
         product = assets[0] if len(assets) == 1 else {"participants": assets}
-        return {name: product}, [{"status": "qualified", "asset": name, "ranks": [w.rank for w in workers]} for _ in queries]
+        return {name: product}, [
+            {"status": "qualified", "asset": name, "ranks": [w.rank for w in workers]} for _ in queries
+        ]
 
 
 class LocalSchedulerBatch:
@@ -189,8 +199,16 @@ class LocalSchedulerBatch:
         requested = WorkerDomain.observed([{"domain": domain}])
         if configuration.structure() != requested["instances"]["null"]:
             raise ValueError("supplied native configuration differs from the requested worker")
-        job = {"configuration": configuration.values, "model": requested["model"],
-               "batch": {"cut": "model" if model else "host", "phase": phase, "requests": inputs["requests"], "priming": prefix}}
+        job = {
+            "configuration": configuration.values,
+            "model": requested["model"],
+            "batch": {
+                "cut": "model" if model else "host",
+                "phase": phase,
+                "requests": inputs["requests"],
+                "priming": prefix,
+            },
+        }
         if queues is not None:
             job["batch"]["waiting"] = [m["id"] for m in queues["waiting"]]
         placement = AscendDeployment(deployment, configuration.tp, False)
@@ -212,8 +230,18 @@ class LocalSchedulerBatch:
         calibration = BatchCalibration.cuts(job, queries[0]["parameters"].get("sequence_capacity"))
         if calibration:
             job["calibration"] = calibration
-        return SGLangAscendLaunch.local_attempt(arguments, limit, deployment, devices, revision, job,
-                                                 "--local-worker", runtime_trace=True, host_timing=bool(calibration), model=job["model"]["path"])
+        return SGLangAscendLaunch.local_attempt(
+            arguments,
+            limit,
+            deployment,
+            devices,
+            revision,
+            job,
+            "--local-worker",
+            runtime_trace=True,
+            host_timing=bool(calibration),
+            model=job["model"]["path"],
+        )
 
     def qualify(self, queries, recording, timeout=None):
         worker = WorkerCapture(recording, WorkerDomain.rank(queries[0]["domain"]))
@@ -275,8 +303,13 @@ class LocalSchedulerBatch:
         root, = (i for i, s in enumerate(scopes) if s["role"] == "run_batch" and s["parent"] == 0)
 
         def tensor(role, direction, name):
-            ports = [p["tensor"] for i, s in enumerate(scopes) if (i == root or s["parent"] == root) and s["role"] == role
-                     for p in s["ports"] if (p["direction"], p["name"]) == (direction, name)]
+            ports = [
+                p["tensor"]
+                for i, s in enumerate(scopes)
+                if (i == root or s["parent"] == root) and s["role"] == role
+                for p in s["ports"]
+                if (p["direction"], p["name"]) == (direction, name)
+            ]
             if len(ports) != 1:
                 raise ValueError(f"one native model cut requires one {role} {direction} port for {name}")
             return ports[0]
@@ -296,7 +329,9 @@ class LocalSchedulerBatch:
             prompt = sum(n for _, n in row["prompt"])
             count = 1 if batch["phase"] == "prefill" else member["context_tokens"] - prompt + 2
             expected.append({"id": row["id"], "generated_tokens": count, "finished": count == row["output_tokens"]})
-        publication = [effect | {"tokens": [row["next_token"]]} for effect, row in zip(expected, batch["requests"], strict=True)]
+        publication = [
+            effect | {"tokens": [row["next_token"]]} for effect, row in zip(expected, batch["requests"], strict=True)
+        ]
         emitter = facts["environment"]["parallel"]["tp_rank"] == 0
         if bounds["effects"] != expected or bounds["publication"] != (publication if emitter else []):
             raise ValueError("native request state and receiving socket must agree on each produced token")
@@ -311,11 +346,21 @@ class LocalSchedulerBatch:
             raise ValueError("observed host segments must account for the native request and publication effects")
 
         # The supplied token tensor is on the device. Its materialization must account for the actual batch payload.
-        reads = [i for i, s in enumerate(scopes) if s["role"] == "host_read" and s["bindings"]["condition"]["input"] == "next_token_ids"]
-        copies = [s for s in facts["spans"] if s["scope"] in reads and s.get("copy", {}).get("operand") == "next_token_ids"]
-        if (len(reads) != 1 or len(copies) != 1 or copies[0]["copy"]["direction"] != "device_to_host"
-                or copies[0]["operand_bytes"] != len(expected) * copies[0]["copy"]["element_bytes"]
-                or not any(p["name"] == "next_token_ids" and p["direction"] == "input" for p in scopes[reads[0]]["ports"])):
+        reads = [
+            i
+            for i, s in enumerate(scopes)
+            if s["role"] == "host_read" and s["bindings"]["condition"]["input"] == "next_token_ids"
+        ]
+        copies = [
+            s for s in facts["spans"] if s["scope"] in reads and s.get("copy", {}).get("operand") == "next_token_ids"
+        ]
+        if (
+            len(reads) != 1
+            or len(copies) != 1
+            or copies[0]["copy"]["direction"] != "device_to_host"
+            or copies[0]["operand_bytes"] != len(expected) * copies[0]["copy"]["element_bytes"]
+            or not any(p["name"] == "next_token_ids" and p["direction"] == "input" for p in scopes[reads[0]]["ports"])
+        ):
             raise ValueError("the host read must consume the supplied device output for each batch member")
 
     @staticmethod

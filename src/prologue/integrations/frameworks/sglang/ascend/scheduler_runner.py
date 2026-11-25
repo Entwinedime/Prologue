@@ -8,13 +8,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic_ns
 
-from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.configuration import NativeConfiguration
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
 from prologue.integrations.frameworks.sglang.observation.role_plan import NativeWorkerLayout
 from prologue.integrations.platforms.ascend.markers import AscendMarkers
+from prologue.runtime.io import write_json
 
 
 class WorkerProbes:
@@ -88,7 +88,11 @@ class SchedulerRunner:
         settings["prefill_chunk_tokens"] = scheduler.chunked_prefill_size or 0
         if "microbatch_requests" in self.configuration.settings():
             settings["microbatch_requests"] = args.pp_max_micro_batch_size
-        return {"capacity": BatchTensors.capacity(allocator, slots), "configured_settings": settings, "initial_state": readback}
+        return {
+            "capacity": BatchTensors.capacity(allocator, slots),
+            "configured_settings": settings,
+            "initial_state": readback,
+        }
 
     def worker(self, rank, revision, args, ports, host_timing):
         import torch
@@ -97,7 +101,11 @@ class SchedulerRunner:
         from sglang.srt.managers.scheduler import Scheduler
         from sglang.srt.plugins.hook_registry import HookRegistry
 
-        from prologue.integrations.frameworks.sglang.ascend.batch_runner import SchedulerBatch, SchedulerBatchHostTiming, SchedulerBatchObservation
+        from prologue.integrations.frameworks.sglang.ascend.batch_runner import (
+            SchedulerBatch,
+            SchedulerBatchHostTiming,
+            SchedulerBatchObservation,
+        )
 
         world = self.configuration.tp
         directory = self.output if world == 1 else self.output / "workers" / str(rank)
@@ -161,13 +169,23 @@ class SchedulerRunner:
             parallel_state.destroy_model_parallel()
             parallel_state.destroy_distributed_environment()
 
-        write_json(directory / "capture.json", {
-            "framework_revision": revision, "rank": rank, "observed": rank in observed,
-            "binding": "binding.json", "boundary": "boundary.json", **({"host": "host.json"} if host_timing else {"facts": "facts.json"}),
-            "engine_starts": 0, "model_runner_starts": 1, "initialization_ns": initialized - started,
-            "preparation_and_readback_ns": prepared - initialized, "capture_and_export_ns": monotonic_ns() - prepared,
-            **({"timing_warmup": cut.preparation} if cut.preparation is not None else {}),
-        })
+        write_json(
+            directory / "capture.json",
+            {
+                "framework_revision": revision,
+                "rank": rank,
+                "observed": rank in observed,
+                "binding": "binding.json",
+                "boundary": "boundary.json",
+                **({"host": "host.json"} if host_timing else {"facts": "facts.json"}),
+                "engine_starts": 0,
+                "model_runner_starts": 1,
+                "initialization_ns": initialized - started,
+                "preparation_and_readback_ns": prepared - initialized,
+                "capture_and_export_ns": monotonic_ns() - prepared,
+                **({"timing_warmup": cut.preparation} if cut.preparation is not None else {}),
+            },
+        )
 
     def run(self, revision, *, host_timing=False):
         from sglang.benchmark import one_batch

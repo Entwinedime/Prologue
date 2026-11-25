@@ -2,10 +2,10 @@
 
 from time import monotonic_ns
 
-from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.ascend.attention_observation import DecodeAttentionObservation
 from prologue.integrations.frameworks.sglang.configuration import NativeConfiguration
 from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
+from prologue.runtime.io import write_json
 
 
 class AttentionReturned(Exception):
@@ -41,10 +41,15 @@ class NativeAttentionBatch:
         vocab = self.model.model_config.vocab_size
         ids = [[(index + pos) % vocab for pos in range(n)] for index, n in enumerate(lengths)]
         requests = self.native.prepare_synthetic_inputs_for_latency_test(len(ids), max(lengths), ids)
-        batch = self.native.ScheduleBatch.init_new(reqs=requests, req_to_token_pool=self.model.req_to_token_pool,
-                                                  token_to_kv_pool_allocator=self.model.token_to_kv_pool_allocator,
-                                                  tree_cache=self.cache, model_config=self.model.model_config,
-                                                  enable_overlap=False, spec_algorithm=self.native.SpeculativeAlgorithm.NONE)
+        batch = self.native.ScheduleBatch.init_new(
+            reqs=requests,
+            req_to_token_pool=self.model.req_to_token_pool,
+            token_to_kv_pool_allocator=self.model.token_to_kv_pool_allocator,
+            tree_cache=self.cache,
+            model_config=self.model.model_config,
+            enable_overlap=False,
+            spec_algorithm=self.native.SpeculativeAlgorithm.NONE,
+        )
         batch.prepare_for_extend()
         if batch.input_ids is None:
             batch.input_ids = batch.prefill_input_ids_cpu.to(batch.device, non_blocking=True)
@@ -76,7 +81,10 @@ class KvReadback:
 
         slots = batch.req_pool_indices_cpu.tolist()
         lengths = batch.seq_lens_cpu.tolist()
-        table = [batch.req_to_token_pool.req_to_token[slot, :length].tolist() for slot, length in zip(slots, lengths, strict=True)]
+        table = [
+            batch.req_to_token_pool.req_to_token[slot, :length].tolist()
+            for slot, length in zip(slots, lengths, strict=True)
+        ]
         written = batch.out_cache_loc.tolist()
         flat = [loc for row in table for loc in row]
         expected = flat if extend else [row[-1] for row in table]
@@ -96,7 +104,9 @@ class KvReadback:
             else:
                 pieces = now.split(lengths)
                 correct = correct and torch.equal(torch.stack([piece[-1] for piece in pieces]), expected_data)
-                matching_prefix = matching_prefix and torch.equal(torch.cat([p[:-1] for p in pieces]), self.prefix[len(contents)])
+                matching_prefix = matching_prefix and torch.equal(
+                    torch.cat([p[:-1] for p in pieces]), self.prefix[len(contents)]
+                )
             contents.append(now)
         self.operands = None
         if extend:
@@ -143,7 +153,9 @@ class AttentionRunner:
                 for lengths in self.job["contexts"]:
                     self.batch.decode(self.batch.extend(lengths))
                 warmed = monotonic_ns()
-                observer = DecodeAttentionObservation(None, {"output": self.output, "rank_offset": 0, "attention_sites": {"0": [site]}})
+                observer = DecodeAttentionObservation(
+                    None, {"output": self.output, "rank_offset": 0, "attention_sites": {"0": [site]}}
+                )
                 observer.attach(actual)
                 kv = KvReadback(actual.token_to_kv_pool, module)
                 timings = []
@@ -152,7 +164,9 @@ class AttentionRunner:
                         for _ in range(2):
                             timings.append(self.measure(lengths, observer, kv))
             record = observer.document()
-            record.update(model=actual.model_config.hf_config.to_dict(), rank=observer.rank, load_format=args.load_format)
+            record.update(
+                model=actual.model_config.hf_config.to_dict(), rank=observer.rank, load_format=args.load_format
+            )
             runner.clear()
         finally:
             one_batch.destroy_model_parallel()
@@ -162,8 +176,16 @@ class AttentionRunner:
         exporting = monotonic_ns()
         ScopedTasks.export_calls(self.output, observer.rank, record["calls"])
         write_json(self.output / "attention.json", record)
-        write_json(self.output / "capture.json", {
-            "framework_revision": revision, "measurements": "attention.json", "engine_starts": 0, "model_runner_starts": 1,
-            "initialization_ns": initialized - started, "warmup_ns": warmed - initialized,
-            "points": timings, "postprocessing_ns": monotonic_ns() - exporting,
-        })
+        write_json(
+            self.output / "capture.json",
+            {
+                "framework_revision": revision,
+                "measurements": "attention.json",
+                "engine_starts": 0,
+                "model_runner_starts": 1,
+                "initialization_ns": initialized - started,
+                "warmup_ns": warmed - initialized,
+                "points": timings,
+                "postprocessing_ns": monotonic_ns() - exporting,
+            },
+        )

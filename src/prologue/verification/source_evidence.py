@@ -1,19 +1,19 @@
 """Check retained source evidence independently of template production and prediction."""
 
 import argparse
-from bisect import bisect_right
 import json
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from heapq import heappop, heappush
 from pathlib import Path
 
 from prologue.acquisition.recording import PublishedCapture
 from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
+from prologue.integrations.platforms.ascend.reference import NativeEffectEvidence
 from prologue.libraries.release import LibraryRelease, asset_path
 
 from .actions import ActionScopes
 from .native_case import NativeCase
-from prologue.integrations.platforms.ascend.reference import NativeEffectEvidence
 
 
 class SourceEvidence:
@@ -55,7 +55,10 @@ class SourceEvidence:
             for resource in facts["resources"]
         ], "source resource descriptors differ")
         measurements = facts["measurements"]
-        self.require(all(evidence[key] == measurements[key] for key in ("clock", "window_ns")), "measurement clock/window differs")
+        self.require(
+            all(evidence[key] == measurements[key] for key in ("clock", "window_ns")),
+            "measurement clock/window differs",
+        )
         times = {(item["resource"], item["order"]): item["time_ns"] for item in measurements["coordinates"]}
         coordinates = {}
         for index, (event, anchor) in enumerate(zip(graph["events"], evidence["events"], strict=True)):
@@ -69,7 +72,9 @@ class SourceEvidence:
         native_edges = set()
         for index, edge in enumerate(facts["dependencies"]):
             source, target = (coordinates[self.coordinate(edge[side])] for side in ("source", "target"))
-            self.require(source == target or (source, target, edge["kind"]) in edges, f"native dependency {index} is missing")
+            self.require(
+                source == target or (source, target, edge["kind"]) in edges, f"native dependency {index} is missing"
+            )
             if source != target:
                 native_edges.add((source, target, edge["kind"]))
         orders = self.validate_coverage(coordinates)
@@ -85,14 +90,17 @@ class SourceEvidence:
             native_expressions = ActionScopes.declaration_expressions(native)
             projected_expressions = ActionScopes.declaration_expressions(projected)
             for field in native_expressions:
-                self.require(native_expressions[field] == projected_expressions[field], f"scope {index} changes source {field}")
+                self.require(
+                    native_expressions[field] == projected_expressions[field], f"scope {index} changes source {field}"
+                )
             self.require(len(native["ports"]) == len(projected["ports"]), f"scope {index} port count differs")
             for port, target in zip(native["ports"], projected["ports"], strict=True):
                 expected = {key: value for key, value in port.items() if key not in {"at", "wait", "rendezvous"}}
                 expected["event"] = coordinates[self.coordinate(port["at"])]
                 if "wait" in port:
                     expected["wait"] = {
-                        "resource": port["wait"]["resource"], "begin": coordinates[self.coordinate(port["wait"]["begin"])],
+                        "resource": port["wait"]["resource"],
+                        "begin": coordinates[self.coordinate(port["wait"]["begin"])],
                     }
                 if "rendezvous" in port:
                     expected["rendezvous"] = coordinates[self.coordinate(port["rendezvous"])]
@@ -109,8 +117,11 @@ class SourceEvidence:
             for field in ("kv_accesses", "slot_accesses"):
                 self.require(len(native[field]) == len(projected[field]), f"scope {index} {field} count differs")
                 for access, target in zip(native[field], projected[field], strict=True):
-                    self.require(ActionScopes.expression_key(access.get("rule")) == ActionScopes.expression_key(target.get("rule")),
-                                 f"scope {index} {field} changes its declared token rule")
+                    self.require(
+                        ActionScopes.expression_key(access.get("rule"))
+                        == ActionScopes.expression_key(target.get("rule")),
+                        f"scope {index} {field} changes its declared token rule",
+                    )
                     expected = {key: value for key, value in access.items() if key != "rule"}
                     expected.update({side: coordinates[self.coordinate(access[side])] for side in ("start", "finish")})
                     observed = {key: value for key, value in target.items() if key != "rule"}
@@ -178,7 +189,9 @@ class SourceEvidence:
                 if span is not None:
                     owners.add(span["scope"])
                 common = set.intersection(*(ancestors[owner] for owner in owners))
-                self.require(self.graph["events"][start]["scope"] == max(common), f"event {start} changes source semantic owner")
+                self.require(
+                    self.graph["events"][start]["scope"] == max(common), f"event {start} changes source semantic owner"
+                )
                 preceding = span["scope"] if span is not None else None
                 if position + 1 == len(points):
                     continue
@@ -201,8 +214,11 @@ class SourceEvidence:
         actual = Counter((span, work["scope"], work["resource"], work["kind"], work["start"], work["finish"],
                           json.dumps(work["copy"], sort_keys=True) if "copy" in work else None)
                          for span, work in zip(self.evidence["work_spans"], self.graph["work"], strict=True))
-        self.require(actual == expected,
-                     f"source work coverage differs: {sum((expected - actual).values())} missing, {sum((actual - expected).values())} extra")
+        self.require(
+            actual == expected,
+            f"source work coverage differs: {sum((expected - actual).values())} missing, "
+            f"{sum((actual - expected).values())} extra",
+        )
         self.coverage = {"native_spans": len(self.facts["spans"]), "work_intervals": sum(expected.values()),
                          "ordering_intervals": len(orders)}
         return orders
@@ -305,7 +321,9 @@ class ProductionEvidence:
         launches = {} if retain_measurements else None
         submissions, links = native_evidence.inspect_submissions(protocol_posts, launches)
         payload_times = defaultdict(list) if retain_measurements else None
-        payload = native_evidence.inspect_payload(graph, private_streams, device_intervals, links, launches, payload_times)
+        payload = native_evidence.inspect_payload(
+            graph, private_streams, device_intervals, links, launches, payload_times
+        )
         generations = native_evidence.event_generations
         signals = native_evidence.inspect_signals(contents, native_case.dependencies[rank], generations)
         stream_roles = native_evidence.inspect_stream_roles(*PipelineABI.stream_declarations(native), generations[1])
@@ -338,7 +356,9 @@ class ProductionEvidence:
             delivery = next(submitted for instance, submitted in deliveries if instance["id"] == owner)
             context = FixedHostContext(self.capture, rank, native_evidence, delivery)
             calls = native_case.cpu.native_calls[rank]
-            measured = context.project(native_evidence, graph, host_fences, omitted, self.details, calls, native_case.cpu.native_times)
+            measured = context.project(
+                native_evidence, graph, host_fences, omitted, self.details, calls, native_case.cpu.native_times
+            )
             delays, waits, idle_inputs, posts, queues, protocol = measured
             records["fixed_cpu_calls"] = protocol
             report["native_host_queues"] = queues
@@ -351,7 +371,9 @@ class ProductionEvidence:
             records["fixed_host_waits"] = waits
             records["fixed_host_context"] = context
             records["kernel_threads"] = context.active.kernel_threads
-            records["unbound_queue_notifications"] = queues["queue_completion_notifications"] - queues["bound_to_fixed_work"]
+            records["unbound_queue_notifications"] = (
+                queues["queue_completion_notifications"] - queues["bound_to_fixed_work"]
+            )
 
             native_case.measurements[rank] = records
         return report
@@ -362,7 +384,11 @@ class ProductionEvidence:
         native_case = NativeCase(self.capture, capture, self.production / "work")
         ranks = native_case.workers.observed
         reports = []
-        document = {"production": str(self.production.resolve()), "capture": str(self.capture.resolve()), "ranks": reports}
+        document = {
+            "production": str(self.production.resolve()),
+            "capture": str(self.capture.resolve()),
+            "ranks": reports,
+        }
         origin = json.loads((self.production / "production.json").read_text())["inputs"]["capture_path"]
         if Path(origin).resolve() != self.capture.resolve() or publication["observed_roles"] != ranks:
             return native_case, {**document, "native_case": {"status": "unverified",
@@ -371,17 +397,23 @@ class ProductionEvidence:
         for rank in ranks:
             try:
                 facts = json.loads((native_case.graphs / f"{rank}-facts.json").read_text())
-                report = self.observe_rank(native_case, rank, facts, retain_measurements and native_case.joint_execution)
+                report = self.observe_rank(
+                    native_case, rank, facts, retain_measurements and native_case.joint_execution
+                )
             except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
-
                 # A malformed or absent source is a finding; continue the remaining independent ranks.
                 report = {"mapping": "unverified", "timing": {"status": "unverified"}, "error": str(error)}
             reports.append({"rank": rank, **report})
 
         case_report = {"status": "unverified", "error": "one or more worker mappings are unverified"}
         if not native_case.joint_execution:
-            case_report = {"status": "local_worker_observations", "windows": {
-                owner: [list(window.observed) for window in windows] for owner, windows in native_case.workers.windows.items()}}
+            case_report = {
+                "status": "local_worker_observations",
+                "windows": {
+                    owner: [list(window.observed) for window in windows]
+                    for owner, windows in native_case.workers.windows.items()
+                },
+            }
         elif all(report["mapping"] == "consistent" for report in reports):
             try:
                 native_case.finish()
@@ -399,8 +431,12 @@ class ProductionEvidence:
         workers = bool(document["ranks"]) and all(row["mapping"] == "consistent" and row["timing"]["status"] in timing
                                                   for row in document["ranks"])
         published = "published_templates" not in document or document["published_templates"]["status"] == "matched"
-        return {"local_templates": workers and published and status in {"consistent", "incomplete", "local_worker_observations"},
-                "joint_reference": workers and status == "consistent"}
+        return {
+            "local_templates": workers
+            and published
+            and status in {"consistent", "incomplete", "local_worker_observations"},
+            "joint_reference": workers and status == "consistent",
+        }
 
     def publish(self, document, *, require_joint=False):
         reports, case_report = document["ranks"], document["native_case"]
@@ -408,18 +444,24 @@ class ProductionEvidence:
         self.output.mkdir(parents=True)
         (self.output / "source-evidence.json").write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
         lines = [
-            "# Source Evidence Check", "",
-            "This check compares raw declarations, interpreted records, and the coarse graph. It covers the execution environment, "
-            "call hierarchy and context, communication, retained rules, work and ordering intervals, boundary ownership, geometry, "
-            "dependencies, state access, and agreement between measured time and graph causality. Each work interval must appear "
-            "exactly once. Waits and payload-free intervals contribute ordering only. Instrumentation completeness, applicability "
-            "to target configurations, template generalization, and target predictions require separate evidence.", "",
-            "Native effects are checked against SDK calls, device tasks, runtime records, and queue lifecycles from the same run. "
-            "SDK records or a shared native submission group identify device work. A copy without an SDK task requires evidence of a "
-            "synchronous driver transfer on the original buffer and contributes only a caller interval. Explicit synchronous copies also require a "
-            "measured caller interval and a dependency on the actual return fence.", "",
-            "| Rank | Source mapping | Async copies / sync copies / stream waits | Clock calibration | Nominal time inversions | "
-            "Largest nominal inversion (ns) |", "| --- | --- | ---: | --- | ---: | ---: |",
+            "# Source Evidence Check",
+            "",
+            "This check compares raw declarations, interpreted records, and the coarse graph. It covers the "
+            "execution environment, call hierarchy and context, communication, retained rules, work and ordering "
+            "intervals, boundary ownership, geometry, dependencies, state access, and agreement between measured "
+            "time and graph causality. Each work interval must appear exactly once. Waits and payload-free "
+            "intervals contribute ordering only. Instrumentation completeness, applicability to target "
+            "configurations, template generalization, and target predictions require separate evidence.",
+            "",
+            "Native effects are checked against SDK calls, device tasks, runtime records, and queue lifecycles "
+            "from the same run. SDK records or a shared native submission group identify device work. A copy "
+            "without an SDK task requires evidence of a synchronous driver transfer on the original buffer and "
+            "contributes only a caller interval. Explicit synchronous copies also require a measured caller "
+            "interval and a dependency on the actual return fence.",
+            "",
+            "| Rank | Source mapping | Async copies / sync copies / stream waits | Clock calibration | Nominal "
+            "time inversions | Largest nominal inversion (ns) |",
+            "| --- | --- | ---: | --- | ---: | ---: |",
         ]
         labels = {
             "consistent": "Consistent", "compatible": "Compatible within calibration bounds",
@@ -428,10 +470,16 @@ class ProductionEvidence:
         }
         for report in reports:
             effects = report.get("native_effects")
-            native_counts = f"{effects.get('copies', 0)} / {effects.get('synchronous_copies', 0)} / {effects.get('stream_waits', 0)}" if effects is not None else "-"
+            native_counts = (
+                f"{effects.get('copies', 0)} / {effects.get('synchronous_copies', 0)} / "
+                f"{effects.get('stream_waits', 0)}"
+                if effects is not None
+                else "-"
+            )
             lines.append(
-                f"| {report['rank']} | {labels[report['mapping']]} | {native_counts} | {labels[report['timing']['status']]} | "
-                f"{report.get('counts', {}).get('time_inversion', '-')} | {report.get('maximum_inversion_ns', '-')} |"
+                f"| {report['rank']} | {labels[report['mapping']]} | {native_counts} | "
+                f"{labels[report['timing']['status']]} | {report.get('counts', {}).get('time_inversion', '-')} | "
+                f"{report.get('maximum_inversion_ns', '-')} |"
             )
         for report in reports:
             if "error" in report:
@@ -441,24 +489,35 @@ class ProductionEvidence:
                 measurements = report["native_measurements"]
                 services = report["native_services"]
                 streams, payload = report["native_stream_roles"], report["native_payload"]
-                lines.extend([
-                    "", f"### Rank {report['rank']}", "",
-                    f"Checked {measurements['checked_host_measurements']} host timestamps and "
-                    f"{measurements['checked_device_measurements']} device endpoints against raw records. "
-                    f"{measurements['unmeasured_device_endpoints']} stream boundaries lack measurements, and "
-                    f"{measurements['logical_wait_boundaries']} logical wait boundaries have no device submission. "
-                    f"{measurements['external_transport_endpoints']} transport boundaries require external timing. "
-                    "Synchronous transfers retain the driver's host timestamps, and device return fences retain SDK timestamps.", "",
-                    f"Checked {streams['named_streams']} named streams, {payload.get('retained_payload_tasks', 0)} retained SDK payload tasks, "
-                    f"and {payload.get('opaque_service_tasks', 0)} tasks in private service queues. "
-                    f"Checked {boundaries.get('host_intervals', 0)} raw host intervals, {boundaries.get('service_intervals', 0)} service intervals, "
-                    f"and {boundaries.get('declared_state_accesses', 0)} declared state accesses.", "",
-                    f"Observed {services['synchronous_services']} synchronous services, {services['private_queues']} private queues, "
-                    f"and {services['submitted_tasks']} native submissions. The SDK evidence includes "
-                    f"{signals.get('exported_completions', 0)} exported completions, {signals.get('signal_waits', 0)} waits, "
-                    f"and {signals.get('true_completion_reads', 0)} completion queries that returned true. "
-                    f"The {boundaries.get('derived_state_accesses', 0)} address-derived PD state accesses require pool and transfer evidence.",
-                ])
+                lines.extend(
+                    [
+                        "",
+                        f"### Rank {report['rank']}",
+                        "",
+                        f"Checked {measurements['checked_host_measurements']} host timestamps and "
+                        f"{measurements['checked_device_measurements']} device endpoints against raw records. "
+                        f"{measurements['unmeasured_device_endpoints']} stream boundaries lack measurements, and "
+                        f"{measurements['logical_wait_boundaries']} logical wait boundaries have no device "
+                        f"submission. {measurements['external_transport_endpoints']} transport boundaries require "
+                        "external timing. Synchronous transfers retain the driver's host timestamps, and device "
+                        "return fences retain SDK timestamps.",
+                        "",
+                        f"Checked {streams['named_streams']} named streams, "
+                        f"{payload.get('retained_payload_tasks', 0)} retained SDK payload tasks, and "
+                        f"{payload.get('opaque_service_tasks', 0)} tasks in private service queues. Checked "
+                        f"{boundaries.get('host_intervals', 0)} raw host intervals, "
+                        f"{boundaries.get('service_intervals', 0)} service intervals, and "
+                        f"{boundaries.get('declared_state_accesses', 0)} declared state accesses.",
+                        "",
+                        f"Observed {services['synchronous_services']} synchronous services, "
+                        f"{services['private_queues']} private queues, and {services['submitted_tasks']} native "
+                        f"submissions. The SDK evidence includes {signals.get('exported_completions', 0)} exported "
+                        f"completions, {signals.get('signal_waits', 0)} waits, and "
+                        f"{signals.get('true_completion_reads', 0)} completion queries that returned true. The "
+                        f"{boundaries.get('derived_state_accesses', 0)} address-derived PD state accesses require "
+                        "pool and transfer evidence.",
+                    ]
+                )
         lines.extend(["", f"Native group result `{case_report['status']}`."])
         if "error" in case_report:
             lines.extend(["", case_report["error"]])
@@ -468,41 +527,67 @@ class ProductionEvidence:
         else:
             model = case_report["model_communication"]
             payload = case_report["pd_payload"]
-            lines.extend([
-                "", f"Checked {model['communication_exchanges']} model communication rounds, {case_report['model_links']} cross-rank "
-                f"relations, and {case_report['pd_links']} required PD relations. CPU protocol completeness is "
-                f"`{case_report['cpu_protocol']['complete']}`. Observed {case_report['physical_bindings']['observed_request_bindings']} physical request bindings.",
-                "", f"PD payload checks cover {payload.get('scopes_checked', 0)} transfer scopes, {payload.get('kv_accesses_checked', 0)} KV "
-                f"accesses, and {payload.get('metadata_accesses_checked', 0)} metadata accesses. Registered buffers, copied bytes, and "
-                "request page tables establish the model layer and K/V component at each end. Tensor values and repeated copy counts "
-                "require separate evidence.",
-            ])
+            lines.extend(
+                [
+                    "",
+                    f"Checked {model['communication_exchanges']} model communication rounds, "
+                    f"{case_report['model_links']} cross-rank relations, and {case_report['pd_links']} required PD "
+                    f"relations. CPU protocol completeness is `{case_report['cpu_protocol']['complete']}`. "
+                    f"Observed {case_report['physical_bindings']['observed_request_bindings']} physical request "
+                    "bindings.",
+                    "",
+                    f"PD payload checks cover {payload.get('scopes_checked', 0)} transfer scopes, "
+                    f"{payload.get('kv_accesses_checked', 0)} KV accesses, and "
+                    f"{payload.get('metadata_accesses_checked', 0)} metadata accesses. Registered buffers, copied "
+                    "bytes, and request page tables establish the model layer and K/V component at each end. "
+                    "Tensor values and repeated copy counts require separate evidence.",
+                ]
+            )
             for finding in case_report["findings"]:
                 lines.extend(["", f"`{finding['category']}` {finding.get('reason', finding['kind'])}"])
         if "published_templates" in document:
             published = document["published_templates"]
-            lines.extend(["", f"Released templates: {published['status']}. Matched {published['checked_workers']} original worker bodies."])
-        lines.extend([
-            "", "Nominal inversions use original midpoint timestamps. Each rank uses one calibration across all measured relations, "
-            "including paths through logical waits. The original API, its observed prerequisites, and the absence of physical submissions "
-            "qualify logical waits and any data handed off at their returns. Local work, resource accesses, and recorded signals require measured endpoints. "
-            "A separately observed worker can establish a transport operand and its consumer while its target transport cost remains external. "
-            "Compatibility establishes a feasible calibration on the original graph and timestamps. Exact offsets, capture completeness, "
-            "and SDK attribution require their own evidence. `unknown_time` marks a required measurement gap.",
-            "", "Exit status 0 requires consistent worker mappings and local timing evidence. A joint target reference additionally "
-            "requires consistent physical group evidence and calibration. The group check uses "
-            "native records for participant, CPU protocol, and binding evidence. The default JSON lists up to three nominal timing "
-            "findings per category. `--details` includes every location.", "",
-        ])
+            lines.extend(
+                [
+                    "",
+                    f"Released templates: {published['status']}. Matched {published['checked_workers']} original "
+                    "worker bodies.",
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "Nominal inversions use original midpoint timestamps. Each rank uses one calibration across all "
+                "measured relations, including paths through logical waits. The original API, its observed "
+                "prerequisites, and the absence of physical submissions qualify logical waits and any data handed "
+                "off at their returns. Local work, resource accesses, and recorded signals require measured "
+                "endpoints. A separately observed worker can establish a transport operand and its consumer while "
+                "its target transport cost remains external. Compatibility establishes a feasible calibration on "
+                "the original graph and timestamps. Exact offsets, capture completeness, and SDK attribution "
+                "require their own evidence. `unknown_time` marks a required measurement gap.",
+                "",
+                "Exit status 0 requires consistent worker mappings and local timing evidence. A joint target "
+                "reference additionally requires consistent physical group evidence and calibration. The group "
+                "check uses native records for participant, CPU protocol, and binding evidence. The default JSON "
+                "lists up to three nominal timing findings per category. `--details` includes every location.",
+                "",
+            ]
+        )
         (self.output / "source-evidence.md").write_text("\n".join(lines))
         return 0 if eligibility["joint_reference" if require_joint else "local_templates"] else 1
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--production", type=Path, required=True, help="published produce output with retained intermediates")
-    parser.add_argument("--capture", type=Path, required=True, help="original native source containing independent device clock samples")
-    parser.add_argument("--libraries", type=Path, help="also compare the released templates with this original production")
+    parser.add_argument(
+        "--production", type=Path, required=True, help="published produce output with retained intermediates"
+    )
+    parser.add_argument(
+        "--capture", type=Path, required=True, help="original native source containing independent device clock samples"
+    )
+    parser.add_argument(
+        "--libraries", type=Path, help="also compare the released templates with this original production"
+    )
     parser.add_argument("--output", type=Path, required=True, help="new report directory")
     parser.add_argument("--details", action="store_true", help="include all timing findings")
     arguments = parser.parse_args()

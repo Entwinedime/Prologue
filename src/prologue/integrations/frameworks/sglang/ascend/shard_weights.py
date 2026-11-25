@@ -7,8 +7,8 @@ from itertools import chain
 import torch
 import torch.distributed as distributed
 
-from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
+from prologue.runtime.io import write_json
 
 
 class LayerWeights:
@@ -53,7 +53,9 @@ class ShardWeights:
         modules = dict(model.named_modules())
         layers = {name for name, role in ModelScopes.selected(modules).items() if role == "layer"}
         owners = defaultdict(set)
-        for path, tensor in chain(model.named_parameters(remove_duplicate=False), model.named_buffers(remove_duplicate=False)):
+        for path, tensor in chain(
+            model.named_parameters(remove_duplicate=False), model.named_buffers(remove_duplicate=False)
+        ):
             container = path.rpartition(".")[0]
             while container and container not in layers:
                 container = container.rpartition(".")[0]
@@ -75,7 +77,13 @@ class ShardWeights:
             layer = modules[name]
             layer.forward = update_wrapper(partial(residence.forward, layer.forward), layer.forward)
             parked += sum(backing.nbytes for _, backing in residence.storage)
-        write_json(self.directory / "weight-residency" / f"{distributed.get_rank()}.json", {
-            "native_weight_bytes": footprint, "worker_share_bytes": self.share, "parked_bytes": parked, "layers": len(groups),
-        })
+        write_json(
+            self.directory / "weight-residency" / f"{distributed.get_rank()}.json",
+            {
+                "native_weight_bytes": footprint,
+                "worker_share_bytes": self.share,
+                "parked_bytes": parked,
+                "layers": len(groups),
+            },
+        )
         return model

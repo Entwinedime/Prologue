@@ -1,7 +1,6 @@
 """Compare independent predictions with native request submission and output times."""
 
 import argparse
-import json
 from pathlib import Path
 from statistics import mean
 
@@ -115,23 +114,38 @@ class NativeLatencyMetrics:
             if disaggregated:
                 decode = self.emitter["delivery"].by_request[identity]
                 decode_ingress_ns = published["ingress_raw_ns"] - self.origin_ns
-                if decode["scheduled_ns"] != declared or not declared <= decode["submitted_ns"] <= decode_ingress_ns <= first:
+                if (
+                    decode["scheduled_ns"] != declared
+                    or not declared <= decode["submitted_ns"] <= decode_ingress_ns <= first
+                ):
                     raise ValueError(f"native request {identity} has inconsistent Decode delivery")
                 row.update(decode_submitted_ns=decode["submitted_ns"], decode_ingress_ns=decode_ingress_ns)
             requests.append(row)
         total = sum(row["output_tokens"] for row in requests)
         elapsed = max(row["last_publication_ns"] for row in requests)
-        return {"capture": str(self.source), "publication_basis": self.emitter["basis"], "origin_raw_ns": self.origin_ns,
-                "ttft_basis": "prefill_submission_to_decode_publication" if disaggregated else "request_submission_to_scheduler_publication",
-                "output_tokens": total, "tokens_per_second": total * 1e9 / elapsed if elapsed else None,
-                "p95_ttft_ns": percentile95(row["ttft_ns"] for row in requests), "requests": requests,
-                "specialization_loads": self.specializations}
+        return {
+            "capture": str(self.source),
+            "publication_basis": self.emitter["basis"],
+            "origin_raw_ns": self.origin_ns,
+            "ttft_basis": "prefill_submission_to_decode_publication"
+            if disaggregated
+            else "request_submission_to_scheduler_publication",
+            "output_tokens": total,
+            "tokens_per_second": total * 1e9 / elapsed if elapsed else None,
+            "p95_ttft_ns": percentile95(row["ttft_ns"] for row in requests),
+            "requests": requests,
+            "specialization_loads": self.specializations,
+        }
 
 
 def compare_request_metrics(reference, predicted):
     actual = {row["id"]: row for row in reference["requests"]}
     estimates = {row["id"]: row for row in predicted["requests"]}
-    if len(actual) != len(reference["requests"]) or len(estimates) != len(predicted["requests"]) or actual.keys() != estimates.keys():
+    if (
+        len(actual) != len(reference["requests"])
+        or len(estimates) != len(predicted["requests"])
+        or actual.keys() != estimates.keys()
+    ):
         raise ValueError("request metrics require the same unique request identities")
 
     differences = {identity: {"id": identity} for identity in actual}
@@ -157,10 +171,16 @@ def compare_request_metrics(reference, predicted):
                             "total_requests": len(actual), "not_applicable": missing, "zero_denominators": zero}
 
     observed_rate, predicted_rate = reference["tokens_per_second"], predicted["tokens_per_second"]
-    return {"accuracy": accuracy, "delta_from_baseline": {
-        "requests": list(differences.values()), "p95_ttft_ns": predicted["p95_ttft_ns"] - reference["p95_ttft_ns"],
-        "tokens_per_second": None if observed_rate is None or predicted_rate is None else predicted_rate - observed_rate,
-    }}
+    return {
+        "accuracy": accuracy,
+        "delta_from_baseline": {
+            "requests": list(differences.values()),
+            "p95_ttft_ns": predicted["p95_ttft_ns"] - reference["p95_ttft_ns"],
+            "tokens_per_second": None
+            if observed_rate is None or predicted_rate is None
+            else predicted_rate - observed_rate,
+        },
+    }
 
 
 class LatencyComparison:
@@ -180,7 +200,9 @@ class LatencyComparison:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capture", type=Path, nargs="+", required=True)
-    parser.add_argument("--prediction", type=Path, nargs="+", help="existing result JSONs for a publication-only comparison")
+    parser.add_argument(
+        "--prediction", type=Path, nargs="+", help="existing result JSONs for a publication-only comparison"
+    )
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
     rows = [NativeLatencyMetrics.from_source(path).report() for path in arguments.capture]

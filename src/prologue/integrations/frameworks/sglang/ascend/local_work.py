@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from prologue.runtime.docker import DockerImage
-from prologue.acquisition.capture import NativeAttempt
 from prologue.acquisition.recording import PublishedCapture
 from prologue.acquisition.rules import EvidenceGap
 from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples
@@ -16,8 +14,8 @@ from prologue.integrations.frameworks.sglang.ascend.local_copy import LocalCopie
 from prologue.integrations.frameworks.sglang.ascend.local_scheduler import LocalSchedulerBatch, LocalWorkerBinding
 from prologue.integrations.frameworks.sglang.ascend.worker_capture import WorkerCapture
 from prologue.integrations.frameworks.sglang.worker_templates import WorkerDomain
-from prologue.runtime.docker import ModelingProcess
 from prologue.performance.requirements import CostRequirements
+from prologue.runtime.docker import DockerImage, ModelingProcess
 
 
 class LocalSchedulerWork:
@@ -103,8 +101,10 @@ class LocalPeerWork(LocalSchedulerWork):
             # Staged and physical graphs may differ internally. Use the normal evaluator on the measured wire operand.
             missing = CostSamples.uncovered(queries, report, model, directory)
         name = "samples/transport.json"
-        answers = [{"status": "untriggered", "detail": missing[i]} if i in missing else {"status": "qualified", "asset": name}
-                   for i in range(len(queries))]
+        answers = [
+            {"status": "untriggered", "detail": missing[i]} if i in missing else {"status": "qualified", "asset": name}
+            for i in range(len(queries))
+        ]
         return ({name: report} if len(missing) < len(queries) else {}), answers
 
 
@@ -117,7 +117,9 @@ class LocalHostWork(LocalSchedulerWork):
 
     @staticmethod
     def matches(query):
-        return query.get("work") == "host" and query["domain"]["framework"] == "sglang" and "torch_npu" in query["domain"]
+        return (
+            query.get("work") == "host" and query["domain"]["framework"] == "sglang" and "torch_npu" in query["domain"]
+        )
 
     def sources(self, deployment, rank):
         for directory in self.arguments.structure_session:
@@ -151,15 +153,33 @@ class LocalHostWork(LocalSchedulerWork):
             if needed <= points:
                 self.selected_catalog = source.attempt_id, rank, catalog
                 return SGLangAscendLaunch.local_attempt(
-                    arguments, limit, deployment, source.inputs["physical_devices"], source.inputs["framework_revision"],
-                    job, "--local-host", runtime_trace=True, host_timing=True, model=job["model"]["path"],
+                    arguments,
+                    limit,
+                    deployment,
+                    source.inputs["physical_devices"],
+                    source.inputs["framework_revision"],
+                    job,
+                    "--local-host",
+                    runtime_trace=True,
+                    host_timing=True,
+                    model=job["model"]["path"],
                     template_recording=source.attempt_id,
                 )
 
         # A portable library has no raw profiles. Recreate only the live cut and time it in a separate worker.
         job, devices, revision = LocalSchedulerBatch.work_job(queries, deployment)
-        return SGLangAscendLaunch.local_attempt(arguments, limit, deployment, devices, revision, job, "--local-host-pair",
-                                                 runtime_trace=True, host_timing=True, model=job["model"]["path"])
+        return SGLangAscendLaunch.local_attempt(
+            arguments,
+            limit,
+            deployment,
+            devices,
+            revision,
+            job,
+            "--local-host-pair",
+            runtime_trace=True,
+            host_timing=True,
+            model=job["model"]["path"],
+        )
 
     def qualify(self, queries, recording, timeout=None):
         inputs = recording.inputs

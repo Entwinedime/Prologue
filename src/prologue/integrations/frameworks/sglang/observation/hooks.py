@@ -9,10 +9,10 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.configuration import NativeConfiguration
 from prologue.integrations.frameworks.sglang.observation.model_calls import NativeModelObservation
 from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
+from prologue.runtime.io import write_json
 
 
 class SGLangObservation(NativeModelObservation):
@@ -37,8 +37,12 @@ class SGLangObservation(NativeModelObservation):
         if "ep" in description["serving_input"]["configuration"]:
             from prologue.integrations.frameworks.sglang.observation.native_routes import NativeExpertRoutes
 
-            self.routing = NativeExpertRoutes(description, self.content.execution_aliases, metadata=self.tensors.metadata,
-                                             auxiliary=self.tensors.auxiliary)
+            self.routing = NativeExpertRoutes(
+                description,
+                self.content.execution_aliases,
+                metadata=self.tensors.metadata,
+                auxiliary=self.tensors.auxiliary,
+            )
 
     @property
     def protocol_enabled(self):
@@ -53,14 +57,20 @@ class SGLangObservation(NativeModelObservation):
         result = original(runner)
         self.content.content.check_vocabulary(runner.model_config.vocab_size)
         self.worker = NativeWorkerLayout(runner, self.framework_revision, self.description["rank_offset"])
-        self.parallel, self.groups, self.implementation = self.worker.parallel, self.worker.groups, self.worker.implementation
+        self.parallel, self.groups, self.implementation = (
+            self.worker.parallel,
+            self.worker.groups,
+            self.worker.implementation,
+        )
         self.tensors.namespace = f"rank/{self.parallel['rank']}/"
         self.modules = ModelScopes(self)
         self.modules.attach_model(runner.model)
         if self.routing is not None:
             from prologue.integrations.frameworks.sglang.observation.expert_scopes import ExpertScopes
 
-            self.routing.configure(self.modules.experts, self.modules.expert_layers, runner.model_config.hf_config.num_hidden_layers)
+            self.routing.configure(
+                self.modules.experts, self.modules.expert_layers, runner.model_config.hf_config.num_hidden_layers
+            )
             self.experts = ExpertScopes(self, self.modules.experts)
         return result
 
@@ -69,10 +79,14 @@ class SGLangObservation(NativeModelObservation):
         sites = set(self.modules.bindings)
         if self.routing is not None:
             sites.update(self.experts.sites)
-        conditions = () if self.routing is None else self.routing.geometry.observation_conditions(self.routing.input["requests"])
+        conditions = (
+            () if self.routing is None else self.routing.geometry.observation_conditions(self.routing.input["requests"])
+        )
         self.roles = self.worker.roles(sites, self.modules.expert_layers, conditions)
         if any(worker["expert_layers"] for worker in self.roles.workers) != (self.routing is not None):
-            raise ValueError("MoE models require a declared expert topology and routes; dense models do not accept them")
+            raise ValueError(
+                "MoE models require a declared expert topology and routes; dense models do not accept them"
+            )
         self.content.configure(self.roles.workers)
 
     def plan_roles(self):
@@ -144,7 +158,9 @@ class SGLangObservation(NativeModelObservation):
         # Input dispatch may be mid-pipeline round; only on_idle closes the observed control flow.
         return self.window.phase is None or self.window.drained
 
-    def flush_wrapper(self, original: Any, wrapper: Any, *, flush_cache: Any, is_fully_idle: Any, ipc_channels: Any) -> None:
+    def flush_wrapper(
+        self, original: Any, wrapper: Any, *, flush_cache: Any, is_fully_idle: Any, ipc_channels: Any
+    ) -> None:
         self.scheduler = flush_cache.__self__
         original(wrapper, flush_cache=flush_cache, is_fully_idle=self.can_flush, ipc_channels=ipc_channels)
 
@@ -199,7 +215,10 @@ class SGLangObservation(NativeModelObservation):
                 if self.resource_history is not None:
                     recording["request_input_attempts"] = self.window.input_attempts
                     recording["action_values"] = self.action_values
-                    write_json(self.directory / "resources" / f"rank-{self.parallel['rank']}.json", self.resource_history.document())
+                    write_json(
+                        self.directory / "resources" / f"rank-{self.parallel['rank']}.json",
+                        self.resource_history.document(),
+                    )
                 write_json(self.directory / f"rank-{self.parallel['rank']}.json", recording)
             self.window.prepared_phase = self.window.phase
         return result
@@ -221,11 +240,12 @@ class SGLangObservation(NativeModelObservation):
         from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
         from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
 
+        receiver = "sglang.srt.managers.scheduler_components.request_receiver.SchedulerRequestReceiver"
         targets = {
             "sglang.srt.model_executor.model_runner.ModelRunner.load_model": self.load_model,
             "sglang.srt.managers.scheduler.Scheduler.handle_generate_request": self.request,
-            "sglang.srt.managers.scheduler_components.request_receiver.SchedulerRequestReceiver.recv_requests": self.receive,
-            "sglang.srt.managers.scheduler_components.request_receiver.SchedulerRequestReceiver._pull_raw_reqs": partial(self.receive, ingress=True),
+            f"{receiver}.recv_requests": self.receive,
+            f"{receiver}._pull_raw_reqs": partial(self.receive, ingress=True),
             "sglang.srt.managers.scheduler.Scheduler.flush_cache": self.flush,
             "sglang.srt.managers.scheduler.Scheduler.on_idle": self.idle,
             "sglang.srt.managers.scheduler_components.flush_wrapper.SchedulerFlushWrapper.__init__": self.flush_wrapper,
@@ -239,7 +259,9 @@ class SGLangObservation(NativeModelObservation):
         if shard_transport is not None:
 
             # CPU protocol observers must see the original device operand, before staging changes its device.
-            shard_transport(self.directory, self.tensors.auxiliary, self.communications.local_exchange).install(self.description)
+            shard_transport(self.directory, self.tensors.auxiliary, self.communications.local_exchange).install(
+                self.description
+            )
         NativeProfiles(self).install()
         self.communications.install()
         self.kv_transfers = NativeKvScopes(self.calls, self)

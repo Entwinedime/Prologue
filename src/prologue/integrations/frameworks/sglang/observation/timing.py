@@ -4,13 +4,13 @@ from contextlib import nullcontext
 from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 
-from prologue.runtime.io import write_json
-from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
 from prologue.integrations.frameworks.sglang.observation.content import NativeContent
 from prologue.integrations.frameworks.sglang.observation.host_samples import NativeHostSamples
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 from prologue.integrations.frameworks.sglang.observation.native_routes import NativeExpertRoutes
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
+from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
+from prologue.runtime.io import write_json
 
 
 class NativeTiming:
@@ -32,7 +32,9 @@ class NativeTiming:
             self.requests = {native: {"id": identity} for native, identity in self.content.aliases.items()}
         if "ep" in description["serving_input"]["configuration"]:
             auxiliary = nullcontext if self.host is None else self.host.auxiliary
-            self.routing = NativeExpertRoutes(description, self.content.execution_aliases, metadata=auxiliary, auxiliary=auxiliary)
+            self.routing = NativeExpertRoutes(
+                description, self.content.execution_aliases, metadata=auxiliary, auxiliary=auxiliary
+            )
 
     def load_routed_model(self, original, runner):
         result = original(runner)
@@ -158,9 +160,13 @@ class NativeTiming:
         self.content.install()
         if self.routing is not None:
             HookRegistry.register(
-                "sglang.srt.model_executor.model_runner.ModelRunner.load_model", self.load_routed_model, HookType.AROUND,
+                "sglang.srt.model_executor.model_runner.ModelRunner.load_model",
+                self.load_routed_model,
+                HookType.AROUND,
             )
             self.routing.install()
-        HookRegistry.register("sglang.srt.managers.scheduler.Scheduler.handle_generate_request", self.request, HookType.AROUND)
+        HookRegistry.register(
+            "sglang.srt.managers.scheduler.Scheduler.handle_generate_request", self.request, HookType.AROUND
+        )
         HookRegistry.register("sglang.srt.managers.scheduler.Scheduler.flush_cache", self.flush, HookType.AROUND)
         HookRegistry.register("sglang.srt.managers.scheduler.Scheduler.on_idle", self.idle, HookType.AROUND)

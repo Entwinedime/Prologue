@@ -7,9 +7,9 @@ from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from prologue.runtime.io import write_json
-from prologue.runtime.docker import ModelingProcess
 from prologue.performance.requirements import CostRequirements
+from prologue.runtime.docker import ModelingProcess
+from prologue.runtime.io import write_json
 
 from .fixed_reference import FixedReference
 from .latency_metrics import compare_request_metrics
@@ -47,7 +47,9 @@ class FixedPerformance:
         for index, interval in enumerate(reference.intervals):
             if external := reference.external_cost(interval):
                 rank, identity, features = external
-                points[index] = requirements.external("fixed_protocol", domains[rank], identity, interval.kind, features)
+                points[index] = requirements.external(
+                    "fixed_protocol", domains[rank], identity, interval.kind, features
+                )
         costs = {}
         if points:
             asset = json.loads(self.arguments.costs.read_text())["domains"]
@@ -102,7 +104,9 @@ class FixedPerformance:
             if (consumer == target or consumer >= len(positions)) and replayed[source] + lag == replayed[consumer]:
                 tight[consumer].append(source)
         for (source, consumer, fixed), service in zip(plan["work"], services, strict=True):
-            if (consumer == target or consumer >= len(positions)) and replayed[source] + service + fixed == replayed[consumer]:
+            if (consumer == target or consumer >= len(positions)) and replayed[source] + service + fixed == replayed[
+                consumer
+            ]:
                 tight[consumer].append(source)
 
         # Auxiliary gates retain the nearest original prerequisite for attribution.
@@ -122,7 +126,10 @@ class FixedPerformance:
 
     def measured_baseline(self, reference, model, scratch, measured):
         if None in measured or "unqualified_work_service_partitions" in reference.gaps:
-            self.report["baseline"] = {"status": "incomplete_measured_services", "missing_services": measured.count(None)}
+            self.report["baseline"] = {
+                "status": "incomplete_measured_services",
+                "missing_services": measured.count(None),
+            }
             return None
 
         plan = reference.timeline()
@@ -175,8 +182,13 @@ class FixedPerformance:
         for name, indices in members.items():
             paired = [i for i in indices if estimates[i] is not None and measured[i] is not None]
             errors = [estimates[i] - measured[i] for i in paired]
-            row = reports[name] = {"selector": groups[name], "observed_work": len(indices), "paired_work": len(paired),
-                                   "signed_service_error_ns": sum(errors), "absolute_service_error_ns": sum(map(abs, errors))}
+            row = reports[name] = {
+                "selector": groups[name],
+                "observed_work": len(indices),
+                "paired_work": len(paired),
+                "signed_service_error_ns": sum(errors),
+                "absolute_service_error_ns": sum(map(abs, errors)),
+            }
             if not indices:
                 row["status"] = "not_observed"
             elif len(paired) < len(indices):
@@ -194,8 +206,10 @@ class FixedPerformance:
         if not reference.gaps and None not in estimates:
             scenarios["modeled"] = estimates
             for kind in sorted(self.report["service_coverage"]):
-                scenarios[f"restore_{kind}"] = [observed if interval.kind == kind else estimate
-                                                 for interval, estimate, observed in zip(reference.intervals, estimates, measured, strict=True)]
+                scenarios[f"restore_{kind}"] = [
+                    observed if interval.kind == kind else estimate
+                    for interval, estimate, observed in zip(reference.intervals, estimates, measured, strict=True)
+                ]
         if not scenarios:
             return True
         scenarios = {name: reference.replay_services(durations) for name, durations in scenarios.items()}
@@ -207,14 +221,18 @@ class FixedPerformance:
         outcomes = {}
         for name, stamps in replayed.items():
             inputs = reference.compare_active_input_reads(stamps)
-            outcome = outcomes[name] = {"active_input_reads": inputs,
-                                       "first_timing_difference": self.first_drift(reference, plan, scenarios[name], times, stamps)}
+            outcome = outcomes[name] = {
+                "active_input_reads": inputs,
+                "first_timing_difference": self.first_drift(reference, plan, scenarios[name], times, stamps),
+            }
             if inputs["different"]:
                 outcome["status"] = "input_readiness_unverified"
                 continue
 
             metrics = reference.publications.metrics(stamps)
-            outcome.update(request_metrics=metrics, **compare_request_metrics(self.report["baseline"]["request_metrics"], metrics))
+            outcome.update(
+                request_metrics=metrics, **compare_request_metrics(self.report["baseline"]["request_metrics"], metrics)
+            )
         self.report["scenarios"] = outcomes
         return outcomes.get("modeled", {}).get("status") != "input_readiness_unverified"
 
@@ -249,8 +267,13 @@ class FixedPerformance:
         self.report["external_releases"] = [{"rank": rank, "event": event, "time_ns": stamp}
                                             for (rank, event), stamp in reference.entries.items()]
         self.report["idle_ingress_releases"] = [
-            {"rank": rank, "predecessor": stopped.start, "successor": stopped.finish,
-             "time_ns": wait.source.raw_ns - reference.origin_ns, "wait_enter_ns": stopped.observed_ns - reference.origin_ns}
+            {
+                "rank": rank,
+                "predecessor": stopped.start,
+                "successor": stopped.finish,
+                "time_ns": wait.source.raw_ns - reference.origin_ns,
+                "wait_enter_ns": stopped.observed_ns - reference.origin_ns,
+            }
             for (rank, stopped), wait in reference.input_releases.items()
         ]
         conditions = Counter()
@@ -300,7 +323,11 @@ def main():
     parser.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
     parser.add_argument("--timeout", type=float, required=True, help="cumulative modeling allowance in seconds")
     parser.add_argument("--details", action="store_true", help="retain all reference evidence findings")
-    parser.add_argument("--work-groups", type=Path, help="replace only native work matching each named group and hold other services measured")
+    parser.add_argument(
+        "--work-groups",
+        type=Path,
+        help="replace only native work matching each named group and hold other services measured",
+    )
     raise SystemExit(0 if FixedPerformance(parser.parse_args()).run() else 1)
 
 

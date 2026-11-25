@@ -128,7 +128,10 @@ class NativeServingSession:
 
             for index, instance in enumerate(self.instances):
                 reader, writer = context.Pipe(duplex=False)
-                process = context.Process(target=self.execute, args=(instance, barrier, clock, bootstrap, rendezvous[index].environment, writer))
+                process = context.Process(
+                    target=self.execute,
+                    args=(instance, barrier, clock, bootstrap, rendezvous[index].environment, writer),
+                )
                 try:
                     process.start()
                 except BaseException:
@@ -145,7 +148,9 @@ class NativeServingSession:
                     try:
                         success, result = connection.recv()
                     except EOFError as error:
-                        raise RuntimeError(f"native capture instance {index} exited without reporting a result") from error
+                        raise RuntimeError(
+                            f"native capture instance {index} exited without reporting a result"
+                        ) from error
                     if not success:
                         raise RuntimeError(f"native capture instance {index} failed:\n{result}")
                     results[index] = result
@@ -155,9 +160,15 @@ class NativeServingSession:
                 process.join()
                 if process.exitcode != 0:
                     raise RuntimeError(f"native capture worker exited with {process.exitcode}")
-            write_json(self.output / "capture.json", {
-                "framework_revision": self.framework_revision, "instances": [results[index] for index in range(len(results))],
-            }, indent=2, replace=False)
+            write_json(
+                self.output / "capture.json",
+                {
+                    "framework_revision": self.framework_revision,
+                    "instances": [results[index] for index in range(len(results))],
+                },
+                indent=2,
+                replace=False,
+            )
         finally:
             for connection in pending:
                 connection.close()

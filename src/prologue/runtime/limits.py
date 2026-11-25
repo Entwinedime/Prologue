@@ -41,7 +41,11 @@ class Usage:
                      owner.processing_ns + max(0, self.processing_ns - spent.processing_ns))
 
     def document(self):
-        return {"native_charged_ns": self.native_ns, "native_attempts": self.attempts, "postprocessing_ns": self.processing_ns}
+        return {
+            "native_charged_ns": self.native_ns,
+            "native_attempts": self.attempts,
+            "postprocessing_ns": self.processing_ns,
+        }
 
 
 def retained_bytes(root):

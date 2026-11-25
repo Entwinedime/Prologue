@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import torch
 
-from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.disaggregated_calls import DisaggregatedCalls
 from prologue.integrations.frameworks.sglang.kv_layout import MhaKvLayout
@@ -18,6 +17,7 @@ from prologue.integrations.platforms.ascend.export import AscendExport
 from prologue.integrations.platforms.ascend.markers import AscendMarkers
 from prologue.integrations.platforms.ascend.observation import AscendObservation
 from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
+from prologue.runtime.io import write_json
 
 
 class ReceiverPools:

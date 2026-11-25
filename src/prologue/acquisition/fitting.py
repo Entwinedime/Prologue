@@ -7,12 +7,11 @@ from contextlib import nullcontext
 from statistics import median
 
 from prologue.acquisition.options import FitCostsOptions
-from prologue.runtime.io import read_json, write_json
-from prologue.runtime.docker import ModelingProcess
 from prologue.performance.fitting import FittedCosts
 from prologue.performance.requirements import CostRequirements
-from prologue.performance.samples import ServiceSamples
-from prologue.performance.samples import WorkCatalog
+from prologue.performance.samples import ServiceSamples, WorkCatalog
+from prologue.runtime.docker import ModelingProcess
+from prologue.runtime.io import read_json, write_json
 
 
 class TransportSamples:
@@ -35,8 +34,11 @@ class TransportSamples:
                 if "external" in definition and definition["work"] == [{"kind": "collective"}]:
                     continue
                 axes = row["features"]["axes"]
-                notification = (definition["work"] == [{"kind": "transfer"}] and axes.keys() == {"parameter.dependencies"}
-                                and (definition.get("external", {}).get("operation"), axes["parameter.dependencies"]) in notices)
+                notification = (
+                    definition["work"] == [{"kind": "transfer"}]
+                    and axes.keys() == {"parameter.dependencies"}
+                    and (definition.get("external", {}).get("operation"), axes["parameter.dependencies"]) in notices
+                )
                 if not protocol or not (notification or ServiceSamples.state_transfer(definition, interval)):
                     raise ValueError(f"physical peer profile contains unrelated work at {path}")
                 domain = json.dumps(source["domain"], sort_keys=True)
@@ -102,7 +104,9 @@ class FitCosts:
             directory.mkdir(parents=True, exist_ok=True)
             model = ModelingProcess(self.arguments.binary, self.arguments.modeling_image, self.arguments.timeout)
 
-        fitted, counts, missing, estimates = self.qualify(sources, demand, model, directory, self.reuse_samples, held_out=checks)
+        fitted, counts, missing, estimates = self.qualify(
+            sources, demand, model, directory, self.reuse_samples, held_out=checks
+        )
         evaluations = [{"source": name, **self.assess(source, (estimates[point] for point in points))}
                        for name, source, points in check_sources]
 

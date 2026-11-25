@@ -13,23 +13,49 @@ def main() -> None:
     capture = commands.add_parser("capture", help="run one normalized native observation job")
     capture.add_argument("--input", type=Path, required=True)
     capture.add_argument("--output", type=Path, required=True)
-    capture.add_argument("--local-shards", action="store_true", help="execute logical shards on the single mounted device")
+    capture.add_argument(
+        "--local-shards", action="store_true", help="execute logical shards on the single mounted device"
+    )
     observation = capture.add_mutually_exclusive_group()
-    observation.add_argument("--resource-trace", action="store_true", help="observe resources and input reads for independent comparison")
-    observation.add_argument("--service-reference", action="store_true", help="observe structure, resources and same-run CPU activity")
-    observation.add_argument("--latency-only", action="store_true", help="record scheduler ingress and token publication only")
-    observation.add_argument("--host-timing", action="store_true", help="sample native call cuts and CPU-only queue activity")
-    observation.add_argument("--local-copy", action="store_true", help="time isolated native tensor copies on one device")
-    observation.add_argument("--local-attention", action="store_true", help="measure Decode on a native ModelRunner and KV pool")
-    observation.add_argument("--local-prebuilt", action="store_true", help="observe the receiver assembling a native PD batch")
-    observation.add_argument("--local-embedding", action="store_true", help="observe a vocabulary lookup across native TP shards")
-    observation.add_argument("--local-worker", action="store_true", help="read the initialized scheduler, model and pools")
-    observation.add_argument("--local-host", action="store_true", help="measure local scheduler work with the independent CPU probe")
-    observation.add_argument("--local-host-pair", action="store_true", help="capture and independently time one local worker cut")
+    observation.add_argument(
+        "--resource-trace", action="store_true", help="observe resources and input reads for independent comparison"
+    )
+    observation.add_argument(
+        "--service-reference", action="store_true", help="observe structure, resources and same-run CPU activity"
+    )
+    observation.add_argument(
+        "--latency-only", action="store_true", help="record scheduler ingress and token publication only"
+    )
+    observation.add_argument(
+        "--host-timing", action="store_true", help="sample native call cuts and CPU-only queue activity"
+    )
+    observation.add_argument(
+        "--local-copy", action="store_true", help="time isolated native tensor copies on one device"
+    )
+    observation.add_argument(
+        "--local-attention", action="store_true", help="measure Decode on a native ModelRunner and KV pool"
+    )
+    observation.add_argument(
+        "--local-prebuilt", action="store_true", help="observe the receiver assembling a native PD batch"
+    )
+    observation.add_argument(
+        "--local-embedding", action="store_true", help="observe a vocabulary lookup across native TP shards"
+    )
+    observation.add_argument(
+        "--local-worker", action="store_true", help="read the initialized scheduler, model and pools"
+    )
+    observation.add_argument(
+        "--local-host", action="store_true", help="measure local scheduler work with the independent CPU probe"
+    )
+    observation.add_argument(
+        "--local-host-pair", action="store_true", help="capture and independently time one local worker cut"
+    )
     observation.add_argument("--attention", action="store_true", help="measure selected native Decode attention calls")
     interpret = commands.add_parser("interpret", help="interpret an SDK-exported worker recording")
     interpret.add_argument("--trace", type=Path, required=True)
-    interpret.add_argument("--evidence", action="store_true", help="retain measured boundary clocks for source auditing")
+    interpret.add_argument(
+        "--evidence", action="store_true", help="retain measured boundary clocks for source auditing"
+    )
     export = commands.add_parser("export", help="export one worker through an isolated SDK workspace")
     cuts = commands.add_parser("sampling-cuts", help="bind source device work to portable native sampling cuts")
     for option in ("work", "identities", "runner"):
@@ -41,6 +67,7 @@ def main() -> None:
     arguments = parser.parse_args()
     if arguments.command == "capture" and arguments.local_host_pair:
         import os
+
         from prologue.integrations.frameworks.sglang.ascend.scheduler_runner import WorkerProbes
 
         WorkerProbes(os.environ["PROLOGUE_SGLANG_REVISION"]).pair(arguments.input, arguments.output)
@@ -49,14 +76,20 @@ def main() -> None:
 
         from prologue.integrations.platforms.ascend.copy_sampling import TensorCopySamples
 
-        TensorCopySamples().sample(json.loads(arguments.input.read_text()), arguments.output, os.environ["PROLOGUE_SGLANG_REVISION"])
+        TensorCopySamples().sample(
+            json.loads(arguments.input.read_text()), arguments.output, os.environ["PROLOGUE_SGLANG_REVISION"]
+        )
     elif arguments.command == "capture" and arguments.local_attention:
         import os
 
         from prologue.integrations.frameworks.sglang.ascend.attention_runner import AttentionRunner
 
-        AttentionRunner(json.loads(arguments.input.read_bytes()), arguments.output).run(os.environ["PROLOGUE_SGLANG_REVISION"])
-    elif arguments.command == "capture" and (arguments.local_prebuilt or arguments.local_embedding or arguments.local_worker or arguments.local_host):
+        AttentionRunner(json.loads(arguments.input.read_bytes()), arguments.output).run(
+            os.environ["PROLOGUE_SGLANG_REVISION"]
+        )
+    elif arguments.command == "capture" and (
+        arguments.local_prebuilt or arguments.local_embedding or arguments.local_worker or arguments.local_host
+    ):
         import os
 
         job = json.loads(arguments.input.read_bytes())
@@ -86,9 +119,14 @@ def main() -> None:
         source = json.loads(arguments.input.read_text())
         attention = source.pop("attention_sites") if arguments.attention else None
         NativeServingSession(
-            source, arguments.output, attention_sites=attention,
-            resource_trace=arguments.resource_trace, latency_only=arguments.latency_only,
-            host_timing=arguments.host_timing, service_reference=arguments.service_reference, local_shards=arguments.local_shards,
+            source,
+            arguments.output,
+            attention_sites=attention,
+            resource_trace=arguments.resource_trace,
+            latency_only=arguments.latency_only,
+            host_timing=arguments.host_timing,
+            service_reference=arguments.service_reference,
+            local_shards=arguments.local_shards,
         ).run()
         if attention:
             from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
@@ -116,7 +154,9 @@ def main() -> None:
         recording["scopes"] = SGLangSourceScopes(recording["environment"]).lower(recording["scopes"])
 
         # Framework closure rules stay separate from runtime interpretation and the common graph projection.
-        observation = AscendObservation(arguments.input, arguments.rank, recording, arguments.trace, evidence=arguments.evidence)
+        observation = AscendObservation(
+            arguments.input, arguments.rank, recording, arguments.trace, evidence=arguments.evidence
+        )
         observation.name_streams(*PipelineABI.stream_declarations(recording))
         facts = observation.document()
         native.connect_metadata(facts)

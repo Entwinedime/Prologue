@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from prologue.runtime.io import write_json
 from prologue.performance.models import ModelBindings
+from prologue.runtime.io import write_json
 
 
 def cost_identity(value):
@@ -103,7 +103,9 @@ class CostRequirements:
             return {}
         with TemporaryDirectory(prefix=".cost-points-", dir=directory) as scratch:
             scratch = Path(scratch)
-            points_path, asset_path, result_path = (scratch / name for name in ("points.json", "costs.json", "estimates.json"))
+            points_path, asset_path, result_path = (
+                scratch / name for name in ("points.json", "costs.json", "estimates.json")
+            )
             with accounting():
                 groups = defaultdict(dict)
                 for request in requests:
@@ -115,8 +117,10 @@ class CostRequirements:
                 queries = []
                 for domain, points in groups.items():
                     definitions = {}
-                    rows = [[definitions.setdefault(point.definition, len(definitions)), point.interval, point.features()]
-                            for point in points]
+                    rows = [
+                        [definitions.setdefault(point.definition, len(definitions)), point.interval, point.features()]
+                        for point in points
+                    ]
                     queries.append({
                         "domain": source_domains[domain], "definitions": [declared[key] for key in definitions],
                         "points": rows,
@@ -167,13 +171,21 @@ class CostRequirements:
                 value["reason"] = reasons[point]
             row["points"].append(value)
         return {
-            "targets": {target: {"basis": basis, "counts": dict(counts[target])} for target, basis in self.targets.items()},
+            "targets": {
+                target: {"basis": basis, "counts": dict(counts[target])} for target, basis in self.targets.items()
+            },
             "uncovered": [
-                {"domain": self.domains[domain], "definitions": [self.definitions[name] for name in group["definitions"]],
-                 "work": list(group["work"].values())}
+                {
+                    "domain": self.domains[domain],
+                    "definitions": [self.definitions[name] for name in group["definitions"]],
+                    "work": list(group["work"].values()),
+                }
                 for domain, group in domains.items()
             ],
-            "scope": "Recorded graph and protocol work and each supplied first cost gap. Work on unreached control paths is unknown.",
+            "scope": (
+                "Recorded graph and protocol work and each supplied first cost gap. Work on unreached "
+                "control paths is unknown."
+            ),
         }
 
     @staticmethod

@@ -47,9 +47,24 @@ class ModelingCommand:
         self.output, self.inputs = output.parent.resolve() / output.name, inputs
 
     def arguments(self, allowance, options=()):
-        command = ["docker", "run", "--rm", "--init", "--runtime", "runc", "--network", "none", "--name", self.name,
-                   "--entrypoint", "/usr/bin/timeout", "--mount", f"type=bind,src={self.binary},dst=/app/prologue,readonly",
-                   "--mount", f"type=bind,src={self.output.parent},dst=/output"]
+        command = [
+            "docker",
+            "run",
+            "--rm",
+            "--init",
+            "--runtime",
+            "runc",
+            "--network",
+            "none",
+            "--name",
+            self.name,
+            "--entrypoint",
+            "/usr/bin/timeout",
+            "--mount",
+            f"type=bind,src={self.binary},dst=/app/prologue,readonly",
+            "--mount",
+            f"type=bind,src={self.output.parent},dst=/output",
+        ]
         paths = []
         for index, source in enumerate(self.inputs):
             path = f"/inputs/{index}.json"

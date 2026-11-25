@@ -7,9 +7,9 @@ from subprocess import TimeoutExpired
 
 from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.app.prediction import PredictionProcess
-from prologue.workflow.options import PredictionOptions
-from prologue.runtime.io import write_json
 from prologue.libraries.release import LibraryRelease
+from prologue.runtime.io import write_json
+from prologue.workflow.options import PredictionOptions
 
 from .latency_metrics import LatencyComparison, NativeLatencyMetrics
 from .reference import ReferenceRecording
@@ -61,7 +61,9 @@ class AutonomousVerification:
         if "decode_submitted_ns" in rows[0]:
             submissions.append("decode_submitted_ns")
         order = sorted(rows, key=lambda row: row["declared_ns"])
-        self.report["max_submission_delay_ns"] = max(row[field] - row["declared_ns"] for field in submissions for row in rows)
+        self.report["max_submission_delay_ns"] = max(
+            row[field] - row["declared_ns"] for field in submissions for row in rows
+        )
         if any(order != sorted(rows, key=lambda row: row[field]) for field in submissions):
             return "reference_reordered_submissions"
         return "qualified"
@@ -104,7 +106,9 @@ class AutonomousVerification:
         if reference != "qualified":
             return self.finish(reference)
 
-        self.report["prediction"] = LatencyComparison(self.report["native"], self.output / "prediction/result.json").report()
+        self.report["prediction"] = LatencyComparison(
+            self.report["native"], self.output / "prediction/result.json"
+        ).report()
         return self.finish("compared")
 
 

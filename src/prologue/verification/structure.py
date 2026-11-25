@@ -8,10 +8,10 @@ from tempfile import TemporaryDirectory
 from time import monotonic_ns
 
 from prologue.app.prediction import PredictionProcess
-from prologue.workflow.options import PredictionOptions
-from prologue.runtime.io import write_json
-from prologue.runtime.docker import ModelingProcess
 from prologue.libraries.release import LibraryRelease
+from prologue.runtime.docker import ModelingProcess
+from prologue.runtime.io import write_json
+from prologue.workflow.options import PredictionOptions
 
 from .compare_actions import ActionComparison
 from .execution_inputs import NativeInputs
@@ -74,7 +74,9 @@ class StructureVerification:
             modeling = ModelingProcess(args.binary, args.modeling_image, args.timeout)
             try:
                 for rank in reference.sources:
-                    modeling.run_model("action-layouts", layouts / f"{rank}-layouts.json", reference.graphs / f"{rank}-graph.json")
+                    modeling.run_model(
+                        "action-layouts", layouts / f"{rank}-layouts.json", reference.graphs / f"{rank}-graph.json"
+                    )
             except (CalledProcessError, TimeoutError, TimeoutExpired, RuntimeError) as error:
                 return self.finish("action_layout_unavailable", stages | {"layout_error": str(error)})
             inputs = NativeInputs(capture, reference.graphs, timing, layouts, peer_handoffs=args.peer_handoffs)
@@ -99,7 +101,8 @@ class StructureVerification:
                 return self.finish(status, stages | {"evidence": str(path)})
             return self.finish("prediction_no_trace", stages)
 
-        # Compare against the original reference, including actual condition consumption and independent causal evidence.
+        # Compare against the original reference, including actual condition consumption and independent causal
+        # evidence.
         started = monotonic_ns()
         try:
             report = ActionComparison(reference, trace, self.output / "comparison", args.details,
@@ -131,11 +134,20 @@ def main():
     parser.add_argument("--capture", type=Path, required=True, help="published detailed native capture task")
     for name in ("reference", "libraries", "input", "binary", "output"):
         parser.add_argument(f"--{name}", type=Path, required=True)
-    parser.add_argument("--timeout", type=float, required=True, help="allowance in seconds for each of layout preparation and prediction")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        required=True,
+        help="allowance in seconds for each of layout preparation and prediction",
+    )
     parser.add_argument("--control-image", default="prologue-control:ubuntu22.04")
     parser.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
     parser.add_argument("--details", action="store_true", help="retain all evidence findings")
-    parser.add_argument("--peer-handoffs", action="store_true", help="allow measured common ports when a single-device action has a different layout")
+    parser.add_argument(
+        "--peer-handoffs",
+        action="store_true",
+        help="allow measured common ports when a single-device action has a different layout",
+    )
     raise SystemExit(0 if StructureVerification(parser.parse_args()).run() else 1)
 
 

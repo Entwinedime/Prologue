@@ -3,6 +3,7 @@
 import argparse
 import json
 from collections import Counter, defaultdict
+from itertools import pairwise
 from pathlib import Path
 
 from prologue.runtime.io import read_json, write_json
@@ -47,10 +48,14 @@ class NativeInputs:
         layouts = None if self.layouts is None else read_json(self.layouts / f"{rank}-layouts.json")
         if layouts is not None and set(layouts) != {str(index) for index in identities}:
             raise ValueError("timing layouts and independently observed action scopes differ")
-        if layouts is not None and sum(len(layout["identity"][-1]) for layout in layouts.values()) != len(graph["work"]):
+        if layouts is not None and sum(len(layout["identity"][-1]) for layout in layouts.values()) != len(
+            graph["work"]
+        ):
             raise ValueError(f"rank {rank} action cuts omit or repeat native work")
         services = case.measured_service_pairs(rank, graph, raw) if layouts is not None else set()
-        self.counts["unmeasured_work_finishes"] += sum(evidence["events"][work["finish"]]["time_ns"] is None for work in graph["work"])
+        self.counts["unmeasured_work_finishes"] += sum(
+            evidence["events"][work["finish"]]["time_ns"] is None for work in graph["work"]
+        )
         for index, identity in identities.items():
             scope = graph["scopes"][index]
             entered = next(port["event"] for port in scope["ports"] if port["name"] == "call.enter")
@@ -75,7 +80,10 @@ class NativeInputs:
                     measured = clock.window(event)
                     if measured is None:
                         if event not in case.logical[rank]:
-                            raise ValueError(f"rank {rank} action {index} event {event} lacks measurement or a verified order witness")
+                            raise ValueError(
+                                f"rank {rank} action {index} event {event} lacks measurement or a verified "
+                                "order witness"
+                            )
                         time_ns = None
                         self.counts["logical_boundaries"] += 1
                     else:
@@ -179,9 +187,15 @@ class NativeInputs:
 
             # The pairing uses already checked posting conditions, before a consumer can advance.
             posts = sorted(positions, key=lambda row: (row["group"], row["step"]))
-            result.append({"posts": posts, "ready": {
-                side: self.window(*windows[rank], origin) for side, rank in zip(("send", "receive"), key[1:3], strict=True)
-            }})
+            result.append(
+                {
+                    "posts": posts,
+                    "ready": {
+                        side: self.window(*windows[rank], origin)
+                        for side, rank in zip(("send", "receive"), key[1:3], strict=True)
+                    },
+                }
+            )
         return result
 
     def run(self, reference=None):
@@ -191,7 +205,9 @@ class NativeInputs:
             evidence = NativeCase.read(self.capture, self.graphs) if reference is None else reference
             if self.peer_handoffs and not any(source[0] != target[0] for source, target, _ in evidence.links):
                 raise ValueError("peer handoff timing requires a verified cross-worker dependency")
-            for instance, session, submitted in zip(evidence.manifest["instances"], evidence.sessions, evidence.submissions, strict=True):
+            for instance, session, submitted in zip(
+                evidence.manifest["instances"], evidence.sessions, evidence.submissions, strict=True
+            ):
                 if set(instance["observed_roles"]) != set(session["native_participants"]):
                     raise ValueError("native input needs every actual participant")
                 origin = submitted.origin_ns
@@ -223,8 +239,12 @@ class NativeInputs:
                     if post is not None:
                         self.cpu_positions[post] = {"group": group, "step": position}
             notifications = [
-                {"identity": {"group": row["group"], "name": name, "work": {"request": row["request"]}},
-                 "window": self.window(row[field]["begin_raw_ns"], row[field]["end_raw_ns"], self.origins[row["group"]])}
+                {
+                    "identity": {"group": row["group"], "name": name, "work": {"request": row["request"]}},
+                    "window": self.window(
+                        row[field]["begin_raw_ns"], row[field]["end_raw_ns"], self.origins[row["group"]]
+                    ),
+                }
                 for row in evidence.readiness["endpoints"]
                 for name, field in (("kv_ready", "reservation_update"), ("kv_success", "completion_update"))
                 if row[field] is not None and (name != "kv_ready" or row["remote_reservation"])
@@ -240,17 +260,29 @@ class NativeInputs:
                         "notifications": notifications, "transfers": self.transfers(evidence)}
             if self.layouts is not None:
                 document["layouts"] = self.layout_values.values
-            report.update(status="partial" if self.counts["unmeasured_boundaries"] or self.counts["unmeasured_work_finishes"]
-                          or native_report["status"] != "consistent" else "extracted",
-                          clock_realization=self.realization.report(), counts=dict(self.counts),
-                          steps={group: len(actor["steps"]) for group, actor in actors.items()})
+            report.update(
+                status="partial"
+                if self.counts["unmeasured_boundaries"]
+                or self.counts["unmeasured_work_finishes"]
+                or native_report["status"] != "consistent"
+                else "extracted",
+                clock_realization=self.realization.report(),
+                counts=dict(self.counts),
+                steps={group: len(actor["steps"]) for group, actor in actors.items()},
+            )
             if report["status"] == "extracted":
                 write_json(self.output / "execution-inputs.json", document, replace=False)
         except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
             report.update(status="unverified", error=str(error))
         report["timing_scope"] = "peer_handoffs" if self.peer_handoffs else "observed_execution"
-        report["scope"] = "Measured endpoints use one feasible device-clock realization rounded upward to integer nanoseconds. Independently verified elided waits supply causal witnesses without time constraints. Original calibration uncertainty and CPU wire and notification bounds remain."
-        (self.output / "execution-inputs-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+        report["scope"] = (
+            "Measured endpoints use one feasible device-clock realization rounded upward to integer "
+            "nanoseconds. Independently verified elided waits supply causal witnesses without time "
+            "constraints. Original calibration uncertainty and CPU wire and notification bounds remain."
+        )
+        (self.output / "execution-inputs-report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+        )
         return report
 
 
@@ -281,19 +313,34 @@ class ConsumedInputs:
         for rank, (source, raw, identities) in self.case.sources.items():
             group = self.groups[rank]
 
-            # Original CPU entries establish order; graph scope references retain their independently checked raw origins.
+            # Original CPU entries establish order; graph scope references retain their independently checked
+            # raw origins.
             host = {int(row["name"].split("/")[1]): row["begin_raw_ns"]
                     for row in raw["host_observation"]["intervals"] if row["name"].startswith("prologue.scope/")}
             host.update({query["scope"]: query["begin_raw_ns"] for query in raw["state_queries"]})
             for index, identity in identities.items():
-                self.ports[group, index] = tuple(self.case.completion_boundaries(rank, index, peer_handoffs=self.peer_handoffs))
+                self.ports[group, index] = tuple(
+                    self.case.completion_boundaries(rank, index, peer_handoffs=self.peer_handoffs)
+                )
                 if bindings := source.invocation_bindings(index, group):
                     self.bindings[group, index] = bindings
                 origins = source.graph["scopes"][index]["bindings"]["source_scopes"]
-                begin = min(raw["scopes"][origin]["host_interval"]["begin_raw_ns"] if "service" in raw["scopes"][origin] else host[origin]
-                            for origin in origins)
-                ordered[group].append((begin, {"operation": "action", "identity": {key: identity[key] for key in ("action", "parameters", "work")},
-                                              "source": {"scope": index}}))
+                begin = min(
+                    raw["scopes"][origin]["host_interval"]["begin_raw_ns"]
+                    if "service" in raw["scopes"][origin]
+                    else host[origin]
+                    for origin in origins
+                )
+                ordered[group].append(
+                    (
+                        begin,
+                        {
+                            "operation": "action",
+                            "identity": {key: identity[key] for key in ("action", "parameters", "work")},
+                            "source": {"scope": index},
+                        },
+                    )
+                )
 
             for call in self.case.cpu.native_calls[rank]:
                 if not call.execution["in_flow"]:
@@ -306,7 +353,9 @@ class ConsumedInputs:
 
             if raw["request_ingress"]:
                 instance = group.rsplit("/", 1)[0]
-                for index, (interval, read) in enumerate(zip(raw["request_input_attempts"], self.ingress.native_reads[instance], strict=True)):
+                for index, (interval, read) in enumerate(
+                    zip(raw["request_input_attempts"], self.ingress.native_reads[instance], strict=True)
+                ):
                     ordered[group].append((interval["begin_raw_ns"], {
                         "operation": "input", "identity": read["identity"], "source": {"input": index},
                     }))
@@ -314,7 +363,7 @@ class ConsumedInputs:
         self.expected = {}
         for group, records in ordered.items():
             records.sort(key=lambda item: item[0])
-            if any(left[0] >= right[0] for left, right in zip(records, records[1:])):
+            if any(left[0] >= right[0] for left, right in pairwise(records)):
                 raise ValueError("native condition witnesses need strictly ordered measured CPU entries")
             self.expected[group] = [record for _, record in records]
 
@@ -351,10 +400,13 @@ class ConsumedInputs:
                     or row["step"] != position or position >= len(self.expected[group]) or group in self.pending):
                 raise ValueError(f"invalid consumed execution condition position: {group} at {position}")
 
-            # The following graph or input read supplies the actual identity; the receipt only selects its original condition.
+            # The following graph or input read supplies the actual identity; the receipt only selects its
+            # original condition.
             record = self.expected[group][position]
             if row["operation"] != record["operation"] or row["source"] != record["source"]:
-                raise ValueError(f"consumed execution condition differs from its native causal prefix: {group} at {position}")
+                raise ValueError(
+                    f"consumed execution condition differs from its native causal prefix: {group} at {position}"
+                )
             self.positions[group] += 1
             self.counts[record["operation"]] += 1
             if record["operation"] == "input":
@@ -433,7 +485,9 @@ class ConsumedInputs:
             for boundary in self.ports[group, scope]:
                 target = contents.boundary_event(0, boundary["at"])
                 if target is None:
-                    raise ValueError(f"required native resource tail is absent at {group}, scope {scope}: {boundary['at']}")
+                    raise ValueError(
+                        f"required native resource tail is absent at {group}, scope {scope}: {boundary['at']}"
+                    )
                 event = row["event_ids"][target]
                 self.boundaries[event][self.ranks[group], boundary["event"]] = None
             self.measured_graph = (self.ranks[group], scope, contents, row["event_ids"], {}, row["work_ns"])
@@ -482,7 +536,9 @@ class ConsumedInputs:
             raise ValueError(f"rank {rank} action {root} consumed an unrelated native event")
         if {name: identities[event] for name, event in predicted.events.items()} != native.events:
             raise ValueError(f"rank {rank} action {root} changes native semantic ports")
-        predicted_work = Counter((identity[:2], identities[begin], identities[end]) for identity, begin, end in predicted.work)
+        predicted_work = Counter(
+            (identity[:2], identities[begin], identities[end]) for identity, begin, end in predicted.work
+        )
         if predicted_work != Counter((identity[:2], begin, end) for identity, begin, end in native.work):
             raise ValueError(f"rank {rank} action {root} changes native work endpoint pairs")
 
@@ -514,15 +570,30 @@ class ConsumedInputs:
                     "scope": "No consumed-condition witness; ordinary logical pairing only."}
         remaining = sum(len(records) - self.positions[group] for group, records in self.expected.items())
         complete = not remaining and not self.pending and not self.reads and not self.boundaries
-        full = complete and not self.peer_handoffs and not self.counts["cpu"] and 0 < self.counts["full_graphs"] == self.counts["action"]
+        full = (
+            complete
+            and not self.peer_handoffs
+            and not self.counts["cpu"]
+            and 0 < self.counts["full_graphs"] == self.counts["action"]
+        )
         if self.peer_handoffs:
             self.counts["shared_boundary_graphs"] = self.counts["action_graphs"] - self.counts["full_graphs"]
         clock = self.realization.solve()
-        return {"status": "complete" if complete else "partial", "verified_prefix": True,
-                "full_node_coverage": full,
-                "checked": dict(self.counts), "unconsumed": remaining, "unbound_graphs": len(self.pending), "unreturned_reads": len(self.reads),
-                "unfinished_boundaries": len(self.boundaries), "clock_realization": clock.report(),
-                "scope": "Consumed native identities follow measured CPU order. Timed conditions use original measurements and one joint clock; logical witnesses leave completion to actual dependencies."}
+        return {
+            "status": "complete" if complete else "partial",
+            "verified_prefix": True,
+            "full_node_coverage": full,
+            "checked": dict(self.counts),
+            "unconsumed": remaining,
+            "unbound_graphs": len(self.pending),
+            "unreturned_reads": len(self.reads),
+            "unfinished_boundaries": len(self.boundaries),
+            "clock_realization": clock.report(),
+            "scope": (
+                "Consumed native identities follow measured CPU order. Timed conditions use original "
+                "measurements and one joint clock; logical witnesses leave completion to actual dependencies."
+            ),
+        }
 
 
 def main():

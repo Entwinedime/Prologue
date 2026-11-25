@@ -9,7 +9,6 @@ import torch.distributed as distributed
 from sglang.srt.distributed import parallel_state
 from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
-from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.ascend.shard_transport import ShardTransport
 from prologue.integrations.frameworks.sglang.groups import ParallelGroups
 from prologue.integrations.frameworks.sglang.observation.call_scopes import NativeCallObservation
@@ -21,6 +20,7 @@ from prologue.integrations.platforms.ascend.export import AscendExport
 from prologue.integrations.platforms.ascend.markers import AscendMarkers
 from prologue.integrations.platforms.ascend.observation import AscendObservation
 from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
+from prologue.runtime.io import write_json
 
 
 class EmbeddingReady(Exception):
@@ -49,7 +49,10 @@ class EmbeddingReady(Exception):
                           skip_tokenizer_init=True, disable_cuda_graph=True, disable_overlap_schedule=True)
         set_global_server_args_for_scheduler(args)
         config = ModelConfig.from_server_args(args)
-        if json.loads(config.hf_config.to_json_string(use_diff=False)) != impl["model"] or str(config.dtype) != impl["dtype"]:
+        if (
+            json.loads(config.hf_config.to_json_string(use_diff=False)) != impl["model"]
+            or str(config.dtype) != impl["dtype"]
+        ):
             raise ValueError("requested and loaded embedding model or dtype differ")
         initialize_dp_attention(args, config)
 
@@ -72,7 +75,9 @@ class ShardRows:
     def __init__(self, shard, count, rank, cpu_group):
         indices = shard.shard_indices
         self.ranges = [None] * shard.tp_size
-        distributed.all_gather_object(self.ranges, [indices.org_vocab_start_index, indices.org_vocab_end_index], group=cpu_group)
+        distributed.all_gather_object(
+            self.ranges, [indices.org_vocab_start_index, indices.org_vocab_end_index], group=cpu_group
+        )
         bounds = [0, *(end for _, end in self.ranges)]
         if (bounds[-1] != shard.org_vocab_size or any(end <= start for start, end in self.ranges)
                 or [start for start, _ in self.ranges] != bounds[:-1]):

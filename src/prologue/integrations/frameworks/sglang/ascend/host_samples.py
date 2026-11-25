@@ -1,17 +1,16 @@
 """Match independently timed native CPU fragments to complete coarse work intervals."""
 
-import json
 from collections import Counter, defaultdict
 
 from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.acquisition.recording import PublishedCapture
-from prologue.runtime.io import read_json, read_jsonl, write_json
 from prologue.integrations.frameworks.sglang.acquisition.host_scopes import NativeHostCalls
 from prologue.integrations.frameworks.sglang.ascend.launch import SGLangAscendLaunch
 from prologue.integrations.platforms.ascend.host_alignment import AscendHostAlignment, ThreadService
 from prologue.integrations.platforms.ascend.trace import AscendTrace
 from prologue.integrations.runtimes.pytorch.protocol_work import CpuProtocolWork
 from prologue.performance.samples import ServiceSamples, WorkCatalog
+from prologue.runtime.io import read_json, read_jsonl, write_json
 
 
 class HostCostSamples:
@@ -30,7 +29,9 @@ class HostCostSamples:
         raw = read_json(original.source / f"rank-{rank}.json")
         if raw["environment"] != probe["environment"] or probe["rank"] != rank or probe["clock"] != "monotonic_raw_ns":
             raise ValueError("local CPU probe differs from the observed native worker or clock")
-        return cls().measure(catalog, {rank: probe}, rank, raw, original.source, original.source / "sdk/trace.json", timed.source)
+        return cls().measure(
+            catalog, {rank: probe}, rank, raw, original.source, original.source / "sdk/trace.json", timed.source
+        )
 
     @staticmethod
     def supports(work, resource):
@@ -141,8 +142,14 @@ class HostCostSamples:
         if (facts["measurements"]["window_ns"] != catalog.window
                 or facts["environment"] != graph["environment"] or original["environment"] != graph["environment"]):
             raise ValueError("host measurement uses a graph from a different native capture")
-        if (not host["host_timing"] or "profile_windows" in instance or set(records) != set(instance["native_participants"])
-                or any(record["rank"] != actor or record["clock"] != "monotonic_raw_ns" for actor, record in records.items())):
+        if (
+            not host["host_timing"]
+            or "profile_windows" in instance
+            or set(records) != set(instance["native_participants"])
+            or any(
+                record["rank"] != actor or record["clock"] != "monotonic_raw_ns" for actor, record in records.items()
+            )
+        ):
             raise ValueError("host timing requires all CPU participants from one run on the common RAW clock")
 
         report = self.measure(catalog, records, rank, original, source_root, self.arguments.trace, path.parent)
@@ -169,8 +176,14 @@ class HostCostSamples:
         profile, = (source_root / "native" / f"rank-{rank}").glob("*_ascend_pt")
         trace = AscendTrace(profile, source_root / "runtime", original, trace_path)
         alignment = AscendHostAlignment(
-            trace, original["scopes"], probe["scopes"], queues["commands"], list(read_jsonl(directory / timing["runtime"])),
-            list(read_jsonl(directory / timing["activity"])), probe["auxiliary_intervals"], cold[rank].values(),
+            trace,
+            original["scopes"],
+            probe["scopes"],
+            queues["commands"],
+            list(read_jsonl(directory / timing["runtime"])),
+            list(read_jsonl(directory / timing["activity"])),
+            probe["auxiliary_intervals"],
+            cold[rank].values(),
         )
         exact = alignment.cuts(pairs, original["state_queries"])
         local = alignment.cuts(local_pairs, original["state_queries"], strict_runtime=True) if local_pairs else None
@@ -194,7 +207,11 @@ class HostCostSamples:
                 thread = int(resource["identity"].split("/")[1])
                 submission = resource["role"] == "submission"
                 duration = exact.duration(thread, begin, end, submission)
-                if duration is None and local_pairs and source_calls.supports_local_work(scope, features, observed_calls, local_pairs):
+                if (
+                    duration is None
+                    and local_pairs
+                    and source_calls.supports_local_work(scope, features, observed_calls, local_pairs)
+                ):
                     duration = local.duration(thread, begin, end, submission)
                     if duration is not None:
                         self.qualification["locally_matched_work"] += 1

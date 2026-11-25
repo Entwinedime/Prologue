@@ -6,10 +6,10 @@ import json
 from itertools import pairwise
 from pathlib import Path
 
-from prologue.runtime.io import write_json
 from prologue.contracts.workload import WorkloadContent
 from prologue.contracts.workload.expert_routes import ExpertRoutes
 from prologue.integrations.frameworks.sglang.configuration import CaptureInput
+from prologue.runtime.io import write_json
 
 
 class MatrixInputs:
