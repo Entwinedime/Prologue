@@ -160,7 +160,7 @@ flowchart TB
 | 目录 / 文件 | 核心职责 |
 | --- | --- |
 | [`src/prologue/app/`](../../src/prologue/app/) | Python 公开 CLI（`__main__.py`）、预测调度（`prediction.py`）、采集/控制容器内入口（`capture_worker.py`、`control_worker.py`）以及 C++ 可执行程序入口（`main.cpp`、`execution_trace.cpp`）。 |
-| [`src/prologue/workflow/`](../../src/prologue/workflow/) | 配置集探索编排（`exploration.py`）、目标状态与额度约束（`targets.py`、`limits.py`）与摘要报告（`report.py`）。 |
+| [`src/prologue/workflow/`](../../src/prologue/workflow/) | 配置集探索编排（`exploration.py`）、目标状态（`targets.py`）、工作流调用选项（`options.py`）与摘要报告（`report.py`）。 |
 | [`src/prologue/acquisition/`](../../src/prologue/acquisition/) | 通用观测合同（`observation/`）、采集规则与会话管理（`capture.py`、`rules.py`、`budget.py`）、离线图/模板生产（`production.py`）、协调缺项补采与发布（`replenishment.py`）、成本采样与拟合编排（`costs.py`、`fitting.py`）。 |
 | [`libraries/`](../../src/prologue/libraries) / [`runtime/`](../../src/prologue/runtime) | 双库的读取、拼接与增量发布集中在库层。宿主底座负责文件、工作区锁、时限与容器。 |
 | [`src/prologue/contracts/`](../../src/prologue/contracts/) | C++ 表达式与 serving 公共数据结构、Python workload 及条件 EP 路由校验（`workload/`）。 |
@@ -168,7 +168,7 @@ flowchart TB
 | [`src/prologue/templates/`](../../src/prologue/templates/) | 模板编译、接口导出、绑定、归一化、局部叶复用、候选选择、局部证据补充与实例化。 |
 | [`src/prologue/serving/`](../../src/prologue/serving/) | 控制交互（`controller/`）、唯一资源服务（`resources/`）、事件时间线与依赖/通信推进（`execution/`）、会话编排（`session.cpp`）及耗时/执行输入接入。 |
 | [`src/prologue/performance/`](../../src/prologue/performance/) | C++23 统一工作特征提取与成本求值（`work_features.cpp`、`work_costs.cpp`、`service_model.cpp`）；Python 离线拟合、模型族注册与样本合同（`fitting.py`、`models.py`、`backends.py`、`requirements.py`、`samples.py`）。 |
-| [`src/prologue/integrations/`](../../src/prologue/integrations/) | `frameworks/sglang/`（唯一解释 SGLang 批次、KV、MoE 层几何、观测、无设备控制与 Ascend 组合局部规则）、`platforms/ascend/`（物理部署、SDK 桥、时钟与通知取证）、`runtimes/`（PyTorch/Gloo 公共协议边界）。 |
+| [`src/prologue/integrations/`](../../src/prologue/integrations/) | SGLang 在 `shared/` 定义批次、KV、角色及坐标合同，`observation/` 在原生 worker 内采集，`control/` 执行无设备决策，`acquisition/` 在宿主选择部署与局部采样规则。Ascend 的 `runtime/` 记录原始事件，`analysis/` 解释设备工作与端口，`host/` 管理物理部署，`reference/` 依据原始记录独立核对。PyTorch/Gloo 的调用边界由 `runtimes/` 维护。 |
 | [`src/prologue/verification/`](../../src/prologue/verification/) | 原生整组核对（`source_evidence.py`、`native_case.py`）、受控时间提取（`execution_inputs.py`）、结构/固定图/自主三路验证与局部构图（`structure.py`、`compare_actions.py`、`fixed_graph.py`、`autonomous.py`、`local_graphs.cpp`）。 |
 
 - **条件 EP 路由与拓扑规范化**：条件 EP 路由归属 workload 合同，采集与控制共用实现；框架适配器按原生 MoE 块配对路由器与专家模块取得逐层 top-k、层号和专家数，禁止从首个 router 推断全模型。原生参数规范化若改写用户请求的拓扑，须在启动 worker 前报错，不得将改写结果记为原配置成功。
