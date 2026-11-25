@@ -5,7 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from prologue.integrations.platforms.ascend.analysis.commands import StreamCommand, StreamCommands
-from prologue.integrations.platforms.ascend.analysis.trace import AscendTrace, DevicePoint, Interval, ThreadIntervals
+from prologue.integrations.platforms.ascend.analysis.trace import AscendTrace, DevicePoint
+from prologue.integrations.platforms.ascend.trace_store import Interval, ThreadIntervals
 
 
 class ObservedTimeline:

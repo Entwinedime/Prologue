@@ -2,7 +2,7 @@
 
 from collections import Counter
 
-from prologue.common.workload.expert_routes import ExpertRoutes
+from prologue.common.workload import ExpertRoutes
 from prologue.integrations.bindings import platform_domain
 
 

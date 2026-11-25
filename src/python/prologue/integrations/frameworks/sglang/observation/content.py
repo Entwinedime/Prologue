@@ -4,8 +4,7 @@ from contextlib import nullcontext
 
 import torch
 
-from prologue.common.workload import WorkloadContent
-from prologue.common.workload.routing import RoutedContent
+from prologue.common.workload import RoutedContent, WorkloadContent
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import symbols
 from prologue.integrations.frameworks.sglang.shared.cache_keys import RoutedCacheKeys

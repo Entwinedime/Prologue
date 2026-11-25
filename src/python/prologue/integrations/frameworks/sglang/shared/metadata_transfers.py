@@ -1,14 +1,11 @@
 """Hand native CPU protocol intervals to runtime services, outside template CPU work."""
 
-import inspect
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import partial
 
-import torch.distributed as distributed
-
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
-from prologue.integrations.runtimes.pytorch.shared.protocol_work import CpuTransfer
+from prologue.integrations.runtimes.pytorch.shared import CpuTransfer
 
 
 class MetadataWork:
@@ -22,8 +19,10 @@ class MetadataWork:
 
 
 class MetadataTransfers:
-    def __init__(self, calls) -> None:
+    def __init__(self, calls, protocol=None) -> None:
         self.calls = calls
+        self.protocol = protocol
+        self.transfer = CpuTransfer()
         self.in_transfer = ContextVar("native_metadata_transfer", default=False)
 
     @contextmanager
@@ -48,26 +47,19 @@ class MetadataTransfers:
                 self.in_transfer.reset(previous)
 
     def invoke(self, name, signature, original, *args, **kwargs):
+
+        # Blocking send/recv can call their async counterpart. Observe the outer native call exactly once.
         if self.in_transfer.get():
             return original(*args, **kwargs)
-        arguments = signature.bind(*args, **kwargs)
-        arguments.apply_defaults()
-        values = arguments.arguments
-        tensor = values["tensor"]
-        if tensor.device.type != "cpu":
+        native = self.transfer.native(name, signature, args, kwargs)
+        if native is None:
             return original(*args, **kwargs)
-        group = distributed.group.WORLD if values["group"] is None else values["group"]
-        receiving = name in {"recv", "irecv"}
-        endpoint = "src" if receiving else "dst"
-        transfer = CpuTransfer(range(distributed.get_world_size())).describe(
-            tensor, group, values["tag"], values[endpoint], values.get("group_" + endpoint), receiving,
-        )
+        transfer, group = native
+        run = original if self.protocol is None else partial(self.protocol.invoke, name, transfer, group, original)
         with self.boundary(name, transfer, group):
-            result = original(*args, **kwargs)
+            result = run(*args, **kwargs)
         return MetadataWork(self, result, name, transfer, group) if name in {"isend", "irecv"} else result
 
     def install(self):
-        for name in ("send", "recv", "isend", "irecv"):
-            hook = partial(self.invoke, name, inspect.signature(getattr(distributed, name)))
-            for module in ("torch.distributed", "torch.distributed.distributed_c10d"):
-                HookTable.around(f"{module}.{name}", hook)
+        for path, hook in CpuTransfer.hooks(self.invoke):
+            HookTable.around(path, hook)

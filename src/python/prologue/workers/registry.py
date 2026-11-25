@@ -3,5 +3,8 @@
 from prologue.integrations.bindings import route
 
 
-def entry(component):
-    return route().framework_module(component)
+def entry(component, job=None):
+    selected = route()
+    if job is not None:
+        selected.require_job(job)
+    return selected.framework_module(component)

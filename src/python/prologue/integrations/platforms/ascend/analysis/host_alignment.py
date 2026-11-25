@@ -2,9 +2,8 @@
 
 from collections import Counter, defaultdict
 
-from prologue.common.observation.thread_service import ThreadService
-from prologue.integrations.platforms.ascend.analysis.sdk_rows import HOST_WAITS
-from prologue.integrations.platforms.ascend.analysis.trace import Interval, ThreadIntervals
+from prologue.common.observation import ThreadService
+from prologue.integrations.platforms.ascend.trace_store import HOST_WAITS, Interval, ThreadIntervals
 
 
 class HostCuts:

@@ -1,19 +1,29 @@
 """Index raw evidence and comparison coordinates for an independent native reference."""
 
-import json
 from collections import Counter, defaultdict
-from decimal import Decimal
 from functools import cached_property
 
-from prologue.integrations.platforms.ascend.analysis.clock import AscendClock, HostCounter
-from prologue.integrations.platforms.ascend.analysis.sdk_rows import Interval, ThreadIntervals, task_flips
+from prologue.integrations.platforms.ascend.trace_store import (
+    EVENT_WAITS,
+    STREAM_WAITS,
+    AscendClock,
+    HostCounter,
+    Interval,
+    ThreadIntervals,
+    event_records,
+    native_interval,
+    runtime_rows,
+    sdk_intervals,
+    sdk_rows,
+    task_flips,
+)
 
 from .queue_evidence import QueueEvidence
 from .reference_streams import SdkStreams
 
 
 class SdkRecording:
-    waits = {"aclrtStreamWaitEvent", "aclrtStreamWaitEventWithTimeout"}
+    waits = STREAM_WAITS
 
     def __init__(self, capture, rank, native, facts, sdk):
         self.native, self.facts = native, facts
@@ -24,7 +34,7 @@ class SdkRecording:
         device, = profile.glob("PROF_*/device_*")
         self.clock = AscendClock(device, native["device_clock"])
         flips = task_flips(profile)
-        rows = json.loads(sdk.read_text(), parse_float=Decimal)
+        rows = sdk_rows(sdk)
         self.sdk = SdkStreams(rows, self.clock, flips)
         self.index_sdk(rows, counter)
         self.index_markers(native)
@@ -37,21 +47,14 @@ class SdkRecording:
         self.dequeue_ids = {}
         self.host_measurements = {}
         dequeues = []
-        for row in rows:
-            if row.get("ph") != "X":
-                continue
+        for interval in sdk_intervals(rows, counter):
+            row = interval.record
             args = row.get("args", {})
-            if "Task Type" not in args and (row.get("cat") in {"enqueue", "dequeue"} or "connection_id" in args):
-                interval = Interval.read(row, counter)
 
-                # Reconstruct expected times from raw SDK coordinates, never from interpreted measurements.
-                for position in (interval.begin, interval.end):
-                    self.host_measurements[f"thread/{interval.thread}", position] = counter.framework_raw + round(
-                        Decimal(position - counter.anchor) * 1_000_000_000 / counter.frequency
-                    )
-            if "Task Type" in args:
-                continue
-            elif row.get("cat") in {"enqueue", "dequeue"}:
+            # Reconstruct the reference from raw SDK counter coordinates.
+            for position in (interval.begin, interval.end):
+                self.host_measurements[f"thread/{interval.thread}", position] = counter.timestamp(position)
+            if row.get("cat") in {"enqueue", "dequeue"}:
                 if row["cat"] == "enqueue":
                     self.enqueues[args["correlation_id"]] = interval
                 else:
@@ -71,7 +74,7 @@ class SdkRecording:
         self.points = {}
         signals = {index for index, point in enumerate(native["points"]) if point["side"] == "signal"}
         for row in native["host_observation"]["intervals"]:
-            interval = self.interval(row)
+            interval = native_interval(row)
             name = row["name"]
             if name == "prologue.window":
                 windows.append(interval)
@@ -100,9 +103,7 @@ class SdkRecording:
 
     def index_runtime(self, capture, native, facts, rows, flips):
         process = native["host_observation"]["process"]
-        self.runtime = [
-            json.loads(line) for line in (capture / "runtime" / f"{process}.jsonl").read_text().splitlines()
-        ]
+        self.runtime = list(runtime_rows(capture / "runtime", process))
         self.runtime_records = {(row["thread"], row["begin_counter"]): row for row in self.runtime}
         self.require(len(self.runtime_records) == len(self.runtime), "raw runtime repeats an API interval identity")
         self.source_scopes = {origin: index for index, scope in enumerate(facts["scopes"])
@@ -113,7 +114,7 @@ class SdkRecording:
                 self.closed_scopes.add(scope["id"])
 
         # Decode driver postings directly from the recording, before checking any projected edges.
-        calls = (self.interval(row) for row in self.runtime if row["api"].startswith("halSq"))
+        calls = (native_interval(row) for row in self.runtime if row["api"].startswith("halSq"))
         self.queues = QueueEvidence(calls, self.apis, rows, flips)
 
         # Actual RAW samples override SDK reconstruction at their own coordinates, including service threads.
@@ -154,10 +155,6 @@ class SdkRecording:
     def require(condition, message):
         if not condition:
             raise ValueError(message)
-
-    @staticmethod
-    def interval(row):
-        return Interval(row["begin_counter"], row["end_counter"], row["thread"], row)
 
     def origin(self, api):
         dequeue = self.dequeues.enclosing(api)
@@ -202,29 +199,22 @@ class SdkRecording:
                           if port["use"] == "signal" and port["direction"] == "input" and "producer" in port}
             for scope in self.native["scopes"]
         }
-        records, work, waits = {}, {}, defaultdict(list)
-        for row in sorted(self.runtime, key=lambda row: row["begin_counter"]):
-            if row["api"] == "aclrtRecordEvent":
-                records[row["event"]] = row
-            elif row["api"] == "aclrtDestroyEvent":
-                records.pop(row["event"], None)
-            elif row["api"] in self.waits | {"aclrtSynchronizeEvent", "aclrtSynchronizeEventWithTimeout"}:
-                interval = self.interval(row)
-                if interval.end <= self.window.begin or self.window.end <= interval.begin:
-                    continue
-                api = self.native_api(interval)
-                owner = self.owner(api)
-                if owner is None:
-                    continue
-                producer = records.get(row["event"])
-                self.require(producer is not None, "native event consumer has no recorded generation")
-                recorded = self.native_api(self.interval(producer))
-                connection = recorded.record["args"]["connection_id"]
-                waits[owner, connection].append((row, api))
-                producer = self.owner(recorded)
-                if producer in peers[owner]:
-                    self.require(
-                        work.setdefault(producer, connection) == connection,
-                        "native Work has competing completion generations",
-                    )
+        work, waits = {}, defaultdict(list)
+        for interval, producer in event_records(map(native_interval, self.runtime), EVENT_WAITS):
+            if interval.end <= self.window.begin or self.window.end <= interval.begin:
+                continue
+            api = self.native_api(interval)
+            owner = self.owner(api)
+            if owner is None:
+                continue
+            self.require(producer is not None, "native event consumer has no recorded generation")
+            recorded = self.native_api(producer)
+            connection = recorded.record["args"]["connection_id"]
+            waits[owner, connection].append((interval.record, api))
+            producer = self.owner(recorded)
+            if producer in peers[owner]:
+                self.require(
+                    work.setdefault(producer, connection) == connection,
+                    "native Work has competing completion generations",
+                )
         return work, waits

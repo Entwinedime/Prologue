@@ -3,7 +3,7 @@
 import json
 from subprocess import TimeoutExpired
 
-from prologue.common.observation.workers import CapturedWorkers
+from prologue.common.observation import CapturedWorkers
 from prologue.host.libraries.release import LibraryRelease
 from prologue.host.workflow.options import PredictionOptions
 from prologue.host.workflow.prediction import PredictionProcess

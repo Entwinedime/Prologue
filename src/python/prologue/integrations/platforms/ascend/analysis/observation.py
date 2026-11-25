@@ -7,12 +7,12 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from prologue.common.observation.thread_service import ThreadService
+from prologue.common.observation import ThreadService
 from prologue.integrations.platforms.ascend.analysis.services import SynchronousCopy, uses_peer_service
+from prologue.integrations.platforms.ascend.trace_store import HOST_WAITS
 
 from .device_events import DeviceEvents
 from .port_bindings import PortBindings
-from .sdk_rows import HOST_WAITS
 from .timeline import ObservedTimeline
 
 

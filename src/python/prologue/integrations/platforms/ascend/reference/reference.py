@@ -3,7 +3,7 @@
 from collections import Counter, defaultdict
 from functools import cached_property
 
-from prologue.integrations.platforms.ascend.analysis.sdk_rows import HOST_WAITS, Interval, ThreadIntervals
+from prologue.integrations.platforms.ascend.trace_store import HOST_WAITS, Interval, ThreadIntervals, native_interval
 
 from .recording import SdkRecording
 
@@ -40,7 +40,7 @@ class NativeEffectEvidence(SdkRecording):
             self.require(call is not None and call["api"] in HOST_WAITS
                          and call["end_counter"] == end and call["result"] == 0,
                          "recorded host fence must use its native runtime entry and return")
-            api = self.native_api(self.interval(call))
+            api = self.native_api(native_interval(call))
             self.require(self.owner(api) == source, "host fence changes its native owner")
             fences[locations[lane, begin], locations[lane, end]] = call
 

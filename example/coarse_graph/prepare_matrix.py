@@ -7,8 +7,7 @@ from itertools import pairwise
 from pathlib import Path
 
 from prologue.common.io import write_json
-from prologue.common.workload import WorkloadContent
-from prologue.common.workload.expert_routes import ExpertRoutes
+from prologue.common.workload import ExpertRoutes, WorkloadContent
 from prologue.host.registry import AdapterRegistry
 
 

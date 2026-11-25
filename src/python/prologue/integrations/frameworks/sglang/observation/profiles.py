@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from prologue.common.io import write_json
-from prologue.common.observation.workers import ProfileWindow
+from prologue.common.observation import ProfileWindow
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
@@ -19,7 +19,7 @@ class NativeProfiles:
         self.observation = observation
         self.windows_by_round = None
         self.round = 0
-        from prologue.integrations.runtimes.pytorch.capture.protocol import CpuProtocol
+        from prologue.integrations.runtimes.pytorch.capture import CpuProtocol
 
         capture = observation.capture
         self.protocol = CpuProtocol(
@@ -111,9 +111,6 @@ class NativeProfiles:
         return result
 
     def install(self) -> None:
-        for target, hook in self.protocol.hooks():
-            HookTable.around(target, hook)
-
         manager = symbols().scheduler_profiler_manager + "."
         targets = {
             manager + "_profile": self.request,

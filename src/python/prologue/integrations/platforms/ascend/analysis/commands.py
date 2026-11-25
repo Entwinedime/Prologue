@@ -6,7 +6,8 @@ from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 
-from prologue.integrations.platforms.ascend.analysis.trace import AscendTrace, DeviceTask, Interval, ThreadIntervals
+from prologue.integrations.platforms.ascend.analysis.trace import AscendTrace, DeviceTask
+from prologue.integrations.platforms.ascend.trace_store import Interval, ThreadIntervals
 
 
 def span_references(result):

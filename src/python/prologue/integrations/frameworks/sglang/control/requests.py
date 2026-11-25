@@ -4,7 +4,7 @@ import sys
 
 import zmq
 
-from prologue.common.workload.routing import RoutedContent
+from prologue.common.workload import RoutedContent
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.shared.cache_keys import RoutedCacheKeys
 from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions

@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 
-from prologue.common.workload.expert_routes import ExpertRoutes
+from prologue.common.workload import ExpertRoutes
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors

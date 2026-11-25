@@ -2,7 +2,7 @@
 
 from collections import Counter, defaultdict, deque
 
-from prologue.integrations.platforms.ascend.analysis.sdk_rows import Interval
+from prologue.integrations.platforms.ascend.trace_store import Interval, native_interval
 
 from .recording import SdkRecording
 
@@ -93,7 +93,7 @@ class StreamEffects:
         expected, coordinates, counts = set(), {}, Counter()
         for row in recording.runtime:
             if row["api"] == "aclrtMemcpy" and row["bytes"] > 0:
-                interval = recording.interval(row)
+                interval = native_interval(row)
                 if recording.window.begin <= interval.begin and interval.end <= recording.window.end:
                     owner = recording.owner(recording.native_api(interval))
                     if owner is not None and owner not in recording.closed_scopes:
@@ -102,7 +102,7 @@ class StreamEffects:
             copy = row["api"] == "aclrtMemcpyAsync" and row["bytes"] > 0
             if not copy and row["api"] not in recording.waits:
                 continue
-            interval = recording.interval(row)
+            interval = native_interval(row)
             if interval.end <= recording.window.begin or recording.window.end <= interval.begin:
                 continue
             api = recording.native_api(interval)

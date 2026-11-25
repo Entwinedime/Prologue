@@ -261,7 +261,11 @@ class SGLangObservation(NativeModelObservation):
             shard_transport(self.directory, self.tensors.auxiliary, self.communications.local_exchange).install(
                 self.description
             )
-        NativeProfiles(self).install()
+        profiles = NativeProfiles(self)
+        profiles.install()
+
+        # Keep metadata timing inside the device dispatch hooks and outside the caller's template work.
+        MetadataTransfers(self.calls, profiles.protocol).install()
         self.communications.install()
         self.kv_transfers = NativeKvScopes(self.calls, self)
         self.kv_transfers.install()
@@ -274,6 +278,3 @@ class SGLangObservation(NativeModelObservation):
         self.content.install()
         if self.routing is not None:
             self.routing.install()
-
-        # The caller fragment must close before the runtime measures or blocks on CPU metadata.
-        MetadataTransfers(self.calls).install()

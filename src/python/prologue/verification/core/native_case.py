@@ -4,7 +4,7 @@ import json
 from collections import Counter, defaultdict
 from functools import cached_property
 
-from prologue.common.observation.workers import CapturedWorkers
+from prologue.common.observation import CapturedWorkers
 from prologue.verification.core.adapters import device_coordinates
 
 from .actions import ActionIdentity

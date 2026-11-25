@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 
 from prologue.common.cost import ServiceSamples, WorkCatalog, cost_features
 from prologue.common.io import write_json
-from prologue.common.observation.workers import CapturedWorkers
+from prologue.common.observation import CapturedWorkers
 from prologue.host.acquisition.recording import PublishedCapture
 from prologue.host.performance.fitting import FittedCosts
 from prologue.host.performance.requirements import CostRequirements

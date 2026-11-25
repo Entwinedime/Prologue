@@ -6,10 +6,9 @@ from bisect import bisect_right
 from collections import defaultdict
 
 from prologue.integrations.platforms.ascend.analysis.commands import NativeStreamCall, StreamCommand
-from prologue.integrations.platforms.ascend.analysis.trace import Interval
+from prologue.integrations.platforms.ascend.trace_store import HOST_WAITS, Interval
 
 from .commands import span_references
-from .sdk_rows import HOST_WAITS
 
 
 class PortBindings:

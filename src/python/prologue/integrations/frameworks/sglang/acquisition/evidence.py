@@ -4,7 +4,7 @@ from prologue.integrations.frameworks.sglang.shared.configuration import Capture
 from prologue.integrations.frameworks.sglang.shared.kv_layout import KvBufferAddresses, MhaKvLayout
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 from prologue.integrations.frameworks.sglang.shared.source_layout import SourceLayout
-from prologue.integrations.runtimes.pytorch.shared.protocol_work import CpuProtocolWork, CpuTransfer
+from prologue.integrations.runtimes.pytorch.shared import CpuProtocolWork, CpuTransfer
 
 capture_input = CaptureInput
 serving_input = ServingInput

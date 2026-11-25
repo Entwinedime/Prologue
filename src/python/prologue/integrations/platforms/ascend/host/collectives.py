@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from itertools import permutations
 
 from prologue.common.cost import RendezvousService
-from prologue.integrations.platforms.ascend.analysis.clock import DeviceCalibration
 from prologue.integrations.platforms.ascend.analysis.notifications import NotifyProgress
+from prologue.integrations.platforms.ascend.trace_store import DeviceCalibration
 
 
 @dataclass(frozen=True, slots=True)

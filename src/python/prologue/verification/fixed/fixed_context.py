@@ -6,7 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from itertools import pairwise
 
-from prologue.common.observation.thread_service import ThreadService
+from prologue.common.observation import ThreadService
 from prologue.verification.core.adapters import platform_evidence
 
 from ..core.ingress import IngressEvidence

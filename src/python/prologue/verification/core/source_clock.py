@@ -6,7 +6,7 @@ from fractions import Fraction
 from itertools import combinations
 from math import ceil, floor
 
-from prologue.common.observation.device_clock import DeviceCalibration
+from prologue.common.observation import DeviceCalibration
 
 
 @dataclass(frozen=True, slots=True)

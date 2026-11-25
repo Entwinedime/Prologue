@@ -19,7 +19,7 @@ from prologue.integrations.frameworks.sglang.shared.groups import ParallelGroups
 from prologue.integrations.frameworks.sglang.shared.metadata_transfers import MetadataTransfers
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 from prologue.integrations.frameworks.sglang.shared.state_calls import RequestStateCalls
-from prologue.integrations.runtimes.pytorch.capture.protocol import CpuProtocol
+from prologue.integrations.runtimes.pytorch.capture import CpuProtocol
 
 
 class NativeHostSamples(ServingCuts):
@@ -234,8 +234,7 @@ class NativeHostSamples(ServingCuts):
 
     def install(self, device_api):
         if self.protocol is not None:
-            for target, hook in self.protocol.hooks():
-                HookTable.around(target, hook)
+            MetadataTransfers(self, self.protocol).install()
         HookTable.around(symbols().model_runner_load_model, self.load_model)
         ModelScopes.install_batch_hooks(self)
         self.communications.install(self.observe_expert_exchange if self.ep_size > 1 else None)
@@ -244,7 +243,6 @@ class NativeHostSamples(ServingCuts):
         super().install()
         if self.pipeline is not None:
             self.pipeline.install(device_api)
-            MetadataTransfers(self).install()
 
     def document(self):
         document = {

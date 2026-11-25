@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 
 from prologue.integrations.platforms.ascend.analysis.commands import NativeStreamCall
 from prologue.integrations.platforms.ascend.analysis.services import uses_peer_service
-from prologue.integrations.platforms.ascend.analysis.trace import Interval
+from prologue.integrations.platforms.ascend.trace_store import Interval
 
 from .commands import span_references
 

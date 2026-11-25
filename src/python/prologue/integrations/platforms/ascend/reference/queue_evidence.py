@@ -5,12 +5,12 @@ from collections import defaultdict
 from functools import cached_property
 from itertools import pairwise
 
-from prologue.integrations.platforms.ascend.analysis.sdk_rows import driver_submissions, queue_marker
+from prologue.integrations.platforms.ascend.trace_store import device_tasks, driver_submissions, physical_slots
 
 
 class QueueEvidence:
     def __init__(self, runtime, apis, rows, flips):
-        self.apis, self.rows, self.flips = apis, rows, flips
+        self.apis, self.tasks, self.flips = apis, device_tasks(rows), flips
         self.submissions = list(driver_submissions(runtime))
         by_caller, self.issued, self.post_index = defaultdict(list), defaultdict(list), {}
         for stream, post in self.submissions:
@@ -30,22 +30,7 @@ class QueueEvidence:
 
     @cached_property
     def slots(self):
-        by_stream = defaultdict(lambda: defaultdict(set))
-        for row in self.rows:
-            args = row.get("args", {})
-            if row.get("ph") == "X" and "Task Type" in args:
-                slot = int(args["Batch Id"]), int(args["Task Id"])
-                owner = None if queue_marker(args, self.flips) else args["connection_id"]
-                by_stream[int(args["Physic Stream Id"])][slot].add(owner)
-        result = {}
-        for stream, slots in by_stream.items():
-            ordered = sorted(slots.items())
-            positions = defaultdict(list)
-            for index, (_, owners) in enumerate(ordered):
-                for owner in owners:
-                    positions[owner].append(index)
-            result[stream] = ordered, positions
-        return result
+        return physical_slots(self.tasks, self.flips)
 
     def posts(self, connection, stream):
         return [post for post in self.inside(self.apis[connection], stream) if post.record["tasks"]]

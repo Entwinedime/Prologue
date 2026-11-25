@@ -6,7 +6,7 @@ from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import symbols
 from prologue.integrations.frameworks.sglang.shared.groups import ParallelGroups
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
-from prologue.integrations.runtimes.pytorch.control.point_to_point import CpuPointToPoint
+from prologue.integrations.runtimes.pytorch.control import CpuPointToPoint
 
 
 class TransferWork:

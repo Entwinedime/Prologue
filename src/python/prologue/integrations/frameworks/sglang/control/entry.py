@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 from prologue.common.control_peer import ControlPeer
-from prologue.integrations.runtimes.pytorch.control.cpu import CpuDeclarations
 
 
 def main() -> None:
@@ -21,6 +20,9 @@ def main() -> None:
         os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
         os.environ["SGLANG_USE_CPU_ENGINE"] = "1"
         os.environ["OMP_NUM_THREADS"] = "1"
+
+        from prologue.integrations.runtimes.pytorch.control import CpuDeclarations
+
         CpuDeclarations.install(arguments.kernel_python)
 
         from prologue.integrations.frameworks.sglang.control.workers import NativeWorkers

@@ -7,11 +7,17 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from prologue.common.io import write_json
-from prologue.integrations.platforms.ascend.analysis.clock import HostCounter
 from prologue.integrations.platforms.ascend.analysis.commands import StreamCommands
-from prologue.integrations.platforms.ascend.analysis.sdk_rows import queue_marker, task_flips
-from prologue.integrations.platforms.ascend.analysis.trace import AscendTrace, Interval, ThreadIntervals
+from prologue.integrations.platforms.ascend.analysis.trace import AscendTrace
 from prologue.integrations.platforms.ascend.runtime.export import AscendExport
+from prologue.integrations.platforms.ascend.trace_store import (
+    HostCounter,
+    Interval,
+    ThreadIntervals,
+    queue_marker,
+    sdk_rows,
+    task_flips,
+)
 
 
 def tensor_layouts(environment):
@@ -72,7 +78,7 @@ class ScopedTasks:
     @classmethod
     def measured(cls, profile, trace):
         counter = HostCounter(profile)
-        rows = [row for row in json.loads(trace.read_text(), parse_float=Decimal) if row.get("ph") == "X"]
+        rows = sdk_rows(trace)
         markers = {row["name"]: Interval.read(row, counter) for row in rows
                    if row["name"].startswith("prologue.sample.")}
         if markers.keys() != {"prologue.sample.begin", "prologue.sample.call", "prologue.sample.end"}:

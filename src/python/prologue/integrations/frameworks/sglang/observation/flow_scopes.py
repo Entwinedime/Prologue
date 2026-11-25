@@ -14,7 +14,7 @@ from prologue.integrations.frameworks.sglang.shared.host_reads import HostReads
 from prologue.integrations.frameworks.sglang.shared.metadata_collectives import MetadataCollectives
 from prologue.integrations.frameworks.sglang.shared.resources import ResourceCalls
 from prologue.integrations.frameworks.sglang.shared.selection import BatchSelection
-from prologue.integrations.runtimes.pytorch.capture.boundaries import TensorUpload
+from prologue.integrations.runtimes.pytorch.capture import TensorUpload
 
 
 class ServingCuts(CallSegments):

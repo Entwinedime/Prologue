@@ -4,13 +4,12 @@ from collections import Counter, defaultdict
 
 from prologue.common.cost import ServiceSamples, WorkCatalog
 from prologue.common.io import read_json, read_jsonl, write_json
-from prologue.common.observation.thread_service import ThreadService
-from prologue.common.observation.workers import CapturedWorkers
+from prologue.common.observation import CapturedWorkers, ThreadService
 from prologue.host.acquisition.recording import PublishedCapture
 from prologue.integrations.bindings import platform_backend
 from prologue.integrations.frameworks.sglang.acquisition.host_scopes import NativeHostCalls
 from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangPlacement
-from prologue.integrations.runtimes.pytorch.shared.protocol_work import CpuProtocolWork
+from prologue.integrations.runtimes.pytorch.shared import CpuProtocolWork
 
 
 class HostCostSamples:

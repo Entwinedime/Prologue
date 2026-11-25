@@ -17,9 +17,13 @@ from prologue.integrations.bindings import route
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
-from prologue.integrations.runtimes.pytorch.control.collectives import CollectiveCalls, CpuCollectives
-from prologue.integrations.runtimes.pytorch.control.cpu import CpuDeclarations
-from prologue.integrations.runtimes.pytorch.control.point_to_point import CpuPointToPoint, PointToPointCalls
+from prologue.integrations.runtimes.pytorch.control import (
+    CollectiveCalls,
+    CpuCollectives,
+    CpuDeclarations,
+    CpuPointToPoint,
+    PointToPointCalls,
+)
 
 
 class NativeStopped(Exception):

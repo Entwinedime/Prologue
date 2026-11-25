@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 from torch.utils.weak import WeakIdKeyDictionary
 
-from prologue.common.workload.expert_routes import ExpertRoutes
+from prologue.common.workload import ExpertRoutes
 from prologue.integrations.bindings import platform_domain
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.control.flow import FlowExecution
@@ -20,7 +20,7 @@ from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.shared.experts import ExpertBatch
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI, PipelineMessages
 from prologue.integrations.frameworks.sglang.shared.state_calls import RequestStateCalls
-from prologue.integrations.runtimes.pytorch.control.tensors import TensorValues
+from prologue.integrations.runtimes.pytorch.control import TensorValues
 
 _compute_parallelism_ranks = resolve(symbols().compute_parallelism_ranks)
 LogitsProcessorOutput = resolve(symbols().logits_processor_output)

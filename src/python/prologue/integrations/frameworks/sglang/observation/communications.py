@@ -9,13 +9,13 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
-from prologue.common.observation.parameters import ScopeParameters
+from prologue.common.observation import ScopeParameters
 from prologue.integrations.bindings import platform_domain
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.module_scopes import tensor_ports
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
-from prologue.integrations.runtimes.pytorch.capture.boundaries import GatherLayout
+from prologue.integrations.runtimes.pytorch.capture import GatherLayout
 
 
 @dataclass

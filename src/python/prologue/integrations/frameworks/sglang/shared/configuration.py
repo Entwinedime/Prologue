@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from prologue.common.workload.expert_routes import ExpertRoutes
+from prologue.common.workload import ExpertRoutes
 from prologue.integrations.bindings import platform_domain
 
 

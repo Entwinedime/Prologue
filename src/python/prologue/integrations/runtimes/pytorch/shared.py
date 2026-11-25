@@ -1,12 +1,15 @@
-"""Separate CPU transfer identity from its physical wire features."""
+"""Identify native CPU transfers and their measured service intervals."""
 
+import inspect
 from collections import defaultdict
+from functools import partial
+from operator import itemgetter
 
 from prologue.common.cost import cost_features
 
 
 class CpuTransfer:
-    def __init__(self, world) -> None:
+    def __init__(self, world=None) -> None:
         self.world = world
 
     @staticmethod
@@ -14,6 +17,33 @@ class CpuTransfer:
 
         # Private object serialization can change byte counts without changing the native control operation.
         return {name: description[name] for name in ("group", "source", "target", "tag", "receiving", "dtype")}
+
+    operations = ("send", "recv", "isend", "irecv")
+    route = staticmethod(itemgetter("group", "source", "target", "tag"))
+
+    @classmethod
+    def hooks(cls, invoke):
+        import torch.distributed as distributed
+
+        for name in cls.operations:
+            hook = partial(invoke, name, inspect.signature(getattr(distributed, name)))
+            for module in ("torch.distributed", "torch.distributed.distributed_c10d"):
+                yield f"{module}.{name}", hook
+
+    def native(self, name, signature, args, kwargs):
+        import torch.distributed as distributed
+
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        values = bound.arguments
+        tensor = values["tensor"]
+        if tensor.device.type != "cpu":
+            return None
+        group = distributed.group.WORLD if values["group"] is None else values["group"]
+        receiving = name in {"recv", "irecv"}
+        endpoint = "src" if receiving else "dst"
+        return self.describe(tensor, group, values["tag"], values[endpoint], values.get("group_" + endpoint),
+                             receiving), group
 
     def describe(self, tensor, group, tag, endpoint, group_endpoint, receiving):
         import torch.distributed as distributed
@@ -23,10 +53,11 @@ class CpuTransfer:
             endpoint = distributed.get_global_rank(group, group_endpoint)
         if endpoint is None:
             raise ValueError("Native metadata receive requires an explicit sender")
+        world = self.world if self.world is not None else range(distributed.get_world_size())
         local = distributed.get_rank()
         source, target = (endpoint, local) if receiving else (local, endpoint)
         return {
-            "group": group.group_name, "source": self.world[source], "target": self.world[target],
+            "group": group.group_name, "source": world[source], "target": world[target],
             "tag": tag, "receiving": receiving, "dtype": str(tensor.dtype), "shape": list(tensor.shape),
             "elements": tensor.numel(), "element_bytes": tensor.element_size(),
         }
@@ -43,8 +74,7 @@ class CpuProtocolWork:
         route = execution["work"]["context"]["cpu_transfer"]
         identity = {name: descriptor[name] for name in ("source", "target", "dtype")}
         identity.update(operation=operation, channel=route["group"])
-        axes = {f"parameter.{name}": descriptor[name] for name in ("elements", "element_bytes")}
-        return identity, cost_features(axes)
+        return identity, cost_features({f"parameter.{key}": descriptor[key] for key in ("elements", "element_bytes")})
 
     @staticmethod
     def readiness_operation(descriptor):

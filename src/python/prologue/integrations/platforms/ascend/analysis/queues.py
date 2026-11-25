@@ -6,13 +6,13 @@ from dataclasses import dataclass
 from functools import cached_property
 from itertools import accumulate, pairwise
 
-from .sdk_rows import driver_submissions, queue_marker
+from prologue.integrations.platforms.ascend.trace_store import device_tasks, driver_submissions, physical_slots
 
 
 class NativeQueues:
     def __init__(self, runtime, apis, rows, flips) -> None:
         self.apis, self.flips = apis, flips
-        self.device = [row["args"] for row in rows if row.get("ph") == "X" and "Task Type" in row.get("args", {})]
+        self.tasks = device_tasks(rows)
         self.resolved = {}
         self.submissions = list(driver_submissions(runtime))
         calls = defaultdict(list)
@@ -33,23 +33,7 @@ class NativeQueues:
 
     @cached_property
     def physical(self):
-        streams = defaultdict(lambda: defaultdict(set))
-        for task in self.device:
-            stream = int(task["Physic Stream Id"])
-            connection = None if queue_marker(task, self.flips) else task["connection_id"]
-            streams[stream][self.slot(task)].add(connection)
-
-        # Several SDK subtasks can describe one physical SQE; a confirmed flip still consumes its own slot.
-        physical = {}
-        for stream, units in streams.items():
-            ordered = sorted(units.items())
-            owned = defaultdict(list)
-            for index, (_, connections) in enumerate(ordered):
-                for connection in connections:
-                    if connection is not None:
-                        owned[connection].append(index)
-            physical[stream] = ordered, owned
-        return physical
+        return physical_slots(self.tasks, self.flips)
 
     @cached_property
     def issued(self):

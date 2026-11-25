@@ -4,7 +4,7 @@ from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 
-from prologue.integrations.platforms.ascend.analysis.sdk_rows import queue_marker
+from prologue.integrations.platforms.ascend.trace_store import queue_marker
 
 
 @dataclass(frozen=True, slots=True)

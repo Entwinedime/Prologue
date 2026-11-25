@@ -45,17 +45,15 @@ COPY src/python/prologue/integrations/__init__.py src/python/prologue/integratio
 COPY src/python/prologue/integrations/frameworks/__init__.py ./python/prologue/integrations/frameworks/
 COPY src/python/prologue/integrations/frameworks/sglang/__init__.py ./python/prologue/integrations/frameworks/sglang/
 COPY src/python/prologue/integrations/platforms/__init__.py ./python/prologue/integrations/platforms/
-COPY src/python/prologue/integrations/platforms/ascend/__init__.py src/python/prologue/integrations/platforms/ascend/backend.py ./python/prologue/integrations/platforms/ascend/
+COPY src/python/prologue/integrations/platforms/ascend/__init__.py src/python/prologue/integrations/platforms/ascend/backend.py src/python/prologue/integrations/platforms/ascend/trace_store.py ./python/prologue/integrations/platforms/ascend/
 COPY src/python/prologue/integrations/runtimes/__init__.py ./python/prologue/integrations/runtimes/
-COPY src/python/prologue/integrations/runtimes/pytorch/__init__.py ./python/prologue/integrations/runtimes/pytorch/
+COPY src/python/prologue/integrations/runtimes/pytorch/__init__.py src/python/prologue/integrations/runtimes/pytorch/shared.py src/python/prologue/integrations/runtimes/pytorch/capture.py ./python/prologue/integrations/runtimes/pytorch/
 COPY src/python/prologue/workers/__init__.py src/python/prologue/workers/registry.py ./python/prologue/workers/
 COPY src/python/prologue/workers/capture.py src/python/prologue/workers/plugin.py ./python/prologue/workers/
 COPY src/python/prologue/common ./python/prologue/common/
 COPY src/python/prologue/integrations/frameworks/sglang/abi ./python/prologue/integrations/frameworks/sglang/abi/
 COPY src/python/prologue/integrations/frameworks/sglang/shared ./python/prologue/integrations/frameworks/sglang/shared/
 COPY src/python/prologue/integrations/frameworks/sglang/observation ./python/prologue/integrations/frameworks/sglang/observation/
-COPY src/python/prologue/integrations/runtimes/pytorch/shared ./python/prologue/integrations/runtimes/pytorch/shared/
-COPY src/python/prologue/integrations/runtimes/pytorch/capture ./python/prologue/integrations/runtimes/pytorch/capture/
 COPY src/python/prologue/integrations/platforms/ascend/runtime ./python/prologue/integrations/platforms/ascend/runtime/
 COPY src/python/prologue/integrations/platforms/ascend/analysis ./python/prologue/integrations/platforms/ascend/analysis/
 RUN install /opt/prologue/native/ascend/scripts/capture.sh /opt/prologue/capture.sh \

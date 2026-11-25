@@ -4,7 +4,7 @@ from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from itertools import pairwise
 
-from prologue.common.observation.thread_service import ThreadService
+from prologue.common.observation import ThreadService
 from prologue.verification.core.adapters import platform_evidence
 
 

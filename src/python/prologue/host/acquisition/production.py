@@ -4,7 +4,7 @@ import subprocess
 from uuid import uuid4
 
 from prologue.common.io import discard_path, read_json, write_json
-from prologue.common.observation.workers import CapturedWorkers
+from prologue.common.observation import CapturedWorkers
 from prologue.host.acquisition.adapters import ProductionAdapter
 from prologue.host.acquisition.options import ProductionOptions
 from prologue.host.runtime.docker import DockerImage, OwnedContainers

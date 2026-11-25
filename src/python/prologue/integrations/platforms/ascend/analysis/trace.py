@@ -2,19 +2,30 @@
 
 from __future__ import annotations
 
-import json
 import struct
 from collections import defaultdict
 from dataclasses import dataclass
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from prologue.integrations.platforms.ascend.analysis.clock import AscendClock, HostCounter
 from prologue.integrations.platforms.ascend.analysis.notifications import HcclNotifications
+from prologue.integrations.platforms.ascend.trace_store import (
+    HOST_WAITS,
+    STREAM_WAITS,
+    AscendClock,
+    HostCounter,
+    Interval,
+    ThreadIntervals,
+    event_records,
+    native_interval,
+    queue_marker,
+    runtime_rows,
+    sdk_intervals,
+    sdk_rows,
+    task_flips,
+)
 
 from .queues import NativeQueues, ServiceExecutions
-from .sdk_rows import HOST_WAITS, Interval, ThreadIntervals, queue_marker, task_flips
 
 
 @dataclass
@@ -37,7 +48,7 @@ class DevicePoint:
     stream: int
 
 class AscendTrace:
-    stream_waits = frozenset({"aclrtStreamWaitEvent", "aclrtStreamWaitEventWithTimeout"})
+    stream_waits = STREAM_WAITS
 
     @classmethod
     def reserved_host_intervals(cls, calls, repeated_host_waits):
@@ -62,12 +73,10 @@ class AscendTrace:
         self.cann, = profile.glob("PROF_*")
         device, = self.cann.glob("device_*")
         self.clock = AscendClock(device, raw["device_clock"])
-        rows = json.loads(trace.read_text(), parse_float=Decimal)
+        rows = sdk_rows(trace)
         self.notifications = HcclNotifications(rows) if evidence else None
         flips = task_flips(profile)
-        intervals = [self.device_interval(row) if "Task Type" in row.get("args", {}) else Interval.read(row, counter)
-                     for row in rows if row.get("ph") == "X"
-                     and (row.get("cat") in {"enqueue", "dequeue"} or "connection_id" in row.get("args", {}))]
+        intervals = list(sdk_intervals(rows, counter, self.clock))
         self.host_times = {
             (f"thread/{interval.thread}", position): counter.timestamp(position)
             for interval in intervals if "Task Type" not in interval.record.get("args", {})
@@ -156,8 +165,7 @@ class AscendTrace:
         self.api_ranges = ThreadIntervals(list(self.apis.values()))
 
         self.runtime = []
-        for line in (runtime / f"{self.process}.jsonl").read_text().splitlines():
-            row = json.loads(line)
+        for row in runtime_rows(runtime, self.process):
             if row["result"] != 0:
                 raise RuntimeError(f"native runtime call failed: {row['api']} ({row['result']})")
             self.runtime.append(self.native_interval(row))
@@ -172,18 +180,7 @@ class AscendTrace:
         self.services.assign(self.device_tasks)
 
         self.runtime_ranges = ThreadIntervals(self.runtime)
-        self.synchronizations = []
-        records = {}
-        for native in sorted(self.runtime, key=lambda value: value.begin):
-            row = native.record
-            if row["api"] == "aclrtRecordEvent":
-                records[row["event"]] = native
-            elif row["api"] == "aclrtDestroyEvent":
-                records.pop(row["event"], None)
-            elif row["api"] in HOST_WAITS | self.stream_waits:
-
-                # Resolve the generation while the handle is live; a later record can reuse the same handle.
-                self.synchronizations.append((native, records.get(row.get("event"))))
+        self.synchronizations = list(event_records(self.runtime, HOST_WAITS | self.stream_waits))
         self.device_points = {identity: self.device_point(identity) for identity in self.points}
         self.observer_connections = {
             point.api.record["args"]["connection_id"]
@@ -196,11 +193,10 @@ class AscendTrace:
         for side in ("begin", "end"):
             for resource in (f"thread/{thread}", f"service/{thread}"):
                 self.host_times[resource, record[f"{side}_counter"]] = record[f"{side}_raw_ns"]
-        return Interval(record["begin_counter"], record["end_counter"], thread, record)
+        return native_interval(record)
 
     def device_interval(self, record: dict) -> Interval:
-        begin, end = self.clock.interval(record)
-        return Interval(begin, end, int(record["tid"]), record)
+        return Interval.read(record, self.clock)
 
     def collective_payloads(self, queues: dict[int, Interval]) -> dict[int, list[int]]:
         if not queues:
