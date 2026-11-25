@@ -2,19 +2,19 @@
 
 **更新日期**　2026-11-25
 
-**进度**　整个窗口完成 9/12 轮、3/4 个阶段（75%）。M3 完成 3/3 轮（100%）。开发分支为 `architecture-modular-refactor`，M3 代码基线为 `989ce81`。
+**进度**　12/12 轮实施完毕（100%），4/4 个阶段进入交付。M4 的三轮代码已提交至 `architecture-modular-refactor`，代码基线为 `43f64a5`。代码净缩减目标仍有差额。
 
-**约定暂停点**　当前停在 M3/M4 边界。R07–R09 已完成阶段验收，M4 等待 AGY 审查和用户放行。
+**窗口状态**　开启，停在 AGY 终审点。
 
-| 阶段 | 轮次 | 已交付 | 状态 |
-| --- | --- | ---: | --- |
-| M1　公共契约、宿主基础设施与双库存储 | R01–R03 | 3/3 | 完成 |
-| M2　运行域、适配器与镜像打包 | R04–R06 | 3/3 | 完成 |
-| M3　C++23 核心与性能模型注册 | R07–R09 | 3/3 | 完成 |
-| M4　验证层、统一 CLI 与全仓回归 | R10–R12 | 0/3 | 待做 |
+| 阶段 | 已执行 | 状态 |
+| --- | ---: | --- |
+| M1　公共契约、宿主基础设施与双库存储 | 3/3 | 已交付 |
+| M2　运行域、适配器与镜像打包 | 3/3 | 已交付 |
+| M3　C++23 核心与性能模型注册 | 3/3 | 已交付 |
+| M4　验证层、统一 CLI 与全仓回归 | 3/3 | 技术门禁通过，规模目标待终审 |
 
-**可依赖的事实**　从同一份 Qwen3-8B TP1 双库预测两个配置、两个负载，四个目标的 211,290 条轨迹与 16 次 token 发布均与 `499dd1e`、`54861ec` 一致。用五个实测点注册双轴 attention 模型后，Python 和 C++ 对每个点给出的纳秒值相同。[逐项回归](../../../data/architecture-modular-refactor/m3/regression.json)
+**执行与验证**　统一 CLI 有 5 个命令域、16 个子命令。Qwen3-8B TP1 四目标的 211,290 条预测记录及 16 次 token 发布与窗口起点一致。一个独立 TP1 真实案例完成自主评分，新旧实现的指标一致。本阶段新增原生采集 0 次。[逐项回归](../../../data/architecture-modular-refactor/m4/regression.json)
 
-**架构边界**　C++ Release 全目标编译零告警。核心 36 个翻译单元的传递依赖没有越层。231 个项目 Python 模块的导入图无环，采集和控制镜像实际安装的 111 和 53 个模块均与对应依赖及源码一致。[静态与镜像检查](../../../data/architecture-modular-refactor/m3/static-checks.json)
+**架构与构建**　249 个 Python 模块无导入环，验证层通过工作流启动预测。Release 的 48 个构建步骤与 Ruff 均零错误、零告警。实装检查确认推理、控制镜像分别包含 111、53 个入口所需模块。[静态与镜像核验](../../../data/architecture-modular-refactor/m4/static-checks.json)
 
-**已知费用与限制**　M3 新增原生采集 0 次、物理卡时 0。固定来源图有 43,276 项工作，其中 15,223 项在原成本库中缺少可用估计，两份基线与当前实现均报告同一缺口。此次结论限于既有资产的行为一致性。此前原始记录缺少原生资源绑定历史，仍仅支持本地模板核对。[固定图回归](../../../data/architecture-modular-refactor/m3/regression.json) · [原始记录资格](../../../data/architecture-modular-refactor/m2/reference-final/source-evidence.json)
+**未达标与证据边界**　M4 的 `src` Python 增加 857 物理行、737 非空行，示例减少 47／40 行。PD 两版本均配对 5,355 个动作、报告 825 处端口差异，自主预测受实测成本范围限制。历史 TP2 结构记录缺少释放页字段。以上结果保留各自的参考资格。[规模明细](../../../data/architecture-modular-refactor/m4/line-deltas.json) · [验证结果](../../../data/architecture-modular-refactor/m4/regression.json)

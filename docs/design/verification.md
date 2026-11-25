@@ -19,6 +19,8 @@ flowchart TB
     LIB --> AUTO
 ```
 
+宿主统一入口为 `python3 -m prologue verify`。证据核对及平台交接在 `verification/core/`。结构、固定真实图和自主预测各有一个子包，共用运行目录、来源隔离检查和原子结果发布。已有执行轨迹可交给 `structure --compare-only`。已有 token 发布可交给 `autonomous --metrics-only`，批次分歧使用 `autonomous --schedule-diff`。这些模式复用正式比较器，各自的 `--help` 列出需要的输入。
+
 ## 一、隔离红线与通用资格原则
 
 - **完整物理拓扑真值**：三条路径的独立参考均来自目标完整物理拓扑的原生运行（单 worker 为单卡，多 worker 为实际物理放置联合运行）。同一冻结矩阵内，单卡分片与完整拓扑两种建库来源可共用同一物理目标的详细图（仅投影一次粗图）与轻量参考；仅有单卡分片记录且缺多卡参考时标为缺少完整拓扑真值。
@@ -28,11 +30,11 @@ flowchart TB
 
 ## 二、来源证据独立检查（`source_evidence` & `NativeCase`）
 
-`prologue.verification.source_evidence` 运行在无设备 modeling 环境中，仅加载无设备依赖的原始区间/计数转换与缓冲区布局类型，不安装推理框架或调用生产解释器，不修改任何业务资产。验证已发布双库中的模板时传入 `--libraries`，按原生尝试身份与物理部署逐角色核对发布的定义、绑定与端口是否仍与原生产一致。
+`python3 -m prologue verify source` 运行在无设备宿主环境中，涉及校准时钟求解时使用 SciPy，仅加载无设备依赖的原始区间/计数转换与缓冲区布局类型，不安装推理框架或调用生产解释器，不修改任何业务资产。验证已发布双库中的模板时传入 `--libraries`，按原生尝试身份与物理部署逐角色核对发布的定义、绑定与端口是否仍与原生产一致。
 
 ### 1. 共享 `NativeCase` 阶段与映射核对
 
-- **原生整组独立构建**：来源检查与预测对照共用 [`native_case.py`](../../src/prologue/verification/native_case.py) 与 [`contents.py`](../../src/prologue/verification/contents.py) 构成的 `NativeCase` 阶段——仅消费原生记录与粗图，建立全 rank 动作身份、注册池、已观察绑定、通信轮次、CPU 消息与 PD 前置关系，**绝不因预测协议错误取消原生图构建**。
+- **原生整组独立构建**：来源检查与预测对照共用 [`native_case.py`](../../src/prologue/verification/core/native_case.py) 与 [`contents.py`](../../src/prologue/verification/core/contents.py) 构成的 `NativeCase` 阶段——仅消费原生记录与粗图，建立全 rank 动作身份、注册池、已观察绑定、通信轮次、CPU 消息与 PD 前置关系，**绝不因预测协议错误取消原生图构建**。
 - **声明、端口与 SDK 顺序核对**：
   - 先核对生产清单完整覆盖 `observed_roles`，按共同框架 ABI 检查实现、输入、guard、张量端口（集合/用途/几何/存储版本/写入者/分配所有者，含父转交子就绪点；数据依赖不可重分类为布局元数据）与 shape/token 规则语义（允许二元 `add`/`mul`/`eq` 交换操作数，不按观测值认定公式等价）。
   - 从原始主机记录核对调用进入/返回与 CPU/服务区间计数器和 RAW 测量，核对状态访问声明、`Event`/`Work` 完成代次及异步拷贝/stream 等待；返回 `true` 的查询核对观察路径，`false` 不强加等待。
@@ -65,7 +67,7 @@ flowchart TB
 
 ### 2. 受控执行输入（`execution_inputs`）
 
-在 CPU control 环境运行 `prologue.verification.execution_inputs`，要求全部参与者具备原始记录与带 `--evidence` 的粗图（不读模板或预测）。提取过程先用 SciPy 稀疏优化求候选基，再用 **SymPy 有理数精确重建并认证**原始查询区间、全 rank 必要因果与向上取整开闭区间（同物理设备多记录在重合区间共享同一映射，数值求解成功不替代精确认证）。全部必要事实齐全才发布 `execution-inputs.json` 与 `execution-inputs-report.json`。
+在 CPU control 环境运行 `python3 -m prologue verify inputs`，要求全部参与者具备原始记录与带 `--evidence` 的粗图（不读模板或预测）。提取过程先用 SciPy 稀疏优化求候选基，再用 **SymPy 有理数精确重建并认证**原始查询区间、全 rank 必要因果与向上取整开闭区间（同物理设备多记录在重合区间共享同一映射，数值求解成功不替代精确认证）。全部必要事实齐全才发布 `execution-inputs.json` 与 `execution-inputs-report.json`。
 
 | 顶层字段 | 内容与核心校验约束 |
 | --- | --- |
@@ -128,7 +130,7 @@ flowchart TB
 ### 1. 自主闭环评分与首次分歧定位
 
 - **端到端评分（`autonomous` & `latency_metrics`）**：对比无 profiler 的轻量原生参考（`capture --latency-only`，核对 `specialization_loads` 与实际提交偏差/次序）。原生 TTFT 从实际提交给 Engine 起算，仿真从 workload 声明到达起算，均在调度器发布首 token 处结束（区分 `ResultProcessed` 与 `RequestOutput`）。逐请求保留带符号误差；TTFT 与 TPOT 各列请求总数、可计分数、实测零分母数（保留绝对误差）与不适用数（单输出 token 的 TPOT 不适用）。**正式自主预测留出精度要求 TTFT 与 TPOT 的 MAPE 各自低于 6%**（启动前固定统计粒度与排除项）。
-- **调度分歧归因（`schedule`）**：固定图基线通过后，将自主预测与固定图对照；若固定图接近实测而自主误差显著，`prologue.verification.schedule` 对照详细参考的请求阶段、批次成员与 token 范围，定位首个动作/读取/状态分歧及其读入、释放与前次共同批次时序依据，区分“成本经反馈放大”与“输入/结构/资源语义差异”。
+- **调度分歧归因（`schedule`）**：固定图基线通过后，将自主预测与固定图对照；若固定图接近实测而自主误差显著，`python3 -m prologue verify autonomous --schedule-diff` 对照详细参考的请求阶段、批次成员与 token 范围，定位首个动作/读取/状态分歧及其读入、释放与前次共同批次时序依据，区分“成本经反馈放大”与“输入/结构/资源语义差异”。
 
 ### 2. 冻结留出矩阵（`prepare_matrix.py` & `matrix.py`）
 

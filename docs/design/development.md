@@ -44,21 +44,17 @@ docker run --rm --runtime runc --network none \
 
 ## 二、已交付命令速查表
 
-### 1. Python 公开入口（[`src/prologue/app/__main__.py`](../../src/prologue/app/__main__.py)）
+### 1. Python 宿主入口
 
-| 子命令（`python3 -m prologue.app <cmd>`） | 定位与核心用途 |
+命令格式为 `python3 -m prologue <命令域> <操作>`。安装宿主包后也可使用 `prologue-cli`。宿主运行在 Python 3.10 及以上环境中。开发容器通过 `PYTHONPATH=src` 使用当前源码。框架与平台的具体实现由宿主注册表选择。[宿主装配](../../src/prologue/app/cli.py) · [适配器注册](../../src/prologue/app/registry.py)
+
+| 命令域 | 操作与用途 |
 | --- | --- |
-| `explore` | 批量探索配置集 × workload 集；只读模式传固定发布目录，加 `--deployment` 可按缺项自动局部补库并只重算受影响目标 |
-| `predict` | 单目标纯预测、给定耗时或受控结构对照（`--execution-inputs`），可选 `--execution-trace` 输出明细 |
-| `acquire-local` | 接收预测返回的原缺项查询（`--query`），在有界原生会话中执行局部结构或性能取证 |
-| `publish-local` | 核对 `acquire-local` 会话与原查询，原子增量发布到长期双库存储并输出固定发布目录 |
-| `capture` | 执行或恢复一次完整/单卡原生采集，支持五类互斥模式（默认结构、`--resource-trace`、`--service-reference`、`--latency-only`、`--host-timing`、`--attention-sites`） |
-| `produce` | 从已闭合的原生采集任务离线导出、解释并投影为来源模板（`--product templates`）或实测粗图（`--product graphs`） |
-| `cost-samples` | 从保留中间事实的生产目录导出设备、同步搬运、设备 collective、PD 通知或纯物理通信样本（`--transport-only`） |
-| `batch-cost-samples` | 从已核对的 `acquire-local` 局部批次会话提取设备计算与搬运时延样本 |
-| `host-cost-samples` | 配对详细结构观测与 `--host-timing` 观测，发布合格主机 CPU 服务样本 |
-| `fit-costs` | 对合格服务样本离线拟合成本模型，可选 `--check` / `--demand` / `--gap` 经 C++23 复核覆盖 |
-| `acquire-costs` | 面向训练来源或显式 `--demand` / `--gap` 执行有界主机/通信采样并拟合发布 `costs.json` |
+| `predict` | `run` 预测一个目标，`explore` 探索配置与负载组合 |
+| `library` | `acquire` 回答原始缺项，`publish` 从局部会话或已有训练集合发布，`inspect` 只读查看发布或存储 |
+| `capture` | `run` 采集跨 rank 原生证据，`project` 将已闭合的记录生成模板或实测粗图 |
+| `cost` | `extract` 按 `--kind device/transport/batch/host` 选择样本来源，`fit` 拟合模型，`acquire` 在预算内补充成本 |
+| `verify` | `source` 核对来源，`inputs` 提取实测条件，`local-graphs` 核对局部展开。三路正式验证为 `structure`、`fixed-graph`、`autonomous` |
 
 ### 2. C++23 核心入口（[`src/prologue/app/main.cpp`](../../src/prologue/app/main.cpp)）与辅助脚本
 
@@ -76,7 +72,7 @@ docker run --rm --runtime runc --network none \
 | `prologue serve <templates-dir> <task> <result> [--trace] [--execution-inputs \| --costs]` | 应用内部核心仿真入口（标准输入输出接控制协议） |
 | `prologue_local_graphs actions \| expand` | 给定真实动作的离线局部构图验证程序 |
 | 容器内诊断入口 | `python3 -m prologue.app.capture_worker capture\|interpret`、`/opt/prologue/export-profile.sh` |
-| 示例与矩阵入口（[`example/coarse_graph/`](../../example/coarse_graph/)） | `run.py`（四目标探索示例）、`import_assets.py`（旧训练资产导入发布）、`prepare_matrix.py`、`matrix.py` |
+| 示例与矩阵入口（[`example/coarse_graph/`](../../example/coarse_graph/)） | `run.py`（四目标探索示例）、`prepare_matrix.py`、`matrix.py` |
 
 ## 三、核心工作流操作手册
 
@@ -91,7 +87,7 @@ python3 example/coarse_graph/run.py --libraries /path/to/qwen-release --timeout 
 - **自动局部补库模式**：传入 `--deployment` 与可写长期库根目录，系统先用同一对固定库预测全部目标，归并可共用初始化的缺项后执行局部取证并增量发布，随后**仅重算所选 worker 模板、初态或成本域发生变化的目标**。存储额度覆盖 `acquisition/` 与新写入库文件；四项额度均为零时仍可查询现有库并输出缺项；卡时按单调时钟乘实际参与卡数累计（含超时清理）。
 
 ```bash
-python3 -m prologue.app explore --input /data/targets.json --output /data/exploration \
+python3 -m prologue predict explore --input /data/targets.json --output /data/exploration \
   --deployment /data/placement.json --libraries /data/libraries --binary /build/prologue \
   --timeout 300 --attempt-limit 2 --card-budget-seconds 400 \
   --postprocessing-budget-seconds 120 --storage-bytes 3221225472
@@ -101,18 +97,18 @@ python3 -m prologue.app explore --input /data/targets.json --output /data/explor
 
 ### 2. 局部采集、增量发布与历史资产导入
 
-- **局部缺项采集（`acquire-local`）**：直接接收预测输出的原缺项查询；可共用一次初始化的多个查询合并传入 `--query`。局部会话收据记录实际设备、累计卡时、保留字节及按秒采样的磁盘峰值。
+- **局部缺项采集（`library acquire`）**：直接接收预测输出的原缺项查询；可共用一次初始化的多个查询合并传入 `--query`。局部会话收据记录实际设备、累计卡时、保留字节及按秒采样的磁盘峰值。
 
 ```bash
-PYTHONPATH=src python3 -m prologue.app acquire-local \
+PYTHONPATH=src python3 -m prologue library acquire \
   --query /path/to/gap.json --deployment /path/to/deployment.json \
   --output /path/to/local-session --timeout 60 --budget-seconds 60 --attempt-limit 1
 ```
 
   SGLang 在 Ascend 上按缺项选择原生入口。
 
-  1. **同步张量搬运**：按模板工作执行同卡张量操作并核对同步 ACL 区间与目标数据；样本经 `fit-costs --samples ... --gap ...` 复核。
-  2. **稠密 TP1 Decode Attention**：额外传 `--libraries <发布根>`，复用单个 `ModelRunner` 跑 Prefill 写 KV 与指定 Decode attention，回读 K/V 并逐段核对设备任务与计时；支持零新增尝试从原生记录恢复。对照完整服务开销时使用 `capture --attention-sites <文件>`。
+  1. **同步张量搬运**：按模板工作执行同卡张量操作并核对同步 ACL 区间与目标数据；样本经 `cost fit --samples ... --gap ...` 复核。
+  2. **稠密 TP1 Decode Attention**：额外传 `--libraries <发布根>`，复用单个 `ModelRunner` 跑 Prefill 写 KV 与指定 Decode attention，回读 K/V 并逐段核对设备任务与计时；支持零新增尝试从原生记录恢复。对照完整服务开销时使用 `capture run --attention-sites <文件>`。
   3. **PD `prebuilt_prepare`**：接收端按已准入成员顺序与长度预备本地 KV 并执行批准备，核对页表写入与 K/V 读回，产物 `structure/receiver.json` 可直接投影编译。
   4. **稠密 TP 词嵌入**：按 `model_tokens` 合批同阶段同词元数查询共用初始化，单卡顺序观测并经主机交换分片，完整模式在设备间求和，输出 `structure/embedding-<rank>.json`。
   5. **Worker 初态和调度器批次。** 初始化读取真实角色、槽位、KV 容量和预热后状态。局部批次按需求中的队列、成员和已生成 token 数在原生调度器准备前序状态，再观察选批、模型前向或结果发布。这个批次入口覆盖关闭前缀缓存、采用常规调度的稠密模型。
@@ -120,33 +116,33 @@ PYTHONPATH=src python3 -m prologue.app acquire-local \
 
 并发 Prefill 首次需要实测时，采集器从这批成员的实际长度和可运行步数生成有限的局部输入。它测量最长成员单独执行的 Prefill。有两个可继续的成员组时，还测量它们合批后的 Decode 前向与结果处理。不同探针共享一次有额度的采集任务，收据列出 ModelRunner 启动数、卡时和各产物的原生测量位置。模板编译从指定的合并入口抽取子图。冷任务结束前，协调器核对这些实测切口涉及的同步搬运，将仍缺的载荷交给已有的就绪张量采样器。额度耗尽时，结果单列尚未定价的训练工作。
 
-- **增量发布到长期库（`publish-local`）与局部批次提样（`batch-cost-samples`）**：`publish-local` 核对候选后原子切换双库并返回固定发布目录（重复提交同证据返回现有发布，旧读者不受影响；已核对的单批次结构会话亦可回答对应设备区间成本查询）。
+- **增量发布到长期库（`library publish`）与局部批次提样（`cost extract --kind batch`）**：`library publish` 核对候选后原子切换双库并返回固定发布目录（重复提交同证据返回现有发布，旧读者不受影响；已核对的单批次结构会话亦可回答对应设备区间成本查询）。
 
 ```bash
-python3 -m prologue.app publish-local --libraries /data/libraries \
-  --session /data/session --query /data/query.json \
+python3 -m prologue library publish --libraries /data/libraries \
+  --from-session /data/session --query /data/query.json \
   --binary /build/prologue --timeout 300
 
-python3 -m prologue.app batch-cost-samples --session /training/local-batch \
+python3 -m prologue cost extract --kind batch --session /training/local-batch \
   --binary /build/prologue --timeout 300 --output /training/samples/batch.json
 ```
 
-- **从旧训练集合导入发布**：在控制镜像内执行，并按原绝对路径挂载历史采集目录；发布根 `release.json` 固定双库入口与原生来源身份，所有运行时引用指向发布根内文件。
+- **从旧训练集合导入发布**：通过宿主 CLI 执行，并按原绝对路径挂载历史采集目录；发布根 `release.json` 固定双库入口与原生来源身份，所有运行时引用指向发布根内文件。
 
 ```bash
-PYTHONPATH=src python3 example/coarse_graph/import_assets.py \
-  --collection /path/to/training/collection --costs /path/to/training/costs.json \
-  --output /path/to/qwen-release
+PYTHONPATH=src python3 -m prologue library publish \
+  --from-collection /path/to/training/collection --costs /path/to/training/costs.json \
+  --libraries /path/to/qwen-release
 ```
 
-### 3. 原生采集（`capture`）与离线生产（`produce`）
+### 3. 原生采集（`capture run`）与离线生产（`capture project`）
 
 ```bash
-PYTHONPATH=src python3 -m prologue.app capture \
+PYTHONPATH=src python3 -m prologue capture run \
   --input <job.json> --deployment <deployment.json> \
   --output <采集任务目录> --timeout 900 --budget-seconds 1800 --attempt-limit 2
 
-PYTHONPATH=src python3 -m prologue.app produce \
+PYTHONPATH=src python3 -m prologue capture project \
   --capture <已发布的原生采集任务目录> --output <生产目录> \
   --binary <modeling构建的prologue> --budget-seconds 600
 ```
@@ -159,23 +155,23 @@ PYTHONPATH=src python3 -m prologue.app produce \
 
 ```bash
 # 导出物理通信样本（可重复 --rank/--work-identities/--output 共用同次校时）
-python3 -m prologue.app cost-samples --transport-only \
+python3 -m prologue cost extract --kind transport \
   --production /training/collection/assets/0 --rank 0 \
   --work-identities /training/assets/0/sources/0/0-work.json \
   --output /calibration/tp2-rank-0.json
 
 # 拟合离线成本资产（可选 --check / --demand / --gap 走 C++23 复核）
-python3 -m prologue.app fit-costs --samples /calibration/*.json \
+python3 -m prologue cost fit --samples /calibration/*.json \
   --binary /build/prologue --output /training/costs.json
 ```
 
-- `host-cost-samples` 配对详细观测与 `capture --host-timing` 观测提取主机 CPU 服务样本。
-- `acquire-costs` 支持 `--production`、`--samples`、`--demand`、`--gap` 与 `--transport-samples`，按累计预算自动补采主机/通信样本并输出 `costs.json`（保留明细需加 `--keep-intermediates`）。
+- `cost extract --kind host` 配对详细观测与 `capture run --host-timing` 观测提取主机 CPU 服务样本。
+- `cost acquire` 支持 `--production`、`--samples`、`--demand`、`--gap` 与 `--transport-samples`，按累计预算自动补采主机/通信样本并输出 `costs.json`（保留明细需加 `--keep-intermediates`）。
 
 ### 5. 单目标预测（`predict`）与执行明细排障
 
 ```bash
-PYTHONPATH=src python3 -m prologue.app predict \
+PYTHONPATH=src python3 -m prologue predict run \
   --libraries /path/to/qwen-release --input <prediction.json> \
   --binary <modeling构建的prologue> --output <新输出目录> --timeout 180
 ```
@@ -201,17 +197,17 @@ PYTHONPATH=src python3 -m prologue.app predict \
 三路独立验证的完整算法、时钟认证与资格判据详见 [verification.md](verification.md)，常用公开调用如下：
 
 ```bash
-# 来源证据独立检查（modeling 容器）
-PYTHONPATH=src python3 -m prologue.verification.source_evidence \
+# 来源证据独立检查（宿主源码，时钟约束求解使用带 SciPy 的无设备环境）
+PYTHONPATH=src python3 -m prologue verify source \
   --production <生产目录> --capture <原始采集目录> [--libraries <双库目录>] --output <报告目录>
 
 # 单案例执行结构验证（串联参考核验、受控输入、预测与 compare_actions）
-PYTHONPATH=src python3 -m prologue.verification.structure \
+PYTHONPATH=src python3 -m prologue verify structure \
   --capture <采集目录> --reference <真实图生产目录> --libraries <双库目录> \
   --input <目标输入.json> --binary <prologue> --output <验证目录> --timeout 180
 
 # 单案例自主闭环评分
-PYTHONPATH=src python3 -m prologue.verification.autonomous \
+PYTHONPATH=src python3 -m prologue verify autonomous \
   --capture <轻量采集目录> --libraries <双库目录> --input <目标输入.json> \
   --binary <prologue> --output <验证目录> --timeout 180
 
@@ -235,9 +231,9 @@ python3 example/coarse_graph/matrix.py \
 
 | 需要回答的问题 | 优先入口与依据 | 排查顺序 |
 | --- | --- | --- |
-| 真实时间下能否展开出一致的执行结构？ | `python3 -m prologue.verification.structure` | 核对参考材料、`condition_inputs` 覆盖与消费，定位首个动作、模板绑定、依赖或资源效果差异 |
-| 同一执行图上的性能成本是否准确？ | `python3 -m prologue.verification.fixed_graph`（调用 `work-costs` + `replay`） | 核对单工作自身服务测量资格 → 确认实测基线通过 → 查单元误差与关键链传播 |
-| 使用独立成本后的端到端结果如何？ | `python3 -m prologue.verification.autonomous` + `schedule` | 固定图基线通过后，比较自主运行与固定图的首处时序、控制或状态分歧 |
+| 真实时间下能否展开出一致的执行结构？ | `python3 -m prologue verify structure` | 核对参考材料、`condition_inputs` 覆盖与消费，定位首个动作、模板绑定、依赖或资源效果差异 |
+| 同一执行图上的性能成本是否准确？ | `python3 -m prologue verify fixed-graph`（调用 `work-costs` + `replay`） | 核对单工作自身服务测量资格 → 确认实测基线通过 → 查单元误差与关键链传播 |
+| 使用独立成本后的端到端结果如何？ | `python3 -m prologue verify autonomous` + `schedule` | 固定图基线通过后，比较自主运行与固定图的首处时序、控制或状态分歧 |
 
 ### 日常开发边界与验证纪律
 

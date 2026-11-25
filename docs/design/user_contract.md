@@ -4,12 +4,18 @@ Prologue 的一次任务由**一个固定模型**、**非空配置集合**与**�
 
 ## 一、公开任务入口与核心输入合同
 
-| 公开入口 | 核心用途 | 关键输入 |
-| --- | --- | --- |
-| `python3 -m prologue.app explore` | 对配置集 × workload 集批量预测与指标对比；传入 `--deployment` 时可按缺项自动局部补库并只重算受影响目标 | `--input`、`--libraries`、`--timeout`；补库模式另传 `--deployment` 及累计额度 |
-| `python3 -m prologue.app predict` | 单目标预测：按时间输入选择自主成本预测、给定统一耗时或受控实测结构对照 | `--input`、`--libraries`、`--timeout`；按需传 `--execution-inputs` 或在输入声明 `given_work_ns` |
-| `python3 -m prologue.app acquire-local` | 接收预测返回的原缺项查询，在有界原生会话中取得局部结构或性能证据 | `--query`、`--deployment`、`--output`、单次限时与累计预算 |
-| `python3 -m prologue.app publish-local` | 核对局部会话产物与原查询，原子发布到长期双库存储并输出固定发布目录 | `--libraries`、`--session`、`--query`、`--binary`、`--timeout` |
+通过 `python3 -m prologue` 或安装后的 `prologue-cli` 调用下表各操作。`--libraries` 在预测时传固定发布目录。
+
+| 公开操作 | 作用与关键输入 |
+| --- | --- |
+| `predict explore` | 用 `--input` 中的一个模型、多个配置和多个负载生成目标。传入固定发布、`--binary` 和 `--timeout`。启用补库时传可写存储、`--deployment` 与累计额度。 |
+| `predict run` | 用一个目标、固定发布与二进制生成预测。输入可指定 `given_work_ns`，也可用 `--execution-inputs` 传入独立实测条件。 |
+| `library acquire` | 用原始 `--query`、物理部署、输出位置、单次限时和累计预算采集局部证据。 |
+| `library publish` | `--from-session` 配合原查询、二进制与限时发布到长期存储。`--from-collection` 从已编译的训练集合导入，可传独立的 `--costs`。两种来源均以 `--libraries` 指定目的地。 |
+| `library inspect` | 接受固定发布目录或长期存储，在标准输出显示所选发布的模板、成本与来源摘要。 |
+| `capture run/project` | 以物理部署和预算获取原生记录，再从指定来源投影模板或真实粗图。 |
+| `cost extract/fit/acquire` | 按样本来源提取实测，拟合发布资产或根据真实缺项补采。 |
+| `verify source/inputs/local-graphs/structure/fixed-graph/autonomous` | 分别核对原始证据、实测条件、局部展开及三条验证路径。每项显式传入本次的输入和输出位置。 |
 
 ### 公共输入字段合同
 
