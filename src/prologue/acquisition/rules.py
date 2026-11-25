@@ -1,17 +1,17 @@
 """Run one local native session and answer its original evidence queries."""
 
 import subprocess
-from dataclasses import replace
 from contextlib import nullcontext
+from dataclasses import replace
 from typing import Protocol
 
-from prologue.runtime.workspace import TaskWorkspace, file_lock
-from prologue.acquisition.options import LocalAcquisitionOptions
 from prologue.acquisition.capture import NativeAttempt
+from prologue.acquisition.options import LocalAcquisitionOptions
 from prologue.acquisition.recording import PublishedCapture
-from prologue.runtime.io import content_id, read_json, write_json
 from prologue.performance.requirements import require_work_interval
+from prologue.runtime.io import content_id, read_json, write_json
 from prologue.runtime.limits import AllowanceExhausted, OperationLimit
+from prologue.runtime.workspace import TaskWorkspace, file_lock
 
 
 class EvidenceGap(Exception):
@@ -25,7 +25,9 @@ class EvidenceRule(Protocol):
 
     def matches(self, query: dict) -> bool: ...
     def session_key(self, query: dict, deployment: dict): ...
-    def prepare(self, queries: list[dict], deployment: dict, arguments: LocalAcquisitionOptions, limit: OperationLimit) -> NativeAttempt: ...
+    def prepare(
+        self, queries: list[dict], deployment: dict, arguments: LocalAcquisitionOptions, limit: OperationLimit
+    ) -> NativeAttempt: ...
     def qualify(self, queries: list[dict], recording: PublishedCapture, timeout=None) -> tuple[dict, list[dict]]: ...
 
 
@@ -92,6 +94,10 @@ class LocalAcquisition:
             product.update(acquisition_rule=rule.name, native_recordings=[*sources, recording.attempt_id])
         return products, answers
 
+    def requalify(self, recording, queries):
+        rule, = (rule for rule in self.rules if rule.name == recording.inputs["rule"])
+        return self.products(rule, queries, recording)
+
     def observe(self, arguments, queries, deployment, root, limit, processing):
         keys = [content_id(query) for query in queries]
         request = {"queries": keys, "deployment": deployment, "source_image": arguments.source_image}
@@ -108,7 +114,9 @@ class LocalAcquisition:
         if result.exists():
             receipt = read_json(result)
             assets = (root / row["asset"] for row in receipt.get("answers", ()) if "asset" in row)
-            if receipt["status"] not in {"allowance_exhausted", "native_failed", "untriggered"} and all(path.is_file() for path in assets):
+            if receipt["status"] not in {"allowance_exhausted", "native_failed", "untriggered"} and all(
+                path.is_file() for path in assets
+            ):
                 return receipt
 
         native = root / "native"
@@ -141,8 +149,13 @@ class LocalAcquisition:
             status = "untriggered"
             if products:
                 status = "qualified" if all(answer["status"] == "qualified" for answer in answers) else "incomplete"
-            receipt.update(status=status, answers=answers, native_recording=recording.attempt_id, image=recording.inputs["image"],
-                           assets={name: content_id(product) for name, product in products.items()})
+            receipt.update(
+                status=status,
+                answers=answers,
+                native_recording=recording.attempt_id,
+                image=recording.inputs["image"],
+                assets={name: content_id(product) for name, product in products.items()},
+            )
             limit.check()
         except EvidenceGap as gap:
             receipt.update(gap.report)
@@ -152,7 +165,11 @@ class LocalAcquisition:
             attempts = NativeAttempt.attempts(native)
             if not attempts or attempts[-1]["status"] != "failed":
                 raise
-            detail = "native attempt exceeded its deadline" if isinstance(error, subprocess.TimeoutExpired) else f"native process exited with {error.returncode}"
+            detail = (
+                "native attempt exceeded its deadline"
+                if isinstance(error, subprocess.TimeoutExpired)
+                else f"native process exited with {error.returncode}"
+            )
             receipt.update(status="native_failed", detail=detail, attempt=attempts[-1]["number"])
 
         state = native / "execution.json"

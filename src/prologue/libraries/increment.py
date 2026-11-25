@@ -1,25 +1,46 @@
 """Qualify one local recording for persistent structure or service-cost publication."""
 
-import json
 from collections import defaultdict
 from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Protocol
 
-from prologue.acquisition.recording import PublishedCapture
-from prologue.runtime.io import read_json, content_id, write_json
-from prologue.libraries import asset_path
+from prologue.libraries.release import asset_path
+from prologue.libraries.templates import TemplatePublication
 from prologue.performance.fitting import FittedCosts
 from prologue.performance.requirements import CostRequirements
-from prologue.templates.publication import TemplatePublication
+from prologue.runtime.io import content_id, read_json, write_json
+
+
+class NativeRecording(Protocol):
+    directory: Path
+    attempt_id: str
+    inputs: dict
+    source: Path
+    manifest: dict
+
+
+class EvidenceQualifier(Protocol):
+    def requalify(self, recording: NativeRecording, queries: list[dict]) -> tuple[dict, list[dict]]: ...
+    def template_resources(self, facts: dict) -> list[dict]: ...
 
 
 class LocalLibraryIncrement:
-    def __init__(self, session, queries, acquisition, model, cost_source, *, measured=None):
-        self.session = session.resolve(strict=True)
-        self.recording = PublishedCapture(self.session / "native")
+    def __init__(
+        self,
+        recording: NativeRecording,
+        queries,
+        qualifier: EvidenceQualifier,
+        model,
+        cost_source,
+        *,
+        measured=None,
+    ):
+        self.recording = recording
+        self.session = recording.directory.parent
         self.receipt = read_json(self.session / "result.json")
-        self.acquisition, self.model, self.cost_source = acquisition, model, cost_source
+        self.qualifier, self.model, self.cost_source = qualifier, model, cost_source
         self.measured = measured
         native, receipt = self.recording, self.receipt
         if (receipt["status"] not in {"qualified", "incomplete"} or receipt["native_recording"] != native.attempt_id
@@ -52,7 +73,9 @@ class LocalLibraryIncrement:
         if not self.questions:
             raise ValueError("local publication requires an original query")
 
-        self.identities = {name: content_id([native.attempt_id, name]) for name in self.questions.keys() | self.support.keys()}
+        self.identities = {
+            name: content_id([native.attempt_id, name]) for name in self.questions.keys() | self.support.keys()
+        }
 
     def applied(self, receipts):
         return all(identity in receipts and self.questions.get(name, {}).keys() <= set(receipts[identity]["queries"])
@@ -71,8 +94,7 @@ class LocalLibraryIncrement:
             else:
 
                 # Receipts without product digests can be qualified again from the owning native recording.
-                rule, = (rule for rule in self.acquisition.rules if rule.name == self.recording.inputs["rule"])
-                products, answers = self.acquisition.products(rule, self.direct, self.recording)
+                products, answers = self.qualifier.requalify(self.recording, self.direct)
                 if any(answer["status"] != "qualified" for answer in answers):
                     raise ValueError("original query failed native requalification")
         for name in self.derived:
@@ -89,7 +111,10 @@ class LocalLibraryIncrement:
             products = self.products(scratch)
             structure, costs = {}, {}
             for name, product in products.items():
-                if self.recording.attempt_id not in product["native_recordings"] or product["acquisition_rule"] != self.receipt["rule"]:
+                if (
+                    self.recording.attempt_id not in product["native_recordings"]
+                    or product["acquisition_rule"] != self.receipt["rule"]
+                ):
                     raise ValueError("local product belongs to a different native measurement")
                 if "samples" in product:
                     costs[name] = product
@@ -98,7 +123,7 @@ class LocalLibraryIncrement:
             if structure:
                 native = self.recording
                 update = TemplatePublication(candidate / "templates", scratch, self.model, native.attempt_id,
-                                             native.inputs["deployment"], self.acquisition.template_resources)
+                                             native.inputs["deployment"], self.qualifier.template_resources)
                 for name, facts in structure.items():
                     update.observe(self.identities[name], facts, self.questions[name].values())
                 update.publish()
@@ -110,9 +135,12 @@ class LocalLibraryIncrement:
                 prior = receipts.get(identity, {})
                 related = self.support.get(name, set()) | set(prior.get("supports", ()))
                 receipts[identity] = {
-                    "product": name, "queries": sorted(self.questions[name].keys() | set(prior.get("queries", ()))),
-                    "recordings": product["native_recordings"], "rule": self.receipt["rule"],
-                    "deployment": self.recording.inputs["deployment"], "physical_devices": self.recording.inputs["physical_devices"],
+                    "product": name,
+                    "queries": sorted(self.questions[name].keys() | set(prior.get("queries", ()))),
+                    "recordings": product["native_recordings"],
+                    "rule": self.receipt["rule"],
+                    "deployment": self.recording.inputs["deployment"],
+                    "physical_devices": self.recording.inputs["physical_devices"],
                     "image": self.recording.inputs["image"],
                 }
                 if related:
@@ -132,7 +160,11 @@ class LocalLibraryIncrement:
 
             # Native work binds its exact interval. A peer profile binds a measured physical operand across graph forms.
             native_intervals = name in self.derived and "transport_profile" not in product
-            measured = set(CostRequirements().samples(identity, product, basis="native_measurement")) if native_intervals else None
+            measured = (
+                set(CostRequirements().samples(identity, product, basis="native_measurement"))
+                if native_intervals
+                else None
+            )
             if name in self.derived and "transport_profile" in product:
                 if self.cost_source.uncovered(list(self.questions[name].values()), product, self.model, scratch):
                     raise ValueError("the physical calibration does not cover the requested collective operand")

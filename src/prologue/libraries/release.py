@@ -1,14 +1,15 @@
 """Read a fixed, portable pair of template and service-cost publications."""
 
 import json
-from hashlib import sha256
+from collections import Counter
 from dataclasses import dataclass
 from functools import cached_property
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
-from prologue.runtime.io import content_id, write_json
+from prologue.runtime.io import content_id, read_json, write_json
 
 
 def asset_path(directory, name):
@@ -64,12 +65,12 @@ class TemplateCatalog:
         return shard
 
     def read_shard(self, shard):
-        body = json.loads(asset_path(self.directory, shard["body"]).read_bytes())
+        body = read_json(asset_path(self.directory, shard["body"]))
         for position, definition in enumerate(body["definitions"]):
             if "object" in definition:
                 key = definition["object"]
                 path = asset_path(self.directory / "definitions", key + ".json")
-                value = json.loads(path.read_bytes())
+                value = read_json(path)
                 if content_id(value) != key:
                     raise ValueError(f"published template definition differs from its content address: {key}")
                 body["definitions"][position] = value | {"id": definition["id"]}
@@ -82,8 +83,8 @@ class TemplateCatalog:
             shards = []
             for role, (path, sampling) in enumerate(paths):
                 name = f"bodies/{ordinal}/{role}.json"
-                recipe = json.loads(sampling.read_bytes()) if sampling is not None else None
-                shard = cls.write_shard(directory, name, json.loads(path.read_bytes()), sampling=recipe)
+                recipe = read_json(sampling) if sampling is not None else None
+                shard = cls.write_shard(directory, name, read_json(path), sampling=recipe)
                 shards.append(shard)
             records[identity] = {"deployment": deployment, "shards": shards}
 
@@ -112,7 +113,7 @@ class TemplateCatalog:
         for identity, observation in self.observations.items():
             for shard in observation["shards"]:
                 if "sampling" in shard:
-                    yield identity, json.loads(asset_path(self.directory, shard["sampling"]).read_bytes())
+                    yield identity, read_json(asset_path(self.directory, shard["sampling"]))
 
     def program_identity(self, binding):
         for path in binding.paths:
@@ -120,7 +121,12 @@ class TemplateCatalog:
                 self.body_digests[path] = sha256(path.read_bytes()).hexdigest()
 
         # The body includes the content addresses of its definitions. The header supplies the worker's initial state.
-        return [binding.worker_count, binding.worker_deployment, binding.headers, [self.body_digests[path] for path in binding.paths]]
+        return [
+            binding.worker_count,
+            binding.worker_deployment,
+            binding.headers,
+            [self.body_digests[path] for path in binding.paths],
+        ]
 
 
 class LibraryRelease:
@@ -149,7 +155,7 @@ class LibraryRelease:
         self.directory = self.root
         pointer = self.root / "current.json"
         if pointer.is_file():
-            current = json.loads(pointer.read_bytes())["release"]
+            current = read_json(pointer)["release"]
             self.directory = asset_path(self.root, current)
         manifest = self.directory / "release.json"
         if not manifest.exists() and self.directory == self.root and (not self.root.exists() or all(
@@ -160,7 +166,7 @@ class LibraryRelease:
             self.costs = None
             return
 
-        published = json.loads(manifest.read_bytes())
+        published = read_json(manifest)
         self.identity = published["id"]
         self.catalog = asset_path(self.directory, published["templates"])
         self.costs = asset_path(self.directory, published["costs"])
@@ -169,11 +175,52 @@ class LibraryRelease:
     def templates(self):
         if self.catalog is None:
             return TemplateCatalog(self.directory, {"bindings": [], "observations": {}})
-        return TemplateCatalog(self.catalog.parent, json.loads(self.catalog.read_bytes()))
+        return TemplateCatalog(self.catalog.parent, read_json(self.catalog))
 
     @cached_property
     def cost_identities(self):
         if self.costs is None:
             return {}
         return {content_id(group["domain"]): content_id([group["definitions"], group["models"]])
-                for group in json.loads(self.costs.read_bytes())["domains"]}
+                for group in read_json(self.costs)["domains"]}
+
+    def summarize(self) -> dict:
+        """Describe the templates a reader can select and the ranges of the published cost models."""
+        templates = self.templates
+        bindings = []
+        definitions = set()
+        for binding in templates.bindings.values():
+            selected = templates.select(binding["domain"])
+            active = set()
+            for path in selected.paths:
+                for definition in read_json(path)["definitions"]:
+                    key = definition.get("object")
+                    active.add(key if key is not None else content_id(definition))
+            definitions.update(active)
+
+            workers = []
+            for header in selected.headers[:selected.worker_count]:
+                rank = header["resources"][0]["rank"]
+                roles = header["domain"]["worker_roles"]
+                workers.append({"rank": rank, "roles": [role["parallel"] for role in roles.values()
+                                                       if role["representative"] == rank]})
+            bindings.append({"domain": binding["domain"], "workers": workers, "templates": len(active),
+                             "recordings": list(selected.recordings)})
+
+        costs = read_json(self.costs) if self.costs is not None else {"domains": [], "sample_recordings": []}
+        coverage = []
+        for domain in costs["domains"]:
+            families = Counter()
+            extents = {}
+            for model in domain["models"]:
+                families[model["family"]] += 1
+                for axis, (low, high) in model["bounds"].items():
+                    left, right = extents.get(axis, (low, high))
+                    extents[axis] = [min(left, low), max(right, high)]
+
+            # Extents describe the collection. Individual models retain their own possibly disjoint coverage.
+            coverage.append({"domain": domain["domain"], "models": len(domain["models"]),
+                             "families": dict(families), "feature_extents": extents})
+        return {"release": self.identity, "template_count": len(definitions), "bindings": bindings,
+                "cost_domains": coverage, "sample_tables": len(costs["sample_recordings"]),
+                "cost_recordings": sorted({origin for origins in costs["sample_recordings"] for origin in origins})}

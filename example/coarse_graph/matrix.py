@@ -10,7 +10,7 @@ from pathlib import Path
 
 from prologue.acquisition.recording import PublishedCapture
 from prologue.integrations.frameworks.sglang.worker_templates import SGLangTask
-from prologue.libraries import LibraryRelease
+from prologue.libraries.release import LibraryRelease
 from prologue.runtime.io import write_json
 from prologue.runtime.docker import OwnedContainers
 from prologue.verification.reference import ReferenceRecording

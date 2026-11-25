@@ -1,15 +1,14 @@
 """Publish both libraries together while readers keep their selected release."""
 
-import json
 import os
 from pathlib import Path
 from shutil import copytree, ignore_patterns, rmtree
 from uuid import uuid4
 
-from prologue.runtime.workspace import file_lock
-from prologue.runtime.io import write_json
-from prologue.libraries import LibraryRelease, asset_path
+from prologue.libraries.release import LibraryRelease, asset_path
 from prologue.performance.fitting import FittedCosts
+from prologue.runtime.io import read_json, write_json
+from prologue.runtime.workspace import file_lock
 
 
 class LibraryStore:
@@ -19,9 +18,13 @@ class LibraryStore:
     def recover(self, release):
         journal = self.root / ".pending.json"
         if journal.is_file():
-            pending = json.loads(journal.read_bytes())
+            pending = read_json(journal)
             relative = Path(pending["release"])
-            if relative.parent != Path("releases") or len(relative.name) != 32 or not all(c in "0123456789abcdef" for c in relative.name):
+            if (
+                relative.parent != Path("releases")
+                or len(relative.name) != 32
+                or not all(c in "0123456789abcdef" for c in relative.name)
+            ):
                 raise ValueError("invalid pending library release")
             candidate = asset_path(self.root, relative)
             if release.directory != candidate and release.identity != pending["base"]:
@@ -44,10 +47,11 @@ class LibraryStore:
             before = LibraryRelease(self.root)
             self.recover(before)
 
-            # A concurrent release may already cover the demand. The predictor rechecks it before another purchase or merge.
+            # A concurrent release may already cover the demand. The predictor rechecks it before another
+            # purchase or merge.
             if expected is not None and before.identity != expected.identity:
                 return before
-            receipts = json.loads((before.directory / "evidence.json").read_bytes()) if before.identity else {}
+            receipts = read_json(before.directory / "evidence.json") if before.identity else {}
             if increment.applied(receipts):
                 return before
 

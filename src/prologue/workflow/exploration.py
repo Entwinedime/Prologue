@@ -12,7 +12,7 @@ from pathlib import Path
 from prologue.runtime.workspace import BinarySnapshot, TaskWorkspace, file_lock
 from prologue.runtime.docker import DockerImage
 from prologue.runtime.io import read_json, write_json
-from prologue.libraries import LibraryRelease
+from prologue.libraries.release import LibraryRelease
 from prologue.runtime.limits import OperationLimit, Usage, retained_bytes
 from prologue.workflow.options import ExplorationOptions, PredictionOptions
 from prologue.workflow.report import ExplorationReport

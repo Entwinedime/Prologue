@@ -9,7 +9,7 @@ from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.app.prediction import PredictionProcess
 from prologue.workflow.options import PredictionOptions
 from prologue.runtime.io import write_json
-from prologue.libraries import LibraryRelease
+from prologue.libraries.release import LibraryRelease
 
 from .latency_metrics import LatencyComparison, NativeLatencyMetrics
 from .reference import ReferenceRecording

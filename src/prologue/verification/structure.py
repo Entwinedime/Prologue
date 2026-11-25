@@ -11,7 +11,7 @@ from prologue.app.prediction import PredictionProcess
 from prologue.workflow.options import PredictionOptions
 from prologue.runtime.io import write_json
 from prologue.runtime.docker import ModelingProcess
-from prologue.libraries import LibraryRelease
+from prologue.libraries.release import LibraryRelease
 
 from .compare_actions import ActionComparison
 from .execution_inputs import NativeInputs

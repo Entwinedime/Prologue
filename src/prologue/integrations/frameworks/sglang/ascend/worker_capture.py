@@ -5,7 +5,7 @@ import json
 from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.observation.source_scopes import SGLangSourceScopes
 from prologue.integrations.platforms.ascend.observation import AscendObservation
-from prologue.libraries import asset_path
+from prologue.libraries.release import asset_path
 from prologue.performance.samples import WorkCatalog
 
 

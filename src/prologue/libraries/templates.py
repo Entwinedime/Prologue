@@ -1,9 +1,8 @@
 """Store measured template fragments and compose initialized workers in their observed domains."""
 
-import json
 
-from prologue.runtime.io import content_id, write_json
-from prologue.libraries import TemplateCatalog
+from prologue.libraries.release import TemplateCatalog
+from prologue.runtime.io import content_id, read_json, write_json
 
 
 class TemplatePublication:
@@ -11,7 +10,7 @@ class TemplatePublication:
         self.directory, self.scratch, self.model = directory, scratch, model
         self.template_resources = template_resources
         self.origin = origin
-        self.index = json.loads((directory / "index.json").read_bytes())
+        self.index = read_json(directory / "index.json")
         self.catalog = TemplateCatalog(directory, self.index)
         self.observations = self.index["observations"]
         self.observation = self.observations.setdefault(origin, {"deployment": deployment, "shards": []})
@@ -26,20 +25,23 @@ class TemplatePublication:
         shards = self.observation["shards"]
         shard = next((row for row in shards if row["product"] == identity), None)
         if shard is None:
-            source, graph, library = (self.scratch / f"{identity}-{part}.json" for part in ("facts", "graph", "template"))
+            source, graph, library = (
+                self.scratch / f"{identity}-{part}.json" for part in ("facts", "graph", "template")
+            )
             projected = {key: value for key, value in facts.items() if key not in {"sampling", "export_site"}}
             projected["resources"] = self.template_resources(facts)
             write_json(source, projected)
             self.model.run_model("project", graph, source)
             options = ("--root-site", facts["export_site"]) if "export_site" in facts else ()
             self.model.run_model("templates", library, graph, options=options)
-            shard = self.catalog.write_shard(self.directory, f"observed/{identity}.json", json.loads(library.read_bytes()),
+            shard = self.catalog.write_shard(self.directory, f"observed/{identity}.json", read_json(library),
                                              sampling=facts.get("sampling"))
             shard["product"] = identity
             shards.append(shard)
             self.added.append((self.origin, shard))
 
-        # Only a qualified initialization can introduce serving participants. A leaf can be stored before its worker exists.
+        # Only a qualified initialization can introduce serving participants. A leaf can be stored before its
+        # worker exists.
         for query in queries:
             if query.get("status") != "missing_worker_binding":
                 self.checks.append((query, shard))
@@ -61,7 +63,9 @@ class TemplatePublication:
         domain = content_id(binding["domain"])
         fragments = self.added
         if domain in self.initialized:
-            fragments = [(origin, shard) for origin, observation in self.observations.items() for shard in observation["shards"]]
+            fragments = [
+                (origin, shard) for origin, observation in self.observations.items() for shard in observation["shards"]
+            ]
         mode = workers["deployment"]["acquisition_mode"]
         fragments = [(origin, shard) for origin, shard in fragments if origin != binding["workers"]
                      and self.observations[origin]["deployment"]["acquisition_mode"] == mode]
@@ -80,7 +84,9 @@ class TemplatePublication:
                 sources = binding.setdefault("sources", [])
                 if origin not in sources:
                     sources.append(origin)
-            effective[position] = self.catalog.write_shard(self.directory, f"workers/{domain}/{position}.json", json.loads(current.read_bytes()))
+            effective[position] = self.catalog.write_shard(
+                self.directory, f"workers/{domain}/{position}.json", read_json(current)
+            )
             binding["compiled"] = effective
 
     def export(self, shard, name):
@@ -109,7 +115,7 @@ class TemplatePublication:
                 library = self.export(program, "readback")
                 answer = self.scratch / f"answer-{number}-{index}.json"
                 self.model.run_model("query-template", answer, library, request)
-                selected = json.loads(answer.read_bytes())
+                selected = read_json(answer)
                 if selected["status"] != "covered" or "observation" not in selected:
                     raise ValueError(f"published program does not answer its original template query: {selected}")
 

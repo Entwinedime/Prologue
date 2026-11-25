@@ -3,17 +3,16 @@
 from collections import defaultdict
 
 from prologue.acquisition.budget import AcquisitionBudget
-from prologue.runtime.docker import DockerImage
 from prologue.acquisition.capture import NativeAttempt
-from prologue.acquisition.library_increment import LocalLibraryIncrement
-from prologue.acquisition.library_store import LibraryStore
 from prologue.acquisition.options import LocalAcquisitionOptions, QualificationOptions, ReplenishmentOptions
 from prologue.acquisition.recording import PublishedCapture
 from prologue.acquisition.rules import EvidenceGap
-from prologue.runtime.io import read_json, content_id, write_json
-from prologue.runtime.docker import ModelingProcess
-from prologue.libraries import LibraryRelease, asset_path
+from prologue.libraries.increment import LocalLibraryIncrement
+from prologue.libraries.release import LibraryRelease, asset_path
+from prologue.libraries.store import LibraryStore
 from prologue.performance.requirements import CostRequirements
+from prologue.runtime.docker import DockerImage, ModelingProcess
+from prologue.runtime.io import content_id, read_json, write_json
 from prologue.runtime.limits import AllowanceExhausted
 
 
@@ -84,9 +83,16 @@ class Replenishment:
 
         sources = [path.parent for path in sorted(self.sessions.glob("*/session/result.json"))]
         args = LocalAcquisitionOptions(
-            binary=self.qualification.binary, timeout=self.qualification.timeout, modeling_image=self.qualification.modeling_image,
-            source_image=self.source_image, storage_bytes=self.budget.limit.storage_bytes, output=directory,
-            structure_session=sources, budget_seconds=card_ns / 1e9, card_budget_ns=card_ns, attempt_limit=attempts,
+            binary=self.qualification.binary,
+            timeout=self.qualification.timeout,
+            modeling_image=self.qualification.modeling_image,
+            source_image=self.source_image,
+            storage_bytes=self.budget.limit.storage_bytes,
+            output=directory,
+            structure_session=sources,
+            budget_seconds=card_ns / 1e9,
+            card_budget_ns=card_ns,
+            attempt_limit=attempts,
         )
         origin = LibraryRelease(asset_path(self.store.root, demand["origin"])) if demand["origin"] else None
         acquisition = self.rules(origin, args)
@@ -95,16 +101,24 @@ class Replenishment:
         if receipt["status"] not in {"qualified", "incomplete"}:
             return receipt, None
 
-        qualified = [q for q, answer in zip(queries, receipt["answers"], strict=True) if answer["status"] == "qualified"]
+        qualified = [
+            q for q, answer in zip(queries, receipt["answers"], strict=True) if answer["status"] == "qualified"
+        ]
         with self.budget.processing() as seconds:
             model = ModelingProcess(args.binary, args.modeling_image, min(seconds, args.timeout))
-            increment = LocalLibraryIncrement(directory, qualified, acquisition, model, self.source_costs)
+            increment = LocalLibraryIncrement(
+                PublishedCapture(native), qualified, acquisition, model, self.source_costs
+            )
             published = self.store.publish(increment, self.budget.before_commit, expected=release)
         return receipt, published
 
     def reuse_measurements(self, queries, release):
         requirements = CostRequirements()
-        points = {key: requirements.gap(key, q) for key, q in queries.items() if q.get("work") in {"device", "transfer", "collective"}}
+        points = {
+            key: requirements.gap(key, q)
+            for key, q in queries.items()
+            if q.get("work") in {"device", "transfer", "collective"}
+        }
         if not points:
             return None
         for path in sorted(self.sessions.glob("*/session/result.json")):
@@ -120,10 +134,18 @@ class Replenishment:
             for product, keys in products.items():
                 source = native.attempt_id, product
                 previous = self.measured.get(source)
-                if previous and "transport_profile" not in previous[0] and all(points[key] not in previous[1] for key in keys):
+                if (
+                    previous
+                    and "transport_profile" not in previous[0]
+                    and all(points[key] not in previous[1] for key in keys)
+                ):
                     continue
                 with self.budget.processing() as seconds:
-                    model = ModelingProcess(self.qualification.binary, self.qualification.modeling_image, min(seconds, self.qualification.timeout))
+                    model = ModelingProcess(
+                        self.qualification.binary,
+                        self.qualification.modeling_image,
+                        min(seconds, self.qualification.timeout),
+                    )
                     group = [queries[key] for key in keys]
                     if source not in self.measured:
                         table = self.source_costs.extract(directory, native, group, model, self.sessions)
@@ -132,13 +154,16 @@ class Replenishment:
                     table, sampled = self.measured[source]
                     if "transport_profile" in table:
 
-                        # The same physical posts supply both ranks; the staged work may have a different local definition.
+                        # Both ranks use the same physical posts, even when they have different local definitions.
                         missing = self.source_costs.uncovered(group, table, model, self.sessions)
                         qualified = [q for index, q in enumerate(group) if index not in missing]
                     else:
                         qualified = [queries[key] for key in keys if points[key] in sampled]
                     if qualified:
-                        increment = LocalLibraryIncrement(directory, qualified, None, model, self.source_costs, measured=table)
+                        qualifier = self.rules(release, self.qualification)
+                        increment = LocalLibraryIncrement(
+                            native, qualified, qualifier, model, self.source_costs, measured=table
+                        )
                         return self.store.publish(increment, self.budget.before_commit, expected=release)
         return None
 
@@ -159,7 +184,9 @@ class Replenishment:
         if not demand.points:
             return {}
         with self.budget.processing() as seconds:
-            model = ModelingProcess(self.qualification.binary, self.qualification.modeling_image, min(seconds, self.qualification.timeout))
+            model = ModelingProcess(
+                self.qualification.binary, self.qualification.modeling_image, min(seconds, self.qualification.timeout)
+            )
             domains = read_json(release.costs)["domains"]
             _, missing, _ = demand.check(model, domains, self.sessions)
         queries = [demand.work_query(point) for point in missing]
@@ -169,7 +196,7 @@ class Replenishment:
         queries, users = {}, defaultdict(list)
         for target in targets:
             if target["status"] in {"template_gap", "cost_gap"}:
-                query = read_json((self.root / target["evidence"]))
+                query = read_json(self.root / target["evidence"])
                 key = content_id(query)
                 queries[key] = query
                 users[key].append(target)
@@ -191,14 +218,19 @@ class Replenishment:
             return None
         answers = dict(self.failed)
         if current.identity:
-            for product in read_json((current.directory / "evidence.json")).values():
+            for product in read_json(current.directory / "evidence.json").values():
                 if product["deployment"] == self.deployment:
                     for key in queries.keys() & set(product["queries"]):
-                        answers[key] = {"status": "published_evidence_did_not_resolve_query", "product": product["product"]}
+                        answers[key] = {
+                            "status": "published_evidence_did_not_resolve_query",
+                            "product": product["product"],
+                        }
 
         if self.budget.limit.storage_bytes and self.budget.state["processing_ns"] < self.budget.processing_ns:
             try:
-                published = self.reuse_measurements({key: q for key, q in queries.items() if key not in answers}, release)
+                published = self.reuse_measurements(
+                    {key: q for key, q in queries.items() if key not in answers}, release
+                )
                 if published and published.identity != release.identity:
                     return published
             except AllowanceExhausted as failure:

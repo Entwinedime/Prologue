@@ -6,7 +6,7 @@ from pathlib import Path
 
 from prologue.acquisition.recording import SourceProductions
 from prologue.acquisition.recording import PublishedCapture
-from prologue.libraries import LibraryRelease, asset_path
+from prologue.libraries.release import LibraryRelease, asset_path
 
 
 def import_assets(collection, costs, output):

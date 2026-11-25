@@ -9,7 +9,7 @@ from pathlib import Path
 
 from prologue.acquisition.recording import PublishedCapture
 from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
-from prologue.libraries import LibraryRelease, asset_path
+from prologue.libraries.release import LibraryRelease, asset_path
 
 from .actions import ActionScopes
 from .native_case import NativeCase
