@@ -1,8 +1,9 @@
 #include "prologue/graph/types.hpp"
 
+#include "prologue/contracts/serving.hpp"
+
 #include <algorithm>
 #include <array>
-#include <limits>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -15,13 +16,6 @@ constexpr std::array<std::string_view, 7> work_names{ "host", "device", "transfe
 constexpr std::array<std::string_view, 8> relation_names{ "order", "submission", "data", "signal", "control", "state", "communication", "observation" };
 constexpr std::array<std::string_view, 2> direction_names{ "input", "output" };
 constexpr std::array<std::string_view, 4> port_use_names{ "control", "data", "metadata", "signal" };
-
-std::int64_t integer(const nlohmann::json & value) {
-    if (!value.is_number_integer()
-        || (value.is_number_unsigned() && value.get<std::uint64_t>() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())))
-        throw std::invalid_argument("graph metadata requires a signed 64-bit integer");
-    return value.get<std::int64_t>();
-}
 
 template <class Kind, std::size_t Size> Kind read_kind(std::string_view name, const std::array<std::string_view, Size> & names) {
     const auto found = std::ranges::find(names, name);
@@ -55,12 +49,16 @@ std::string_view direction_name(Direction direction) { return direction_names.at
 PortUse port_use(std::string_view name) { return read_kind<PortUse>(name, port_use_names); }
 std::string_view port_use_name(PortUse use) { return port_use_names.at(static_cast<std::size_t>(use)); }
 
+ResourceClass ResourceClass::read(const nlohmann::json & source) {
+    return {resource_kind(source.at("kind").get<std::string>()), source.at("role").get<std::string>(), source.at("serial").get<bool>()};
+}
+
+nlohmann::json ResourceClass::document() const {
+    return {{"kind", resource_name(kind)}, {"role", role}, {"serial", serial}};
+}
+
 Resource Resource::read(const nlohmann::json & source) {
-    Resource result{ resource_kind(source.at("kind").get<std::string>()),
-                     integer(source.at("rank")),
-                     source.at("role").get<std::string>(),
-                     source.at("identity").get<std::string>(),
-                     source.at("serial").get<bool>() };
+    Resource result{ ResourceClass::read(source), read_integer(source.at("rank"), "rank"), source.at("identity").get<std::string>() };
     if (result.rank < 0 || result.role.empty() || result.identity.empty()) throw std::invalid_argument("invalid graph resource identity");
     if (result.kind != ResourceKind::Service && !result.serial) throw std::invalid_argument("threads and streams require serial order");
     if (source.contains("binding")) {
@@ -71,13 +69,9 @@ Resource Resource::read(const nlohmann::json & source) {
 }
 
 nlohmann::json Resource::document() const {
-    nlohmann::json result = {
-        {     "kind", resource_name(kind) },
-        {     "rank",                rank },
-        {     "role",                role },
-        { "identity",            identity },
-        {   "serial",              serial }
-    };
+    auto result = ResourceClass::document();
+    result["rank"] = rank;
+    result["identity"] = identity;
     if (binding) result["binding"] = *binding;
     return result;
 }
@@ -114,7 +108,7 @@ std::shared_ptr<const TensorCopy> TensorCopy::read(const nlohmann::json & work) 
     if (found == work.end()) return {};
     const auto & copy = *found;
     TensorCopy result{ copy.at("operand").get<std::string>(), TensorRule::read(copy.at("tensor")),
-                       integer(copy.at("element_bytes")), copy.at("caller").get<std::string>(),
+                       read_integer(copy.at("element_bytes"), "element_bytes"), copy.at("caller").get<std::string>(),
                        copy.at("implementation").get<std::string>(), copy.at("direction").get<std::string>() };
     if (work.at("kind") != "transfer" || result.operand.empty() || result.element_bytes <= 0 || result.caller.empty()
         || result.implementation.empty() || result.direction.empty())
@@ -138,11 +132,11 @@ std::int64_t TensorCopy::bytes(const Parameters & parameters) const {
 TensorObservation TensorObservation::read(const nlohmann::json & source, const ScopeInfo & scope) {
     TensorObservation result{ source.at("value").get<std::string>(),
                               source.at("storage").get<std::string>(),
-                              integer(source.at("version")),
+                              read_integer(source.at("version"), "version"),
                               source.at("dtype").get<std::string>(),
                               {},
                               std::nullopt };
-    for (const auto & dimension : source.at("shape").get_ref<const nlohmann::json::array_t &>()) result.shape.push_back(integer(dimension));
+    for (const auto & dimension : source.at("shape").get_ref<const nlohmann::json::array_t &>()) result.shape.push_back(read_integer(dimension, "shape dimension"));
     if (result.value.empty() || result.storage.empty() || result.dtype.empty() || result.version < 0
         || std::ranges::any_of(result.shape, [](auto size) { return size < 0; }))
         throw std::invalid_argument("invalid observed tensor boundary");
@@ -154,12 +148,12 @@ TensorObservation TensorObservation::read(const nlohmann::json & source, const S
         for (const auto & rule : rules) result.shape_rule->push_back(Expression::read(rule));
     }
     if (!source.at("writer").is_null()) {
-        const auto writer = integer(source.at("writer"));
+        const auto writer = read_integer(source.at("writer"), "writer");
         if (writer < 0) throw std::invalid_argument("invalid tensor writer scope");
         result.writer = static_cast<std::size_t>(writer);
     }
     if (!source.at("allocation").is_null()) {
-        const auto allocation = integer(source.at("allocation"));
+        const auto allocation = read_integer(source.at("allocation"), "allocation");
         if (allocation < 0) throw std::invalid_argument("invalid tensor allocation scope");
         result.allocation = static_cast<std::size_t>(allocation);
     }
@@ -201,7 +195,7 @@ ScopeInfo ScopeInfo::read(const nlohmann::json & source) {
     ScopeInfo result;
     const auto & parent = source.at("parent");
     if (!parent.is_null()) {
-        const auto value = integer(parent);
+        const auto value = read_integer(parent, "parent");
         if (value < 0) throw std::invalid_argument("invalid scope parent");
         result.parent = static_cast<std::size_t>(value);
     }
@@ -250,7 +244,7 @@ nlohmann::json ScopeInfo::document() const {
 PeerRows PeerRows::read(const nlohmann::json & source) {
     auto rows = [&](std::string_view name) {
         std::vector<std::int64_t> result;
-        for (const auto & value : source.at(name).get_ref<const nlohmann::json::array_t &>()) result.push_back(integer(value));
+        for (const auto & value : source.at(name).get_ref<const nlohmann::json::array_t &>()) result.push_back(read_integer(value, name));
         return result;
     };
     return { rows("send"), rows("receive") };
@@ -261,7 +255,7 @@ nlohmann::json PeerRows::document() const {
 }
 
 CommunicationGroup CommunicationGroup::read(const nlohmann::json & source) {
-    const auto ordinal = integer(source.at("order"));
+    const auto ordinal = read_integer(source.at("order"), "order");
     if (ordinal < 0) throw std::invalid_argument("communication order must be nonnegative");
     CommunicationGroup result{ source.at("channel").get<std::string>(),
                                source.at("operation").get<std::string>(),

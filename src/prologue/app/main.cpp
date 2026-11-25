@@ -2,7 +2,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -20,6 +19,8 @@
 #include <nlohmann/json.hpp>
 #include <unistd.h>
 
+#include "prologue/contracts/json_io.hpp"
+#include "prologue/contracts/serving.hpp"
 #include "prologue/integrations/frameworks/sglang/serving.hpp"
 #include "prologue/integrations/frameworks/sglang/templates.hpp"
 #include "prologue/app/execution_trace.hpp"
@@ -59,12 +60,8 @@ public:
     }
 };
 
-nlohmann::json read_json(const std::filesystem::path & path) {
-    std::ifstream stream(path);
-    if (!stream) throw std::runtime_error("cannot read input: " + path.string());
-    stream.exceptions(std::ios::badbit);
-    return nlohmann::json::parse(stream);
-}
+using prologue::Publication;
+using prologue::read_json;
 
 class PublishedTemplates {
 public:
@@ -92,36 +89,6 @@ public:
 private:
     std::filesystem::path directory_;
     std::map<std::string, nlohmann::json> definitions_;
-};
-
-// Publishing a new artifact must neither expose a partial JSON nor replace an existing input or output.
-class Publication {
-public:
-    explicit Publication(std::filesystem::path destination)
-        : destination_(std::move(destination)),
-          temporary_(destination_.string() + ".tmp." + std::to_string(getpid())) {
-        if (!destination_.parent_path().empty()) std::filesystem::create_directories(destination_.parent_path());
-        stream_.exceptions(std::ios::badbit | std::ios::failbit);
-        stream_.open(temporary_, std::ios::out | std::ios::noreplace);
-    }
-
-    ~Publication() {
-        std::error_code ignored;
-        std::filesystem::remove(temporary_, ignored);
-    }
-
-    void write(const nlohmann::json & document) {
-        stream_ << document << '\n';
-        stream_.close();
-
-        // A same-directory hard link is atomic and fails if the destination already exists, including symlinks.
-        std::filesystem::create_hard_link(temporary_, destination_);
-    }
-
-private:
-    std::filesystem::path destination_;
-    std::filesystem::path temporary_;
-    std::ofstream stream_;
 };
 
 constexpr std::string_view usage = "prologue project <native-facts.json> <coarse.json> [--evidence]\n"
@@ -170,20 +137,14 @@ nlohmann::json work_costs(const prologue::sglang::TemplateDeclarations & source,
     return result;
 }
 
-std::int64_t nonnegative(const nlohmann::json & value) {
-    if (!value.is_number_integer() || value.get<std::uint64_t>() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
-        throw std::invalid_argument("fixed execution coordinates must be nonnegative signed 64-bit integers");
-    return value.get<std::int64_t>();
-}
-
 nlohmann::json replay(const nlohmann::json & plan, const nlohmann::json & scenarios) {
     std::vector<std::int64_t> releases;
-    for (const auto & value : plan.at("releases_ns").get_ref<const nlohmann::json::array_t &>()) releases.push_back(nonnegative(value));
+    for (const auto & value : plan.at("releases_ns").get_ref<const nlohmann::json::array_t &>()) releases.push_back(prologue::read_nonnegative_integer(value, "release time"));
     std::vector<prologue::TimedDependency> edges;
     for (const auto name : { "dependencies", "work" }) {
         for (const auto & row : plan.at(name).get_ref<const nlohmann::json::array_t &>()) {
             if (!row.is_array() || row.size() != 3) throw std::invalid_argument("fixed dependency needs two endpoints and an immutable delay");
-            edges.push_back({ static_cast<std::size_t>(nonnegative(row[0])), static_cast<std::size_t>(nonnegative(row[1])), nonnegative(row[2]) });
+            edges.push_back({ static_cast<std::size_t>(prologue::read_nonnegative_integer(row[0], "source event")), static_cast<std::size_t>(prologue::read_nonnegative_integer(row[1], "target event")), prologue::read_nonnegative_integer(row[2], "fixed delay") });
         }
     }
 
@@ -194,7 +155,7 @@ nlohmann::json replay(const nlohmann::json & plan, const nlohmann::json & scenar
     for (const auto & [name, values] : scenarios.get_ref<const nlohmann::json::object_t &>()) {
         if (!values.is_array() || values.size() != work.size()) throw std::invalid_argument("fixed replay needs one service value per declared work interval");
         for (std::size_t index = 0; index < work.size(); ++index) {
-            const auto service = nonnegative(values[index]);
+            const auto service = prologue::read_nonnegative_integer(values[index], "service duration");
             if (service > std::numeric_limits<std::int64_t>::max() - fixed_delays[index])
                 throw std::overflow_error("fixed work delay exceeds int64 nanoseconds");
             work[index].delay_ns = fixed_delays[index] + service;
@@ -208,7 +169,7 @@ nlohmann::json execute(const prologue::CoarseGraph & graph, const nlohmann::json
     std::vector<prologue::ServiceDuration> work_ns;
     for (const auto & value : timing.at("work_ns").get_ref<const nlohmann::json::array_t &>()) {
         if (value.is_null()) work_ns.push_back(std::nullopt);
-        else work_ns.push_back(prologue::read_parameters({ { "service_ns", value } }).at("service_ns"));
+        else work_ns.push_back(prologue::read_integer(value, "service_ns"));
     }
     std::vector<prologue::BoundaryCondition> boundaries;
     if (timing.contains("boundaries")) {
@@ -260,10 +221,7 @@ prologue::GraphInvocation invocation(const nlohmann::json & source) {
         for (const auto & [name, value] : source.at("state_inputs").items()) result.state_inputs.emplace(name, prologue::StateBindings::read(value));
     }
     for (const auto & [name, storage] : source.at("storage").get_ref<const nlohmann::json::object_t &>()) {
-        const auto version = prologue::read_parameters({
-                                                         { "version", storage.at("version") }
-        })
-                                 .at("version");
+        const auto version = prologue::read_integer(storage.at("version"), "version");
         result.storage.emplace(name, prologue::StorageBinding{ storage.at("identity").get<std::string>(), version });
     }
     for (const auto & resource : source.at("resources").get_ref<const nlohmann::json::array_t &>())
@@ -286,10 +244,9 @@ int main(int argc, char ** argv) {
         nlohmann::json output;
         if (command == "project" && (argc == 4 || (argc == 5 && std::string_view(argv[4]) == "--evidence"))) {
             destination = argv[3];
-            auto observation = prologue::NativeObservation::read(read_json(argv[2]));
-            prologue::ProjectionEvidence evidence;
-            output = prologue::CoarseProjection::project(std::move(observation), argc == 5 ? &evidence : nullptr).document();
-            if (argc == 5) output["evidence"] = evidence.document(observation);
+            auto projected = prologue::CoarseProjection::project(prologue::NativeObservation::read(read_json(argv[2])), argc == 5);
+            output = projected.graph.document();
+            if (projected.evidence) output["evidence"] = std::move(*projected.evidence);
         }
         else if (((command == "templates" || command == "work-identities") && argc == 4)
                  || (command == "templates" && argc == 6 && std::string_view(argv[4]) == "--root-site")) {
@@ -415,10 +372,7 @@ int main(int argc, char ** argv) {
                 }
 
                 // Auxiliary bodies can supply closed actions or local children; participants come from the role binding.
-                const auto imports = prologue::sglang::NativeTemplates::share_closed_actions(libraries);
-                std::vector<prologue::TemplateLibrary *> sources;
-                for (auto & [_, library] : libraries) sources.push_back(&library);
-                prologue::TemplateLibrary::link_local_implementations(sources);
+                const auto imports = prologue::sglang::link_serving_libraries(libraries);
                 output = prologue::sglang::serve(libraries, task, timing, costs, peer, trace.get(), trace.get(), trace.get());
                 output["template_imports"] = imports;
             }

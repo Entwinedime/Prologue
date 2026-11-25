@@ -189,7 +189,8 @@ public:
                               source.state,
                               source.state_input,
                               source.communication,
-                              source.allocations },
+                              source.allocations,
+                              {} },
                 {},
                 {}
             };

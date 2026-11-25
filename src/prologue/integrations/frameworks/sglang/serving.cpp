@@ -56,7 +56,7 @@ nlohmann::json serve(const std::map<std::size_t, TemplateLibrary> & libraries, c
 
     ServiceDuration duration;
     if (given) {
-        duration = read_parameters({ { "given_work_ns", task.at("given_work_ns") } }).at("given_work_ns");
+        duration = read_integer(task.at("given_work_ns"), "given_work_ns");
         if (*duration < 0) throw std::invalid_argument("given work duration must be nonnegative nanoseconds");
     }
     std::optional<ExecutionInputs> inputs;
@@ -121,10 +121,7 @@ nlohmann::json serve(const std::map<std::size_t, TemplateLibrary> & libraries, c
             const auto local = static_cast<std::int64_t>(ranks.size());
             if (parallel.at("tp_rank") != local % tp || parallel.at("pp_rank") != local / tp)
                 throw std::invalid_argument("participants must follow their native TP/PP rank order");
-            const auto rank = read_parameters({
-                                                  { "rank", binding.at("rank") }
-            })
-                                  .at("rank");
+            const auto rank = read_integer(binding.at("rank"), "rank");
             if (rank < 0 || parallel.at("rank") != rank) throw std::invalid_argument("participant rank must match its nonnegative environment rank");
             ranks.push_back(static_cast<std::size_t>(rank));
             workers.push_back({

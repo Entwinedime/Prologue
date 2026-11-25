@@ -94,10 +94,7 @@ private:
 
     std::size_t resource(std::size_t identity) {
         const auto [found, inserted] = resources_.try_emplace(identity, resources_.size());
-        if (inserted) {
-            const auto & actual = library_.resources.at(identity);
-            result_.resources.push_back({ actual.kind, actual.role, actual.serial });
-        }
+        if (inserted) result_.resources.push_back(library_.resources.at(identity));
         return found->second;
     }
 

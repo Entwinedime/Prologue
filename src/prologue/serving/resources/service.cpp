@@ -1,3 +1,4 @@
+#include "prologue/contracts/serving.hpp"
 #include "prologue/serving/resources/service.hpp"
 
 #include <set>
@@ -33,7 +34,7 @@ nlohmann::json ResourceService::call(const nlohmann::json & message, const std::
         const auto field = message.at("field").get<std::string>();
         const auto operation = message.at("operation").get<std::string>();
         if (operation == "declare") {
-            const auto capacity = read_parameters({{"capacity", message.at("capacity")}}).at("capacity");
+            const auto capacity = read_integer(message.at("capacity"), "capacity");
             if (field.empty() || request_fields_.contains(field) || fields_.contains(field) || capacity <= 0)
                 throw std::invalid_argument("state slot declaration requires a new field and positive capacity");
             fields_.try_emplace(field, static_cast<std::size_t>(capacity));
@@ -45,7 +46,7 @@ nlohmann::json ResourceService::call(const nlohmann::json & message, const std::
             const auto slot = slots.allocate();
             return slot ? nlohmann::json(*slot) : nlohmann::json();
         }
-        const auto index = read_parameters({{"slot", message.at("slot")}}).at("slot");
+        const auto index = read_integer(message.at("slot"), "slot");
         if (index < 0) throw std::invalid_argument("state slot index must be nonnegative");
         const auto slot = static_cast<std::size_t>(index);
         if (operation == "bind") {
@@ -113,12 +114,7 @@ nlohmann::json ResourceService::call(const nlohmann::json & message, const std::
             const auto id = request(member.at("request"), delivered);
             if (!members.insert(id).second) throw std::invalid_argument("allocation repeats a request");
             std::int64_t tokens = 0;
-            if (kind == "allocate") {
-                const auto demand = read_parameters({
-                    { "tokens", member.at("tokens") }
-                });
-                tokens = demand.at("tokens");
-            }
+            if (kind == "allocate") tokens = read_integer(member.at("tokens"), "tokens");
 
             if (kind == "slots" && member.contains("prefix")) {
                 const auto & prefix = member.at("prefix");

@@ -348,7 +348,7 @@ nlohmann::json NativeTemplates::domain(const nlohmann::json & environment) {
     return result;
 }
 
-nlohmann::json NativeTemplates::share_closed_actions(std::map<std::size_t, TemplateLibrary> & libraries) {
+nlohmann::json link_serving_libraries(std::map<std::size_t, TemplateLibrary> & libraries) {
     struct Candidate {
         std::size_t source;
         std::size_t entry;
@@ -395,6 +395,9 @@ nlohmann::json NativeTemplates::share_closed_actions(std::map<std::size_t, Templ
                 imports.push_back({ { "recipient", index }, { "entry", *entry }, { "source", candidate.source }, { "source_entry", candidate.entry } });
         }
     }
+    std::vector<TemplateLibrary *> sources;
+    for (auto & [_, library] : libraries) sources.push_back(&library);
+    TemplateLibrary::link_local_implementations(sources);
     return imports;
 }
 

@@ -1,3 +1,4 @@
+#include "prologue/contracts/serving.hpp"
 #include "prologue/serving/controller/delivery.hpp"
 
 #include <map>
@@ -16,7 +17,7 @@ RequestDelivery::RequestDelivery(std::span<const Request> requests, const nlohma
     for (std::size_t index = 0; index < requests.size(); ++index) identities.emplace(requests[index].id, index);
     std::set<std::size_t> received;
     for (const auto & record : ingress->get_ref<const nlohmann::json::array_t &>()) {
-        const auto time_ns = read_parameters({ { "time_ns", record.at("time_ns") } }).at("time_ns");
+        const auto time_ns = read_integer(record.at("time_ns"), "time_ns");
         if (time_ns < 0 || (!rounds_.empty() && time_ns < rounds_.back().time_ns))
             throw std::invalid_argument("ingress rounds require nonnegative, nondecreasing nanoseconds");
         Round round{ time_ns, {} };

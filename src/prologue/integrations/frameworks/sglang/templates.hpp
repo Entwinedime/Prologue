@@ -27,7 +27,8 @@ public:
     static TemplateDeclarations describe(CoarseGraph graph);
     static nlohmann::json condition(std::string_view action, nlohmann::json facts);
     static nlohmann::json domain(const nlohmann::json & environment);
-    static nlohmann::json share_closed_actions(std::map<std::size_t, TemplateLibrary> & libraries);
 };
+
+nlohmann::json link_serving_libraries(std::map<std::size_t, TemplateLibrary> & libraries);
 
 } // namespace prologue::sglang

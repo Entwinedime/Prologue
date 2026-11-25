@@ -85,6 +85,7 @@ KvAllocation KvPool::plan(std::span<const KvDemand> demands) const {
         if (tokens < 0 || __builtin_add_overflow(resident.allocated_tokens, tokens, &end))
             throw std::invalid_argument("invalid KV allocation token extent");
         const auto pages = pages_for(end) - static_cast<std::int64_t>(resident.pages.size());
+        if (pages < 0) throw std::invalid_argument("KV allocation cannot shrink resident pages");
         if (pages > static_cast<std::int64_t>(free_pages_.size()) - allocation.allocated_pages)
             throw std::invalid_argument("allocation exceeds available KV pages");
         member.new_pages.resize(static_cast<std::size_t>(pages));

@@ -1,3 +1,4 @@
+#include "prologue/contracts/serving.hpp"
 #include "prologue/serving/controller/native.hpp"
 
 #include <algorithm>
@@ -286,7 +287,7 @@ std::optional<ServingAction> NativeController::plan(std::int64_t now_ns) {
         }
         auto & participant = groups_.at(name);
         if (kind == "completion_notice") {
-            const auto owner = read_parameters({ { "request", message.at("request") } }).at("request");
+            const auto owner = read_integer(message.at("request"), "request");
             if (owner < 0 || !input.delivery.delivered().contains(static_cast<std::size_t>(owner)))
                 throw std::invalid_argument("notification owner was not delivered to this instance");
             const auto request = static_cast<std::size_t>(owner);

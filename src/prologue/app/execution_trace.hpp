@@ -9,7 +9,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 
 #include <nlohmann/json.hpp>
 
@@ -56,7 +55,10 @@ private:
 
     std::ofstream stream_;
     std::map<std::size_t, std::size_t> completion_reads_;
-    std::unordered_map<std::string, std::size_t> context_indices_;
+    struct ContextOrder {
+        bool operator()(const nlohmann::json & left, const nlohmann::json & right) const;
+    };
+    std::map<nlohmann::json, std::size_t, ContextOrder> context_indices_;
 };
 
 } // namespace prologue

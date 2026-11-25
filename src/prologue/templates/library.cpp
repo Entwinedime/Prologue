@@ -122,8 +122,7 @@ TemplateInterface TemplateInterface::read(const nlohmann::json & source) {
                               source.at("ports"),
                               {} };
     for (const auto & resource : source.at("resources").get_ref<const nlohmann::json::array_t &>())
-        result.resources.push_back(
-            { resource_kind(resource.at("kind").get<std::string>()), resource.at("role").get<std::string>(), resource.at("serial").get<bool>() });
+        result.resources.push_back(ResourceClass::read(resource));
     for (const auto & relation : source.at("causality")) result.causality.emplace_back(index(relation.at(0)), index(relation.at(1)));
     return result;
 }
@@ -141,12 +140,7 @@ nlohmann::json TemplateInterface::document() const {
         {      "causality",               causality },
         {      "resources", nlohmann::json::array() }
     };
-    for (const auto & resource : resources)
-        result["resources"].push_back({
-            {   "kind", resource_name(resource.kind) },
-            {   "role",                resource.role },
-            { "serial",              resource.serial }
-        });
+    for (const auto & resource : resources) result["resources"].push_back(resource.document());
     return result;
 }
 
@@ -172,8 +166,7 @@ TemplateDefinition TemplateDefinition::read(const nlohmann::json & source) {
                                        TemplateReference::read(access.at("start")),
                                        TemplateReference::read(access.at("finish")) });
     for (const auto & resource : source.at("resources").get_ref<const nlohmann::json::array_t &>())
-        result.resources.push_back(
-            { resource_kind(resource.at("kind").get<std::string>()), resource.at("role").get<std::string>(), resource.at("serial").get<bool>() });
+        result.resources.push_back(ResourceClass::read(resource));
 
     for (const auto & piece : source.at("work").get_ref<const nlohmann::json::array_t &>())
         result.work.push_back({ index(piece.at("resource")),
@@ -242,12 +235,7 @@ nlohmann::json TemplateDefinition::document() const {
             {  "start",          access.start.document() },
             { "finish",         access.finish.document() }
         });
-    for (const auto & resource : resources)
-        result["resources"].push_back({
-            {   "kind", resource_name(resource.kind) },
-            {   "role",                resource.role },
-            { "serial",              resource.serial }
-        });
+    for (const auto & resource : resources) result["resources"].push_back(resource.document());
     for (const auto & piece : work) {
         result["work"].push_back({
             { "resource",          piece.resource },
@@ -326,6 +314,11 @@ TemplateFrame read_frame(const nlohmann::json & source, const std::map<std::size
 
 } // namespace
 
+nlohmann::json TensorBinding::document() const {
+    return {{ "value", value }, { "storage", storage }, { "version", version }, { "external", external }, { "buffer", buffer },
+            { "writer", writer ? nlohmann::json(*writer) : nlohmann::json(nullptr) }};
+}
+
 nlohmann::json TemplateFrame::local_document() const {
     nlohmann::json result{
         { "definition",              definition },
@@ -338,18 +331,7 @@ nlohmann::json TemplateFrame::local_document() const {
         {      "state",        state.document() },
         { "state_input", state_input ? nlohmann::json(*state_input) : nlohmann::json(nullptr) }
     };
-    for (const auto & tensor : tensors) {
-        if (tensor)
-            result["tensors"].push_back({
-                {    "value",                                                              tensor->value },
-                {  "storage",                                                            tensor->storage },
-                {  "version",                                                            tensor->version },
-                { "external",                                                           tensor->external },
-                {   "buffer",                                                             tensor->buffer },
-                {   "writer", tensor->writer ? nlohmann::json(*tensor->writer) : nlohmann::json(nullptr) }
-            });
-        else result["tensors"].push_back(nullptr);
-    }
+    for (const auto & tensor : tensors) result["tensors"].push_back(tensor ? tensor->document() : nlohmann::json(nullptr));
     if (!allocations.empty()) result["allocations"] = allocations;
     if (communication) result["communication"] = communication->document();
     return result;

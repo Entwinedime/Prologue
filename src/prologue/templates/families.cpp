@@ -148,16 +148,10 @@ private:
             if (!rows.empty()) meaning["row_path"] = rows;
 
             // A replacement cannot change another scope's aliases, versions, writers or data access contract.
-            shared.insert(nlohmann::json{
-                { "position",                                                                   position },
-                {     "port",                                                         std::move(meaning) },
-                {    "value",                                                              tensor->value },
-                {  "storage",                                                            tensor->storage },
-                {  "version",                                                            tensor->version },
-                { "external",                                                           tensor->external },
-                {   "buffer",                                                             tensor->buffer },
-                {   "writer", tensor->writer ? nlohmann::json(*tensor->writer) : nlohmann::json(nullptr) }
-            });
+            auto binding = tensor->document();
+            binding["position"] = position;
+            binding["port"] = std::move(meaning);
+            shared.insert(std::move(binding));
         }
         for (std::size_t child = 0; child < frame.children.size(); ++child) {
             std::map<std::string, Expression> parameters;

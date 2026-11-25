@@ -31,14 +31,6 @@ struct TemplateReference {
     nlohmann::json document() const;
 };
 
-struct TemplateResource {
-    ResourceKind kind;
-    std::string role;
-    bool serial;
-
-    bool operator==(const TemplateResource &) const = default;
-};
-
 struct TemplateWork {
     std::size_t resource;
     WorkKind kind;
@@ -77,7 +69,7 @@ struct TemplateInterface {
     std::string implementation;
     std::set<std::string> parameters;
     std::set<std::string> fixed;
-    std::vector<TemplateResource> resources;
+    std::vector<ResourceClass> resources;
 
     // Imports, exports and named ports address boundary slots; each boundary binds one resource slot.
     std::vector<std::size_t> imports;
@@ -127,7 +119,7 @@ struct TemplateDefinition {
     std::string implementation;
     std::set<std::string> parameters;
     std::set<std::string> fixed;
-    std::vector<TemplateResource> resources;
+    std::vector<ResourceClass> resources;
     std::vector<std::size_t> events;
     std::vector<std::size_t> imports;
     std::vector<TemplateReference> exports;
@@ -153,6 +145,8 @@ struct TensorBinding {
     // A pre-existing allocation may still receive its current value inside this action.
     std::optional<std::vector<std::size_t>> writer;
     std::string buffer;
+
+    nlohmann::json document() const;
 };
 
 struct KvBinding {
@@ -213,7 +207,7 @@ struct TemplateFrame {
     std::optional<std::string> state_input;
     std::optional<CommunicationGroup> communication;
     std::set<std::string> allocations{};
-    std::vector<ObservedBranch> alternatives{};
+    std::vector<ObservedBranch> alternatives;
 
     nlohmann::json local_document() const;
     nlohmann::json document() const;

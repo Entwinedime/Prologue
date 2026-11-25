@@ -5,8 +5,21 @@
 #include <limits>
 #include <set>
 #include <stdexcept>
+#include <utility>
 
 namespace prologue {
+
+std::int64_t read_integer(const nlohmann::json & value, std::string_view name) {
+    if (!value.is_number_integer() || (value.is_number_unsigned() && !std::in_range<std::int64_t>(value.get<std::uint64_t>())))
+        throw std::invalid_argument("parameter must be a signed 64-bit integer: " + std::string(name));
+    return value.get<std::int64_t>();
+}
+
+std::int64_t read_nonnegative_integer(const nlohmann::json & value, std::string_view name) {
+    const auto integer = read_integer(value, name);
+    if (integer < 0) throw std::invalid_argument("parameter must be nonnegative: " + std::string(name));
+    return integer;
+}
 
 std::vector<Request> Request::read(const nlohmann::json & source) {
     if (!source.is_array() || source.empty()) throw std::invalid_argument("serving needs a nonempty request array");
@@ -16,13 +29,8 @@ std::vector<Request> Request::read(const nlohmann::json & source) {
         for (const auto & [name, _] : request.items()) {
             if (std::ranges::find(fields, name) == fields.end()) throw std::invalid_argument("request has unsupported field: " + name);
         }
-        for (const auto * field : { "arrival_ns", "prompt_tokens", "output_tokens" }) {
-            if (!request.at(field).is_number_integer()) throw std::invalid_argument("serving fields must be integers");
-        }
-        requests.push_back({ request.at("id").get<std::string>(),
-                             request.at("arrival_ns").get<std::int64_t>(),
-                             request.at("prompt_tokens").get<std::int64_t>(),
-                             request.at("output_tokens").get<std::int64_t>() });
+        requests.push_back({ request.at("id").get<std::string>(), read_integer(request.at("arrival_ns"), "arrival_ns"),
+                             read_integer(request.at("prompt_tokens"), "prompt_tokens"), read_integer(request.at("output_tokens"), "output_tokens") });
         if (request.contains("prefix_id")) requests.back().prefix_id = request.at("prefix_id").get<std::string>();
     }
 

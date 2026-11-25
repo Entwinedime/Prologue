@@ -6,6 +6,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -16,6 +17,9 @@ namespace prologue {
 
 // Native policy reserves zero for unset timestamps; all virtual clock APIs share this origin.
 inline constexpr std::int64_t control_clock_epoch_ns = 1'000'000'000;
+
+std::int64_t read_integer(const nlohmann::json & value, std::string_view name);
+std::int64_t read_nonnegative_integer(const nlohmann::json & value, std::string_view name);
 
 struct Request {
     std::string id;

@@ -1,19 +1,13 @@
 #include "prologue/graph/state.hpp"
 
+#include "prologue/contracts/serving.hpp"
+
 #include <limits>
 #include <set>
 #include <stdexcept>
 #include <utility>
 
 namespace prologue {
-namespace {
-
-std::int64_t nonnegative(const nlohmann::json & value) {
-    if (!value.is_number_integer() || value.get<std::int64_t>() < 0) throw std::invalid_argument("state coordinates must be nonnegative integers");
-    return value.get<std::int64_t>();
-}
-
-} // namespace
 
 StateAccess state_access(std::string_view name) {
     if (name == "read") return StateAccess::Read;
@@ -24,7 +18,7 @@ StateAccess state_access(std::string_view name) {
 std::string_view state_access_name(StateAccess access) { return access == StateAccess::Read ? "read" : "write"; }
 
 TokenRegion TokenRegion::read(const nlohmann::json & source) {
-    TokenRegion result{ source.at("request").get<std::string>(), nonnegative(source.at("begin")), nonnegative(source.at("end")) };
+    TokenRegion result{ source.at("request").get<std::string>(), read_nonnegative_integer(source.at("begin"), "begin"), read_nonnegative_integer(source.at("end"), "end") };
     if (result.request.empty() || result.begin > result.end) throw std::invalid_argument("invalid request token region");
     return result;
 }
@@ -108,7 +102,7 @@ nlohmann::json RowPacking::bind(const nlohmann::json & work, const Parameters & 
 }
 
 RowCall RowCall::read(const nlohmann::json & source) {
-    RowCall result{ static_cast<std::size_t>(nonnegative(source.at("member"))), source.at("parent_port").get<std::string>(),
+    RowCall result{ static_cast<std::size_t>(read_nonnegative_integer(source.at("member"), "member")), source.at("parent_port").get<std::string>(),
                    source.at("source_port").get<std::string>(), source.at("destination_port").get<std::string>() };
     if (result.parent_port.empty() || result.source_port.empty() || result.destination_port.empty())
         throw std::invalid_argument("a row call requires its source, destination and parent output ports");
@@ -125,11 +119,11 @@ std::span<const nlohmann::json> admitted_members(const nlohmann::json & work) {
 }
 
 Parameters member_parameters(const nlohmann::json & member) {
-    return {{ "context_tokens", nonnegative(member.at("context_tokens")) }, { "new_tokens", nonnegative(member.at("new_tokens")) }};
+    return {{ "context_tokens", read_nonnegative_integer(member.at("context_tokens"), "context_tokens") }, { "new_tokens", read_nonnegative_integer(member.at("new_tokens"), "new_tokens") }};
 }
 
 KvSlice KvSlice::read(const nlohmann::json & source) {
-    KvSlice result{ nonnegative(source.at("token_bytes")), nonnegative(source.at("begin")), nonnegative(source.at("end")) };
+    KvSlice result{ read_nonnegative_integer(source.at("token_bytes"), "token_bytes"), read_nonnegative_integer(source.at("begin"), "begin"), read_nonnegative_integer(source.at("end"), "end") };
     result.validate();
     return result;
 }
@@ -165,7 +159,7 @@ std::vector<std::pair<std::int64_t, std::int64_t>> KvSlice::ranges(std::int64_t 
 KvAccess KvAccess::read(const nlohmann::json & source) {
     if (source.at("space") != "kv") throw std::invalid_argument("state access is not in the KV address space");
     KvAccess result{ source.at("pool").get<std::string>(),
-                     nonnegative(source.at("layer")),
+                     read_nonnegative_integer(source.at("layer"), "layer"),
                      state_access(source.at("access").get<std::string>()),
                      KvSlice::read(source.at("slice")),
                      {},

@@ -17,6 +17,7 @@ add_library(prologue_core
     src/prologue/serving/resources/service.cpp
     src/prologue/serving/resources/slot_pool.cpp
     src/prologue/serving/resources/prefix_index.cpp
+    src/prologue/contracts/json_io.cpp
     src/prologue/contracts/expression.cpp
     src/prologue/contracts/serving.cpp
     src/prologue/graph/types.cpp

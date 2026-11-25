@@ -178,10 +178,9 @@ private:
         for (std::size_t index = 0; index < frame.resources.size(); ++index) {
             if (frame.resources[index] == source) return index;
         }
-        const auto & descriptor = source_.resources[source];
         const auto index = frame.resources.size();
         frame.resources.push_back(source);
-        definition.resources.push_back({ descriptor.kind, descriptor.role, descriptor.serial });
+        definition.resources.push_back(source_.resources[source]);
         return index;
     }
 

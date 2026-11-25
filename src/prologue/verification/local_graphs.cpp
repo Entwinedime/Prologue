@@ -1,6 +1,5 @@
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
 #include <iostream>
 #include <map>
 #include <stdexcept>
@@ -11,6 +10,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "prologue/contracts/json_io.hpp"
 #include "prologue/integrations/frameworks/sglang/templates.hpp"
 #include "prologue/integrations/frameworks/sglang/workers.hpp"
 #include "prologue/graph/graph.hpp"
@@ -19,10 +19,7 @@
 
 namespace {
 
-nlohmann::json read_json(const char * path) {
-    std::ifstream input(path);
-    return nlohmann::json::parse(input);
-}
+using prologue::read_json;
 
 // Only action metadata crosses this boundary; target work, ports and edges cannot enter the constructor.
 class LocalGraphs {
@@ -92,10 +89,7 @@ int main(int argc, char ** argv) {
             }
 
             // Export declared invocation inputs; generation runs without access to the observed graph.
-            std::ofstream output(argv[3], std::ios::out | std::ios::noreplace);
-            output.exceptions(std::ios::failbit | std::ios::badbit);
-            output << nlohmann::json{ { "environment", declarations.graph.environment }, { "actions", std::move(actions) } }.dump() << '\n';
-            output.close();
+            prologue::Publication(argv[3]).write({{ "environment", declarations.graph.environment }, { "actions", std::move(actions) }});
             return 0;
         }
         if (argc != 5 || std::string_view(argv[1]) != "expand")
@@ -108,15 +102,11 @@ int main(int argc, char ** argv) {
         if (libraries.empty()) throw std::invalid_argument("local expansion requires a primary source library");
 
         // Assemble the same source candidates as serving; the first library owns this worker's action interface.
-        prologue::sglang::NativeTemplates::share_closed_actions(libraries);
-        std::vector<prologue::TemplateLibrary *> sources;
-        for (auto & [_, library] : libraries) sources.push_back(&library);
-        prologue::TemplateLibrary::link_local_implementations(sources);
+        prologue::sglang::link_serving_libraries(libraries);
 
         const auto inputs = read_json(argv[3]);
         const LocalGraphs graphs(libraries.at(0), inputs.at("environment"));
-        std::ofstream output(argv[4], std::ios::out | std::ios::noreplace);
-        output.exceptions(std::ios::failbit | std::ios::badbit);
+        prologue::Publication output(argv[4]);
         std::size_t built = 0;
         for (const auto & input : inputs.at("actions")) {
             const prologue::EntrySpecification action{ input.at("scope").get<std::size_t>(), input.at("action"), input.at("condition") };
@@ -130,10 +120,9 @@ int main(int argc, char ** argv) {
             catch (const std::exception & error) {
                 record["error"] = error.what();
             }
-            output << record.dump() << '\n';
+            output.append(record);
         }
-        output << nlohmann::json{ { "kind", "local_summary" }, { "attempted", inputs.at("actions").size() }, { "built", built } }.dump() << '\n';
-        output.close();
+        output.write({{ "kind", "local_summary" }, { "attempted", inputs.at("actions").size() }, { "built", built }});
         return built == inputs.at("actions").size() ? 0 : 1;
     }
     catch (const std::exception & error) {

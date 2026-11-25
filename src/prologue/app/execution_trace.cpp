@@ -1,5 +1,7 @@
 #include "prologue/app/execution_trace.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <utility>
 #include <vector>
 
@@ -15,10 +17,32 @@ ExecutionTrace::ExecutionTrace(const std::filesystem::path & path) {
     stream_.open(path, std::ios::out | std::ios::noreplace);
 }
 
+bool ExecutionTrace::ContextOrder::operator()(const nlohmann::json & left, const nlohmann::json & right) const {
+    using Json = nlohmann::json;
+
+    // Preserve JSON representations such as 1, 1.0 and -0.0. Positive signed and unsigned integers print identically.
+    const auto type = [](const Json & value) {
+        return value.type() == Json::value_t::number_integer && value.get<std::int64_t>() >= 0 ? Json::value_t::number_unsigned : value.type();
+    };
+    const auto kind = type(left);
+    if (kind != type(right)) return std::to_underlying(kind) < std::to_underlying(type(right));
+    if (kind == Json::value_t::number_unsigned) return left.get<std::uint64_t>() < right.get<std::uint64_t>();
+    if (left.is_array()) return std::ranges::lexicographical_compare(left, right, *this);
+    if (left.is_object()) {
+        const auto member_less = [this](const auto & a, const auto & b) {
+            return a.first != b.first ? a.first < b.first : (*this)(a.second, b.second);
+        };
+        return std::ranges::lexicographical_compare(left.get_ref<const Json::object_t &>(), right.get_ref<const Json::object_t &>(), member_less);
+    }
+    if (left.is_number_float() && left == 0 && right == 0)
+        return std::signbit(left.get<double>()) && !std::signbit(right.get<double>());
+    return left < right;
+}
+
 std::size_t ExecutionTrace::context_value(const nlohmann::json & value) {
-    const auto [entry, inserted] = context_indices_.try_emplace(value.dump(), context_indices_.size());
+    const auto [entry, inserted] = context_indices_.try_emplace(value, context_indices_.size());
     if (inserted) {
-        stream_ << "{\"kind\":\"context_value\",\"index\":" << entry->second << ",\"value\":" << entry->first << "}\n";
+        stream_ << "{\"kind\":\"context_value\",\"index\":" << entry->second << ",\"value\":" << value << "}\n";
     }
     return entry->second;
 }

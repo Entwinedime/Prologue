@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -189,6 +190,27 @@ private:
     HostTimestamp begin_;
 };
 
+void record_call(const char * directory, const char * name, HostTimestamp begin, HostTimestamp end,
+                 const char * format, ...) __attribute__((format(printf, 5, 6)));
+
+void record_call(const char * directory, const char * name, HostTimestamp begin, HostTimestamp end, const char * format, ...) {
+    char record[768];
+    const auto header = std::snprintf(record, sizeof(record),
+                                      "{\"api\":\"%s\",\"thread\":%ld,\"begin_counter\":%llu,\"end_counter\":%llu,"
+                                      "\"begin_raw_ns\":%lld,\"end_raw_ns\":%lld,",
+                                      name, syscall(SYS_gettid), static_cast<unsigned long long>(begin.counter),
+                                      static_cast<unsigned long long>(end.counter), static_cast<long long>(begin.raw_ns),
+                                      static_cast<long long>(end.raw_ns));
+    if (header < 0 || static_cast<std::size_t>(header) >= sizeof(record)) std::abort();
+
+    va_list arguments;
+    va_start(arguments, format);
+    const auto body = std::vsnprintf(record + header, sizeof(record) - header, format, arguments);
+    va_end(arguments);
+    if (body < 0 || static_cast<std::size_t>(body) >= sizeof(record) - header) std::abort();
+    append_record(directory, record, header + body, sizeof(record));
+}
+
 class DriverCall {
 public:
     explicit DriverCall(const char * name, bool lifecycle = false)
@@ -204,27 +226,9 @@ public:
         sample_.finish(static_cast<int>(result), tasks);
         if (directory_ == nullptr) return result;
 
-        const auto end = host_timestamp();
-        char record[512];
-        const auto size = std::snprintf(record,
-                                        sizeof(record),
-                                        "{\"api\":\"%s\",\"thread\":%ld,\"begin_counter\":%llu,\"end_counter\":%llu,"
-                                        "\"begin_raw_ns\":%lld,\"end_raw_ns\":%lld,"
-                                        "\"device\":%u,\"task_system\":%u,\"queue\":%u,\"stream\":%u,\"tasks\":%u,\"service\":%lld,\"result\":%d}\n",
-                                        name_,
-                                        syscall(SYS_gettid),
-                                        static_cast<unsigned long long>(begin_.counter),
-                                        static_cast<unsigned long long>(end.counter),
-                                        static_cast<long long>(begin_.raw_ns),
-                                        static_cast<long long>(end.raw_ns),
-                                        device,
-                                        system,
-                                        queue,
-                                        stream,
-                                        tasks,
-                                        static_cast<long long>(service_scope),
-                                        static_cast<int>(result));
-        append_record(directory_, record, size, sizeof(record));
+        record_call(directory_, name_, begin_, host_timestamp(),
+                    "\"device\":%u,\"task_system\":%u,\"queue\":%u,\"stream\":%u,\"tasks\":%u,\"service\":%lld,\"result\":%d}\n",
+                    device, system, queue, stream, tasks, static_cast<long long>(service_scope), static_cast<int>(result));
         return result;
     }
 
@@ -233,24 +237,9 @@ public:
         if (directory_ == nullptr) return result;
 
         // Driver workers need no ACL context; observing a completed transfer must not create or query one.
-        const auto end = host_timestamp();
-        char record[512];
-        const auto size = std::snprintf(record,
-                                        sizeof(record),
-                                        "{\"api\":\"%s\",\"thread\":%ld,\"begin_counter\":%llu,\"end_counter\":%llu,"
-                                        "\"begin_raw_ns\":%lld,\"end_raw_ns\":%lld,\"source\":\"%llx\",\"destination\":\"%llx\","
-                                        "\"bytes\":%zu,\"result\":%d}\n",
-                                        name_,
-                                        syscall(SYS_gettid),
-                                        static_cast<unsigned long long>(begin_.counter),
-                                        static_cast<unsigned long long>(end.counter),
-                                        static_cast<long long>(begin_.raw_ns),
-                                        static_cast<long long>(end.raw_ns),
-                                        static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(source)),
-                                        static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(destination)),
-                                        bytes,
-                                        static_cast<int>(result));
-        append_record(directory_, record, size, sizeof(record));
+        record_call(directory_, name_, begin_, host_timestamp(), "\"source\":\"%llx\",\"destination\":\"%llx\",\"bytes\":%zu,\"result\":%d}\n",
+                    static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(source)),
+                    static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(destination)), bytes, static_cast<int>(result));
         return result;
     }
 
@@ -306,29 +295,11 @@ public:
                           static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(destination_)));
         }
 
-        char record[768];
-        const auto size = std::snprintf(record,
-                                        sizeof(record),
-                                        "{\"api\":\"%s\",\"thread\":%ld,\"begin_counter\":%llu,\"end_counter\":%llu,"
-                                        "\"begin_raw_ns\":%lld,\"end_raw_ns\":%lld,"
-                                        "\"device\":%d,\"device_status\":%d,\"stream\":%d,\"stream_status\":%d,"
-                                        "\"bytes\":%zu,\"direction\":%d,\"event\":\"%llx\",\"result\":%d%s}\n",
-                                        name_,
-                                        syscall(SYS_gettid),
-                                        static_cast<unsigned long long>(begin_.counter),
-                                        static_cast<unsigned long long>(end.counter),
-                                        static_cast<long long>(begin_.raw_ns),
-                                        static_cast<long long>(end.raw_ns),
-                                        device_,
-                                        device_status_,
-                                        stream_,
-                                        stream_status_,
-                                        bytes_,
-                                        direction_,
-                                        static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(created == nullptr ? event_ : created)),
-                                        result,
-                                        buffers);
-        append_record(directory_, record, size, sizeof(record));
+        record_call(directory_, name_, begin_, end,
+                    "\"device\":%d,\"device_status\":%d,\"stream\":%d,\"stream_status\":%d,"
+                    "\"bytes\":%zu,\"direction\":%d,\"event\":\"%llx\",\"result\":%d%s}\n",
+                    device_, device_status_, stream_, stream_status_, bytes_, direction_,
+                    static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(created == nullptr ? event_ : created)), result, buffers);
 
         return result;
     }

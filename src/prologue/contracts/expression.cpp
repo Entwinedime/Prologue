@@ -1,5 +1,7 @@
 #include "prologue/contracts/expression.hpp"
 
+#include "prologue/contracts/serving.hpp"
+
 #include <algorithm>
 #include <limits>
 #include <set>
@@ -55,12 +57,7 @@ Parameters read_parameters(const nlohmann::json & source) {
     if (!source.is_object()) throw std::invalid_argument("parameters must be an object");
 
     Parameters result;
-    for (const auto & [name, value] : source.items()) {
-        if (!value.is_number_integer()
-            || (value.is_number_unsigned() && value.get<std::uint64_t>() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())))
-            throw std::invalid_argument("parameter must be a signed 64-bit integer: " + name);
-        result.emplace(name, value.get<std::int64_t>());
-    }
+    for (const auto & [name, value] : source.items()) result.emplace(name, read_integer(value, name));
     return result;
 }
 

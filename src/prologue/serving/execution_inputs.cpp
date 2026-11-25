@@ -1,3 +1,4 @@
+#include "prologue/contracts/serving.hpp"
 #include "prologue/serving/execution_inputs.hpp"
 #include "prologue/serving/execution/observer.hpp"
 
@@ -26,7 +27,7 @@ TimeWindow window(const nlohmann::json & record) {
 
 ServiceDuration service(const nlohmann::json & record) {
     if (record.at("service_ns").is_null()) return std::nullopt;
-    const auto result = read_parameters({{ "service_ns", record.at("service_ns") }}).at("service_ns");
+    const auto result = read_integer(record.at("service_ns"), "service_ns");
     if (result < 0) throw std::invalid_argument("execution service must be nonnegative nanoseconds or unknown");
     return result;
 }
@@ -76,7 +77,7 @@ ExecutionInputs::ExecutionInputs(const nlohmann::json & source, ControlObserver 
         std::set<nlohmann::json> positions;
         for (const auto & post : posts) {
             const auto & actor = actors_.at(post.at("group").get<std::string>());
-            const auto index = read_parameters({{ "step", post.at("step") }}).at("step");
+            const auto index = read_integer(post.at("step"), "step");
             if (index < 0 || static_cast<std::size_t>(index) >= actor.steps.size() || actor.steps[static_cast<std::size_t>(index)].at("operation") != "cpu"
                 || !positions.insert(post).second)
                 throw std::invalid_argument("CPU transfer refers to an invalid or repeated post");

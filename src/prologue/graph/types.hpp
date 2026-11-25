@@ -73,12 +73,19 @@ struct CommunicationGroup {
     void validate() const;
 };
 
-struct Resource {
+struct ResourceClass {
     ResourceKind kind;
-    std::int64_t rank;
     std::string role;
-    std::string identity;
     bool serial;
+
+    bool operator==(const ResourceClass &) const = default;
+    static ResourceClass read(const nlohmann::json & source);
+    nlohmann::json document() const;
+};
+
+struct Resource : ResourceClass {
+    std::int64_t rank;
+    std::string identity;
     std::optional<std::string> binding{};
 
     bool operator==(const Resource &) const = default;

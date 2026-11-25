@@ -1,7 +1,6 @@
 #pragma once
 
-#include <cstddef>
-#include <vector>
+#include <optional>
 
 #include <nlohmann/json.hpp>
 
@@ -10,21 +9,16 @@
 
 namespace prologue {
 
-struct ProjectionEvidence {
-
-    // Shared serial boundaries may have several anchors; one observed span supplies the same resource coordinate.
-    std::vector<NativeAnchor> events;
-    std::vector<std::size_t> work_spans;
-
-    nlohmann::json document(const NativeObservation & observation) const;
+struct ProjectedGraph {
+    CoarseGraph graph;
+    std::optional<nlohmann::json> evidence;
 };
 
 // Source and independent target runs use this projection, without evaluating template rules.
 class CoarseProjection {
 public:
 
-    // Semantic declarations move into the graph; measurement storage remains available for evidence.
-    static CoarseGraph project(NativeObservation && observation, ProjectionEvidence * evidence = nullptr);
+    static ProjectedGraph project(NativeObservation observation, bool include_evidence);
 };
 
 } // namespace prologue

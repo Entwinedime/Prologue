@@ -11,6 +11,15 @@
 namespace prologue {
 namespace {
 
+struct ProjectionEvidence {
+
+    // Shared serial boundaries may have several anchors; one observed span supplies the same resource coordinate.
+    std::vector<NativeAnchor> events;
+    std::vector<std::size_t> work_spans;
+
+    nlohmann::json document(const NativeObservation & observation) const;
+};
+
 struct Boundary {
     std::vector<std::size_t> entering;
     std::vector<std::size_t> touching;
@@ -168,8 +177,6 @@ private:
     std::map<NativeAnchor, std::size_t> service_events_;
 };
 
-} // namespace
-
 nlohmann::json ProjectionEvidence::document(const NativeObservation & observation) const {
     if (!observation.measurements) throw std::invalid_argument("projection evidence requires interpreted boundary measurements");
     const auto & measurements = *observation.measurements;
@@ -191,16 +198,24 @@ nlohmann::json ProjectionEvidence::document(const NativeObservation & observatio
     return result;
 }
 
-CoarseGraph CoarseProjection::project(NativeObservation && observation, ProjectionEvidence * evidence) {
-    if (evidence) *evidence = {};
-    CoarseGraph graph;
-    graph.environment = std::move(observation.environment);
-    for (const auto & resource : observation.resources) graph.resources.push_back(resource.descriptor);
-    for (auto & scope : observation.scopes) graph.scopes.push_back({ std::move(scope.info), {}, {}, std::move(scope.communication) });
+} // namespace
 
-    ResourceProjection projection(observation, graph, evidence);
+ProjectedGraph CoarseProjection::project(NativeObservation observation, bool include_evidence) {
+    ProjectedGraph result;
+    auto & graph = result.graph;
+
+    // Resource projection needs only the parent hierarchy to decide which scope owns an interval.
+    graph.scopes.resize(observation.scopes.size());
+    for (std::size_t i = 0; i < graph.scopes.size(); ++i) graph.scopes[i].info.parent = observation.scopes[i].info.parent;
+    ProjectionEvidence anchors;
+    ResourceProjection projection(observation, graph, include_evidence ? &anchors : nullptr);
     projection.project();
+    if (include_evidence) result.evidence = anchors.document(observation);
+
+    graph.environment = std::move(observation.environment);
     for (std::size_t scope = 0; scope < observation.scopes.size(); ++scope) {
+        graph.scopes[scope].info = std::move(observation.scopes[scope].info);
+        graph.scopes[scope].communication = std::move(observation.scopes[scope].communication);
         for (auto & access : observation.scopes[scope].kv_accesses)
             graph.scopes[scope].kv_accesses.push_back({ std::move(access.value), projection.event(access.start), projection.event(access.finish) });
         for (auto & access : observation.scopes[scope].slot_accesses)
@@ -219,10 +234,11 @@ CoarseGraph CoarseProjection::project(NativeObservation && observation, Projecti
         if (source != target) graph.edges.push_back({ source, target, dependency.kind });
     }
 
+    for (auto & resource : observation.resources) graph.resources.push_back(std::move(resource.descriptor));
     std::ranges::sort(graph.edges);
     graph.edges.erase(std::unique(graph.edges.begin(), graph.edges.end()), graph.edges.end());
     graph.validate();
-    return graph;
+    return result;
 }
 
 } // namespace prologue
