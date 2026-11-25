@@ -77,3 +77,13 @@
 标准池、大池各配单请求和双请求。四个目标的 211,290 条执行记录、16 次 token 发布、四份请求时延、库目录、拟合输出、两组成本点及 43,276 项固定图查询与基线逐字节一致。整轮汇总比较时单列宿主运行耗时、查询耗时和输出占用字节。正式源码从同一原始图编译的两份模板逐字节一致。另与更早存档的模板交叉核对时，发现六个调用帧与两版重建结果均有差异，局部执行域一致。原始索引和哈希已保留。[离线回归](../../../data/topology-extensibility-slimming/m2/regression.json) · [模板交叉核对](../../../data/topology-extensibility-slimming/m2/projection.json)
 
 **结论与限制**　M2 四轮完成。两版均有 15,223 项固定图查询缺少价格，本次验证确认已有预测行为一致。验收汇总 SHA-256 为 `f22d73b6710a6c689222ef037b1076b45b38e7fed45ec1e29299a4673ec10a6f`。停在 M2/M3 边界，等待 AGY 审查与用户放行。[验收汇总](../../../data/topology-extensibility-slimming/m2/acceptance.json)
+
+## 2026-11-25 — AGY 审查 M2 并放行进入 M3
+
+**范围**　独立复核 M2（`733656a..82d12a9`，业务终版 `d48605f`）全部代码改动、静态边界、双镜像实装清单与零卡时离线回归证据。
+
+**改动**　AGY 更新 `status.md` 与 `log.md` 登记 M2 审查通过并放行 M3（R06–R07）；未修改业务源码。
+
+**验证**　独立静态核验仓库根仅剩 `src/`、`docker/`、`example/`、`docs/`、`third_party/` 五个受跟踪目录且 0 多语言混装；`DeviceRuntime`/`PlatformBackend` 协议与 `AscendDeviceRuntime`/`AscendPlatformBackend` 100% 一一对齐；`frameworks/sglang/` 0 处直连 `ascend`/`torch.npu`/`hccl`、`abi/` 外 0 处 `sglang.srt.` 或裸导入、157/157 个 `NativeSymbols` 全部被真实引用并对应上游模块/Mixin；`src/engine/core/` 0 越层 `#include` 且全仓 `src/` 0 硬件代际字面量；全仓无参 `AdapterRegistry.select()` 为 0、生产代码 0 个 mock/stub 文件；263 个业务 Python 模块 0 环 0 缺失导入、`ruff check src/python example` 0 错误、`.pyc` 0 残留；双镜像纯 `COPY` 模拟与 124/72 模块实装清单 SHA-256 零差异；[acceptance.json](../../../data/topology-extensibility-slimming/m2/acceptance.json) 15 项证据 SHA-256 验真通过且四目标 211,290 条轨迹与 `b500cbe` 逐字节一致，新增物理卡时为 0。
+
+**结论与限制**　M2 验收通过，用户已确认放行进入 M3（R06–R07）。当前业务 Python 为 263 文件 / 38,079 物理行 / 33,586 非空行（较 `b500cbe` 净增 +19 文件 / +878 非空行），M3–M5 需合计净砍 ≥ 8,378 非空行并缩减 ≥ 133 个文件以达窗口底线；M3 须严守真机不变量并刚性达成硬性瘦身门槛。
