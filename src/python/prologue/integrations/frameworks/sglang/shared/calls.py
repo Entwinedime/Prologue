@@ -21,6 +21,7 @@ class ActionCall:
     guards: tuple = ()
     input_use: str = "device"
     materializer: str | None = None
+    implementation: str | None = None
 
 
 @dataclass

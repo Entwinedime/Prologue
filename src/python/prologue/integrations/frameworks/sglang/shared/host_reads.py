@@ -32,6 +32,9 @@ class HostReads:
                 condition={"input": name, "method": "tolist"},
                 input_use="host",
                 materializer=self.method,
+
+                # This adapter-owned call has a published identity independent of its Python package layout.
+                implementation="prologue.integrations.frameworks.sglang.host_reads.HostReads.invoke",
             )
 
             # Only this actual read owns readiness and waiting; unrelated tolist calls remain native.

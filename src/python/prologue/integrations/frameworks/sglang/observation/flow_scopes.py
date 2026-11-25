@@ -179,7 +179,7 @@ class FlowScopes(ServingCuts):
     def boundary(self, original, boundary):
         owner = self.observation
         with owner.call(boundary.operation, original, parameters=boundary.parameters, work=boundary.work,
-                        device=boundary.input_use == "device") as call:
+                        device=boundary.input_use == "device", implementation=boundary.implementation) as call:
 
             # Snapshot mutation epochs before native work; an early return may later discard unused ports.
             inputs = {name: owner.tensors.observe(tensor, shape, materializer=boundary.materializer)

@@ -89,8 +89,9 @@ class NativeHostSamples(ServingCuts):
             occurrence["raw_interval"] = [begin, clock_gettime_ns(CLOCK_MONOTONIC_RAW)]
             self.parent.reset(previous)
 
-    def native_call(self, role, original, **facts):
-        return self.scope(role, original.__qualname__, f"{original.__module__}.{original.__qualname__}", **facts)
+    def native_call(self, role, original, *, implementation=None, **facts):
+        implementation = implementation or f"{original.__module__}.{original.__qualname__}"
+        return self.scope(role, original.__qualname__, implementation, **facts)
 
     @property
     def collective_at_root(self):
@@ -145,7 +146,8 @@ class NativeHostSamples(ServingCuts):
 
     @contextmanager
     def boundary(self, original, boundary):
-        with self.native_call(boundary.operation, original, work=boundary.work) as occurrence:
+        with self.native_call(boundary.operation, original, work=boundary.work,
+                              implementation=boundary.implementation) as occurrence:
             yield
         occurrence["work"]["context"] = boundary.work["context"]
         occurrence["parameters"] = boundary.parameters
