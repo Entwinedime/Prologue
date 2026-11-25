@@ -7,6 +7,7 @@ from contextlib import nullcontext
 from statistics import median
 
 from prologue.acquisition.options import FitCostsOptions
+from prologue.contracts.cost import cost_identity
 from prologue.performance.fitting import FittedCosts
 from prologue.performance.requirements import CostRequirements
 from prologue.performance.samples import ServiceSamples, WorkCatalog
@@ -41,7 +42,7 @@ class TransportSamples:
                 )
                 if not protocol or not (notification or ServiceSamples.state_transfer(definition, interval)):
                     raise ValueError(f"physical peer profile contains unrelated work at {path}")
-                domain = json.dumps(source["domain"], sort_keys=True)
+                domain = cost_identity(source["domain"])
                 if protocols.setdefault(domain, protocol) != protocol:
                     raise ValueError(f"physical state transfer protocols differ in one cost domain at {path}")
             self.sources[path] = source

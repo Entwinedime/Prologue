@@ -48,3 +48,6 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.setuptools.package-data]
+"prologue.performance" = ["families.json"]

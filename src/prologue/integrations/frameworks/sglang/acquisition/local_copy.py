@@ -4,11 +4,11 @@ import json
 from collections import defaultdict
 
 from prologue.acquisition.rules import EvidenceGap
+from prologue.contracts.cost import cost_features, cost_identity
 from prologue.integrations.frameworks.sglang.acquisition.local_base import LocalRule
 from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangAscendPlacement
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
 from prologue.integrations.platforms.ascend.runtime.copy_sampling import TensorCopySamples
-from prologue.performance.requirements import cost_identity
 from prologue.performance.samples import ServiceSamples
 
 
@@ -110,7 +110,7 @@ class LocalCopies(LocalRule):
             unmatched += row["unmatched_calls"]
             for duration in row["observations_ns"]:
                 samples.add_external(TensorCopySamples.service(row["caller"]), "transfer",
-                                     {"phase": "", "axes": {"transfer.bytes": row["bytes"]}}, duration)
+                                     cost_features({"transfer.bytes": row["bytes"]}), duration)
         return samples.document({"unmatched_calls": unmatched, "unverified_operands": unverified})
 
     @classmethod

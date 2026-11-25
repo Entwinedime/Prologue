@@ -1,6 +1,5 @@
 """Read a fixed, portable pair of template and service-cost publications."""
 
-import json
 from collections import Counter
 from dataclasses import dataclass
 from functools import cached_property
@@ -9,6 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
+from prologue.contracts.cost import cost_identity
 from prologue.runtime.io import content_id, read_json, write_json
 
 
@@ -37,7 +37,7 @@ class TemplateCatalog:
         self.body_digests = {}
         self.bindings = {}
         for binding in index["bindings"]:
-            key = json.dumps(binding["domain"], sort_keys=True)
+            key = cost_identity(binding["domain"])
             if key in self.bindings:
                 raise ValueError(f"template publication has conflicting worker bindings for {binding['domain']}")
             if {binding["workers"], *binding["imports"], *binding.get("sources", ())} - self.observations.keys():
@@ -93,7 +93,7 @@ class TemplateCatalog:
         write_json(directory / "index.json", document, replace=False)
 
     def select(self, domain):
-        binding = self.bindings.get(json.dumps(domain, sort_keys=True))
+        binding = self.bindings.get(cost_identity(domain))
         if binding is None:
             return None
         workers = self.observations[binding["workers"]]

@@ -1,7 +1,8 @@
 """Pair scoped native host calls using the evidence required by each work interval."""
 
 from collections import defaultdict
-import json
+
+from prologue.contracts.cost import cost_identity
 
 
 class NativeHostCalls:
@@ -39,10 +40,12 @@ class NativeHostCalls:
         role, work = scope["role"], scope["work"]
         detail = None
         if role in cls.batch_roles:
-            detail = [work["phase"], [{key: value for key, value in member.items() if key != "slot"} for member in work["members"]]]
+            members = [{key: value for key, value in member.items() if key != "slot"} for member in work["members"]]
+            detail = [work["phase"], members]
         elif role == "segment":
             detail = [work["continuation"], scope["bindings"]["condition"]]
-        elif role in {"invocation", "query", "host_read", "batch_transform", "cache_match", "cache_insert", "kv_reservation"}:
+        elif role in {"invocation", "query", "host_read", "batch_transform",
+                      "cache_match", "cache_insert", "kv_reservation"}:
             detail = work.get("context")
         elif role == "metadata_collective":
             detail = [scope["parameters"], scope["bindings"]["condition"], work["context"].get("poll_requests")]
@@ -51,14 +54,15 @@ class NativeHostCalls:
         elif role in {"transfer_send_wait", "transfer_receive_wait", "signal_wait"}:
             context = work["context"]
             producer = context["producer"]
-            detail = [context["device_wait"], context.get("wait_stream"), producer.get("record_stream"), producer["message"]]
+            detail = [context["device_wait"], context.get("wait_stream"),
+                      producer.get("record_stream"), producer["message"]]
         elif role == "stream_wait":
             detail = work["context"]["streams"]
         elif role == "signal_record":
             detail = work["context"]["record_stream"]
         elif role == "gather":
             detail = scope["bindings"].get("collective")
-        return role, scope["implementation"], scope["site"], json.dumps(detail, sort_keys=True)
+        return role, scope["implementation"], scope["site"], cost_identity(detail)
 
     def index(self, paths, typed):
         routes = {0: 0}
@@ -72,7 +76,7 @@ class NativeHostCalls:
             # Exact matches retain the enclosing batch context as part of the call route.
             component = call if scope["role"] in self.batch_roles else call[:3]
             route = routes[identity] = paths.setdefault((routes[parent], component), len(paths) + 1)
-            arguments = json.dumps(scope.get("parameters"), sort_keys=True) if call[:3] in typed else self.calls[parent]
+            arguments = cost_identity(scope.get("parameters")) if call[:3] in typed else self.calls[parent]
             indexed[route, call, arguments, self.child_keys(identity)].append(identity)
         return indexed
 

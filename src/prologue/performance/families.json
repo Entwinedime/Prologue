@@ -1,0 +1,15 @@
+{
+  "bounded_curve": {"form": "curve"},
+  "startup_transfer": {
+    "form": "linear", "rates": {"transfer.bytes": "ns_per_byte"}, "exclusive_axis": true,
+    "rule": {"kind": "transfer", "operation": "local_copy"}
+  },
+  "attention_pairs": {
+    "form": "linear", "rates": {"batch.attention_pairs": "ns_per_pair"},
+    "rule": {"kind": "device", "role": "attention"}
+  },
+  "layer_tokens": {
+    "form": "linear", "rates": {"parameter.model_tokens": "ns_per_token"},
+    "rule": {"kind": "device", "role": "layer"}
+  }
+}

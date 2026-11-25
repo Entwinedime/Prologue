@@ -3,6 +3,7 @@
 import json
 from collections import Counter, defaultdict
 
+from prologue.contracts.cost import cost_features, cost_identity
 from prologue.performance.samples import ServiceSamples
 
 
@@ -113,8 +114,8 @@ class AscendTransportProfile:
             payload_axes = {port["elements_axis"]: axes[port["elements_axis"]]
                             for ports in identity["ports"].values() for port in ports.values()}
             payload_axes.update((axis, axes[axis]) for axis in row_axes)
-            key = json.dumps((identity, payload_axes), sort_keys=True)
-            coordinates[key] = identity, {"phase": "", "axes": payload_axes}
+            key = cost_identity((identity, payload_axes))
+            coordinates[key] = identity, cost_features(payload_axes)
             receipts[key][tuple(payload)].append(duration)
 
         for key, variants in receipts.items():

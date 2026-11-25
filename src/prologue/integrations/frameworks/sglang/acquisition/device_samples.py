@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 
 from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.acquisition.recording import PublishedCapture
+from prologue.contracts.cost import cost_features
 from prologue.integrations.frameworks.sglang.acquisition.batch_readback import BatchReadback
 from prologue.integrations.frameworks.sglang.acquisition.local_copy import LocalCopies
 from prologue.integrations.frameworks.sglang.acquisition.local_embedding import LocalEmbedding
@@ -227,7 +228,7 @@ class CostSamples:
             if span is None:
                 absent["notification"] += 1
                 continue
-            features = {"phase": "", "axes": {"parameter.dependencies": measured["dependencies"]}}
+            features = cost_features({"parameter.dependencies": measured["dependencies"]})
             samples.add_external({"operation": measured["operation"]}, "transfer", features, sum(span) // 2)
 
         report = {**samples.document(absent), **provenance, "native_recordings": [self.recording.attempt_id]}

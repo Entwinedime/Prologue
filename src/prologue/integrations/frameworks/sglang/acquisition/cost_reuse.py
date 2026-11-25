@@ -3,7 +3,8 @@
 from collections import defaultdict
 from dataclasses import replace
 
-from prologue.performance.requirements import WorkPoint, cost_identity
+from prologue.contracts.cost import cost_identity
+from prologue.performance.requirements import WorkPoint
 
 
 class BatchHostReuse:
@@ -18,8 +19,9 @@ class BatchHostReuse:
 
     @staticmethod
     def local(definition, interval):
+        edges = ("children", "imports", "exports", "kv_accesses", "slot_accesses")
         return (definition.get("role") == "batch_transform" and definition["work"][interval]["kind"] == "host"
-                and all(not definition[field] for field in ("children", "imports", "exports", "kv_accesses", "slot_accesses")))
+                and not any(definition[field] for field in edges))
 
     @classmethod
     def match(cls, demand, missing, sources):

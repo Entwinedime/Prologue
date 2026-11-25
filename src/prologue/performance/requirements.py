@@ -7,12 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from prologue.performance.models import ModelBindings
+from prologue.contracts.cost import cost_features, cost_identity
+from prologue.performance.registry import service_models
 from prologue.runtime.io import write_json
-
-
-def cost_identity(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def require_work_interval(query):
@@ -36,10 +33,8 @@ class WorkPoint:
         return cls(domain, definition, interval, features["phase"], tuple(sorted(features["axes"].items())), transport)
 
     def features(self):
-        result = {"phase": self.phase, "axes": dict(self.axes)}
-        if self.transport is not None:
-            result["transport"] = json.loads(self.transport)
-        return result
+        transport = json.loads(self.transport) if self.transport is not None else None
+        return cost_features(dict(self.axes), phase=self.phase, transport=transport)
 
 
 class CostRequirements:
@@ -157,7 +152,8 @@ class CostRequirements:
             index = definitions.setdefault(point.definition, len(definitions))
             query = self.work_query(point)
             value = query["features"]
-            choice = ModelBindings.for_interval(query["definition"], point.interval)
+            rule = service_models.select(query["definition"], point.interval, value["axes"], value.get("transport"))
+            choice = service_models.choice(rule)
             candidates = tuple(family.family for family in choice.candidates(value["axes"]))
             key = index, point.interval, point.phase, status, candidates
             row = domain["work"].setdefault(key, {

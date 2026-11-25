@@ -1,0 +1,5 @@
+#pragma once
+
+namespace prologue {
+inline constexpr char published_family_contracts[] = R"catalog(@PROLOGUE_SERVICE_FAMILIES@)catalog";
+}

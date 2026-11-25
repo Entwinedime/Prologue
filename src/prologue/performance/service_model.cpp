@@ -9,18 +9,23 @@
 
 #include "prologue/performance/work_features.hpp"
 
+#include "prologue/contracts/serving.hpp"
+#include "prologue/performance/families.hpp"
+
 namespace prologue {
 
 namespace {
 
 using Json = nlohmann::json;
 
-struct Binding {
-    const Json & model;
-    std::size_t ordinal;
-    const Json & definition;
-    const Json & work;
-};
+std::int64_t service_ns(double value) {
+    if (!std::isfinite(value) || value < 0 || value >= 0x1p63) throw std::out_of_range("service exceeds signed nanoseconds");
+
+    // Match Python round(): halfway values go to the even integer, independent of the caller's rounding mode.
+    const auto whole = static_cast<std::int64_t>(value);
+    const auto fraction = value - static_cast<double>(whole);
+    return whole + (fraction > 0.5 || (fraction == 0.5 && whole % 2 != 0));
+}
 
 auto measured_bounds(const Json & bounds) {
     std::map<std::string, ServiceModel::Range, std::less<>> result;
@@ -37,15 +42,14 @@ auto measured_bounds(const Json & bounds) {
 
 class BoundedCurve final : public ServiceModel {
 public:
-    explicit BoundedCurve(const Binding & spec) : ServiceModel(spec.model, spec.ordinal) {
-        const auto & model = spec.model;
+    BoundedCurve(const Json & model, std::size_t ordinal) : ServiceModel(model, ordinal) {
         if (!model.at("axis").is_null()) axis_ = model.at("axis").get<std::string>();
         for (const auto & row : model.at("knots").get_ref<const Json::array_t &>()) {
             const auto & values = row.get_ref<const Json::array_t &>();
             if (values.size() != 2 || !values[1].is_number_integer())
                 throw std::invalid_argument("cost knot requires a coordinate and integer service nanoseconds");
-            const Point point{ values[0].get<double>(), values[1].get<std::int64_t>() };
-            if (!std::isfinite(point.coordinate) || point.ns < 0 || (!knots_.empty() && point.coordinate <= knots_.back().coordinate))
+            const Point point{ values[0].get<double>(), read_nonnegative_integer(values[1], "service knot") };
+            if (!std::isfinite(point.coordinate) || (!knots_.empty() && point.coordinate <= knots_.back().coordinate))
                 throw std::invalid_argument("cost knots require increasing coordinates and nonnegative costs");
             knots_.push_back(point);
         }
@@ -75,82 +79,66 @@ private:
         const auto right = std::ranges::lower_bound(knots_, coordinate, {}, &Point::coordinate);
         if (right->coordinate == coordinate) return right->ns;
         const auto & left = *std::prev(right);
-        const long double fraction = (static_cast<long double>(coordinate) - left.coordinate)
-            / (static_cast<long double>(right->coordinate) - left.coordinate);
-        return static_cast<std::int64_t>(std::nearbyint(left.ns + fraction * (static_cast<long double>(right->ns) - left.ns)));
+        const double offset = static_cast<double>(right->ns - left.ns) * (coordinate - left.coordinate) / (right->coordinate - left.coordinate);
+        return service_ns(static_cast<double>(left.ns) + offset);
     }
 };
 
-class AxisRegression : public ServiceModel {
-protected:
-    AxisRegression(const Binding & spec, std::string_view axis, std::string_view rate)
-        : ServiceModel(spec.model, spec.ordinal), axis_(axis), startup_ns_(spec.model.at("startup_ns").get<double>()),
-          rate_(spec.model.at(rate).get<double>()) {
-        const auto range = bounds.find(axis);
-        if (range == bounds.end() || range->second.lower <= 0 || range->second.lower >= range->second.upper
-            || !std::isfinite(startup_ns_) || startup_ns_ < 0 || !std::isfinite(rate_) || rate_ <= 0)
-            throw std::invalid_argument("linear service requires a positive measured span, finite startup and positive rate");
-        duration(range->second.upper);
+class LinearRegression final : public ServiceModel {
+public:
+    LinearRegression(const Json & model, std::size_t ordinal, const Json & encoding)
+        : ServiceModel(model, ordinal), startup_ns_(model.at("startup_ns").get<double>()) {
+        if (!std::isfinite(startup_ns_) || startup_ns_ < 0) throw std::invalid_argument("invalid linear service startup");
+
+        // Published named rates and newly registered coefficients both describe the same ordered sum.
+        if (encoding.contains("rates")) {
+            for (const auto & [axis, field] : encoding.at("rates").items())
+                rates_.emplace(axis, model.at(field.get_ref<const std::string &>()).get<double>());
+        } else {
+            rates_ = model.at("coefficients").get<decltype(rates_)>();
+        }
+        if (rates_.empty()) throw std::invalid_argument("linear service requires at least one feature axis");
+        double maximum = startup_ns_;
+        for (const auto & [axis, rate] : rates_) {
+            const auto span = bounds.find(axis);
+            if (span == bounds.end() || span->second.lower <= 0 || span->second.lower >= span->second.upper || !std::isfinite(rate) || rate <= 0)
+                throw std::invalid_argument("linear service requires a positive measured span and rate");
+            maximum += span->second.upper * rate;
+        }
+        service_ns(maximum);
     }
 
 private:
-    std::string_view axis_;
+    std::map<std::string, double> rates_;
     double startup_ns_;
-    double rate_;
 
-    std::int64_t duration(double coordinate) const {
-        const auto ns = std::nearbyint(startup_ns_ + static_cast<long double>(coordinate) * rate_);
-        if (ns >= 0x1p63L) throw std::out_of_range("service exceeds signed nanoseconds");
-        return static_cast<std::int64_t>(ns);
-    }
-    std::int64_t predict(const FeatureValues & features) const override { return duration(*features.value(axis_)); }
-};
-
-class StartupTransfer final : public AxisRegression {
-public:
-    explicit StartupTransfer(const Binding & spec) : AxisRegression(spec, "transfer.bytes", "ns_per_byte") {
-        const auto external = spec.definition.find("external");
-        const bool copy = spec.work.contains("copy") || (external != spec.definition.end() && external->at("operation") == "local_copy");
-        if (spec.work.at("kind") != "transfer" || !copy || bounds.size() != 1)
-            throw std::invalid_argument("a startup transfer model requires a declared local copy with a byte coordinate");
+    std::int64_t predict(const FeatureValues & features) const override {
+        double value = startup_ns_;
+        for (const auto & [axis, rate] : rates_) value += *features.value(axis) * rate;
+        return service_ns(value);
     }
 };
-
-class AttentionPairs final : public AxisRegression {
-public:
-    explicit AttentionPairs(const Binding & spec) : AxisRegression(spec, "batch.attention_pairs", "ns_per_pair") {
-        if (spec.work.at("kind") != "device" || spec.definition.value("role", "") != "attention")
-            throw std::invalid_argument("an attention-pair model requires device work in an attention scope");
-    }
-};
-
-class LayerTokens final : public AxisRegression {
-public:
-    explicit LayerTokens(const Binding & spec) : AxisRegression(spec, "parameter.model_tokens", "ns_per_token") {
-        if (spec.work.at("kind") != "device" || spec.definition.value("role", "") != "layer")
-            throw std::invalid_argument("a layer-token model requires device work in a model layer");
-    }
-};
-
-template<class Backend>
-std::unique_ptr<const ServiceModel> load(const Binding & spec) { return std::make_unique<Backend>(spec); }
 
 } // namespace
 
 ServiceModel::ServiceModel(const Json & model, std::size_t ordinal)
     : binding(ordinal), bounds(measured_bounds(model.at("bounds"))) {}
 
-std::unique_ptr<const ServiceModel> ServiceModel::decode(const Json & model, std::size_t binding, const Json & definition,
-                                                        std::size_t interval) {
-    using Factory = std::unique_ptr<const ServiceModel> (*)(const Binding &);
-    static const std::map<std::string_view, Factory> backends{
-        { "bounded_curve", load<BoundedCurve> }, { "startup_transfer", load<StartupTransfer> },
-        { "attention_pairs", load<AttentionPairs> }, { "layer_tokens", load<LayerTokens> },
-    };
+const Json & ServiceModelRegistry::encoding(const Json & model) {
+    if (model.contains("form")) return model;
+    static const Json catalog = Json::parse(published_family_contracts);
     const auto & family = model.at("family").get_ref<const std::string &>();
-    const auto found = backends.find(family);
-    if (found == backends.end()) throw std::invalid_argument("unknown service cost model family: " + family);
-    return found->second({ model, binding, definition, definition.at("work").at(interval) });
+    const auto found = catalog.find(family);
+    if (found == catalog.end()) throw std::invalid_argument("unknown service cost model family: " + family);
+    return *found;
+}
+
+std::unique_ptr<const ServiceModel> ServiceModelRegistry::decode(const Json & model, std::size_t binding) {
+    const auto & wire = encoding(model);
+    const auto & form = wire.at("form").get_ref<const std::string &>();
+    if (form == "curve") return std::make_unique<BoundedCurve>(model, binding);
+    if (form == "linear") return std::make_unique<LinearRegression>(model, binding, wire);
+    throw std::invalid_argument("unknown service model evaluator: " + form);
 }
 
 std::optional<std::int64_t> ServiceModel::estimate(const FeatureValues & features) const {

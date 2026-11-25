@@ -2,7 +2,7 @@ ARG BASE_IMAGE=prologue-sglang:ubuntu22.04
 FROM scratch AS control-domains
 COPY src/prologue/app /prologue/app/
 COPY src/prologue/serving /prologue/serving/
-COPY src/prologue/contracts/workload /prologue/contracts/workload/
+COPY src/prologue/contracts /prologue/contracts/
 COPY src/prologue/integrations/frameworks/sglang/shared /prologue/integrations/frameworks/sglang/shared/
 COPY src/prologue/integrations/frameworks/sglang/control /prologue/integrations/frameworks/sglang/control/
 COPY src/prologue/integrations/runtimes/pytorch /prologue/integrations/runtimes/pytorch/

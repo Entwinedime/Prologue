@@ -45,6 +45,9 @@ public:
     static nlohmann::json evaluate(const nlohmann::json & groups, const nlohmann::json & asset, bool bindings);
 
 private:
+    static void validate_binding(const nlohmann::json & model, const nlohmann::json & definition, std::size_t interval,
+                                 const nlohmann::json * operand);
+
     struct Estimate {
         const ServiceModel * model;
         ServiceDuration service_ns;

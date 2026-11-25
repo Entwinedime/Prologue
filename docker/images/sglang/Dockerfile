@@ -3,7 +3,7 @@ FROM scratch AS capture-domains
 COPY src/prologue/app /prologue/app/
 COPY src/prologue/runtime /prologue/runtime/
 COPY src/prologue/performance /prologue/performance/
-COPY src/prologue/contracts/workload /prologue/contracts/workload/
+COPY src/prologue/contracts /prologue/contracts/
 COPY src/prologue/acquisition/observation /prologue/acquisition/observation/
 COPY src/prologue/integrations/frameworks/sglang/shared /prologue/integrations/frameworks/sglang/shared/
 COPY src/prologue/integrations/frameworks/sglang/observation /prologue/integrations/frameworks/sglang/observation/

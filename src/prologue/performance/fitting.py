@@ -4,8 +4,8 @@ import json
 from collections import defaultdict
 from itertools import chain
 
-from prologue.performance.models import ModelBindings
-from prologue.performance.requirements import cost_identity
+from prologue.contracts.cost import cost_identity
+from prologue.performance.registry import service_models
 from prologue.runtime.io import write_json
 
 
@@ -42,10 +42,11 @@ class DomainCosts:
     def document(self):
         accepted, unresolved = [], []
         for (definition, interval, phase, transport), rows in sorted(self.groups.items()):
-            model = ModelBindings.fit(self.definitions[definition], interval, rows)
-            if transport:
-                model["transport"] = json.loads(transport)
-            destination = accepted if model["points"] else unresolved
+            operand = json.loads(transport) if transport else None
+            model = service_models.fit(self.definitions[definition], interval, rows, operand)
+            if operand is not None:
+                model["transport"] = operand
+            destination = accepted if "family" in model else unresolved
             destination.append({"definition": definition, "interval": interval, "phase": phase, **model})
 
         result = {"domain": self.domain, "definitions": self.definitions, "models": accepted}

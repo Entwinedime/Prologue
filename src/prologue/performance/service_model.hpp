@@ -21,8 +21,6 @@ public:
     };
 
     virtual ~ServiceModel() = default;
-    static std::unique_ptr<const ServiceModel> decode(const nlohmann::json & model, std::size_t binding,
-                                                      const nlohmann::json & definition, std::size_t interval);
     std::optional<std::int64_t> estimate(const FeatureValues & features) const;
 
     const std::size_t binding;
@@ -31,6 +29,12 @@ public:
 protected:
     ServiceModel(const nlohmann::json & model, std::size_t binding);
     virtual std::int64_t predict(const FeatureValues & features) const = 0;
+};
+
+class ServiceModelRegistry {
+public:
+    static const nlohmann::json & encoding(const nlohmann::json & model);
+    static std::unique_ptr<const ServiceModel> decode(const nlohmann::json & model, std::size_t binding);
 };
 
 } // namespace prologue

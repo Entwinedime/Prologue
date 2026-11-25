@@ -2,6 +2,8 @@
 
 from collections import defaultdict
 
+from prologue.contracts.cost import cost_features
+
 
 class CpuTransfer:
     def __init__(self, world) -> None:
@@ -42,7 +44,7 @@ class CpuProtocolWork:
         identity = {name: descriptor[name] for name in ("source", "target", "dtype")}
         identity.update(operation=operation, channel=route["group"])
         axes = {f"parameter.{name}": descriptor[name] for name in ("elements", "element_bytes")}
-        return identity, {"phase": "", "axes": axes}
+        return identity, cost_features(axes)
 
     @staticmethod
     def readiness_operation(descriptor):
@@ -115,7 +117,8 @@ class CpuProtocolWork:
         for peers in messages.values():
             if len(peers) != 2:
                 continue
-            active = [post["interval"]["execution"] for post in peers.values() if post["interval"]["execution"]["in_flow"]]
+            executions = (post["interval"]["execution"] for post in peers.values())
+            active = [call for call in executions if call["in_flow"]]
             if not active:
                 continue
             geometry = {tuple(post["descriptor"][name] for name in ("dtype", "elements", "element_bytes"))
@@ -136,7 +139,8 @@ class CpuProtocolWork:
                 consumed = post["consumed"]
                 duration = None
                 if last_post is not None:
-                    bound = self.ready_window(measured[rank], last_post, None if consumed is None else consumed["end_raw_ns"])
+                    end_ns = None if consumed is None else consumed["end_raw_ns"]
+                    bound = self.ready_window(measured[rank], last_post, end_ns)
                     if bound is not None:
                         duration = bound[0] - last_post
                 yield rank, identity, features, duration

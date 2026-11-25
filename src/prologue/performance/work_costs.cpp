@@ -43,6 +43,34 @@ CostGap::CostGap(nlohmann::json details)
     : std::runtime_error("no qualified service cost at " + details.at("site").get<std::string>()),
       details_(std::move(details)) {}
 
+void WorkCosts::validate_binding(const nlohmann::json & model, const nlohmann::json & definition, std::size_t interval,
+                                 const nlohmann::json * operand) {
+    const auto & work = definition.at("work").at(interval);
+    const auto & wire = ServiceModelRegistry::encoding(model);
+    const auto & bounds = model.at("bounds").get_ref<const nlohmann::json::object_t &>();
+    const auto rule = wire.find(model.contains("form") ? "binding_rule" : "rule");
+    if (rule == wire.end()) {
+        if (model.contains("form")) throw std::invalid_argument("a registered service model requires its binding rule");
+        return;
+    }
+
+    auto operation = work.value("operation", "");
+    if (operand && (definition.contains("external") || work.at("kind") == "collective"))
+        operation = operand->value("operation", operation);
+    if (work.contains("copy")) operation = "local_copy";
+    for (const auto & [field, value] : rule->get_ref<const nlohmann::json::object_t &>()) {
+        if (field == "axes") {
+            for (const auto & axis : value.get_ref<const nlohmann::json::array_t &>()) {
+                if (!bounds.contains(axis.get_ref<const std::string &>())) throw std::invalid_argument("model binding requires its declared feature axes");
+            }
+        } else if (!((field == "kind" && value == work.at("kind")) || (field == "role" && value == definition.value("role", ""))
+                     || (field == "operation" && value == operation))) {
+            throw std::invalid_argument("inapplicable service binding: " + field);
+        }
+    }
+    if (wire.value("exclusive_axis", false) && bounds.size() != 1) throw std::invalid_argument("work requires exactly one cost coordinate");
+}
+
 template<class Definitions>
 WorkCosts::WorkCosts(nlohmann::json domain, const nlohmann::json & asset, const Definitions & definitions)
     : domain_(std::move(domain)), model_indices_(definitions.size()) {
@@ -89,7 +117,8 @@ WorkCosts::WorkCosts(nlohmann::json domain, const nlohmann::json & asset, const 
         }
         auto & entries = models_.at(definition).at(interval);
         if (lookup(entries, phase, operand)) throw std::invalid_argument("cost asset repeats a work interval, phase and operand");
-        entries.push_back({phase, operand ? *operand : nlohmann::json(nullptr), ServiceModel::decode(model, ordinal, declared, interval)});
+        validate_binding(model, declared, interval, operand);
+        entries.push_back({phase, operand ? *operand : nlohmann::json(nullptr), ServiceModelRegistry::decode(model, ordinal)});
     }
 
     // Work definitions may be shared; the models always come from the selected execution domain.

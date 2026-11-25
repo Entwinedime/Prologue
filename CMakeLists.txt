@@ -9,6 +9,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(nlohmann_json 3.11 REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
+set(service_catalog "${CMAKE_CURRENT_SOURCE_DIR}/src/prologue/performance/families.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${service_catalog}")
+file(READ "${service_catalog}" PROLOGUE_SERVICE_FAMILIES)
+configure_file(src/prologue/performance/families.hpp.in generated/prologue/performance/families.hpp @ONLY)
+
 add_library(prologue_core
     src/prologue/serving/controller/native.cpp
     src/prologue/serving/controller/cpu_messages.cpp
@@ -47,7 +52,9 @@ add_library(prologue_core
     src/prologue/templates/validation.cpp
     src/prologue/templates/instance.cpp
 )
-target_include_directories(prologue_core PUBLIC src)
+target_include_directories(prologue_core PUBLIC src PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+# Both evaluators use separate binary64 multiplication and addition before rounding nanoseconds.
+set_source_files_properties(src/prologue/performance/service_model.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 target_link_libraries(prologue_core PUBLIC nlohmann_json::nlohmann_json PRIVATE OpenSSL::Crypto)
 
 add_library(prologue_sglang

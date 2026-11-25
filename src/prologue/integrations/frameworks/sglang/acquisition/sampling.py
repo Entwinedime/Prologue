@@ -7,6 +7,7 @@ from pathlib import Path
 from prologue.acquisition.options import HostSampleOptions
 from prologue.acquisition.recording import PublishedCapture
 from prologue.acquisition.rules import EvidenceGap, LocalAcquisition
+from prologue.contracts.cost import cost_identity
 from prologue.integrations.frameworks.sglang.acquisition.host_cost_samples import HostCostSamples
 from prologue.integrations.frameworks.sglang.acquisition.local_attention import LocalAttention
 from prologue.integrations.frameworks.sglang.acquisition.local_copy import LocalCopies
@@ -14,7 +15,6 @@ from prologue.integrations.frameworks.sglang.acquisition.worker_capture import W
 from prologue.integrations.frameworks.sglang.shared.attention import AttentionCatalog
 from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
 from prologue.libraries.release import asset_path
-from prologue.performance.requirements import cost_identity
 from prologue.runtime.io import content_id, read_json, write_json
 from prologue.runtime.limits import AllowanceExhausted
 

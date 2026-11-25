@@ -3,6 +3,8 @@
 import json
 from dataclasses import dataclass
 
+from prologue.contracts.cost import cost_identity
+
 
 @dataclass(frozen=True, slots=True)
 class RendezvousService:
@@ -58,7 +60,7 @@ class ServiceSamples:
         self.external = {}
 
     def add(self, definition, interval, features, duration_ns, copy=None, collective=None):
-        key = definition, interval, json.dumps([features, copy, collective], sort_keys=True)
+        key = definition, interval, cost_identity([features, copy, collective])
         row = self.rows.setdefault(key, {
             "definition": definition, "interval": interval, "features": features, "observations_ns": [],
         })
@@ -73,7 +75,7 @@ class ServiceSamples:
         row["observations_ns"].append(duration_ns)
 
     def add_external(self, identity, kind, features, duration_ns, *, collective=None):
-        key = json.dumps(identity, sort_keys=True)
+        key = cost_identity(identity)
         if key not in self.external:
             self.external[key] = len(self.definitions)
             self.definitions.append({"external": identity, "work": [{"kind": kind}]})
