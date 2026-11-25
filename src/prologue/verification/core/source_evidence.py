@@ -1,8 +1,5 @@
 """Check retained source evidence independently of template production and prediction."""
 
-from prologue.verification.core.adapters import device_effects, stream_declarations
-
-
 import json
 from bisect import bisect_right
 from collections import Counter, defaultdict
@@ -11,6 +8,7 @@ from pathlib import Path
 
 from prologue.acquisition.recording import PublishedCapture
 from prologue.libraries.release import asset_path
+from prologue.verification.core.adapters import device_effects, stream_declarations
 
 from .actions import ActionScopes
 from .native_case import NativeCase
@@ -338,7 +336,8 @@ class ProductionEvidence:
         report["native_submissions"] = submissions
         report["native_signals"] = signals
         if retain_measurements:
-            retain_measurements(native_case, rank, facts, graph, native_evidence, host_fences, launches, payload_times, report, self.details)
+            retain_measurements(native_case, rank, facts, graph, native_evidence, host_fences, launches,
+                payload_times, report, self.details)
         return report
 
     def inspect(self, *, retain_measurements=None):

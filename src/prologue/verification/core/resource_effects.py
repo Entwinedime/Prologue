@@ -45,7 +45,9 @@ class FieldEffects:
             request = record["request"]
             if key in self.bindings and self.bindings[key] != request:
                 raise ValueError("slot binding overwrites another live request")
-            if any(owner == request and address[0] == field and address != key for address, owner in self.bindings.items()):
+            if any(
+                owner == request and address[0] == field and address != key for address, owner in self.bindings.items()
+            ):
                 raise ValueError("request owns multiple rows in one slot pool")
             self.bindings[key] = request
         elif operation == "release":
@@ -189,7 +191,9 @@ class ResourceEffects:
                     if action == "match":
                         operation["indices"] = record["result"]["indices"]
                     else:
-                        operation.update(indices=observed["indices"][:length], existing_tokens=record["result"]["existing_tokens"])
+                        operation.update(
+                            indices=observed["indices"][:length], existing_tokens=record["result"]["existing_tokens"]
+                        )
                 elif action == "lock":
                     operation.update(node=observed["node"], acquire=observed["acquire"], delta=record["result"])
                 elif action == "evict":
@@ -215,7 +219,11 @@ class ResourceEffects:
                 if result != len(self.fields.free[field]):
                     raise ValueError("state slot availability differs from observed ownership")
             else:
-                value = {"field": field, "operation": operation, "slot": result if operation == "allocate" else observed["slot"]}
+                value = {
+                    "field": field,
+                    "operation": operation,
+                    "slot": result if operation == "allocate" else observed["slot"],
+                }
                 if operation == "bind":
                     value["request"] = requests[observed["request"]]
                 if operation == "release" and row["returned_fields"] != [[field, observed["slot"]]]:
@@ -227,8 +235,10 @@ class ResourceEffects:
             operation.update(requests=[requests[member["request"]] for member in observed["members"]],
                              slots=[member["slot"] for member in result])
         elif kind == "allocate":
-            operation.update(requests=[[requests[member["request"]], member["tokens"]] for member in observed["members"]],
-                             indices=chain.from_iterable(member["indices"] for member in result["members"]))
+            operation.update(
+                requests=[[requests[member["request"]], member["tokens"]] for member in observed["members"]],
+                indices=chain.from_iterable(member["indices"] for member in result["members"]),
+            )
         elif kind == "release_request":
             slot, = row["returned_slots"]
             operation.update(request=requests[observed["request"]], slot=slot)
@@ -266,10 +276,15 @@ class ResourceEffectComparison:
     def observed(self, history, graph, group, raw):
         initial = history["initial"]
         available = initial["available"]
-        if (sorted(initial["free_pages"]) != list(range(initial["page_capacity"])) or initial["released_pages"]
-                or available["pages"] != initial["page_capacity"] or available["evictable_tokens"] or available["protected_tokens"]
-                or sorted(initial["free_slots"]) != list(range(available["slots"]))
-                or any(sorted(pool["free"]) != list(range(pool["capacity"])) for pool in initial["state_slots"].values())):
+        if (
+            sorted(initial["free_pages"]) != list(range(initial["page_capacity"]))
+            or initial["released_pages"]
+            or available["pages"] != initial["page_capacity"]
+            or available["evictable_tokens"]
+            or available["protected_tokens"]
+            or sorted(initial["free_slots"]) != list(range(available["slots"]))
+            or any(sorted(pool["free"]) != list(range(pool["capacity"])) for pool in initial["state_slots"].values())
+        ):
             raise ValueError("native observation does not start with empty logical KV and free slot pools")
         self.initial[group] = initial
         source = ResourceEffects(initial["page_size"])
@@ -287,8 +302,12 @@ class ResourceEffectComparison:
             if not record["control"]:
                 continue
             query = queries.pop(record["scope"], None)
-            if (query is None or query["read"] != record["operation"] or query["result"] != record["result"]
-                    or not query["begin_raw_ns"] <= record["begin_raw_ns"] <= record["end_raw_ns"] <= query["end_raw_ns"]):
+            if (
+                query is None
+                or query["read"] != record["operation"]
+                or query["result"] != record["result"]
+                or not query["begin_raw_ns"] <= record["begin_raw_ns"] <= record["end_raw_ns"] <= query["end_raw_ns"]
+            ):
                 raise ValueError("native resource getter differs from its semantic read boundary, resource or result")
             self.capacity_read("native", group, record["operation"], record["result"])
         if queries:
@@ -338,13 +357,30 @@ class ResourceEffectComparison:
             if expected == target.operations:
                 matched += 1
             else:
-                different = next((index for index, pair in enumerate(zip(source.operations, target.operations)) if pair[0] != pair[1]),
-                                 min(len(source.operations), len(target.operations)))
-                yield "resource_effects", {"group": group}, {
-                    "first_difference": different, "native_operations": len(source.operations), "predicted_operations": len(target.operations),
-                    "native": self.summary(source.operations[different]) if different < len(source.operations) else None,
-                    "predicted": self.summary(target.operations[different]) if different < len(target.operations) else None,
-                }
+                # A shorter sequence first differs at the end of its shared prefix.
+                different = next(
+                    (
+                        index
+                        for index, pair in enumerate(zip(source.operations, target.operations, strict=False))
+                        if pair[0] != pair[1]
+                    ),
+                    min(len(source.operations), len(target.operations)),
+                )
+                yield (
+                    "resource_effects",
+                    {"group": group},
+                    {
+                        "first_difference": different,
+                        "native_operations": len(source.operations),
+                        "predicted_operations": len(target.operations),
+                        "native": self.summary(source.operations[different])
+                        if different < len(source.operations)
+                        else None,
+                        "predicted": self.summary(target.operations[different])
+                        if different < len(target.operations)
+                        else None,
+                    },
+                )
         state_matched = 0
         state_unobserved = []
         for group, source in self.native.items():
@@ -353,26 +389,55 @@ class ResourceEffectComparison:
                 state_unobserved.append(group)
                 continue
             if complete:
-                matches = source.fields.capacities == target.fields.capacities and source.fields.row_histories() == target.fields.row_histories()
+                matches = (
+                    source.fields.capacities == target.fields.capacities
+                    and source.fields.row_histories() == target.fields.row_histories()
+                )
             else:
                 matches = target.fields.prefix_of(source.fields)
 
             if matches:
                 state_matched += 1
             else:
-                yield "state_slot_effects", {"group": group}, {
-                    "native_capacity": source.fields.capacities, "predicted_capacity": target.fields.capacities,
-                    "native_operations": len(source.fields.operations), "predicted_operations": len(target.fields.operations),
-                }
-        self.counts = {"groups": len(self.native), "groups_matched": matched, "operations": dict(totals),
-                       "empty_initial_states_checked": len(self.initial),
-                       "comparison_scope": "complete_history" if complete else "observed_prefix",
-                       "reads": {
-                           **{origin: [{"group": group, "kind": kind, "resource": resource, **value}
-                                       for (group, kind, resource), value in sorted(reads.items())]
-                              for origin, reads in self.reads.items()},
-                           "scope": "Controller scalar reads are checked against original getters and summarized within each run. Resource-internal checks remain diagnostic; no cross-run occurrence or timing correspondence is inferred.",
-                       },
-                       "state_slots": {"groups_matched": state_matched, "unobserved_native": state_unobserved,
-                                       "predicted_operations": sum(len(target.fields.operations) for target in self.predicted.values())},
-                       "scope": "Per-worker observed allocation/cache/free inputs and results under opaque identity renaming. State fields compare per-row allocation/bind/release histories, reuse and failure counts; independent rows commute. Capacity and ownership validity are checked within each run. Excludes queries, explicit request-prefix rebinding between snapshots, and intra-call effect timing."}
+                yield (
+                    "state_slot_effects",
+                    {"group": group},
+                    {
+                        "native_capacity": source.fields.capacities,
+                        "predicted_capacity": target.fields.capacities,
+                        "native_operations": len(source.fields.operations),
+                        "predicted_operations": len(target.fields.operations),
+                    },
+                )
+        self.counts = {
+            "groups": len(self.native),
+            "groups_matched": matched,
+            "operations": dict(totals),
+            "empty_initial_states_checked": len(self.initial),
+            "comparison_scope": "complete_history" if complete else "observed_prefix",
+            "reads": {
+                **{
+                    origin: [
+                        {"group": group, "kind": kind, "resource": resource, **value}
+                        for (group, kind, resource), value in sorted(reads.items())
+                    ]
+                    for origin, reads in self.reads.items()
+                },
+                "scope": (
+                    "Controller scalar reads are checked against original getters and summarized within each run. "
+                    "Resource-internal checks remain diagnostic; no cross-run occurrence or timing correspondence "
+                    "is inferred."
+                ),
+            },
+            "state_slots": {
+                "groups_matched": state_matched,
+                "unobserved_native": state_unobserved,
+                "predicted_operations": sum(len(target.fields.operations) for target in self.predicted.values()),
+            },
+            "scope": (
+                "Per-worker observed allocation/cache/free inputs and results under opaque identity renaming. State "
+                "fields compare per-row allocation/bind/release histories, reuse and failure counts; independent "
+                "rows commute. Capacity and ownership validity are checked within each run. Excludes queries, "
+                "explicit request-prefix rebinding between snapshots, and intra-call effect timing."
+            ),
+        }

@@ -6,15 +6,15 @@ from subprocess import CalledProcessError, TimeoutExpired
 from tempfile import TemporaryDirectory
 from time import monotonic_ns
 
-from prologue.workflow.prediction import PredictionProcess
 from prologue.libraries.release import LibraryRelease
 from prologue.runtime.docker import ModelingProcess
+from prologue.verification.runner import VerificationRun
 from prologue.workflow.options import PredictionOptions
+from prologue.workflow.prediction import PredictionProcess
 
+from ..core.source_evidence import ProductionEvidence
 from .compare_actions import ActionComparison
 from .execution_inputs import NativeInputs
-from prologue.verification.runner import VerificationRun
-from ..core.source_evidence import ProductionEvidence
 
 
 class StructureVerification(VerificationRun):

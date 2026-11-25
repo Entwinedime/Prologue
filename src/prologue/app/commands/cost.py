@@ -15,7 +15,9 @@ def register(group):
     extract = command(group, "extract", "extract measured services for the selected source kind", configure=extraction)
     extract.add_argument("--kind", choices=("device", "transport", "batch", "host"), help="measurement source")
     fit = command(group, "fit", "fit registered models and optionally check their coverage", fit_costs)
-    acquire = command(group, "acquire", "collect and fit missing services within the supplied allowances", acquire_costs)
+    acquire = command(
+        group, "acquire", "collect and fit missing services within the supplied allowances", acquire_costs
+    )
     for parser in (fit, acquire):
         paths(parser, "output")
         parser.add_argument("--gap", type=Path, action="append", default=[])

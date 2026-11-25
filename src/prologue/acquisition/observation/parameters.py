@@ -26,7 +26,9 @@ class ScopeParameters:
             if expression in record["constants"]:
                 return record["constants"][expression]
             if expression in record["arguments"]:
-                return self.resolve(record["arguments"][expression], record["parent"], record.get("row_call", {}).get("member"))
+                return self.resolve(
+                    record["arguments"][expression], record["parent"], record.get("row_call", {}).get("member")
+                )
             if expression not in record["parameters"]:
                 raise ValueError(f"shape references undeclared parameter: {scope}:{expression}")
             return Parameter(scope, expression)

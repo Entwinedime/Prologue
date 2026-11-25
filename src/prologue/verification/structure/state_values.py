@@ -27,8 +27,16 @@ class StateValueComparison:
             if field != "metadata" or operation not in {"write", "read"} or (field, operation, request) not in declared:
                 raise ValueError("state values have no corresponding declared request access")
             payload = value["values"]
-            fields = {"output_token", "cached_tokens", "cached_tokens_device", "cached_tokens_host", "cached_tokens_storage"}
-            if payload is not None and (payload.keys() != fields or any(type(item) is not int or item < 0 for item in payload.values())):
+            fields = {
+                "output_token",
+                "cached_tokens",
+                "cached_tokens_device",
+                "cached_tokens_host",
+                "cached_tokens_storage",
+            }
+            if payload is not None and (
+                payload.keys() != fields or any(type(item) is not int or item < 0 for item in payload.values())
+            ):
                 raise ValueError("PD payload evidence lacks native token/cache scalar values")
             if type(value["room"]) is not int or value["room"] <= 0:
                 raise ValueError("PD payload evidence lacks its native request room")
@@ -76,7 +84,10 @@ class StateValueComparison:
                 raise ValueError("state invocation starts before its preceding call returns")
         else:
             previous, previous_exit, previous_context, fields = self.continuations.pop(key)
-            if previous != identity or (previous_exit, previous_context) != (position["entry"], position["entry_context"]):
+            if previous != identity or (previous_exit, previous_context) != (
+                position["entry"],
+                position["entry_context"],
+            ):
                 raise ValueError("state segments do not continue the same native invocation")
             declared = declared | fields
         if position["exit"] != "call.return":
@@ -109,14 +120,26 @@ class StateValueComparison:
         counts = Counter()
         for origin, observed in (("native", self.native), ("predicted", self.predicted)):
             for key in observed.keys() - endpoints:
-                self.findings.append(("state_payload", {"group": key[0], "request": key[1]}, {"origin": origin, "reason": "unexpected payload endpoint"}))
+                self.findings.append(
+                    (
+                        "state_payload",
+                        {"group": key[0], "request": key[1]},
+                        {"origin": origin, "reason": "unexpected payload endpoint"},
+                    )
+                )
             for group, request, operation in endpoints:
                 records = observed[group, request, operation]
                 if len(records) != 1:
                     counts[f"{origin}_unpaired"] += 1
                     continue
                 if records[0]["values"] is None:
-                    self.findings.append(("state_payload", {"group": group, "request": request}, {"origin": origin, "reason": "native metadata consumption did not commit a token"}))
+                    self.findings.append(
+                        (
+                            "state_payload",
+                            {"group": group, "request": request},
+                            {"origin": origin, "reason": "native metadata consumption did not commit a token"},
+                        )
+                    )
 
             for (group, request), senders in requirements.items():
                 if (group, request) in senders:
@@ -124,7 +147,12 @@ class StateValueComparison:
                 received = observed[group, request, "read"]
                 for sender, _ in senders:
                     written = observed[sender, request, "write"]
-                    if len(written) != 1 or len(received) != 1 or written[0]["values"] is None or received[0]["values"] is None:
+                    if (
+                        len(written) != 1
+                        or len(received) != 1
+                        or written[0]["values"] is None
+                        or received[0]["values"] is None
+                    ):
                         continue
                     counts[f"{origin}_transfers_checked"] += 1
                     if written[0] != received[0]:
@@ -145,8 +173,15 @@ class StateValueComparison:
                     }))
                 else:
                     counts["endpoints_matched"] += 1
-        self.counts = {"endpoints": len(endpoints), **counts,
-                       "scope": "Native first-token and cache counts at set_buf input and successful commit output. Checks declared field ownership and action returns. Unused padding, multimodal/logprob/speculative fields and unpaired occurrences are not covered."}
+        self.counts = {
+            "endpoints": len(endpoints),
+            **counts,
+            "scope": (
+                "Native first-token and cache counts at set_buf input and successful commit output. Checks declared "
+                "field ownership and action returns. Unused padding, multimodal/logprob/speculative fields and "
+                "unpaired occurrences are not covered."
+            ),
+        }
         return self.findings
 
 
@@ -214,9 +249,17 @@ class ActionResults:
             self.counts["compared"] += 1
             self.counts["matched"] += actual == predicted
             if actual != predicted:
-                findings.append(("action_results", {"group": source[0], "native_scope": source[1], "predicted_event": target[1]},
-                                 {"native": actual, "predicted": predicted}))
-        for origin, records, paired in (("native", self.native, pairs.keys()), ("predicted", self.predicted, pairs.values())):
+                findings.append(
+                    (
+                        "action_results",
+                        {"group": source[0], "native_scope": source[1], "predicted_event": target[1]},
+                        {"native": actual, "predicted": predicted},
+                    )
+                )
+        for origin, records, paired in (
+            ("native", self.native, pairs.keys()),
+            ("predicted", self.predicted, pairs.values()),
+        ):
             for key in records.keys() - set(paired):
                 if any(records[key].values()):
                     self.counts[f"{origin}_unpaired_nonempty"] += 1

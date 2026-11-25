@@ -20,6 +20,7 @@ class ModelBackend(ABC):
 
     family: str
     form: str
+    exclusive_axis = False
 
     def supports(self, axes):
         return True

@@ -112,12 +112,20 @@ class PdStateEvidence:
                 scope = contents.graph["scopes"][contents.source_ids[observed["id"]]]
                 if "native_transfer" in observed:
                     member, = raw["scopes"][observed["submitted_by"]]["work"]["members"]
-                    port, = [port for port in scope["ports"] if port["name"] == "service.complete" and port["direction"] == "output"]
+                    (port,) = [
+                        port
+                        for port in scope["ports"]
+                        if port["name"] == "service.complete" and port["direction"] == "output"
+                    ]
                     services[group, member["id"]].add((rank, port["event"]))
                 if "reservation_publication" in observed:
                     publication = observed["reservation_publication"]
                     recipient = self.addresses[tuple(publication["target"])]
-                    port, = [port for port in scope["ports"] if port["name"] == "reservation.ready" and port["direction"] == "output"]
+                    (port,) = [
+                        port
+                        for port in scope["ports"]
+                        if port["name"] == "reservation.ready" and port["direction"] == "output"
+                    ]
                     reservations[recipient, publication["request"]].add((rank, port["event"]))
 
         required = self.requirements()
@@ -129,7 +137,9 @@ class PdStateEvidence:
                 observed = raw["scopes"][query["scope"]]
                 key = groups[rank], observed["work"]["context"]["request"]["id"]
                 scope = contents.graph["scopes"][contents.source_ids[query["scope"]]]
-                returned, = [port for port in scope["ports"] if port["name"] == "call.return" and port["direction"] == "output"]
+                (returned,) = [
+                    port for port in scope["ports"] if port["name"] == "call.return" and port["direction"] == "output"
+                ]
 
                 # A successful native read proves these prerequisites, without inventing a notification timestamp.
                 predecessors = set(reservations[key])
@@ -147,9 +157,14 @@ class PdStateEvidence:
             before, after = record["before"], record["after"]
 
             # CommonKVManager takes max(old, new) for nonfailed states; snapshots may enclose concurrent writers.
-            if (type(begin) is not int or type(end) is not int or not 0 <= begin <= end
-                    or type(after) is not int or after not in (1, 2, 3, 4)
-                    or (before is not None and (type(before) is not int or before not in (1, 2, 3, 4) or before > after))):
+            if (
+                type(begin) is not int
+                or type(end) is not int
+                or not 0 <= begin <= end
+                or type(after) is not int
+                or after not in (1, 2, 3, 4)
+                or (before is not None and (type(before) is not int or before not in (1, 2, 3, 4) or before > after))
+            ):
                 raise ValueError(f"PD state write lacks an ordered nonfailed monotonic interval at {key}")
             for state in (2, 3, 4):
                 if (0 if before is None else before) < state <= after:
@@ -246,7 +261,11 @@ class PdStateEvidence:
                 if update["end_raw_ns"] < service_end:
                     raise ValueError(f"PD completion update at {group}/{request} precedes required service return")
                 for source in sources:
-                    if source != (group, request) and source in updates and update["end_raw_ns"] < updates[source]["begin_raw_ns"]:
+                    if (
+                        source != (group, request)
+                        and source in updates
+                        and update["end_raw_ns"] < updates[source]["begin_raw_ns"]
+                    ):
                         raise ValueError(f"PD receiver completion at {group}/{request} precedes sender publication")
             successes, pending_after_service = [], 0
             feasible = [(state, window["begin_raw_ns"], window["end_raw_ns"])
@@ -258,7 +277,10 @@ class PdStateEvidence:
                 # SGLang's KVPoll ABI: Failed=0, Bootstrapping=1, WaitingForInput=2, Transferring=3, Success=4.
                 if query["result"] == 4:
                     if end < service_end:
-                        raise ValueError(f"PD Success at {group}/scope {query['scope']} precedes required service return by {service_end - end} ns")
+                        raise ValueError(
+                            f"PD Success at {group}/scope {query['scope']} precedes required service return by "
+                            f"{service_end - end} ns"
+                        )
                     successes.append(query)
                 else:
                     if successes:
@@ -279,23 +301,46 @@ class PdStateEvidence:
                 },
             })
         return {
-            "status": "observed_bounds_consistent" if endpoints else "not_applicable", "endpoints": endpoints,
-            "reservations": publications, "reservation_receipts": receipts,
+            "status": "observed_bounds_consistent" if endpoints else "not_applicable",
+            "endpoints": endpoints,
+            "reservations": publications,
+            "reservation_receipts": receipts,
             "unobserved_transfer_peers": unobserved_peers,
-            "missing_publications": [{"publisher": publisher, "request": request, "recipient": recipient}
-                                     for publisher, request, recipient in sorted(required_publications - published.keys())],
-            "missing_reservation_receipts": [{"publisher": publisher, "request": request, "recipient": recipient}
-                                             for publisher, request, recipient in sorted(required_publications - received)],
+            "missing_publications": [
+                {"publisher": publisher, "request": request, "recipient": recipient}
+                for publisher, request, recipient in sorted(required_publications - published.keys())
+            ],
+            "missing_reservation_receipts": [
+                {"publisher": publisher, "request": request, "recipient": recipient}
+                for publisher, request, recipient in sorted(required_publications - received)
+            ],
             "completion_updates_checked": sum(row["completion_update"] is not None for row in endpoints),
             "state_writes_checked": sum(len(records) for records in self.states.values()),
             "reservation_updates_checked": sum(row["reservation_update"] is not None for row in endpoints),
-            "missing_reservation_updates": [{"group": row["group"], "request": row["request"]}
-                                            for row in endpoints if row["reservation_update"] is None],
-            "missing_completion_updates": [{"group": row["group"], "request": row["request"]}
-                                           for row in endpoints if row["completion_update"] is None],
-            "missing_success_reads": [{"group": row["group"], "request": row["request"]}
-                                      for row in endpoints if not row["success_reads"]],
-            "scope": "Native monotonic state-write intervals constrain readiness and Success reads, independently of polling counts. Overlapping observations and all reads must admit one monotonic transition sequence; overlapping or same-time reads remain unordered. Read constraints do not rewrite the reported native write intervals. Sender readiness requires remote reservations; receiver readiness means local bootstrap initialization, not transferred data. Success additionally requires actual service returns. Missing transitions remain explicit; no timestamp is inferred from a poll. Observed reservation sends must cover exactly the actual native transfer peers and precede remote readiness. Send entry is a causal lower bound, not an exact wire publication time. These bounds do not establish exact notification arrival, metadata visibility or complete protocol qualification.",
+            "missing_reservation_updates": [
+                {"group": row["group"], "request": row["request"]}
+                for row in endpoints
+                if row["reservation_update"] is None
+            ],
+            "missing_completion_updates": [
+                {"group": row["group"], "request": row["request"]}
+                for row in endpoints
+                if row["completion_update"] is None
+            ],
+            "missing_success_reads": [
+                {"group": row["group"], "request": row["request"]} for row in endpoints if not row["success_reads"]
+            ],
+            "scope": (
+                "Native monotonic state-write intervals constrain readiness and Success reads, independently of "
+                "polling counts. Overlapping observations and all reads must admit one monotonic transition "
+                "sequence; overlapping or same-time reads remain unordered. Read constraints do not rewrite the "
+                "reported native write intervals. Sender readiness requires remote reservations; receiver readiness "
+                "means local bootstrap initialization, not transferred data. Success additionally requires actual "
+                "service returns. Missing transitions remain explicit; no timestamp is inferred from a poll. "
+                "Observed reservation sends must cover exactly the actual native transfer peers and precede remote "
+                "readiness. Send entry is a causal lower bound, not an exact wire publication time. These bounds do "
+                "not establish exact notification arrival, metadata visibility or complete protocol qualification."
+            ),
         }
 
 
@@ -409,10 +454,18 @@ class PdPollingEvidence:
             self.begin(group, scope["work"])
             query = queries.get(scope["id"]) if self.in_poll(scope["work"]) else None
             if query is not None and query["kind"] in {"transport", "metadata"}:
-                self.read(group, query["kind"], scope["work"]["context"]["request"]["id"], query["result"], self.in_gate(scope["work"]))
+                self.read(
+                    group,
+                    query["kind"],
+                    scope["work"]["context"]["request"]["id"],
+                    query["result"],
+                    self.in_gate(scope["work"]),
+                )
             if scope["role"] == "metadata_collective" and self.in_poll(scope["work"]):
                 requests = self.request_order(scope["work"])
-                self.check_operands(group, requests, self.operands(group, requests), values.get(scope["id"]), "native", scope["id"])
+                self.check_operands(
+                    group, requests, self.operands(group, requests), values.get(scope["id"]), "native", scope["id"]
+                )
             continuation = scope["work"].get("continuation", {})
             if continuation.get("owner") == "kv_commit" and continuation["entry"] == "call.enter":
                 self.commit(group, scope["work"]["context"]["request"]["id"], "native", scope["id"])
@@ -420,10 +473,18 @@ class PdPollingEvidence:
     def observe(self, record, query, groups):
         kind = record["kind"]
         if kind == "state_query" and self.in_poll(query["work"]) and query["kind"] in {"transport", "metadata"}:
-            self.read(query["group"], query["kind"], query["work"]["context"]["request"]["id"], record["result"], self.in_gate(query["work"]))
+            self.read(
+                query["group"],
+                query["kind"],
+                query["work"]["context"]["request"]["id"],
+                record["result"],
+                self.in_gate(query["work"]),
+            )
         elif kind == "action_values" and record["boundary"] in self.returns and "collective" in record["values"]:
             group, requests, expected = self.returns.pop(record["boundary"])
-            self.check_operands(group, requests, expected, record["values"]["collective"], "predicted", record["boundary"])
+            self.check_operands(
+                group, requests, expected, record["values"]["collective"], "predicted", record["boundary"]
+            )
         elif kind == "edge" and record["relation"] == "communication" and record["target"] in self.collectives:
             self.collectives[record["target"]]["inputs"].add(record["source"])
         elif kind == "completion" and record["event"] in self.collectives:
@@ -458,7 +519,12 @@ class PdPollingEvidence:
 
                 # Actual edges join Decode operands; no cross-run ordinal supplies the peers.
                 self.inputs[source] = rank, requests, ready
-                self.collectives[completed] = {"inputs": set(), "completed": None, "members": members, "requests": requests}
+                self.collectives[completed] = {
+                    "inputs": set(),
+                    "completed": None,
+                    "members": members,
+                    "requests": requests,
+                }
                 self.latest[group] = completed
         continuation = work.get("continuation", {})
         if continuation.get("owner") != "kv_commit" or continuation["entry"] != "call.enter":
@@ -467,14 +533,22 @@ class PdPollingEvidence:
         if len(self.members[group]) > 1:
             collective = self.collectives[self.latest[group]]
             operands = [self.inputs[event] for event in collective["inputs"]]
-            if (collective["completed"] is None or collective["completed"] > record["time_ns"]
-                    or len(operands) != len(collective["members"]) or {rank for rank, _, _ in operands} != set(collective["members"])
-                    or any(requests != collective["requests"] or request not in ready for _, requests, ready in operands)):
+            if (
+                collective["completed"] is None
+                or collective["completed"] > record["time_ns"]
+                or len(operands) != len(collective["members"])
+                or {rank for rank, _, _ in operands} != set(collective["members"])
+                or any(requests != collective["requests"] or request not in ready for _, requests, ready in operands)
+            ):
                 raise ValueError(f"Decode commit precedes its complete successful peer gate at {group}/{request}")
         self.commit(group, request, "predicted", record["event_ids"][entered])
 
     def operand_counts(self):
-        return {"checked": self.checked, "unobserved": self.unobserved + len(self.returns), "different": self.operand_differences}
+        return {
+            "checked": self.checked,
+            "unobserved": self.unobserved + len(self.returns),
+            "different": self.operand_differences,
+        }
 
     def commit_counts(self):
         return {"checked": self.commits, "unobserved": self.unobserved_commits, "different": self.commit_differences}
@@ -497,7 +571,10 @@ class PdPredictionEvidence:
         self.notification_edges = set()
         self.declarations, self.timed = {}, set()
         self.bounds = {
-            (row["group"], row["request"], name): (row[field]["begin_raw_ns"] - origin_ns, row[field]["end_raw_ns"] - origin_ns)
+            (row["group"], row["request"], name): (
+                row[field]["begin_raw_ns"] - origin_ns,
+                row[field]["end_raw_ns"] - origin_ns,
+            )
             for row in readiness["endpoints"]
             for name, field in (("kv_ready", "reservation_update"), ("kv_success", "completion_update"))
             if row[field] is not None and (name != "kv_ready" or row["remote_reservation"])
@@ -542,7 +619,10 @@ class PdPredictionEvidence:
             elif identity["name"] == "kv_ready":
                 if key not in self.targets:
                     raise ValueError("remote reservation readiness belongs to a Prefill endpoint")
-                expected = {self.notifications[(*key, "kv_reservation_received", publisher)]["event"] for publisher in self.targets[key]}
+                expected = {
+                    self.notifications[(*key, "kv_reservation_received", publisher)]["event"]
+                    for publisher in self.targets[key]
+                }
                 if events != expected:
                     raise ValueError("PD readiness lacks the actual native reservation publishers")
             elif identity["name"] == "kv_success":
@@ -557,7 +637,9 @@ class PdPredictionEvidence:
             if record["event"] in self.timed:
                 begin, end = self.bounds[notice]
                 if not begin <= record["time_ns"] <= end:
-                    raise ValueError(f"PD visibility at {notice} lies outside the independently observed state-write interval")
+                    raise ValueError(
+                        f"PD visibility at {notice} lies outside the independently observed state-write interval"
+                    )
             self.notifications[notice] = {"event": record["event"], "time_ns": record["time_ns"]}
             self.notification_edges.update((event, record["event"]) for event in events)
         elif query is not None and query["kind"] == "transport":
@@ -568,11 +650,17 @@ class PdPredictionEvidence:
                 raise ValueError(f"PD endpoint {key} has no independent native sender evidence")
 
             if record["kind"] == "state_query":
-                PdStateEvidence.check_read((*key, record["boundary"]), record["result"], query["returned_ns"], record["time_ns"], (
-                    (state, notice["time_ns"], notice["time_ns"])
-                    for name, state in (("kv_ready", 2), ("kv_success", 4))
-                    if (notice := self.notifications.get((*key, name))) is not None
-                ))
+                PdStateEvidence.check_read(
+                    (*key, record["boundary"]),
+                    record["result"],
+                    query["returned_ns"],
+                    record["time_ns"],
+                    (
+                        (state, notice["time_ns"], notice["time_ns"])
+                        for name, state in (("kv_ready", 2), ("kv_success", 4))
+                        if (notice := self.notifications.get((*key, name))) is not None
+                    ),
+                )
 
                 # These returns are ordered within one worker, even when simulated timestamps are equal.
                 if record["result"] < self.last_states.get(key, 1):
@@ -597,7 +685,9 @@ class PdPredictionEvidence:
                     raise ValueError(f"PD endpoint {key} reads completion from another request or sender: {producers}")
                 self.reads += 1
             elif record["result"] == 4:
-                if (*key, "kv_success") not in self.notifications or self.notifications[(*key, "kv_success")]["time_ns"] > record["time_ns"]:
+                if (*key, "kv_success") not in self.notifications or self.notifications[(*key, "kv_success")][
+                    "time_ns"
+                ] > record["time_ns"]:
                     raise ValueError(f"PD Success at {key} precedes its own visible completion")
 
                 # Cached Success still requires the entire native cohort, not just the signals polled this time.
@@ -609,8 +699,10 @@ class PdPredictionEvidence:
                         completed_ns = queries.signal_completions[event]
                         if completed_ns is None or completed_ns > record["time_ns"]:
                             raise ValueError(f"PD Success at {key} precedes required transfer event {event}")
-                    if key != sender and ((*sender, "kv_success") not in self.notifications
-                                          or self.notifications[(*sender, "kv_success")]["time_ns"] > record["time_ns"]):
+                    if key != sender and (
+                        (*sender, "kv_success") not in self.notifications
+                        or self.notifications[(*sender, "kv_success")]["time_ns"] > record["time_ns"]
+                    ):
                         raise ValueError(f"PD receiver Success at {key} precedes notification release by {sender}")
                 self.successes += 1
 
@@ -676,12 +768,21 @@ class PdPredictionEvidence:
     def finish(self):
         return {
             **self.polling.finish(),
-            "completion_reads_checked": self.reads, "protocol_polls_checked": self.polls, "successful_polls_checked": self.successes,
+            "completion_reads_checked": self.reads,
+            "protocol_polls_checked": self.polls,
+            "successful_polls_checked": self.successes,
             "final_notifications_checked": sum(key[2] == "kv_success" for key in self.notifications),
             "reservation_notifications_checked": sum(key[2] == "kv_ready" for key in self.notifications),
             "reservation_receipts_checked": sum(key[2] == "kv_reservation_received" for key in self.notifications),
             "reservation_submissions_checked": len(self.reservation_events),
             "notification_intervals_checked": len(self.timed),
             "successful_endpoints": sum(state == 4 for state in self.last_states.values()),
-            "scope": "Each reservation receipt follows its native send entry, and Prefill readiness follows all receipts for the request. Success publication follows all native-cohort transfers; each receiver visibility event depends on its actual sender publications. Transport polls follow the visibility gates and nondecreasing worker states. Success reads and Decode admission follow their own visibility and metadata gates. Supplied times are checked independently against native receipt and state-write observations; overlapping intervals only qualify the causal order they establish.",
+            "scope": (
+                "Each reservation receipt follows its native send entry, and Prefill readiness follows all receipts "
+                "for the request. Success publication follows all native-cohort transfers; each receiver visibility "
+                "event depends on its actual sender publications. Transport polls follow the visibility gates and "
+                "nondecreasing worker states. Success reads and Decode admission follow their own visibility and "
+                "metadata gates. Supplied times are checked independently against native receipt and state-write "
+                "observations; overlapping intervals only qualify the causal order they establish."
+            ),
         }

@@ -28,7 +28,9 @@ def register(group):
     local = command(group, "local-graphs", "compare expanded local calls against recorded native actions", local_graphs)
     paths(local, "capture", "graphs", "expanded", "output")
 
-    structure = command(group, "structure", "verify execution structure under measured timing", configure=structure_mode)
+    structure = command(
+        group, "structure", "verify execution structure under measured timing", configure=structure_mode
+    )
     structure.add_argument("--compare-only", action="store_true", help="compare an existing execution trace")
     fixed = command(group, "fixed-graph", "measure cost errors on a fixed native execution graph", fixed_graph)
     paths(fixed, "capture", "reference", "costs", "output")

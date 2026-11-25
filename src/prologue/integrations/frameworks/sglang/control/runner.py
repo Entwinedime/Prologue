@@ -1,13 +1,14 @@
 """Preserve native initialization while replacing physical model and pool construction."""
 
 import torch
-from prologue.integrations.frameworks.sglang.control.resources import PageAllocator, RequestSlots
 from sglang.srt.distributed import parallel_state
 from sglang.srt.distributed.utils import get_pp_indices
 from sglang.srt.layers.dp_attention import get_attention_tp_group, initialize_dp_attention
 from sglang.srt.mem_cache.common import get_req_to_token_extra_context_len
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.model_executor.pool_configurator import MemoryPoolConfig
+
+from prologue.integrations.frameworks.sglang.control.resources import PageAllocator, RequestSlots
 
 
 class UnexecutedModel(torch.nn.Module):
@@ -76,7 +77,11 @@ class MetadataRunner(ModelRunner):
                        page_reuse=reuse, fields=["output_token"])
         self.req_to_token_pool = RequestSlots(self.peer, self.max_running_requests, context, extra)
         self.token_to_kv_pool_allocator = PageAllocator(
-            self.peer, self.max_total_num_tokens, self.server_args.page_size, self.kv_layout, self.allocator_implementation
+            self.peer,
+            self.max_total_num_tokens,
+            self.server_args.page_size,
+            self.kv_layout,
+            self.allocator_implementation,
         )
         self.token_to_kv_pool = self.token_to_kv_pool_allocator.storage
 

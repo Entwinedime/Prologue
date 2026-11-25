@@ -69,9 +69,17 @@ class StateLifetimes:
             for access in scope["slot_accesses"]:
                 for request in access["requests"]:
                     publication = (request, access["publication"]) if access.get("publication") else None
-                    self.fields[access["pool"], access["field"], request].add(MemoryAccess(
-                        (0, 1), (0, 1), access["access"] == "write", events[access["start"]], events[access["finish"]], entered, publication,
-                    ))
+                    self.fields[access["pool"], access["field"], request].add(
+                        MemoryAccess(
+                            (0, 1),
+                            (0, 1),
+                            access["access"] == "write",
+                            events[access["start"]],
+                            events[access["finish"]],
+                            entered,
+                            publication,
+                        )
+                    )
             for access in scope["kv_accesses"]:
                 layout = access["slice"]
                 key = access["pool"], access["layer"]
@@ -92,7 +100,10 @@ class StateLifetimes:
                 return boundaries
         prefix = "device" if graph["resources"][resource]["kind"] == "stream" else "call"
         boundaries = {port["name"]: port["event"] for port in owner["ports"]}
-        start, finish = boundaries[prefix + ".enter"], boundaries[prefix + (".complete" if prefix == "device" else ".return")]
+        start, finish = (
+            boundaries[prefix + ".enter"],
+            boundaries[prefix + (".complete" if prefix == "device" else ".return")],
+        )
         if any(graph["events"][event]["resource"] != resource for event in (start, finish)):
             raise ValueError("tensor access has no lifetime on its declared resource")
         return start, finish
@@ -100,9 +111,18 @@ class StateLifetimes:
     def close_bindings(self):
         self.counts["field_bindings_missing"] += len(self.fields)
         for pool, field, request in self.fields:
-            self.findings.append(("state_binding_evidence", self.identities[self.entered], {
-                "pool": pool, "field": field, "request": request, "reason": "declared state access has no actual physical row binding",
-            }))
+            self.findings.append(
+                (
+                    "state_binding_evidence",
+                    self.identities[self.entered],
+                    {
+                        "pool": pool,
+                        "field": field,
+                        "request": request,
+                        "reason": "declared state access has no actual physical row binding",
+                    },
+                )
+            )
         self.fields.clear()
 
         # Safety needs every declared region, including calls that cannot be paired across runs.
@@ -165,7 +185,9 @@ class StateLifetimes:
                 if lo >= hi:
                     continue
                 layer, columns, write, start, finish = interval
-                value = MemoryAccess((first + lo - begin, first + hi - begin), columns, write, start, finish, self.entered)
+                value = MemoryAccess(
+                    (first + lo - begin, first + hi - begin), columns, write, start, finish, self.entered
+                )
                 self.bind((row["pool"], "kv", page, layer), value, {"pool": row["pool"], "page": page, "layer": layer})
             begin = end
         self.kv_bindings[row["pool"], row["request"]].append((row["begin"], begin))
@@ -182,7 +204,9 @@ class StateLifetimes:
         pages = set(row["returned_pages"])
         if not pages:
             return
-        pending = {page for pool, kind, page, _ in self.active if kind == "kv" and pool == row["group"] and page in pages}
+        pending = {
+            page for pool, kind, page, _ in self.active if kind == "kv" and pool == row["group"] and page in pages
+        }
         self.counts.update(release_calls=1, released_pages=len(pages), released_pages_inflight=len(pending))
 
     def compare(self, graph, event_ranks):
@@ -210,5 +234,13 @@ class StateLifetimes:
     def report(self):
         return {
             **self.counts,
-            "scope": "Prediction-only cross-invocation tensor, KV and request-field safety. Nonempty boundary-visible tensor epochs share their allocation; every nonempty KV region and field access needs an actual physical binding, independently of cross-run pairing. Completed accesses retire before later submissions; logical release preserves pending hazards. Equal publications may write concurrently; readers join pending writers. Excludes intra-invocation hazards, initialization/values, native intra-call release timing and unexercised reuse. Bindings do not prove cross-run row correspondence.",
+            "scope": (
+                "Prediction-only cross-invocation tensor, KV and request-field safety. Nonempty boundary-visible "
+                "tensor epochs share their allocation; every nonempty KV region and field access needs an actual "
+                "physical binding, independently of cross-run pairing. Completed accesses retire before later "
+                "submissions; logical release preserves pending hazards. Equal publications may write concurrently; "
+                "readers join pending writers. Excludes intra-invocation hazards, initialization/values, native "
+                "intra-call release timing and unexercised reuse. Bindings do not prove cross-run row "
+                "correspondence."
+            ),
         }

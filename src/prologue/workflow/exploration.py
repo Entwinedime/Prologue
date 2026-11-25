@@ -105,7 +105,11 @@ class ExplorationTask:
             while True:
                 pending = []
                 for target in targets:
-                    basis = PredictionProcess.basis(target.source, self.release, self.adapter) if acquisition else self.release.identity
+                    basis = (
+                        PredictionProcess.basis(target.source, self.release, self.adapter)
+                        if acquisition
+                        else self.release.identity
+                    )
                     pending.append(
                         workers.submit(
                             target.predict, self.adapter, self.run_options, self.release, self.limit, basis

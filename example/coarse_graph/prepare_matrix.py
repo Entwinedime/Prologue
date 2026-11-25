@@ -6,9 +6,9 @@ import json
 from itertools import pairwise
 from pathlib import Path
 
+from prologue.app.registry import AdapterRegistry
 from prologue.contracts.workload import WorkloadContent
 from prologue.contracts.workload.expert_routes import ExpertRoutes
-from prologue.app.registry import AdapterRegistry
 from prologue.runtime.io import write_json
 
 

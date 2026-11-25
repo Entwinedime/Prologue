@@ -1,6 +1,7 @@
 """Check each run's producer readiness and compare native value provenance and communication peers."""
 
 from collections import defaultdict
+from itertools import pairwise
 
 from .actions import ActionIdentity
 from .batch_sync import BatchSynchronization
@@ -53,7 +54,11 @@ class Connections:
             if "collective" not in record["values"]:
                 continue
             index = record["scope"]
-            if type(index) is not int or not 0 < index < len(raw["scopes"]) or raw["scopes"][index]["role"] != "metadata_collective":
+            if (
+                type(index) is not int
+                or not 0 < index < len(raw["scopes"])
+                or raw["scopes"][index]["role"] != "metadata_collective"
+            ):
                 raise ValueError("metadata evidence requires a unique observed collective")
             index = contents.source_ids[index]
             if index in metadata:
@@ -125,7 +130,8 @@ class Connections:
                 tensor = port["tensor"]
                 writer = owners.get(tensor["writer"])
                 if writer is None:
-                    self.finding("native_evidence", identity, scope=path, port=port["name"], reason="data writer has no observed action")
+                    self.finding("native_evidence", identity, scope=path, port=port["name"],
+                        reason="data writer has no observed action")
                     self.value_evidence_complete = False
                     continue
                 if writer[0] == key:
@@ -134,7 +140,8 @@ class Connections:
                 outputs = [label for label, event in exports[tensor["writer"], tensor["storage"], tensor["version"]]
                            if dependencies.reaches(event, port["event"])]
                 if not outputs:
-                    self.finding("native_evidence", identity, scope=path, port=port["name"], reason="writer action has no connected export for this value")
+                    self.finding("native_evidence", identity, scope=path, port=port["name"],
+                        reason="writer action has no connected export for this value")
                     self.value_evidence_complete = False
                     continue
                 consumer = key, path, "input", port["name"]
@@ -147,7 +154,8 @@ class Connections:
                     **communication, "entered": entered, "scope": (key, path), "work": identity,
                     "ready": ready, "complete": complete,
                     "metadata": scope["role"] == "metadata_collective", "values": metadata.get(index),
-                    "elements": scope["parameters"].get("elements"), "group_role": scope["bindings"].get("collective_group"),
+                    "elements": scope["parameters"].get("elements"),
+                        "group_role": scope["bindings"].get("collective_group"),
                     "payload": self.transfer_payload(scope),
                 }
                 self.channels[instance, communication["channel"]][rank].append(endpoint)
@@ -159,10 +167,12 @@ class Connections:
                 continue
             parts = record["values"]["segments"]
             if (not parts or any(type(part) is not int or not 0 < part < len(raw["scopes"]) for part in parts)
-                    or parts != sorted(set(parts)) or record["scope"] != parts[-1] or contents.source_ids[parts[-1]] in observed):
+                    or parts != sorted(set(parts)) or record["scope"] != parts[-1]
+                        or contents.source_ids[parts[-1]] in observed):
                 raise ValueError("batch synchronization requires its actual ordered segment span")
             parent = raw["scopes"][parts[0]]["parent"]
-            if parts != [i for i, scope in enumerate(raw["scopes"]) if scope["parent"] == parent and scope["role"] == "segment"]:
+            if parts != [i for i, scope in enumerate(raw["scopes"]) if scope["parent"] == parent
+                and scope["role"] == "segment"]:
                 raise ValueError("batch synchronization observation omits or borrows an invocation segment")
             parts = [contents.source_ids[part] for part in parts]
             self.batch_sync.span([identities[part] for part in parts])
@@ -170,7 +180,8 @@ class Connections:
             candidates = [endpoint for endpoint in endpoints if parts[0] <= endpoint["scope"][0][1] <= parts[-1]]
             self.batch_sync.attach(record["values"]["batch_sync"], candidates, identity, "native")
             observed.add(parts[-1])
-        expected = {scope for scope, identity in identities.items() if self.batch_sync.terminal(identity.get("work", {}))}
+        expected = {scope for scope, identity in identities.items()
+            if self.batch_sync.terminal(identity.get("work", {}))}
         self.batch_sync.counts["native_unobserved_returns"] += len(expected - observed)
 
     def predicted(self, contents, identity, events, key):
@@ -195,7 +206,8 @@ class Connections:
                 endpoint = {
                     **communication, "entered": events[entered], "scope": (key, path), "work": identity,
                     "metadata": scope["role"] == "metadata_collective", "values": None,
-                    "elements": scope["parameters"].get("elements"), "group_role": scope["bindings"].get("collective_group"),
+                    "elements": scope["parameters"].get("elements"),
+                        "group_role": scope["bindings"].get("collective_group"),
                     "payload": self.transfer_payload(scope),
                 }
                 self.endpoints[endpoint["scope"]] = endpoint
@@ -255,7 +267,8 @@ class Connections:
             first, last = keys[0], keys[-1]
             expected = {event for event, part in self.action_returns.items()
                         if part["work"]["group"] == record["group"] and first <= part["key"][1] <= last
-                        and (part["work"].get("work", {}).get("continuation") or {}).get("owner") == "batch_sync_exchange"}
+                        and (part["work"].get("work", {}).get("continuation")
+                            or {}).get("owner") == "batch_sync_exchange"}
             if set(parts) != expected:
                 raise ValueError("batch synchronization observation omits an invocation segment")
             candidates = [endpoint for (key, _), endpoint in self.endpoints.items()
@@ -281,7 +294,8 @@ class Connections:
         if not any(endpoint["metadata"] for endpoint in endpoints):
             return
         if not all(endpoint["metadata"] for endpoint in endpoints):
-            self.finding("metadata_protocol", endpoints[0]["work"], reason="participants disagree on metadata ownership")
+            self.finding("metadata_protocol", endpoints[0]["work"],
+                reason="participants disagree on metadata ownership")
             return
 
         # A position-wise polling MIN must refer to the same ordered requests on every peer.
@@ -324,7 +338,8 @@ class Connections:
         # Compute from each run's actual operands; no core/broker reduction or cross-run polling index is reused.
         for endpoint in endpoints:
             if endpoint["values"]["output"] != expected:
-                self.finding("metadata_values", endpoint["work"], expected=expected, actual=endpoint["values"]["output"], origin=origin)
+                self.finding("metadata_values", endpoint["work"], expected=expected,
+                    actual=endpoint["values"]["output"], origin=origin)
                 return
         field = f"{origin}_metadata_matched"
         self.counts[field] = self.counts.get(field, 0) + 1
@@ -387,7 +402,8 @@ class Connections:
                              expected_producers=sorted(producers), predicted_producer=producer)
             else:
                 matched += 1
-        self.counts.update(signal_inputs=len(self.signal_inputs), signal_inputs_matched=matched, signal_inputs_unpaired=unpaired)
+        self.counts.update(signal_inputs=len(self.signal_inputs), signal_inputs_matched=matched,
+            signal_inputs_unpaired=unpaired)
 
     def compare_values(self, dependencies, pairs):
         matched, unpaired = 0, 0
@@ -405,9 +421,12 @@ class Connections:
                 self.finding("data_producer", identity, scope=consumer[1], port=consumer[3],
                              expected_writer=writer, predicted_writer=predicted_writer)
             elif consumer not in self.ports or any(output not in self.ports for output in outputs):
-                self.finding("data_readiness", identity, scope=consumer[1], port=consumer[3], reason="mapped data boundary is absent")
-            elif any(not dependencies.reaches((rank, self.ports[output]), (rank, self.ports[consumer])) for output in outputs):
-                self.finding("data_readiness", identity, scope=consumer[1], port=consumer[3], reason="consumer is not gated by its producer exports")
+                self.finding("data_readiness", identity, scope=consumer[1], port=consumer[3],
+                    reason="mapped data boundary is absent")
+            elif any(not dependencies.reaches((rank, self.ports[output]), (rank, self.ports[consumer]))
+                for output in outputs):
+                self.finding("data_readiness", identity, scope=consumer[1], port=consumer[3],
+                    reason="consumer is not gated by its producer exports")
             else:
                 matched += 1
         self.counts.update(data_inputs=len(self.values), data_inputs_matched=matched, data_inputs_unpaired=unpaired,
@@ -418,7 +437,8 @@ class Connections:
         for source, target in sorted(edges)[:3]:
             record = {}
             for name, event, ports in (("source", source, self.ready), ("target", target, self.complete)):
-                record[name] = {"event": event, "ports": [{"invocation": {"group": key[0], "event": key[1]}, "scope": path}
+                record[name] = {"event": event,
+                    "ports": [{"invocation": {"group": key[0], "event": key[1]}, "scope": path}
                                                           for (key, path), value in ports.items() if value == event]}
             result.append(record)
         return result
@@ -428,17 +448,21 @@ class Connections:
             first = next(iter(ranks.values()))[0]
             members = first["members"]
             if set(ranks) != set(members) or len({len(values) for values in ranks.values()}) != 1:
-                self.finding(category, first["work"], channel=channel, reason="communication participants or call counts are incomplete")
+                self.finding(category, first["work"], channel=channel,
+                    reason="communication participants or call counts are incomplete")
                 yield None
                 continue
             ordered = []
             valid = True
             for rank in members:
-                calls = sorted(ranks[rank], key=lambda value: (dependencies[rank].positions[value["entered"]], value["order"]))
+                calls = sorted(ranks[rank],
+                    key=lambda value: (dependencies[rank].positions[value["entered"]], value["order"]))
 
                 # Protocol order is run-local: never align separate executions by a polling ordinal.
-                if any(not dependencies[rank].reaches(left["entered"], right["entered"]) for left, right in zip(calls, calls[1:])):
-                    self.finding(category, first["work"], channel=channel, reason="calls have no established protocol order")
+                if any(not dependencies[rank].reaches(left["entered"], right["entered"]) for left,
+                    right in pairwise(calls)):
+                    self.finding(category, first["work"], channel=channel,
+                        reason="calls have no established protocol order")
                     valid = False
                 ordered.append(calls)
             if not valid:
@@ -448,7 +472,8 @@ class Connections:
             for endpoints in zip(*ordered, strict=True):
                 if any(value["members"] != members or value["operation"] != endpoints[0]["operation"]
                        or not set(value["required"]) <= set(members) for value in endpoints):
-                    self.finding(category, first["work"], channel=channel, reason="peers disagree on operation or members")
+                    self.finding(category, first["work"], channel=channel,
+                        reason="peers disagree on operation or members")
                     yield None
                 else:
                     yield endpoints
@@ -497,7 +522,8 @@ class Connections:
                 send, receive = (endpoint["payload"] for endpoint in endpoints)
                 if (send[0], receive[0]) != ("input", "output") or send[1:] != receive[1:]:
                     complete = False
-                    self.finding("communication_payload", endpoints[0]["work"], origin="native", send=send, receive=receive)
+                    self.finding("communication_payload", endpoints[0]["work"], origin="native", send=send,
+                        receive=receive)
             peers = {endpoint["rank"]: endpoint for endpoint in endpoints}
             for endpoint in endpoints:
 
@@ -507,15 +533,18 @@ class Connections:
                         incoming = peer.get("peer_rows")
                         if incoming is None:
                             complete = False
-                            self.finding("native_evidence", endpoint["work"], reason="peer exchange has no observed row counts", peer=peer["rank"])
+                            self.finding("native_evidence", endpoint["work"],
+                                reason="peer exchange has no observed row counts", peer=peer["rank"])
                         elif traffic["send"][index] != incoming["receive"][peer["members"].index(endpoint["rank"])]:
                             complete = False
-                            self.finding("communication_payload", endpoint["work"], reason="native send and receive row counts disagree", peer=peer["rank"])
+                            self.finding("communication_payload", endpoint["work"],
+                                reason="native send and receive row counts disagree", peer=peer["rank"])
                         else:
                             row_pairs += 1
 
                 for rank in endpoint["required"]:
-                    self.native_communication_edges.add(((rank, peers[rank]["ready"]), (endpoint["rank"], endpoint["complete"])))
+                    self.native_communication_edges.add(((rank, peers[rank]["ready"]),
+                        (endpoint["rank"], endpoint["complete"])))
         self.counts.update(communication_channels=len(self.channels), communication_exchanges=exchanges,
                            native_communication_protocol_complete=complete, native_peer_row_pairs=row_pairs)
 
@@ -538,17 +567,20 @@ class Connections:
                         if endpoint["payload"] == target["payload"]:
                             payloads_matched += 1
                         else:
-                            self.finding("communication_payload", endpoint["work"], native=endpoint["payload"], predicted=target["payload"])
+                            self.finding("communication_payload", endpoint["work"], native=endpoint["payload"],
+                                predicted=target["payload"])
                 if target is not None:
                     if endpoint["metadata"] and endpoint["values"] is not None and target["values"] is not None:
                         field = "metadata_operands_compared"
                         self.counts[field] = self.counts.get(field, 0) + 1
                         if endpoint["values"] != target["values"]:
-                            self.finding("metadata_operands", endpoint["work"], native=endpoint["values"], predicted=target["values"])
+                            self.finding("metadata_operands", endpoint["work"], native=endpoint["values"],
+                                predicted=target["values"])
                     if "batch_sync" in endpoint and "batch_sync" in target:
                         self.batch_sync.counts["endpoints_compared"] += 1
                         if endpoint["batch_sync"] != target["batch_sync"]:
-                            self.finding("batch_sync_operands", endpoint["work"], native=endpoint["batch_sync"], predicted=target["batch_sync"])
+                            self.finding("batch_sync_operands", endpoint["work"], native=endpoint["batch_sync"],
+                                predicted=target["batch_sync"])
                 for rank in endpoint["required"]:
                     source_scope = self.mapped(peers[rank]["scope"], pairs)
                     if source_scope is None or destination_scope is None:
@@ -557,7 +589,8 @@ class Connections:
                         continue
                     source = self.ready.get(source_scope)
                     if source is None or destination is None:
-                        self.finding("communication_endpoint", endpoint["work"], scope=endpoint["scope"][1], reason="mapped communication boundary is absent")
+                        self.finding("communication_endpoint", endpoint["work"], scope=endpoint["scope"][1],
+                            reason="mapped communication boundary is absent")
                         unresolved = True
                     else:
                         expected.add((source, destination))
@@ -569,7 +602,10 @@ class Connections:
         # Incomplete native evidence cannot label unaccounted prediction edges as spurious.
         if extra and not unresolved:
             self.finding("communication_dependency", {}, extra=len(extra), examples=self.edge_details(extra))
-        self.counts.update(communication_edges_expected=len(expected), communication_edges_observed=len(self.communication_edges),
-                           communication_edges_matched=len(expected & self.communication_edges), communication_edges_unpaired=unpaired,
+        self.counts.update(communication_edges_expected=len(expected),
+            communication_edges_observed=len(self.communication_edges),
+                           communication_edges_matched=len(expected & self.communication_edges),
+                               communication_edges_unpaired=unpaired,
                            communication_evidence_complete=not unresolved, device_transfer_payloads=payloads,
-                           device_transfer_payloads_compared=payloads_compared, device_transfer_payloads_matched=payloads_matched)
+                           device_transfer_payloads_compared=payloads_compared,
+                               device_transfer_payloads_matched=payloads_matched)

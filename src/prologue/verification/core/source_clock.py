@@ -1,14 +1,12 @@
 """Check shared device clocks using only independently observed calibration knots."""
 
-from prologue.verification.core.adapters import DeviceCalibration
-
-
 from collections import defaultdict
 from dataclasses import dataclass
 from fractions import Fraction
 from itertools import combinations
 from math import ceil, floor
 
+from prologue.verification.core.adapters import DeviceCalibration
 
 
 @dataclass(frozen=True, slots=True)

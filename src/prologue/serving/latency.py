@@ -44,6 +44,9 @@ class RequestLatency:
         elapsed = max(row["last_publication_ns"] for row in requests)
         per_token = [row["tpot_ns"] for row in requests if row["tpot_ns"] is not None]
         return {
-            "requests": requests, "output_tokens": total, "p95_ttft_ns": percentile95(row["ttft_ns"] for row in requests),
-            "mean_tpot_ns": mean(per_token) if per_token else None, "tokens_per_second": total * 1e9 / elapsed if elapsed else None,
+            "requests": requests,
+            "output_tokens": total,
+            "p95_ttft_ns": percentile95(row["ttft_ns"] for row in requests),
+            "mean_tpot_ns": mean(per_token) if per_token else None,
+            "tokens_per_second": total * 1e9 / elapsed if elapsed else None,
         }

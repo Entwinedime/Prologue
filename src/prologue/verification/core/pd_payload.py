@@ -1,10 +1,8 @@
 """Compare declared PD state footprints with actual registered buffers and copied bytes."""
 
-from prologue.verification.core.adapters import kv_buffers
-
-
 from collections import Counter, defaultdict
 
+from prologue.verification.core.adapters import kv_buffers
 
 
 class PdPayloadEvidence:

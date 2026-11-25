@@ -86,7 +86,8 @@ class NativeKvScopes:
                 # Remote visibility can begin as soon as the complete payload is handed to the socket.
                 scope["ports"].append({"name": "reservation.ready", "direction": "output", "use": "signal",
                                        "boundary": {"scope": scope["id"], "interval": "call", "side": "begin"}})
-                publication = {"request": work["context"]["request"]["id"], "target": [peer["rank_ip"], peer["rank_port"]]}
+                publication = {"request": work["context"]["request"]["id"],
+                    "target": [peer["rank_ip"], peer["rank_port"]]}
                 scope["reservation_publication"] = publication
                 with owner.capture.runtime.service_scope(publication):
                     return original(*args, **kwargs)
@@ -108,7 +109,8 @@ class NativeKvScopes:
             if owner.resource_history is not None:
                 owner.resource_history.state_binding("metadata", request, aux_index)
             if request.rid in self.calls.aliases:
-                self.reservations[str(receiver.bootstrap_room)] = {"request": self.calls.request_id(request.rid), "index": aux_index}
+                self.reservations[str(receiver.bootstrap_room)] = {"request": self.calls.request_id(request.rid),
+                    "index": aux_index}
         if not self.calls.enabled:
             return original(receiver, kv_indices, aux_index, state_indices, decode_prefix_len)
 
@@ -123,7 +125,8 @@ class NativeKvScopes:
     def metadata(self, original, buffers, req):
         aliases = self.observation.content.aliases
         if req.bootstrap_room is not None and req.rid in aliases:
-            self.reservations[str(req.bootstrap_room)] = {"request": aliases[req.rid], "index": req.metadata_buffer_index}
+            self.reservations[str(req.bootstrap_room)] = {"request": aliases[req.rid],
+                "index": req.metadata_buffer_index}
         if self.observation.resource_history is not None:
             self.observation.resource_history.state_binding("metadata", req, req.metadata_buffer_index)
         return original(buffers, req)
@@ -157,7 +160,8 @@ class NativeKvScopes:
         begin = request.start_send_idx // page_size * page_size
         end = min(begin + len(item.prefill_kv_indices) * page_size, len(request.origin_input_ids))
         work = self.calls.request_work(request, begin, end)
-        parameters = {"transfer_pages": len(item.prefill_kv_indices), "transfer_tokens": end - begin, "last_chunk": int(item.is_last_chunk)}
+        parameters = {"transfer_pages": len(item.prefill_kv_indices), "transfer_tokens": end - begin,
+            "last_chunk": int(item.is_last_chunk)}
 
         # FastQueue uses a reentrant condition: publish the completed marker before a consumer can take the task.
         with queue._cond:
@@ -202,7 +206,8 @@ class NativeKvScopes:
             call.record["submitted_by"] = chunk._prologue_submission
             call.record["native_transfer"] = {
                 "kind": "metadata" if original.__name__ == "send_aux" else "kv", "blocks": [],
-                "session": values["req"].mooncake_session_id if original.__name__ == "send_aux" else values["mooncake_session_id"],
+                "session": values["req"].mooncake_session_id
+                    if original.__name__ == "send_aux" else values["mooncake_session_id"],
             }
             if original.__name__ != "send_aux":
                 call.record["native_transfer"].update(
@@ -210,7 +215,8 @@ class NativeKvScopes:
                 )
             else:
                 call.record["native_transfer"].update(
-                    room=values["req"].room, source_index=values["prefill_aux_index"], target_index=values["req"].dst_aux_index,
+                    room=values["req"].room, source_index=values["prefill_aux_index"],
+                        target_index=values["req"].dst_aux_index,
                 )
 
                 # The submitted request owns both metadata endpoints; interpretation only resolves their physical rows.
@@ -284,7 +290,8 @@ class NativeKvScopes:
 
         for target, hook in (
             ("sglang.srt.disaggregation.utils.ReqToMetadataIdxAllocator.__init__", self.metadata_allocator),
-            ("sglang.srt.disaggregation.common.conn.CommonKVReceiver._connect_to_bootstrap_server", self.connect_reservation),
+            ("sglang.srt.disaggregation.common.conn.CommonKVReceiver._connect_to_bootstrap_server",
+                self.connect_reservation),
             ("sglang.srt.disaggregation.mooncake.conn.MooncakeKVSender.poll", self.poll),
             ("sglang.srt.disaggregation.mooncake.conn.MooncakeKVReceiver.poll", self.poll),
             ("sglang.srt.managers.scheduler.Scheduler.send_kv_chunk", self.send_chunk),
@@ -304,7 +311,10 @@ class NativeKvScopes:
             ("sglang.srt.disaggregation.mooncake.conn.TransferInfo.from_zmq", self.receive_reservation),
             ("sglang.srt.disaggregation.utils.MetadataBuffers.set_buf", self.metadata),
             ("sglang.srt.disaggregation.common.utils.FastQueue.get", self.dequeue),
-            ("sglang.srt.distributed.device_communicators.mooncake_transfer_engine.MooncakeTransferEngine.batch_transfer_sync", self.transfer_data),
+            (
+                "sglang.srt.distributed.device_communicators.mooncake_transfer_engine.MooncakeTransferEngine.batch_transfer_sync",
+                self.transfer_data,
+            ),
         ):
             HookRegistry.register(target, hook, HookType.AROUND)
         for cls, method in (

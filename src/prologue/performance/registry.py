@@ -93,6 +93,8 @@ class ModelBindingRegistry:
         original = self.published.get(rule)
         if original is None:
             result.update(form=backend.form, binding_rule=rule.contract())
+            if backend.exclusive_axis:
+                result["exclusive_axis"] = True
         elif backend.family == rule.family and "rates" in original:
             rates = parameters["coefficients"]
             named_rates = {field: rates[key] for key, field in original["rates"].items()}

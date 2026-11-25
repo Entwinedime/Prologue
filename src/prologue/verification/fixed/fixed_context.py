@@ -1,17 +1,15 @@
 """Project independently observed host conditions onto serial steps of a fixed graph."""
 
-from prologue.verification.core.adapters import Interval, ThreadIntervals, ThreadService
-
-
 import json
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import pairwise
 
+from prologue.verification.core.adapters import Interval, ThreadIntervals, ThreadService
 
-from .host_queues import HostQueueEvidence
 from ..core.ingress import IngressEvidence
+from .host_queues import HostQueueEvidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,7 +201,9 @@ class FixedThreadActivity(ThreadService):
 
 class FixedHostContext:
     @classmethod
-    def retain(cls, native_case, rank, facts, graph, native_evidence, host_fences, launches, payload_times, report, details):
+    def retain(
+        cls, native_case, rank, facts, graph, native_evidence, host_fences, launches, payload_times, report, details
+    ):
         records = {key: facts[key] for key in ("resources", "environment", "measurements")}
         # Timed work and published physical signals retain their actual measured endpoints.
         timed = {piece[side] for piece in graph["work"] for side in ("start", "finish")}

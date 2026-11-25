@@ -66,7 +66,13 @@ class WorkerDomain(WorkerRoles):
 
 
 class SGLangTask:
-    control_command = ("python3", "-m", "prologue.app.control_worker", "--kernel-python", "/opt/prologue/sglang/sgl-kernel/python")
+    control_command = (
+        "python3",
+        "-m",
+        "prologue.app.control_worker",
+        "--kernel-python",
+        "/opt/prologue/sglang/sgl-kernel/python",
+    )
 
     def execution_domains(self):
         for instance in self.serving.instances:

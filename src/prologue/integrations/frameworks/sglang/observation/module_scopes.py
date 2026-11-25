@@ -9,8 +9,9 @@ from functools import partial, update_wrapper
 from typing import Any
 
 import torch
-from prologue.integrations.frameworks.sglang.observation.module_layout import LayerCommunication
 from sglang.srt.model_executor.forward_batch_info import PPProxyTensors
+
+from prologue.integrations.frameworks.sglang.observation.module_layout import LayerCommunication
 
 
 def tensor_ports(value: Any, path: str) -> Iterator[tuple[str, torch.Tensor]]:
@@ -54,7 +55,8 @@ class ModelScopes:
 
         selected = {"": "model_body"}
         containers = [name for name, module in modules.items() if isinstance(module, torch.nn.ModuleList)]
-        outer = [name for name in containers if not any(name.startswith(parent + ".") for parent in containers if parent != name)]
+        outer = [name for name in containers
+            if not any(name.startswith(parent + ".") for parent in containers if parent != name)]
         for container in outer:
             for name, layer in modules[container].named_children():
                 if not isinstance(layer, PPMissingLayer):
@@ -100,7 +102,8 @@ class ModelScopes:
 
         for path, role in self.selected(modules).items():
             module = modules[path]
-            expert_layers = {child.layer_id for child in module.modules() if child in experts} if role == "layer" else set()
+            expert_layers = {child.layer_id for child in module.modules()
+                if child in experts} if role == "layer" else set()
             if len(expert_layers) > 1:
                 raise ValueError("decoder scope contains multiple expert layers with independent routes")
             self.attach(path, role, module, next(iter(expert_layers), None))
@@ -154,7 +157,8 @@ class ModelScopes:
         axis = "model_members" if output and ".next_token_" in name else "model_tokens"
         if not output and name.startswith("argument.pp_proxy_tensors."):
             axis = self.proxy_rows
-        if spec["role"] == "layer" and (output or name.split(".", 2)[1] in {"hidden_states", "residual", "post_residual_addition"}):
+        if spec["role"] == "layer" and (output
+            or name.split(".", 2)[1] in {"hidden_states", "residual", "post_residual_addition"}):
             axis = spec["rows"]["output" if output else "input"]
         shape[0] = axis
         return shape
@@ -215,11 +219,13 @@ class ModelScopes:
                 cache.ports(call, "input")
             for name, tensor in inputs:
                 rule = self.shape(spec, name, tensor, output=False)
-                call.port(name, "input", owner.tensors.observe(tensor, rule), use="device" if tensor.device.type == "npu" else "host")
+                call.port(name, "input", owner.tensors.observe(tensor, rule), use="device"
+                    if tensor.device.type == "npu" else "host")
             result = original(*args, **kwargs)
             if cache is not None:
                 cache.ports(call, "output")
             for name, tensor in tensor_ports(result, "result"):
                 rule = self.shape(spec, name, tensor, output=True)
-                call.port(name, "output", owner.tensors.observe(tensor, rule), use="device" if tensor.device.type == "npu" else "host")
+                call.port(name, "output", owner.tensors.observe(tensor, rule), use="device"
+                    if tensor.device.type == "npu" else "host")
             return result

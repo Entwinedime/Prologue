@@ -1,18 +1,16 @@
 """Bind same-run service evidence and request boundaries to observed execution."""
 
-from prologue.verification.core.adapters import CpuProtocolWork, ObservedServices
-
-
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from itertools import chain
 
+from prologue.verification.core.adapters import CpuProtocolWork, ObservedServices
 
 from ..core.cpu_protocol import NativeCpuCall
-from .fixed_context import CpuReadinessWake, ExternalWake, KernelWake, LocalCallWake, WorkProgress
 from ..core.ingress import IngressEvidence
 from ..core.publications import FixedPublications
 from ..core.source_clock import ClockRealization, CounterPoint
+from .fixed_context import CpuReadinessWake, ExternalWake, KernelWake, LocalCallWake, WorkProgress
 
 
 @dataclass(frozen=True, slots=True)

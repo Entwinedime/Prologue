@@ -40,7 +40,8 @@ class LayerCommunication:
 
             # The ordinary layer ABI owns a flat token axis and a fixed hidden width on this shard.
             with owner.tensors.metadata():
-                if isinstance(hidden_states, torch.Tensor) and hidden_states.ndim == 2 and not get_attn_tp_context().input_scattered:
+                if isinstance(hidden_states,
+                    torch.Tensor) and hidden_states.ndim == 2 and not get_attn_tp_context().input_scattered:
                     owner.tensors.declare_shape(hidden_states, [rows, hidden_states.shape[1]])
         return original(hidden_states, *args, **kwargs)
 
@@ -69,7 +70,8 @@ class LayerCommunication:
             "implementation": f"{type(native).__module__}.{type(native).__qualname__}",
             "modes": {name: mode.name for name, mode in vars(native.layer_scatter_modes).items()},
             "group_sizes": {mode.name: size for mode, size in context.process_group_sizes.items()},
-            "sizes": {name: getattr(context, name) for name in ("attn_tp_size", "attn_dp_size", "attn_cp_size", "tp_size")},
+            "sizes": {name: getattr(context, name)
+                for name in ("attn_tp_size", "attn_dp_size", "attn_cp_size", "tp_size")},
             "flags": {name: getattr(native, name) for name in (
                 "allow_reduce_scatter", "is_last_layer", "force_layernorm_before_dp_gather",
             )},
@@ -105,7 +107,8 @@ class ModuleStructure:
             field = name.lstrip("_")
             if field in identities:
                 continue
-            if type(value) is int and field in {"layer_id", "layer_idx", "start_layer", "end_layer"} and value in layers:
+            if type(value) is int and field in {"layer_id", "layer_idx", "start_layer",
+                "end_layer"} and value in layers:
 
                 # A local layer reference is distinct from an unrelated literal with the same numeric value.
                 fields[name] = ("local_layer", layers[value])

@@ -74,7 +74,9 @@ class CpuProtocol:
             return original(*args, **kwargs)
         receiving = name in {"recv", "irecv"}
         endpoint = "src" if receiving else "dst"
-        description = self.transfer.describe(tensor, group, values["tag"], values[endpoint], values.get("group_" + endpoint), receiving)
+        description = self.transfer.describe(
+            tensor, group, values["tag"], values[endpoint], values.get("group_" + endpoint), receiving
+        )
         route = (description["group"], description["source"], description["target"], description["tag"])
         with self.lock:
             position = self.positions.get(route, 0)

@@ -100,7 +100,11 @@ class ExpertRoutes:
     def batch_segments(self, members, layer: int, padded_tokens: int):
         tokens = self.check_batch(members, padded_tokens)
         ranges = [
-            (self.assignments[member["id"]][layer], member["context_tokens"], member["context_tokens"] + member["new_tokens"])
+            (
+                self.assignments[member["id"]][layer],
+                member["context_tokens"],
+                member["context_tokens"] + member["new_tokens"],
+            )
             for member in members
         ]
         if padded_tokens > tokens:

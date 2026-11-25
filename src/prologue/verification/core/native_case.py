@@ -1,13 +1,11 @@
 """Assemble one observed case independently of prediction and cross-run pairing."""
 
-from prologue.verification.core.adapters import device_coordinates
-
-
 import json
 from collections import Counter, defaultdict
 from functools import cached_property
 
 from prologue.acquisition.observation.workers import CapturedWorkers
+from prologue.verification.core.adapters import device_coordinates
 
 from .actions import ActionIdentity
 from .bindings import BindingComparison

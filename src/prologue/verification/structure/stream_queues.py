@@ -102,14 +102,26 @@ class StreamSynchronization:
                 "missing_activations": len(missing), "events": sorted(missing)[:3],
                 "reason": "completion alone cannot establish command acceptance or the wait's snapshot",
             }))
-        for expected, actual, reason in ((self.expected, self.actual, "missing"), (self.actual, self.expected, "extra")):
+        for expected, actual, reason in (
+            (self.expected, self.actual, "missing"),
+            (self.actual, self.expected, "extra"),
+        ):
             for activation, source, target in sorted(expected - actual):
                 self.findings.append(("stream_frontier", {"event": activation}, {
                     "source": source, "target": target, "reason": reason + " dependency for the actual wait snapshot",
                 }))
         return {
-            **self.counts, "activation_points": len(self.declared), "activations_observed": len(self.activated),
-            "activations_missing": len(missing), "required_dependencies": len(self.expected),
-            "matched_dependencies": len(self.expected & self.actual), "extra_dependencies": len(self.actual - self.expected),
-            "scope": "Run-local command acceptance and host stream-wait snapshots, including empty queues, completed frontiers and pending commands. Queue facts are derived from graph submission and actual activation/completion records, not dynamic edge answers. Excludes native API interception completeness and cross-run timing accuracy.",
+            **self.counts,
+            "activation_points": len(self.declared),
+            "activations_observed": len(self.activated),
+            "activations_missing": len(missing),
+            "required_dependencies": len(self.expected),
+            "matched_dependencies": len(self.expected & self.actual),
+            "extra_dependencies": len(self.actual - self.expected),
+            "scope": (
+                "Run-local command acceptance and host stream-wait snapshots, including empty queues, completed "
+                "frontiers and pending commands. Queue facts are derived from graph submission and actual "
+                "activation/completion records, not dynamic edge answers. Excludes native API interception "
+                "completeness and cross-run timing accuracy."
+            ),
         }

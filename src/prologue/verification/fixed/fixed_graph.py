@@ -9,12 +9,12 @@ from tempfile import TemporaryDirectory
 from prologue.performance.requirements import CostRequirements
 from prologue.runtime.docker import ModelingProcess
 from prologue.runtime.io import write_json
+from prologue.verification.runner import VerificationRun
 
+from ..core.metrics import compare_request_metrics
+from ..core.source_evidence import ProductionEvidence
 from .fixed_context import FixedHostContext
 from .fixed_reference import FixedReference
-from ..core.metrics import compare_request_metrics
-from prologue.verification.runner import VerificationRun
-from ..core.source_evidence import ProductionEvidence
 
 
 class FixedPerformance(VerificationRun):

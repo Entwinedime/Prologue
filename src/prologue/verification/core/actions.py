@@ -1,11 +1,9 @@
 """Identify observed actions by logical work, independently of template selection."""
 
-from prologue.verification.core.adapters import observed_scopes
-
-
 import json
 from collections import Counter, defaultdict
 
+from prologue.verification.core.adapters import observed_scopes
 
 
 class QueryResults:

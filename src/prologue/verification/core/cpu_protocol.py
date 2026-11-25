@@ -1,13 +1,11 @@
 """Join each run's actual CPU P2P facts without cross-run message matching."""
 
-from prologue.verification.core.adapters import CpuProtocolWork, CpuTransfer
-
-
 import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from math import prod
 
+from prologue.verification.core.adapters import CpuProtocolWork, CpuTransfer
 
 from .actions import ActionIdentity
 from .dependencies import CausalGraph
@@ -96,7 +94,11 @@ class CpuProtocolEvidence:
     def native_interval(self, rank, key, phase, interval, descriptor, transport=None):
         begin, end = interval["begin_counter"], interval["end_counter"]
         entered, returned = interval["begin_raw_ns"], interval["end_raw_ns"]
-        if any(type(value) is not int for value in (begin, end, entered, returned)) or begin > end or entered > returned:
+        if (
+            any(type(value) is not int for value in (begin, end, entered, returned))
+            or begin > end
+            or entered > returned
+        ):
             raise ValueError("CPU protocol has an invalid native interval")
         thread = interval["thread"]
         positions = self.native_threads[rank, thread]
@@ -153,8 +155,9 @@ class CpuProtocolEvidence:
             return None
         last_post = max(peer["transport"]["post_raw_ns"] for peer in peers.values())
         windows = {
-            rank: CpuProtocolWork.ready_window(peer["transport"], last_post,
-                                               None if peer["consumed"] is None else self.native_times[peer["consumed"]])
+            rank: CpuProtocolWork.ready_window(
+                peer["transport"], last_post, None if peer["consumed"] is None else self.native_times[peer["consumed"]]
+            )
             for rank, peer in peers.items()
         }
         return last_post, windows
@@ -185,10 +188,15 @@ class CpuProtocolEvidence:
             if not position < end[route]:
                 raise ValueError("CPU protocol post lies outside its declared channel history")
             source, target = key[1:3]
-            if self.native_groups[source] != self.native_groups[target] or self.native_groups[rank] != self.native_groups[source]:
+            if (
+                self.native_groups[source] != self.native_groups[target]
+                or self.native_groups[rank] != self.native_groups[source]
+            ):
                 raise ValueError("CPU protocol crosses independent native worlds")
             operation = post["operation"]
-            if operation not in {"send", "recv", "isend", "irecv"} or post["descriptor"]["receiving"] != (operation in {"recv", "irecv"}):
+            if operation not in {"send", "recv", "isend", "irecv"} or post["descriptor"]["receiving"] != (
+                operation in {"recv", "irecv"}
+            ):
                 raise ValueError("CPU protocol operation disagrees with its receive/send descriptor")
             self.execution(post["interval"], operation)
             descriptor = post["descriptor"]
@@ -267,7 +275,11 @@ class CpuProtocolEvidence:
         elif kind == "native_protocol":
             record, group = row["record"], row["group"]
             if record["phase"] == "scope":
-                if self.predicted_scope or record["backend"] != "gloo" or set(record["operations"]) != {"send", "recv", "isend", "irecv"}:
+                if (
+                    self.predicted_scope
+                    or record["backend"] != "gloo"
+                    or set(record["operations"]) != {"send", "recv", "isend", "irecv"}
+                ):
                     raise ValueError("CPU broker observation has a competing or different protocol scope")
                 self.actors = {actor["rank"]: actor["group"] for actor in record["participants"]}
                 if (len(self.actors) != len(record["participants"])
@@ -328,7 +340,11 @@ class CpuProtocolEvidence:
                 if operation != post_operation + ("_wait" if post_operation in {"isend", "irecv"} else ""):
                     raise ValueError("CPU consumption changes its posted operation")
                 if record["event"] is not None:
-                    if record["event"] not in self.finished_services or self.service_returns[record["event"]] != (rank, key, execution):
+                    if record["event"] not in self.finished_services or self.service_returns[record["event"]] != (
+                        rank,
+                        key,
+                        execution,
+                    ):
                         raise ValueError("CPU consumption precedes or changes its own service return")
                 endpoint["consumed"] = point
             else:
@@ -340,7 +356,9 @@ class CpuProtocolEvidence:
             raise ValueError("CPU readiness is repeated or lacks either post")
         parents = {peer["posted"][1] for peer in peers.values() if peer["posted"][1] >= 0}
         event, service = record["event"], record["service_ns"]
-        if ((service is not None and (type(service) is not int or service < 0)) or set(record["prerequisites"]) != parents):
+        if (service is not None and (type(service) is not int or service < 0)) or set(
+            record["prerequisites"]
+        ) != parents:
             raise ValueError("CPU readiness changes its post prerequisites or service duration")
         if event is None:
             if parents or service != 0:
@@ -518,6 +536,13 @@ class CpuProtocolEvidence:
         return {"dtype": dtype, "elements": elements, "element_bytes": element_bytes, "bytes": elements * element_bytes}
 
     def report(self):
-        return {"complete": not self.findings and not self.returns and (not self.terminals or self.terminals_checked),
-                "unreturned_actions": len(self.returns), **self.counts,
-                "scope": "Observed CPU posts, readiness and consumption within each run. Native call boundaries and predicted action returns anchor the protocol paths. Prefix posts and unconsumed tails have explicit counts. Cross-run payloads use checked post witnesses when available."}
+        return {
+            "complete": not self.findings and not self.returns and (not self.terminals or self.terminals_checked),
+            "unreturned_actions": len(self.returns),
+            **self.counts,
+            "scope": (
+                "Observed CPU posts, readiness and consumption within each run. Native call boundaries and "
+                "predicted action returns anchor the protocol paths. Prefix posts and unconsumed tails have "
+                "explicit counts. Cross-run payloads use checked post witnesses when available."
+            ),
+        }

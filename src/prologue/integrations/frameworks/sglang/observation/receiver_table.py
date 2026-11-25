@@ -18,7 +18,10 @@ class ReceiverTableCopies(TorchFunctionMode):
         if operation is not torch.Tensor.__setitem__:
             return operation(*args, **keywords)
         target, index, source = args
-        if not isinstance(source, torch.Tensor) or source.untyped_storage()._cdata != self.table.untyped_storage()._cdata:
+        if (
+            not isinstance(source, torch.Tensor)
+            or source.untyped_storage()._cdata != self.table.untyped_storage()._cdata
+        ):
             return operation(*args, **keywords)
 
         with self.owner.tensors.metadata():

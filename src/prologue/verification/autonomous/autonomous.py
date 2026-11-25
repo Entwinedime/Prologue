@@ -4,12 +4,12 @@ import json
 from subprocess import TimeoutExpired
 
 from prologue.acquisition.observation.workers import CapturedWorkers
-from prologue.workflow.prediction import PredictionProcess
 from prologue.libraries.release import LibraryRelease
+from prologue.verification.runner import VerificationRun
 from prologue.workflow.options import PredictionOptions
+from prologue.workflow.prediction import PredictionProcess
 
 from .latency_metrics import LatencyComparison, NativeLatencyMetrics
-from prologue.verification.runner import VerificationRun
 
 
 class AutonomousVerification(VerificationRun):

@@ -102,7 +102,9 @@ class LocalComparison(LocalActionComparison):
                 supplied = case.sources[rank][0].graph["scopes"][scope]
                 group = case.groups[rank]
                 if ActionIdentity.record(supplied, group) != ActionIdentity.record(graph["scopes"][0], group):
-                    self.finding("action_input", rank, scope, {"reason": "generated root changes the given action metadata"})
+                    self.finding(
+                        "action_input", rank, scope, {"reason": "generated root changes the given action metadata"}
+                    )
                     continue
                 self.compare(case, rank, scope, graph)
         if summary is None or summary["attempted"] != len(seen) or summary["built"] != built or seen != expected.keys():
@@ -128,20 +130,38 @@ class LocalComparison(LocalActionComparison):
                 "given_actions", "built_actions", "contents_checked", "contents_matched", "dependencies_checked",
                 "dependencies_matched", "stream_frontier_relations_deferred",
             }
-            report["status"] = "differences" if issues - {"output_evidence"} else "incomplete" if issues else "local_actions_matched"
+            report["status"] = (
+                "differences" if issues - {"output_evidence"} else "incomplete" if issues else "local_actions_matched"
+            )
         except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
             report["error"] = str(error)
-        report.update(counts=dict(self.counts), findings=self.findings,
-                      scope="Given action metadata, local contents and intrinsic dependencies only. Symbolic external values/pools/signals; no cross-graph binding, dynamic stream frontier, scheduling, execution time or held-out generalization claim.")
+        report.update(
+            counts=dict(self.counts),
+            findings=self.findings,
+            scope=(
+                "Given action metadata, local contents and intrinsic dependencies only. Symbolic external "
+                "values/pools/signals; no cross-graph binding, dynamic stream frontier, scheduling, execution time "
+                "or held-out generalization claim."
+            ),
+        )
         (self.output / "local-graphs.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
         text = [
-            "# Local Graph Expansion Check", "", f"Result `{report['status']}`.", "",
+            "# Local Graph Expansion Check",
+            "",
+            f"Result `{report['status']}`.",
+            "",
             f"Expanded {self.counts['built_actions']} of {self.counts['given_actions']} supplied native actions.",
-            f"Matched contents for {self.counts['contents_matched']} of {self.counts['contents_checked']} checks and local "
+            f"Matched contents for {self.counts['contents_matched']} of {self.counts['contents_checked']} checks "
+            "and local "
             f"dependencies for {self.counts['dependencies_matched']} of {self.counts['dependencies_checked']} checks.",
-            f"Execution checks cover the {self.counts['stream_frontier_relations_deferred']} deferred dynamic stream dependencies.", "",
-            "This check expands source templates for supplied native actions, with symbolic bindings for external values, pools, and signals. "
-            "Controller behavior, cross-graph dependencies, timing, and held-out generalization require separate evidence.", "",
+            f"Execution checks cover the {self.counts['stream_frontier_relations_deferred']} deferred dynamic "
+            "stream dependencies.",
+            "",
+            "This check expands source templates for supplied native actions, with symbolic bindings for external "
+            "values, pools, and signals. "
+            "Controller behavior, cross-graph dependencies, timing, and held-out generalization require separate "
+            "evidence.",
+            "",
         ]
         (self.output / "local-graphs.md").write_text("\n".join(text))
         return 0 if report["status"] == "local_actions_matched" else 1

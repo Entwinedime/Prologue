@@ -10,8 +10,8 @@ class ExpertScopes:
         import os
 
         from sglang.srt.batch_overlap.two_batch_overlap import MaybeTboDeepEPDispatcher
-        from sglang.srt.layers.moe.token_dispatcher.standard import StandardDispatcher
         from sglang.srt.layers.moe.token_dispatcher.deepep import DeepEPDispatcher
+        from sglang.srt.layers.moe.token_dispatcher.standard import StandardDispatcher
 
         self.observation = observation
         self.sites = []
@@ -25,14 +25,15 @@ class ExpertScopes:
             if not isinstance(module.dispatcher, dispatcher):
                 raise ValueError("native expert dispatcher differs from its declared boundary layout")
             if geometry.size > 1:
-
-                # Native FusedMoE owns a wrapper even without overlap; communication hooks observe its single inner dispatcher.
+                # Native FusedMoE owns a wrapper even without overlap; communication hooks observe its single inner
+                # dispatcher.
                 inner, = module.dispatcher._inners
                 if not isinstance(inner, DeepEPDispatcher):
                     raise ValueError("native expert exchange differs from the declared DeepEP layout")
             self.sites.append(path)
 
-            # Equal initialized modules may share local bodies; their concrete layer/weight bindings remain on each call.
+            # Equal initialized modules may share local bodies; their concrete layer/weight bindings remain on each
+            # call.
             self.implementations[path] = {
                 "layout": geometry.layout, "module": ModuleStructure.read(module, {module.layer_id: 0}, {}),
             }

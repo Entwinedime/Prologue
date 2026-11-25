@@ -111,13 +111,15 @@ class IngressEvidence:
             previous = self.actual_reads[instance]
             in_flow = row["in_flow"]
             if (type(in_flow) is not bool or (members and not in_flow)
-                    or not isinstance(identity["context"], dict) or identity["received"] != sorted(self.received[instance])
+                    or not isinstance(identity["context"], dict)
+                        or identity["received"] != sorted(self.received[instance])
                     or len(set(members)) != len(members) or self.received[instance].intersection(members)
                     or type(row["time_ns"]) is not int or row["time_ns"] < 0
                     or (previous and row["time_ns"] < previous[-1]["time_ns"])):
                 raise ValueError("input read disagrees with its entering delivery history or clock")
             observed = {"requests": members, "time_ns": row["time_ns"]}
-            previous.append({"identity": identity, "in_flow": in_flow, "poll_deadline_ns": row.get("poll_deadline_ns"), **observed})
+            previous.append({"identity": identity, "in_flow": in_flow,
+                "poll_deadline_ns": row.get("poll_deadline_ns"), **observed})
             self.received[instance].update(members)
             if members:
                 self.actual[instance].append(observed)
@@ -126,7 +128,8 @@ class IngressEvidence:
         reads = [row for row in self.actual_reads[instance] if row["in_flow"]]
         outside = len(self.actual_reads[instance]) - len(reads)
         if self.input_attempts[instance]["status"] == "unobserved":
-            self.findings.append(("input_read_evidence", {"instance": instance}, {"reason": "native input attempts were not recorded"}))
+            self.findings.append(("input_read_evidence", {"instance": instance},
+                {"reason": "native input attempts were not recorded"}))
             return {"status": "unobserved", "predicted_reads": len(reads), "outside_flow": outside}
         native = self.groups(self.native_reads[instance])
 
@@ -175,7 +178,8 @@ class IngressEvidence:
         incomplete = ambiguous or unmatched_native or unmatched_predicted or unknown
         return {"status": "different" if differences else "partial" if incomplete else "matched", "matched": matched,
                 "outside_flow": outside,
-                "ambiguous": ambiguous, "unmatched_native": unmatched_native, "unmatched_predicted": unmatched_predicted,
+                "ambiguous": ambiguous, "unmatched_native": unmatched_native,
+                    "unmatched_predicted": unmatched_predicted,
                 "unknown_native_context": unknown, "differences": differences}
 
     def compare(self, read_pairs=None, *, complete):
@@ -196,12 +200,16 @@ class IngressEvidence:
                 for left, right in zip(expected, actual, strict=True):
                     if left["time_ns"] != right["time_ns"]:
                         differences.append({"requests": left["requests"], "native_ns": left["time_ns"],
-                                            "predicted_ns": right["time_ns"], "delta_ns": right["time_ns"] - left["time_ns"]})
-            results[instance] = {"status": "matched" if cohorts and not differences else "different", "cohorts_match": cohorts,
+                                            "predicted_ns": right["time_ns"],
+                                                "delta_ns": right["time_ns"] - left["time_ns"]})
+            results[instance] = {"status": "matched" if cohorts and not differences else "different",
+                "cohorts_match": cohorts,
                                  "comparison_scope": "complete_history" if complete else "observed_prefix",
-                                 "native_rounds": len(native), "predicted_rounds": len(actual), "time_differences": differences,
+                                 "native_rounds": len(native), "predicted_rounds": len(actual),
+                                     "time_differences": differences,
                                  "native_input_attempts": self.input_attempts[instance],
-                                 "input_reads": self.compare_reads(instance, None if read_pairs is None else read_pairs[instance])}
+                                 "input_reads": self.compare_reads(instance, None
+                                     if read_pairs is None else read_pairs[instance])}
             if not cohorts:
                 results[instance].update(native_cohorts=[row["requests"] for row in native],
                                          predicted_cohorts=[row["requests"] for row in actual])

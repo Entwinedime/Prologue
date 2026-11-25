@@ -1,6 +1,7 @@
 """Check the native MLP coordination result against each run's actual participants."""
 
 from collections import Counter
+from itertools import pairwise
 from math import prod
 
 
@@ -30,7 +31,7 @@ class BatchSynchronization:
         if any({name: value for name, value in identity["work"].items() if name != "continuation"} != enclosing
                or identity["group"] != identities[0]["group"] for identity in identities):
             raise ValueError("batch synchronization span crosses different native work")
-        for previous, following in zip(positions, positions[1:]):
+        for previous, following in pairwise(positions):
             if (previous["exit"] == "call.return" or previous["exit"] != following["entry"]
                     or previous["exit_context"] != following["entry_context"]):
                 raise ValueError("batch synchronization segments do not form one continuation")
@@ -39,8 +40,11 @@ class BatchSynchronization:
         layout = payload["layout"]
         if len(layout) != 3 or any(type(size) is not int or size < 1 for size in layout):
             raise ValueError("batch synchronization requires positive DP/TP/CP dimensions")
-        candidates = [endpoint for endpoint in endpoints
-                      if endpoint["operation"] == "all_gather_into_tensor" and endpoint["group_role"] == payload["group"]]
+        candidates = [
+            endpoint
+            for endpoint in endpoints
+            if endpoint["operation"] == "all_gather_into_tensor" and endpoint["group_role"] == payload["group"]
+        ]
         if prod(layout) == 1 and not candidates:
             self.check_values([payload], identity, origin)
             return

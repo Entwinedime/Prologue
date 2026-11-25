@@ -22,7 +22,9 @@ class Adapters:
 
 class AdapterRegistry:
     default = ("sglang", "ascend")
-    bindings = {default: Adapters(SGLangTask, CaptureInput, SGLangAscendLaunch, CostSamples, HostCostSamples, BatchHostReuse)}
+    bindings = {
+        default: Adapters(SGLangTask, CaptureInput, SGLangAscendLaunch, CostSamples, HostCostSamples, BatchHostReuse)
+    }
 
     @classmethod
     def select(cls, framework=None, platform=None):

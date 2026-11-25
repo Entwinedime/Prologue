@@ -92,7 +92,9 @@ class PdNotificationSamples:
             for publisher, received in receipts.items():
                 sent = self.reservations[recipient, request].get(publisher)
                 prerequisites = () if sent is None else ((sent, sent),)
-                yield self.sample("kv_reservation_received", request, (received, received), prerequisites, publisher=publisher)
+                yield self.sample(
+                    "kv_reservation_received", request, (received, received), prerequisites, publisher=publisher
+                )
 
         for (actor, request, state), completion in self.states.items():
             if actor != rank or (state == 2 and (rank, request) not in self.chunks):

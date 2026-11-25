@@ -107,7 +107,9 @@ class BindingComparison:
         for binding in self.pools[group].history["bindings"]:
             scope = graph["scopes"][contents.source_ids[binding["scope"]]]
             events = {port["name"]: port["event"] for port in scope["ports"]}
-            window = tuple(graph["evidence"]["events"][events[name]]["time_ns"] for name in ("call.enter", "call.return"))
+            window = tuple(
+                graph["evidence"]["events"][events[name]]["time_ns"] for name in ("call.enter", "call.return")
+            )
             yield binding, group, window
 
         for index, scope in enumerate(raw["scopes"]):
@@ -132,6 +134,9 @@ class BindingComparison:
                 ranges = [[page - 1, 0, min(size, count - position * size)] for position, page in enumerate(pages)]
                 yield {"scope": index, "request": member["id"], "slot": None,
                        "begin": member["context_tokens"], "ranges": ranges}, pool, window
+
+    def binding_gap(self, identity, pool, request, reason):
+        self.findings.append(("binding_evidence", identity, {"pool": pool, "request": request, "reason": reason}))
 
     def observed(self, contents, raw, group, action_identities):
         graph = contents.graph
@@ -159,12 +164,14 @@ class BindingComparison:
             seen.add(key)
             resolved = self.pools[pool].resolve(binding, window, graph["evidence"]["clock"])
             if resolved is None:
-                self.findings.append(("binding_evidence", identity, {"pool": pool, "request": binding["request"], "reason": "release overlaps the observed binding window"}))
+                self.binding_gap(identity, pool, binding["request"],
+                                 "release overlaps the observed binding window")
                 continue
             slot, ranges = resolved
             end = ranges[-1][1] if ranges else binding["begin"]
             if any(left < binding["begin"] or right > end for left, right in accesses[key]):
-                self.findings.append(("binding_evidence", identity, {"pool": pool, "request": binding["request"], "reason": "observed physical binding does not cover the source graph access"}))
+                self.binding_gap(identity, pool, binding["request"],
+                                 "observed physical binding does not cover the source graph access")
                 continue
             coverage = self.coverage(accesses[key])
             if not coverage:
@@ -174,13 +181,15 @@ class BindingComparison:
                 continue
             value = identity, slot, ranges, coverage
             if key in self.native and self.native[key] != value:
-                self.findings.append(("binding_evidence", identity, {"pool": pool, "request": binding["request"], "reason": "observations disagree on an action's physical binding"}))
+                self.binding_gap(identity, pool, binding["request"],
+                                 "observations disagree on an action's physical binding")
             else:
                 self.native[key] = value
 
         # Missing evidence remains missing even when prediction also omits its binding records.
         for key, pool, request in accesses.keys() - seen:
-            self.findings.append(("binding_evidence", identities[key], {"pool": pool, "request": request, "reason": "source KV access has no observed physical binding"}))
+            self.binding_gap(identities[key], pool, request,
+                                 "source KV access has no observed physical binding")
 
     def initialized(self, row):
         for instance in row["instances"]:
@@ -209,7 +218,13 @@ class BindingComparison:
         group = row["pool"]
         key = invocation, group, row["request"]
         if group not in self.pools:
-            self.findings.append(("binding_evidence", identity, {"pool": group, "request": row["request"], "reason": "no observed physical pool for this action"}))
+            self.findings.append(
+                (
+                    "binding_evidence",
+                    identity,
+                    {"pool": group, "request": row["request"], "reason": "no observed physical pool for this action"},
+                )
+            )
             return
         pool = self.pools[group]
         ranges = pool.ranges(row, lambda page: self.page_epochs[group, page])
@@ -231,8 +246,13 @@ class BindingComparison:
         expected = {(pairs[key[0]], *key[1:]) for key in self.native if key[0] in pairs}
         for key in self.predicted.keys() - expected:
             if key[0] in targets:
-                self.findings.append(("binding_evidence", {"group": key[0][0], "event": key[0][1]},
-                                      {"pool": key[1], "request": key[2], "reason": "no observed physical binding for this action"}))
+                self.findings.append(
+                    (
+                        "binding_evidence",
+                        {"group": key[0][0], "event": key[0][1]},
+                        {"pool": key[1], "request": key[2], "reason": "no observed physical binding for this action"},
+                    )
+                )
 
         for key, (identity, native_slot, native_ranges, expected_coverage) in self.native.items():
             group = key[1]
@@ -244,7 +264,9 @@ class BindingComparison:
             if not rows:
                 failures.append("observed request binding is absent from prediction")
             for slot, ranges, begin in rows:
-                if native_slot is not None and (slot is None or not self.pair(native_slot, slot, slots[group, "forward"], slots[group, "reverse"])):
+                if native_slot is not None and (
+                    slot is None or not self.pair(native_slot, slot, slots[group, "forward"], slots[group, "reverse"])
+                ):
                     failures.append("request-slot sharing or release generation differs")
                 end = ranges[-1][1] if ranges else begin
                 native_begin = native_ranges[0][0] if native_ranges else 0
@@ -272,12 +294,24 @@ class BindingComparison:
             if self.coverage(coverage) != expected_coverage:
                 failures.append("predicted intervals differ from the observed KV access coverage")
             if failures:
-                self.findings.append(("physical_binding", identity, {"pool": group, "request": key[2], "reasons": sorted(set(failures))}))
+                self.findings.append(
+                    ("physical_binding", identity, {"pool": group, "request": key[2], "reasons": sorted(set(failures))})
+                )
             else:
                 matched += 1
-        self.counts = {"native_request_bindings": len(self.native), "request_bindings_matched": matched, "request_bindings_unpaired": unpaired,
-                       "predicted_request_bindings_unpaired": sum(key[0] not in targets for key in self.predicted),
-                       "snapshots_without_kv_access": self.unconsumed_snapshots,
-                       "page_only_bindings": sum(value[1] is None for value in self.native.values()),
-                       "predicted_regions": sum(map(len, self.predicted.values())), "page_intervals": intervals,
-                       "scope": "Observed request extents, page offsets and page/slot alias identities across recorded release epochs. Transport consumes frozen pages, not table slots; native enqueue ownership and retained pages/metadata are checked separately. This comparison does not prove allocator or in-flight lifetime correctness."}
+        self.counts = {
+            "native_request_bindings": len(self.native),
+            "request_bindings_matched": matched,
+            "request_bindings_unpaired": unpaired,
+            "predicted_request_bindings_unpaired": sum(key[0] not in targets for key in self.predicted),
+            "snapshots_without_kv_access": self.unconsumed_snapshots,
+            "page_only_bindings": sum(value[1] is None for value in self.native.values()),
+            "predicted_regions": sum(map(len, self.predicted.values())),
+            "page_intervals": intervals,
+            "scope": (
+                "Observed request extents, page offsets and page/slot alias identities across recorded release "
+                "epochs. Transport consumes frozen pages, not table slots; native enqueue ownership and retained "
+                "pages/metadata are checked separately. This comparison does not prove allocator or in-flight "
+                "lifetime correctness."
+            ),
+        }

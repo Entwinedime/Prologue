@@ -59,6 +59,11 @@ class ExecutionTimes:
         if complete and (self.starts or self.expected or self.bounds):
             raise ValueError("execution has unfinished work or completion conditions")
         return {
-            **self.counts, "unfinished_work": sum(self.expected.values()), "unfinished_windows": len(self.bounds),
-            "scope": "Run-local service lower bounds and explicit completion windows. Unknown service remains unmeasured; no cost model or cross-run timing accuracy qualification.",
+            **self.counts,
+            "unfinished_work": sum(self.expected.values()),
+            "unfinished_windows": len(self.bounds),
+            "scope": (
+                "Run-local service lower bounds and explicit completion windows. Unknown service remains "
+                "unmeasured; no cost model or cross-run timing accuracy qualification."
+            ),
         }

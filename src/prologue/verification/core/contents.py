@@ -52,7 +52,8 @@ class GraphContents(ActionScopes):
             resource = self.graph["resources"][self.graph["events"][port["event"]]["resource"]]
             host_ports &= (resource["kind"] == "thread" and resource["role"] == "control"
                            and port["use"] == "control" and port["relation"] == "control"
-                           and not any(port.get(name) for name in ("tensor", "wait", "signal")) and "rendezvous" not in port)
+                           and not any(port.get(name) for name in ("tensor", "wait", "signal"))
+                               and "rendezvous" not in port)
         pieces = self.work[root]
         resource = self.graph["resources"][pieces[0]["resource"]] if len(pieces) == 1 else {}
 
@@ -96,7 +97,8 @@ class GraphContents(ActionScopes):
         order = []
         children = [child for child in self.children[root] if self.graph["scopes"][child]["role"] == "kv_transfer"]
         if "evidence" in self.graph:
-            entries = {child: next(port["event"] for port in self.graph["scopes"][child]["ports"] if port["name"] == "call.enter")
+            entries = {child: next(port["event"] for port in self.graph["scopes"][child]["ports"]
+                if port["name"] == "call.enter")
                        for child in children}
 
             # Native service entries are measured CPU calls; graph scope numbering is not an ordering witness.
@@ -104,12 +106,14 @@ class GraphContents(ActionScopes):
         for child in children:
             scope = self.graph["scopes"][child]
             peers = {self.pool(access["pool"], group)
-                     for field in ("kv_accesses", "slot_accesses") for access in scope[field] if access["access"] == "write"}
+                     for field in ("kv_accesses", "slot_accesses") for access in scope[field]
+                         if access["access"] == "write"}
             if not peers:
                 continue
             peer, = peers
 
-            # Original synchronous service order supplies a native choice, never a predicted graph or an ordinal peer ID.
+            # Original synchronous service order supplies a native choice, never a predicted graph or an ordinal peer
+            # ID.
             if not order or order[-1] != peer:
                 if peer in order:
                     raise ValueError("native transport returns to an already completed destination")
@@ -152,14 +156,18 @@ class GraphContents(ActionScopes):
             if not graph["resources"][resource]["serial"]:
                 continue
             previous = tails.get(resource)
-            if previous is None or graph["evidence"]["events"][event]["order"] > graph["evidence"]["events"][previous]["order"]:
+            if (
+                previous is None
+                or graph["evidence"]["events"][event]["order"] > graph["evidence"]["events"][previous]["order"]
+            ):
                 tails[resource] = event
         return tails
 
     def completion_boundaries(self, root, *, named_only=False):
         graph = self.graph
         ports = graph["scopes"][root]["ports"]
-        result = [{"at": {"port": port["name"], "direction": port["direction"]}, "event": port["event"]} for port in ports]
+        result = [{"at": {"port": port["name"], "direction": port["direction"]}, "event": port["event"]}
+            for port in ports]
         if named_only:
             return result
 
@@ -205,7 +213,8 @@ class GraphContents(ActionScopes):
         ports = self.graph["scopes"][root]["ports"]
         identity = selector.get("resource", selector)
         if "port" in identity:
-            port, = [port for port in ports if (port["name"], port["direction"]) == (identity["port"], identity["direction"])]
+            port, = [port for port in ports
+                if (port["name"], port["direction"]) == (identity["port"], identity["direction"])]
             if "resource" not in selector:
                 return port["event"]
             resource = self.graph["events"][port["event"]]["resource"]
@@ -237,7 +246,8 @@ class GraphContents(ActionScopes):
         for index in paths:
             if communication := graph["scopes"][index].get("communication"):
                 channel = communication["channel"]
-                channel_origins[channel] = min(channel_origins.get(channel, communication["order"]), communication["order"])
+                channel_origins[channel] = min(channel_origins.get(channel, communication["order"]),
+                    communication["order"])
 
         result = {}
         for index in paths:
@@ -290,10 +300,12 @@ class GraphContents(ActionScopes):
             if communication:
 
                 # Tensor ports and execution edges supply the evidence for agreements and service order.
-                communication = {name: value for name, value in communication.items() if name not in {"agreements", "ordered_service"}}
+                communication = {name: value for name, value in communication.items()
+                    if name not in {"agreements", "ordered_service"}}
                 channel = communication["channel"]
                 channels.setdefault(channel, len(channels))
-                communication = {**communication, "channel": channels[channel], "order": communication["order"] - channel_origins[channel]}
+                communication = {**communication, "channel": channels[channel],
+                    "order": communication["order"] - channel_origins[channel]}
             contents["communication"] = communication
             work = Counter()
             for item in self.work[index]:
