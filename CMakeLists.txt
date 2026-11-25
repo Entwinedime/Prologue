@@ -8,4 +8,4 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
 
-add_subdirectory(engine)
+add_subdirectory(src/engine)

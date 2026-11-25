@@ -19,8 +19,8 @@ class TaskCommands:
         if files is None:
             mounts = [(self.repository, self.repository, False)]
         else:
-            source = self.repository / "python"
-            catalog = self.repository / "shared"
+            source = self.repository / "src/python"
+            catalog = self.repository / "src/shared"
             mounts = [(source, source, True), (catalog, catalog, True)]
             mounts.extend((path, path, readonly) for path, readonly in files)
         if model is not None:
@@ -40,7 +40,7 @@ class TaskCommands:
             command.extend(["--mount", f"type=bind,src={source},dst={destination}" + (",readonly" if readonly else "")])
         command.extend([
             "--workdir", str(self.repository),
-            "--env", "PYTHONPATH=python",
+            "--env", "PYTHONPATH=src/python",
             "--entrypoint", "python3", self.images["control"], "-m", "prologue",
         ])
         return command + [str(value) for value in arguments]

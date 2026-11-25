@@ -17,7 +17,7 @@ RUN bash /opt/prologue/install-sglang.sh /opt/prologue/sglang && rm /opt/prologu
 ENV ASCEND_USE_FA=true ASCEND_USE_FIA=false
 
 # The SDK dumper must publish its running flag before starting the background thread.
-COPY probes/ascend /opt/prologue/native/ascend
+COPY src/probes/ascend /opt/prologue/native/ascend
 RUN bash /opt/prologue/native/ascend/profiler/install.sh
 
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh \
@@ -28,7 +28,7 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh \
     && cp /tmp/prologue-ascend/libprologue_ascend_{observer,weights}.so /opt/prologue/lib/ \
     && rm -rf /tmp/prologue-ascend
 
-COPY probes/pytorch /opt/prologue/native/pytorch
+COPY src/probes/pytorch /opt/prologue/native/pytorch
 RUN cmake -S /opt/prologue/native/pytorch -B /tmp/prologue-gloo -DCMAKE_BUILD_TYPE=Release \
     && cmake --build /tmp/prologue-gloo --parallel \
     && cp /tmp/prologue-gloo/libprologue_gloo.so /opt/prologue/lib/ \
@@ -38,23 +38,23 @@ ENV LD_PRELOAD=/opt/prologue/lib/libprologue_ascend_observer.so:/opt/prologue/li
 
 WORKDIR /opt/prologue/collector
 COPY docker/images/sglang/pyproject.toml .
-COPY python/prologue/__init__.py ./python/prologue/
-COPY python/prologue/integrations/__init__.py ./python/prologue/integrations/
-COPY python/prologue/integrations/frameworks/__init__.py ./python/prologue/integrations/frameworks/
-COPY python/prologue/integrations/frameworks/sglang/__init__.py ./python/prologue/integrations/frameworks/sglang/
-COPY python/prologue/integrations/platforms/__init__.py ./python/prologue/integrations/platforms/
-COPY python/prologue/integrations/platforms/ascend/__init__.py ./python/prologue/integrations/platforms/ascend/
-COPY python/prologue/integrations/runtimes/__init__.py ./python/prologue/integrations/runtimes/
-COPY python/prologue/integrations/runtimes/pytorch/__init__.py ./python/prologue/integrations/runtimes/pytorch/
-COPY python/prologue/workers/__init__.py ./python/prologue/workers/
-COPY python/prologue/workers/capture.py python/prologue/workers/plugin.py ./python/prologue/workers/
-COPY python/prologue/common ./python/prologue/common/
-COPY python/prologue/integrations/frameworks/sglang/shared ./python/prologue/integrations/frameworks/sglang/shared/
-COPY python/prologue/integrations/frameworks/sglang/observation ./python/prologue/integrations/frameworks/sglang/observation/
-COPY python/prologue/integrations/runtimes/pytorch/shared ./python/prologue/integrations/runtimes/pytorch/shared/
-COPY python/prologue/integrations/runtimes/pytorch/capture ./python/prologue/integrations/runtimes/pytorch/capture/
-COPY python/prologue/integrations/platforms/ascend/runtime ./python/prologue/integrations/platforms/ascend/runtime/
-COPY python/prologue/integrations/platforms/ascend/analysis ./python/prologue/integrations/platforms/ascend/analysis/
+COPY src/python/prologue/__init__.py ./python/prologue/
+COPY src/python/prologue/integrations/__init__.py ./python/prologue/integrations/
+COPY src/python/prologue/integrations/frameworks/__init__.py ./python/prologue/integrations/frameworks/
+COPY src/python/prologue/integrations/frameworks/sglang/__init__.py ./python/prologue/integrations/frameworks/sglang/
+COPY src/python/prologue/integrations/platforms/__init__.py ./python/prologue/integrations/platforms/
+COPY src/python/prologue/integrations/platforms/ascend/__init__.py ./python/prologue/integrations/platforms/ascend/
+COPY src/python/prologue/integrations/runtimes/__init__.py ./python/prologue/integrations/runtimes/
+COPY src/python/prologue/integrations/runtimes/pytorch/__init__.py ./python/prologue/integrations/runtimes/pytorch/
+COPY src/python/prologue/workers/__init__.py ./python/prologue/workers/
+COPY src/python/prologue/workers/capture.py src/python/prologue/workers/plugin.py ./python/prologue/workers/
+COPY src/python/prologue/common ./python/prologue/common/
+COPY src/python/prologue/integrations/frameworks/sglang/shared ./python/prologue/integrations/frameworks/sglang/shared/
+COPY src/python/prologue/integrations/frameworks/sglang/observation ./python/prologue/integrations/frameworks/sglang/observation/
+COPY src/python/prologue/integrations/runtimes/pytorch/shared ./python/prologue/integrations/runtimes/pytorch/shared/
+COPY src/python/prologue/integrations/runtimes/pytorch/capture ./python/prologue/integrations/runtimes/pytorch/capture/
+COPY src/python/prologue/integrations/platforms/ascend/runtime ./python/prologue/integrations/platforms/ascend/runtime/
+COPY src/python/prologue/integrations/platforms/ascend/analysis ./python/prologue/integrations/platforms/ascend/analysis/
 RUN install /opt/prologue/native/ascend/scripts/capture.sh /opt/prologue/capture.sh \
     && install /opt/prologue/native/ascend/scripts/export.sh /opt/prologue/export-profile.sh \
     && python3 -m pip install --no-compile --no-deps --no-build-isolation . && rm -rf /opt/prologue/collector
