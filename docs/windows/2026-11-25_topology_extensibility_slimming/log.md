@@ -97,3 +97,43 @@
 **验证**　核查本机具备 8 张 Ascend NPU（`/dev/davinci0..7`），确认历史单卡 TP1/TP2 采集实耗约 122–124s，且 `data/` 留存有 TP1、TP2、TP8、TP2+PP3、PD 与 Host/Transport 全套离线对照输入；核验修改后文档无跨层引用与断链。
 
 **结论与限制**　逐轮真机实采与多拓扑离线回归体系已写入计划，彻底消除在线采集侧验证盲区，同时严格遵守不新建独立测试工程/mock 与预算透明记账纪律；可立即以修订后的 M3 启动 Prompt 交由 Codex 执行 R06–R07。
+
+## 2026-11-25　M3 启动与 R06 验证边界
+
+**范围**　从已与远端同步的 `c42a502` 开始。以 `d48605f` 的 263 个 Python 文件、33,586 个非空行为瘦身起点，以 `b500cbe` 为离线行为基线。
+
+**改动**　R06 先归并 PyTorch、公共模块和 SDK 原始事实读取，再提交本轮核验。生产解释与独立核验各自判断队列归属。单卡 TP2 的作业部署会向 worker 传递 `--local-shards`。
+
+**验证**　采集前已登记问题、复用证据和累计上限。R06 允许单卡运行 360 秒、后处理 300 秒、峰值存储 4 GiB。每次尝试及失败均计入同一额度。[R06 预算](../../../data/topology-extensibility-slimming/m3/r06/budget.json)
+
+**结论与限制**　单卡回归能独立核验每个被观测角色的局部结构。Gloo 探针加载与取得实际消息传输时间分别记证。
+
+## 2026-11-25　R06 双镜像与基线输入
+
+**范围**　核对公共模块和 PyTorch 模块归并后的安装边界，准备 TP1、TP2 与 PD 的同输入对照。
+
+**改动**　公共模块归并为 7 个文件，PyTorch 归并为 4 个文件。框架在原生点对点调用入口解析一次参与者，将同一份描述交给 PyTorch 记录提交和等待。Ascend 的解释器和独立核验器从同一处读取 SDK 原始记录，各自判断队列归属。
+
+**验证**　两个镜像均从官方 SGLang 提交 `4e155ecc` 构建。采集镜像实装 111 个 Python 模块，控制镜像 60 个，文件散列与各自的源码清单一致。采集镜像中的 Ascend 和 Gloo 探针符号均可加载。678 个样本的成本拟合结果与 `b500cbe` 逐字节一致。[静态检查](../../../data/topology-extensibility-slimming/m3/r06/static.json) · [采集镜像](../../../data/topology-extensibility-slimming/m3/r06/sglang-installed.json) · [控制镜像](../../../data/topology-extensibility-slimming/m3/r06/control-installed.json)
+
+**结论与限制**　旧 TP1 输入在基线自身即因缺少实际释放页数而无法解释。改用保留该字段的原始记录，基线已在 TP1、TP2 和指定 PD 案例上生成对照。已登记在空闲物理卡 4 上的单次 TP2 采集。当前 PyTorch 为 774 个非空行，R06 仍在实施。[对照输入](../../../data/topology-extensibility-slimming/m3/r06/offline-inputs.tsv) · [采集账本](../../../data/topology-extensibility-slimming/m3/r06/budget.json)
+
+## 2026-11-25　R06 完成功能对照，行数门槛交回评审
+
+**范围**　工作区候选树为 `5916b884`。单卡新采检验在线采集，三种拓扑的留存输入用于逐字节对照。源码规模比较使用 `d48605f`，行为比较使用 `b500cbe`。
+
+**改动**　框架与 PyTorch 共用一次原生 CPU 通信参数解析，采集侧合并两类信号等待的公共逻辑，控制侧统一分布式钩子的安装。按模块比较非空行，PyTorch 减少 36 行，公共模块减少 11 行，Ascend 增加 7 行，其他业务 Python 减少 8 行，合计减少 48 行。PyTorch 现有 370 行采集、251 行控制、152 行共享协议以及 1 行包声明。独立核验层对生产解释层的导入数为 0，两项平台接口的公开成员逐项对齐。[源码计数](../../../data/topology-extensibility-slimming/m3/r06/source-measurements.json) · [静态边界](../../../data/topology-extensibility-slimming/m3/r06/extensibility-audit.json)
+
+**验证**　物理卡 4 上通过公开入口完成一次 Qwen3-8B TP2 `--local-shards --resource-trace` 采集、投影和来源核验。卡时 130.1 秒，其中初始化 27.7 秒、预热 48.2 秒、有效观测 10.5 秒。后处理用时 42.9 秒，SDK 导出 21,059,140 字节，保留目录 49,262,164 字节，按秒采样的峰值为 56,658,146 字节。两个 rank 分别核对 10,762 和 10,726 个事件。离线 TP1、TP2、PD 共 6 份 rank 解释结果与 6 份核验报告逐字节一致。TP1 留存案例具备局部模板资格，TP2 和 PD 留存案例具备联合核验资格。四个预测目标的 211,290 条执行记录、16 次 token 发布、四份请求时延和 678 个样本的拟合结果均与基线一致。[实采核验](../../../data/topology-extensibility-slimming/m3/r06/physical/check/source-evidence.json) · [预算](../../../data/topology-extensibility-slimming/m3/r06/budget.json) · [离线对照](../../../data/topology-extensibility-slimming/m3/r06/offline-comparison.json) · [预测与拟合](../../../data/topology-extensibility-slimming/m3/r06/prediction-and-fit.json)
+
+**结论与限制**　PyTorch 为 774 个非空行，超出本轮门槛 224 行。采集代码须追踪原生张量别名、写入和完成信号，控制代码须保管模拟载荷直至参与者取走，共享协议须核对通信两端及时间约束。两轮归并后保留了基线的 29 处显式异常表达式，尚未找到能在上述职责内安全省去剩余 224 行的实现。按约定停在 R06，保留工作区交 AGY 裁决，提交与 R07 均待做。本轮单卡的两个角色分窗口运行，Gloo 探针能加载，实采记录中点对点消息为 0，真实跨卡传输时延仍待实测。
+
+## 2026-11-25 — AGY R06 裁决与 M3–M5 减行指标务实校准
+
+**范围**　逐行审查 R06 工作区候选树 `5916b884`（`common/`、`runtimes/pytorch/`、`platforms/ascend/trace_store.py` 与 `analysis/`/`reference/` 现状）及全部真机/离线证据，经用户确认形成三项裁决并修订本窗口 `plan.md` 与 `status.md`。
+
+**改动**　① 批准 R06 现行 `runtimes/pytorch/`（4 文件 / 774 非空行，保留全部 29 条显式 `raise`）直接放行，取消原 `≤ 550` 非空行硬上限；② 明确 R07 中 `trace_store.py` 可同时收口无状态原始文件只读索引（扫描 `raw.json`/`sdk/trace.json`/`runtime/*.jsonl`）与无状态 `TS_TASK_FLIP` 队列槽位证明，由 `analysis/` 与 `reference/` 各自基于原始输入独立调用（`reference/` 仍严禁导入 `analysis/` 或消费解释器结论）；③ 保留全部目录与文件数硬性收敛上限（`ascend + pytorch ≤ 20f`、全窗口业务 Python `≤ 130f`），将 M3 非空行净减目标校准为较 `d48605f` 务实净减 ≥ 400 非空行（M4/M5 同样按真实重复度校准，绝不删守卫或压行凑数）。本轮仅提交计划与状态文档，保留工作区既有 R06 业务改动原样交由 Codex 提交。
+
+**验证**　逐行核验 `pytorch/{capture,control,shared}.py` 确认逻辑高度紧致无水分；核验 [budget.json](../../../data/topology-extensibility-slimming/m3/r06/budget.json)（卡 4 单卡 TP2 实采 130.1s、后处理 42.9s、峰值 56.7 MB、双 rank 10,762/10,726 事件全过）与 [offline-comparison.json](../../../data/topology-extensibility-slimming/m3/r06/offline-comparison.json)（TP1/TP2/PD 12 份产物及四目标预测、678 样本拟合与 `b500cbe` 逐字节一致）；核验修改后文档无跨层引用与断链。
+
+**结论与限制**　R06 裁决通过。Codex 可立即将工作区 R06 业务改动提交并进入 R07，完成 R07 压缩、真机实采与多拓扑回归后停在 M3/M4 边界交由 AGY 审查。
