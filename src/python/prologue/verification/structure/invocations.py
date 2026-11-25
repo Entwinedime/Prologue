@@ -3,10 +3,8 @@
 import json
 from collections import Counter, defaultdict
 
-from ..core.actions import ActionIdentity
-from ..core.contents import GraphContents
-from ..core.context_values import ContextValues
-from ..core.dependencies import ActionBoundaries
+from prologue.verification.core.actions import ActionBoundaries, ActionIdentity, GraphContents
+from prologue.verification.engine import ContextValues
 
 
 class InvocationComparison:

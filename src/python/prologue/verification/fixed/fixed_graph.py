@@ -1,18 +1,17 @@
 """Verify service costs without changing the observed serving execution."""
 
-import json
 from collections import Counter, defaultdict
 from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from prologue.common.io import write_json
+from prologue.common.io import read_json, write_json
 from prologue.host.performance.requirements import CostRequirements
 from prologue.host.runtime.docker import ModelingProcess
+from prologue.verification.core import compare_request_metrics
+from prologue.verification.core.source import ProductionEvidence
 from prologue.verification.runner import VerificationRun
 
-from ..core.metrics import compare_request_metrics
-from ..core.source_evidence import ProductionEvidence
 from .fixed_context import FixedHostContext
 from .fixed_reference import FixedReference
 
@@ -30,7 +29,7 @@ class FixedPerformance(VerificationRun):
         for rank, (contents, _, _) in reference.case.sources.items():
             output = scratch / f"{rank}-costs.json"
             model.run_model("work-costs", output, reference.case.graphs / f"{rank}-graph.json", self.arguments.costs)
-            result = json.loads(output.read_text())
+            result = read_json(output)
             estimates[rank] = result["work_ns"]
             domains[rank] = result["domain"]
             if len(estimates[rank]) != len(contents.graph["work"]):
@@ -49,7 +48,7 @@ class FixedPerformance(VerificationRun):
                 )
         costs = {}
         if points:
-            asset = json.loads(self.arguments.costs.read_text())["domains"]
+            asset = read_json(self.arguments.costs)["domains"]
             costs = requirements.query(model, asset, scratch, nullcontext, None)
 
         result, first_protocol_gap = [], None
@@ -137,7 +136,7 @@ class FixedPerformance(VerificationRun):
         write_json(services, {"measured": measured_steps}, replace=False)
         output = scratch / "measured-times.json"
         model.run_model("replay", output, path, services)
-        times = json.loads(output.read_text())["event_times_ns"]["measured"]
+        times = read_json(output)["event_times_ns"]["measured"]
         baseline = self.report["baseline"] = reference.check_baseline(times)
         publications = baseline["publications"] = reference.publications.compare(times)
         transport = baseline["cpu_transport"] = reference.transport_baseline(times)
@@ -157,7 +156,7 @@ class FixedPerformance(VerificationRun):
     def work_groups(self, reference, estimates, measured):
         if self.arguments.work_groups is None:
             return {}
-        groups = json.loads(self.arguments.work_groups.read_text())
+        groups = read_json(self.arguments.work_groups)
         allowed = {"kind", "scope", "site", "phase", "direction", "caller"}
         if not isinstance(groups, dict) or not groups:
             raise ValueError("work groups require one or more named selectors")
@@ -214,7 +213,7 @@ class FixedPerformance(VerificationRun):
         write_json(services, scenarios, replace=False)
         output = scratch / "scenario-times.json"
         model.run_model("replay", output, scratch / "replay.json", services)
-        replayed = json.loads(output.read_text())["event_times_ns"]
+        replayed = read_json(output)["event_times_ns"]
         outcomes = {}
         for name, stamps in replayed.items():
             inputs = reference.compare_active_input_reads(stamps)

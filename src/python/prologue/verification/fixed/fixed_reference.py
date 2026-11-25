@@ -4,12 +4,12 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from itertools import chain
 
+from prologue.verification.core import FixedPublications
 from prologue.verification.core.adapters import framework_evidence, platform_evidence
+from prologue.verification.core.connections import NativeCpuCall
+from prologue.verification.core.protocol import IngressEvidence
+from prologue.verification.core.source_clock import ClockRealization, CounterPoint
 
-from ..core.cpu_protocol import NativeCpuCall
-from ..core.ingress import IngressEvidence
-from ..core.publications import FixedPublications
-from ..core.source_clock import ClockRealization, CounterPoint
 from .fixed_context import CpuReadinessWake, ExternalWake, KernelWake, LocalCallWake, WorkProgress
 
 

@@ -1,9 +1,12 @@
-"""Identify observed actions by logical work, independently of template selection."""
+"""Identify native actions and compare the structure inside their named boundaries."""
 
 import json
 from collections import Counter, defaultdict
+from dataclasses import dataclass
+from itertools import islice
 
 from prologue.verification.core.adapters import observed_scopes
+from prologue.verification.engine import FindingLedger
 
 
 class QueryResults:
@@ -231,10 +234,10 @@ class ActionScopes:
             origins = scope["bindings"]["source_scopes"]
             if len(origins) != 1:
                 raise ValueError("coarse scope requires one exact native declaration")
-            for origin in origins:
-                if type(origin) is not int or not 0 <= origin < len(raw["scopes"]) or origin in self.source_ids:
-                    raise ValueError("native scope has an invalid or competing coarse owner")
-                self.source_ids[origin] = index
+            origin, = origins
+            if type(origin) is not int or not 0 <= origin < len(raw["scopes"]) or origin in self.source_ids:
+                raise ValueError("native scope has an invalid or competing coarse owner")
+            self.source_ids[origin] = index
         if self.source_ids.keys() != set(range(len(raw["scopes"]))):
             raise ValueError("coarse scopes omit native observations")
         publications = self.tensor_publications(raw)
@@ -578,3 +581,499 @@ class ActionIdentity:
         port = next(port for port in graph["scopes"][0]["ports"] if port["name"] == "call.enter")
         resource = graph["resources"][graph["events"][port["event"]]["resource"]]
         return f"{instance}/{resource['rank']}"
+
+
+class GraphContents(ActionScopes):
+    def __init__(self, graph):
+        super().__init__(graph)
+        self.pools = {}
+
+    @classmethod
+    def value_differences(cls, native, predicted, path=""):
+        if isinstance(native, dict) and isinstance(predicted, dict):
+            for key in sorted(native.keys() | predicted.keys()):
+                if key in native and key in predicted:
+                    yield from cls.value_differences(native[key], predicted[key], f"{path}/{key}")
+                else:
+                    yield {"field": f"{path}/{key}", "native": native.get(key), "predicted": predicted.get(key)}
+        elif native != predicted:
+            yield {"field": path, "native": native, "predicted": predicted}
+
+    @classmethod
+    def differences(cls, native, predicted, details=False):
+        for path in sorted(native.keys() | predicted.keys()):
+            if path not in native or path not in predicted:
+                yield "scope_tree", {"scope": path, "native": path in native, "predicted": path in predicted}
+                continue
+            for field in sorted(native[path].keys() | predicted[path].keys()):
+                expected, actual = native[path].get(field), predicted[path].get(field)
+                if expected != actual:
+                    changes = cls.value_differences(expected, actual)
+                    yield field, {"scope": path, "changes": list(changes if details else islice(changes, 3))}
+
+    def control_key(self, root, identity):
+        scope = self.graph["scopes"][root]
+        return json.dumps({"control": {
+            **{name: identity[name] for name in ("group", "action", "parameters")},
+            **{name: scope[name] for name in ("site", "implementation")},
+            "owner": (identity["work"]["continuation"] or {}).get("owner"),
+        }}, sort_keys=True)
+
+    def declared_control(self, root):
+        scope = self.graph["scopes"][root]
+        if not scope["bindings"].get("segment", {}).get("host_only", False):
+            return False
+        ports = {(port["name"], port["direction"]): port for port in scope["ports"]}
+        host_ports = len(scope["ports"]) == 2 and ports.keys() == {("call.enter", "input"), ("call.return", "output")}
+        for port in scope["ports"]:
+            resource = self.graph["resources"][self.graph["events"][port["event"]]["resource"]]
+            host_ports &= (resource["kind"] == "thread" and resource["role"] == "control"
+                           and port["use"] == "control" and port["relation"] == "control"
+                           and not any(port.get(name) for name in ("tensor", "wait", "signal"))
+                               and "rendezvous" not in port)
+        pieces = self.work[root]
+        resource = self.graph["resources"][pieces[0]["resource"]] if len(pieces) == 1 else {}
+
+        # A native declaration licenses shared CPU contents, never hidden children, device work or resource effects.
+        if (scope["role"] != "segment" or self.children[root] or not host_ports or len(pieces) != 1
+                or pieces[0]["kind"] != "host" or resource.get("kind") != "thread" or resource.get("role") != "control"
+                or scope.get("communication") or scope["kv_accesses"] or scope["slot_accesses"]):
+            raise ValueError("native host-only declaration contains undeclared execution structure")
+        return True
+
+    def structure_key(self, root, identity, controls, contexts):
+        key = self.control_key(root, identity)
+        return key if key in controls else ActionIdentity.structure_key(identity, contexts)
+
+    def observed_pools(self, raw, registrations, groups):
+
+        # The native session identifies the actual destination independently of the predictor's routing rules.
+        targets = sorted({registrations[scope["native_transfer"]["session"]]
+                          for scope in raw["scopes"] if "native_transfer" in scope})
+        self.pools = {f"destination/{position}": groups[rank] for position, rank in enumerate(targets)}
+        bindings = {rank: f"destination/{position}" for position, rank in enumerate(targets)}
+        for scope in self.graph["scopes"]:
+            if scope["role"] == "kv_transfer":
+                expected = set()
+                for origin in scope["bindings"]["source_scopes"]:
+                    transfer = raw["scopes"][origin]["native_transfer"]
+                    field = "kv_accesses" if transfer["kind"] == "kv" else "slot_accesses"
+                    if transfer["kind"] == "kv" and not transfer["source_pages"]:
+                        continue
+                    destination = bindings[registrations[transfer["session"]]]
+                    expected.update(((field, "local", "read"), (field, destination, "write")))
+                actual = {(field, access["pool"], access["access"])
+                          for field in ("kv_accesses", "slot_accesses") for access in scope[field]}
+                if actual != expected:
+                    raise ValueError("coarse transfer loses or invents a native payload endpoint")
+
+    def pool(self, name, group):
+        return group if name == "local" else self.pools.get(name, name)
+
+    def invocation_bindings(self, root, group):
+        order = []
+        children = [child for child in self.children[root] if self.graph["scopes"][child]["role"] == "kv_transfer"]
+        if "evidence" in self.graph:
+            entries = {child: next(port["event"] for port in self.graph["scopes"][child]["ports"]
+                if port["name"] == "call.enter")
+                       for child in children}
+
+            # Native service entries are measured CPU calls; graph scope numbering is not an ordering witness.
+            children.sort(key=lambda child: self.graph["evidence"]["events"][entries[child]]["time_ns"])
+        for child in children:
+            scope = self.graph["scopes"][child]
+            peers = {self.pool(access["pool"], group)
+                     for field in ("kv_accesses", "slot_accesses") for access in scope[field]
+                         if access["access"] == "write"}
+            if not peers:
+                continue
+            peer, = peers
+
+            # Original synchronous service order supplies a native choice, never a predicted graph or an ordinal peer
+            # ID.
+            if not order or order[-1] != peer:
+                if peer in order:
+                    raise ValueError("native transport returns to an already completed destination")
+                order.append(peer)
+        return {"transport_order": order} if order else {}
+
+    def resource(self, index):
+        resource = self.graph["resources"][index]
+        return {name: resource[name] for name in ("kind", "role", "rank", "serial")}
+
+    def paths(self, root):
+        paths, pending = {root: "root"}, [root]
+        for index in pending:
+            for child, scope in enumerate(self.children[index]):
+                paths[scope] = f"{paths[index]}/{child}"
+                pending.append(scope)
+        return paths
+
+    def serial_tails(self, root):
+        graph = self.graph
+        scopes = [root]
+        for scope in scopes:
+            scopes.extend(self.children[scope])
+        retained = {event for scope in scopes for event in self.events[scope]}
+        for scope in scopes:
+            for work in self.work[scope]:
+                retained.update((work["start"], work["finish"]))
+            for port in graph["scopes"][scope]["ports"]:
+                retained.add(port["event"])
+                if "wait" in port:
+                    retained.add(port["wait"]["begin"])
+                if "rendezvous" in port:
+                    retained.add(port["rendezvous"])
+            for access in graph["scopes"][scope]["kv_accesses"] + graph["scopes"][scope]["slot_accesses"]:
+                retained.update((access["start"], access["finish"]))
+
+        tails = {}
+        for event in retained:
+            resource = graph["events"][event]["resource"]
+            if not graph["resources"][resource]["serial"]:
+                continue
+            previous = tails.get(resource)
+            if (
+                previous is None
+                or graph["evidence"]["events"][event]["order"] > graph["evidence"]["events"][previous]["order"]
+            ):
+                tails[resource] = event
+        return tails
+
+    def completion_boundaries(self, root, *, named_only=False):
+        graph = self.graph
+        ports = graph["scopes"][root]["ports"]
+        result = [{"at": {"port": port["name"], "direction": port["direction"]}, "event": port["event"]}
+            for port in ports]
+        if named_only:
+            return result
+
+        named_resources = {graph["events"][port["event"]]["resource"] for port in ports}
+        tails = self.serial_tails(root)
+        for resource, event in sorted(tails.items()):
+            names = sorted((port["name"], port["direction"]) for port in ports
+                           if graph["events"][port["event"]]["resource"] == resource)
+            if names:
+                name, direction = names[0]
+                identity = {"port": name, "direction": direction}
+            else:
+                identity = {key: graph["resources"][resource][key] for key in ("kind", "role")}
+                if sum(all(graph["resources"][peer][key] == value for key, value in identity.items())
+                       for peer in tails.keys() - named_resources) != 1:
+                    raise ValueError(f"scope {root} ({graph['scopes'][root]['site']}) resource tail {identity} "
+                                     "has no unique named interface or resource role")
+
+            # A semantic resource identity selects a tail; native thread/stream IDs never cross the run boundary.
+            result.append({"at": {"resource": identity}, "event": event})
+        return result
+
+    def host_tails(self, root):
+        graph = self.graph
+        ports = graph["scopes"][root]["ports"]
+        if "evidence" in graph:
+            tails = self.serial_tails(root)
+        else:
+            tails = {graph["events"][port["event"]]["resource"]: port["event"] for port in ports
+                     if port["name"].startswith("resource.exit/")}
+        named = {port["event"] for port in ports
+                 if not port["name"].startswith(("resource.enter/", "resource.exit/"))}
+        host_finishes = {piece["finish"] for piece in self.work[root] if piece["kind"] == "host"}
+        scope = tuple(graph["scopes"][root][field] for field in ("role", "site", "implementation"))
+        identities = {}
+        for lane, tail in tails.items():
+            resource = graph["resources"][lane]
+            if resource["kind"] == "thread" and tail not in named and tail in host_finishes:
+                identities[tail] = (*scope, resource["role"])
+        return identities
+
+    def boundary_event(self, root, selector):
+        ports = self.graph["scopes"][root]["ports"]
+        identity = selector.get("resource", selector)
+        if "port" in identity:
+            port, = [port for port in ports
+                if (port["name"], port["direction"]) == (identity["port"], identity["direction"])]
+            if "resource" not in selector:
+                return port["event"]
+            resource = self.graph["events"][port["event"]]["resource"]
+            candidates = [port for port in ports if port["name"].startswith("resource.exit/")
+                          and self.graph["events"][port["event"]]["resource"] == resource]
+        else:
+            named_resources = {self.graph["events"][port["event"]]["resource"] for port in ports
+                               if not port["name"].startswith(("resource.enter/", "resource.exit/"))}
+            candidates = [port for port in ports if port["name"].startswith("resource.exit/")
+                          and self.graph["events"][port["event"]]["resource"] not in named_resources
+                          and all(self.graph["resources"][self.graph["events"][port["event"]]["resource"]][key] == value
+                                  for key, value in identity.items())]
+        if len(candidates) > 1:
+            raise ValueError("execution resource tail has an ambiguous semantic interface")
+        return candidates[0]["event"] if candidates else None
+
+    def snapshot(self, root, group):
+        graph, paths = self.graph, self.paths(root)
+
+        # Relative versions and alias partitions survive different addresses and allocation histories.
+        versions = {}
+        for index in paths:
+            for port in graph["scopes"][index]["ports"]:
+                if port["use"] == "data" and (tensor := port.get("tensor")):
+                    storage = tensor["storage"]
+                    versions[storage] = min(versions.get(storage, tensor["version"]), tensor["version"])
+        storages, resources, channels = {}, {}, {}
+        channel_origins = {}
+        for index in paths:
+            if communication := graph["scopes"][index].get("communication"):
+                channel = communication["channel"]
+                channel_origins[channel] = min(channel_origins.get(channel, communication["order"]),
+                    communication["order"])
+
+        result = {}
+        for index in paths:
+            scope = graph["scopes"][index]
+            contents = {name: scope[name] for name in ("role", "site", "implementation", "parameters")}
+            if index != root and (row := scope.get("row_call")):
+                contents["row_call"] = {**row, "request": scope["work"]["members"][0]["id"]}
+            contents["weights"] = scope["bindings"].get("weights")
+            ports = {}
+            for port in sorted(scope["ports"], key=lambda value: (value["name"], value["direction"])):
+
+                # These ports are added during action cutting; cross-action serial frontiers need their own check.
+                if index == root and port["name"].startswith(("resource.enter/", "resource.exit/")):
+                    continue
+                boundary = {name: port[name] for name in ("use", "relation")}
+                resource = graph["events"][port["event"]]["resource"]
+                resources.setdefault(resource, len(resources))
+                boundary["resource"] = {**self.resource(resource), "alias": resources[resource]}
+                if "wait" in port:
+                    waited = port["wait"]["resource"]
+                    resources.setdefault(waited, len(resources))
+                    boundary["wait_resource"] = {**self.resource(waited), "alias": resources[waited]}
+                boundary["rendezvous"] = "rendezvous" in port
+                if tensor := port.get("tensor"):
+                    boundary["tensor"] = {"dtype": tensor["dtype"], "shape": tensor["shape"]}
+                    if packing := tensor.get("packing"):
+                        boundary["tensor"]["packing"] = {key: packing[key] for key in ("table", "slices")}
+
+                    # Metadata describes layout; its runtime buffer lifecycle is not a graph data dependency.
+                    if port["use"] == "data":
+                        storage = tensor["storage"]
+                        storages.setdefault(storage, len(storages))
+                        boundary["tensor"].update(
+                            storage_alias=storages[storage], version=tensor["version"] - versions[storage],
+                            writer=paths.get(tensor["writer"], "external"),
+                            allocation=paths.get(tensor["allocation"], "external"),
+                            buffer=tensor["buffer"],
+                        )
+                ports[f"{port['direction']}:{port['name']}"] = boundary
+            contents["ports"] = ports
+
+            for field in ("kv_accesses", "slot_accesses"):
+                accesses = []
+                for access in scope[field]:
+                    value = {name: value for name, value in access.items() if name not in {"start", "finish", "rule"}}
+                    value["pool"] = self.pool(value["pool"], group)
+                    accesses.append(value)
+                contents[field] = accesses
+            communication = scope.get("communication")
+            if communication:
+
+                # Tensor ports and execution edges supply the evidence for agreements and service order.
+                communication = {name: value for name, value in communication.items()
+                    if name not in {"agreements", "ordered_service"}}
+                channel = communication["channel"]
+                channels.setdefault(channel, len(channels))
+                communication = {**communication, "channel": channels[channel],
+                    "order": communication["order"] - channel_origins[channel]}
+            contents["communication"] = communication
+            work = Counter()
+            for item in self.work[index]:
+                service = {"kind": item["kind"], "resource": self.resource(item["resource"])}
+                if "copy" in item:
+                    service["copy"] = item["copy"]
+                work[json.dumps(service, sort_keys=True)] += 1
+            contents["work"] = dict(work)
+            result[paths[index]] = contents
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class RankedBoundaries:
+    events: dict
+    work: list
+    resources: dict
+
+
+class ActionBoundaries:
+    def __init__(self, contents, root, event_ids=None):
+        graph = contents.graph
+        event_ids = range(len(graph["events"])) if event_ids is None else event_ids
+        paths, resources = contents.paths(root), {}
+        self.events, self.work, self.resources = {}, [], {}
+        for scope, path in paths.items():
+            node = graph["scopes"][scope]
+            boundaries = {}
+            for port in sorted(node["ports"], key=lambda value: (value["name"], value["direction"])):
+
+                # Generated action frontiers have no source port; their edges still participate in reachability.
+                if scope == root and port["name"].startswith(("resource.enter/", "resource.exit/")):
+                    continue
+                name = f"{path}/{port['direction']}:{port['name']}"
+                boundaries[name] = event_ids[port["event"]]
+                resource = graph["events"][port["event"]]["resource"]
+                resources.setdefault(resource, len(resources))
+                if "wait" in port:
+                    boundaries[name + "/wait.begin"] = event_ids[port["wait"]["begin"]]
+                    resources.setdefault(port["wait"]["resource"], len(resources))
+                if "rendezvous" in port:
+                    boundaries[name + "/rendezvous"] = event_ids[port["rendezvous"]]
+            for field in ("kv_accesses", "slot_accesses"):
+                for index, access in enumerate(node[field]):
+                    for side in ("start", "finish"):
+                        boundaries[f"{path}/{field}/{index}/{side}"] = event_ids[access[side]]
+
+            self.events.update(boundaries)
+
+        for scope, path in paths.items():
+            for work in contents.work[scope]:
+                resource = work["resource"]
+                descriptor = contents.resource(resource)
+                self.resources[resource] = (*descriptor.values(), resources.get(resource))
+                identity = (path, work["kind"], resource)
+                self.work.append((identity, event_ids[work["start"]], event_ids[work["finish"]]))
+
+    def ranked(self, rank):
+        return RankedBoundaries(
+            events={name: (rank, event) for name, event in self.events.items()},
+            work=[(identity, (rank, start), (rank, finish)) for identity, start, finish in self.work],
+            resources=self.resources,
+        )
+
+
+class ActionOrderComparison:
+    def __init__(self, contexts, details=False):
+        self.contexts, self.details = contexts, details
+        self.counts, self.findings = Counter(), FindingLedger()
+        self.repeated_counts = Counter()
+        self.qualified = False
+
+
+    def compare_repeated(self, actual, predicted, actions, repeated):
+        if not repeated:
+            return
+        names = ("root/input:call.enter", "root/output:call.return")
+        anchors = [(native.events[name], target.events[name]) for _, native, target in actions for name in names]
+        if not anchors:
+            self.repeated_counts["unqualified_contexts"] += len(repeated)
+            self.repeated_counts["unqualified_calls"] += sum(len(targets) for _, _, targets in repeated.values())
+            return
+        frontiers = []
+        for side, graph in enumerate((actual, predicted)):
+            events = set()
+            for row in repeated.values():
+                for call in row[side + 1]:
+                    events.update(call.events[name] for name in names)
+            frontiers.append(graph.frontiers([row[side] for row in anchors], events))
+        for identity, native, targets in repeated.values():
+            if not native:
+                self.repeated_counts.update(unqualified_contexts=1, unqualified_calls=len(targets))
+                continue
+            positions = [{tuple(value for name in names for value in masks[call.events[name]]) for call in calls}
+                         for masks, calls in zip(frontiers, (native, targets), strict=True)]
+            missing, extra = positions[0] - positions[1], positions[1] - positions[0]
+            self.repeated_counts.update(
+                contexts_checked=1,
+                native_positions=len(positions[0]),
+                predicted_positions=len(positions[1]),
+                matched_positions=len(positions[0] & positions[1]),
+                calls_checked=len(targets),
+            )
+            if not missing and not extra:
+                self.repeated_counts.update(contexts_matched=1, calls_matched=len(targets))
+                continue
+
+            # Compare whole position sets. No member is selected to supply a source occurrence, body or duration.
+            examples = {}
+            for label, differences, calls, masks in (
+                ("native", missing, native, frontiers[0]),
+                ("predicted", extra, targets, frontiers[1]),
+            ):
+                for call in calls:
+                    signature = tuple(value for name in names for value in masks[call.events[name]])
+                    if signature in differences:
+                        examples[label] = {"events": {name: call.events[name] for name in names},
+                                           "anchor_counts": [mask.bit_count() for mask in signature]}
+                        break
+            self.findings.add("repeated_call_order", identity, {"native_only_positions": len(missing),
+                                  "predicted_only_positions": len(extra), "examples": examples})
+
+    def compare(self, actual, predicted, actions):
+        labels, identities = defaultdict(list), {}
+        for identity, native, estimate in actions:
+            if native.events.keys() != estimate.events.keys():
+                self.findings.add("ordering_evidence", identity, {"reason": "action boundary sets differ"})
+                return
+
+            # Occurrence pairs are already established; repeated work still needs distinct order labels.
+            key = ActionIdentity.logical_key(identity, self.contexts), native.events["root/input:call.enter"]
+            identities[key] = identity
+            for name, event in native.events.items():
+                labels[event, estimate.events[name]].append((key, name))
+        pairs = list(labels)
+        self.counts.update(actions_compared=len(identities), boundaries_compared=sum(map(len, labels.values())),
+                           paired_events=len(pairs))
+        if not pairs:
+            return
+
+        # Equal ports may alias one event; their partitions must agree before comparing partial orders.
+        for side, origin in enumerate(("native", "predicted")):
+            aliases = defaultdict(list)
+            for pair in pairs:
+                aliases[pair[side]].append(pair)
+            for event, entries in aliases.items():
+                if len(entries) == 1:
+                    continue
+                self.counts["alias_conflicts"] += 1
+                key, _ = labels[entries[0]][0]
+                self.findings.add("action_order_alias", identities[key], {
+                    "origin": origin, "event": event, "opposite_events": len(entries),
+                    "reason": "named boundaries alias one event in only one run",
+                })
+        if self.findings:
+            return
+
+        projections = [
+            graph.projected([pair[side] for pair in pairs]) for side, graph in enumerate((actual, predicted))
+        ]
+        covers = [
+            {(source, target) for source, targets in graph.next.items() for target in targets} for graph in projections
+        ]
+        names = [min(labels[pair]) for pair in pairs]
+        differences = []
+        for side, kind in enumerate(("missing", "extra")):
+            other = projections[1 - side]
+            self.counts[("native" if side == 0 else "predicted") + "_relations"] = len(covers[side])
+            for source, target in covers[side]:
+                if other.reaches(source, target):
+                    continue
+                reverse = other.reaches(target, source)
+                differences.append((side, source, target, reverse))
+                self.counts[kind + "_relations"] += 1
+                self.counts[kind + "_reversed_relations"] += reverse
+                self.counts[kind + "_cross_rank_relations"] += (
+                    identities[names[source][0]]["group"] != identities[names[target][0]]["group"]
+                )
+        self.qualified = True
+
+        # Covers generate the whole order. Checking both directions preserves strict reachability equality.
+        # The first native topological position is a representative, not a unique first cause under concurrency.
+        differences.sort(key=lambda item: (actual.positions[pairs[item[2]][0]], item[0], item[1]))
+        shown = set()
+        for side, source, target, reverse in differences:
+            source_key, source_name = names[source]
+            target_key, target_name = names[target]
+            kind = "missing" if side == 0 else "extra"
+            detail = {"source": {"work": identities[source_key], "boundary": source_name}, "boundary": target_name,
+                      "opposite_order_reversed": reverse}
+            if self.details or kind not in shown:
+                detail["path"] = (actual, predicted)[side].witness(pairs[source][side], pairs[target][side])
+                shown.add(kind)
+            self.findings.add(kind + "_order", identities[target_key], detail)

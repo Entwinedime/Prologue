@@ -5,13 +5,11 @@ from collections import Counter, defaultdict
 from itertools import pairwise
 
 from prologue.common.io import read_json, write_json
-
-from ..core.actions import ActionIdentity
-from ..core.context_values import ContextValues
-from ..core.dependencies import ActionBoundaries
-from ..core.ingress import IngressEvidence
-from ..core.native_case import NativeCase
-from ..core.source_clock import ClockRealization
+from prologue.verification.core.actions import ActionBoundaries, ActionIdentity
+from prologue.verification.core.protocol import IngressEvidence
+from prologue.verification.core.source import NativeCase
+from prologue.verification.core.source_clock import ClockRealization
+from prologue.verification.engine import ContextValues
 
 
 class NativeInputs:

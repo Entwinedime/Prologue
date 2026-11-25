@@ -1,8 +1,8 @@
 """Verify cost-driven serving against an independent lightweight native run."""
 
-import json
 from subprocess import TimeoutExpired
 
+from prologue.common.io import read_json
 from prologue.common.observation import CapturedWorkers
 from prologue.host.libraries.release import LibraryRelease
 from prologue.host.workflow.options import PredictionOptions
@@ -74,7 +74,7 @@ class AutonomousVerification(VerificationRun):
 
     def verify(self):
         args = self.arguments
-        source = json.loads(args.input.read_text())
+        source = read_json(args.input)
         release = LibraryRelease(args.libraries)
         options = PredictionOptions(output=self.output / "prediction", timeout=args.timeout, binary=args.binary,
                                   modeling_image=args.modeling_image, control_image=args.control_image,

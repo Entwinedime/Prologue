@@ -1,18 +1,18 @@
 """Verify a serving structure against one observed native case."""
 
-import json
 from pathlib import Path
 from subprocess import CalledProcessError, TimeoutExpired
 from tempfile import TemporaryDirectory
 from time import monotonic_ns
 
+from prologue.common.io import read_json
 from prologue.host.libraries.release import LibraryRelease
 from prologue.host.runtime.docker import ModelingProcess
 from prologue.host.workflow.options import PredictionOptions
 from prologue.host.workflow.prediction import PredictionProcess
+from prologue.verification.core.source import ProductionEvidence
 from prologue.verification.runner import VerificationRun
 
-from ..core.source_evidence import ProductionEvidence
 from .compare_actions import ActionComparison
 from .execution_inputs import NativeInputs
 
@@ -33,7 +33,7 @@ class StructureVerification(VerificationRun):
             "capture": str(recording.directory), "reference": str(args.reference.resolve(strict=True)),
             "libraries": str(args.libraries.resolve()), "wall_ns": wall_ns,
         }
-        source = json.loads(args.input.read_text())
+        source = read_json(args.input)
         if self.input_mismatch(source):
             return self.finish("input_mismatch")
         prediction = self.output / "prediction"

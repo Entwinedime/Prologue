@@ -1,16 +1,14 @@
 """Find the first batch decision affected by autonomous execution."""
 
-import json
 from collections import defaultdict
 from itertools import zip_longest
 
 from prologue.common.io import write_json
-
-from ..core.actions import ActionIdentity
-from ..core.context_values import ContextValues
-from ..core.ingress import IngressEvidence
-from ..core.native_case import NativeCase
-from ..core.reference import ReferenceRecording
+from prologue.verification.core import ReferenceRecording
+from prologue.verification.core.actions import ActionIdentity
+from prologue.verification.core.protocol import IngressEvidence
+from prologue.verification.core.source import NativeCase
+from prologue.verification.engine import TraceReader
 
 
 class ScheduleComparison:
@@ -54,46 +52,38 @@ class ScheduleComparison:
                     )
 
     def observe_prediction(self, trace):
-        contexts, pending = ContextValues(), {}
+        pending = {}
         requests = sorted(self.reference.submissions[0].requests.values(), key=lambda request: request["arrival_ns"])
-        complete = False
-        with trace.open("rb") as stream:
-            for line in stream:
-                if not line.endswith(b"\n"):
-                    break
-                row = json.loads(line)
-                kind = row["kind"]
-                complete = kind == "end"
-                if kind == "context_value":
-                    contexts.declare(row)
-                elif kind == "resources":
-                    if row["requests"] != requests:
-                        raise ValueError("autonomous trace has different workload requests")
-                    self.ingress.observe(row)
-                elif kind == "input_read":
-                    row["identity"] = contexts.decode(row["identity"])
-                    self.ingress.observe(row)
-                elif kind == "graph":
-                    scope = row["graph"]["scopes"][0]
-                    if scope["role"] != "run_batch":
-                        continue
-                    work = contexts.decode(scope["work"])
-                    group = self.reference.groups[work["rank"]]
-                    stamp = {**self.decision(work, None, None), "submitted_ns": row["time_ns"]}
-                    self.predicted[group].append(stamp)
-                    ports = {port["name"]: row["event_ids"][port["event"]] for port in scope["ports"]}
-                    pending[ports["call.enter"]] = stamp, "entered_ns"
-                    pending[ports["call.return"]] = stamp, "returned_ns"
-                elif kind == "completion" and row["event"] in pending:
-                    stamp, boundary = pending.pop(row["event"])
-                    stamp[boundary] = row["time_ns"]
-                elif kind == "resource" and row["capacity_increased"]:
-                    op = row["operation"]
-                    self.predicted_releases[row["group"]].append({"operation": op["kind"], "request": op.get("request"),
-                                                                 "time_ns": row["time_ns"]})
-        if complete and pending:
+        reader = TraceReader(trace)
+        for row in reader:
+            kind = row["kind"]
+            if kind == "resources":
+                if row["requests"] != requests:
+                    raise ValueError("autonomous trace has different workload requests")
+                self.ingress.observe(row)
+            elif kind == "input_read":
+                self.ingress.observe(row)
+            elif kind == "graph":
+                scope = row["graph"]["scopes"][0]
+                if scope["role"] != "run_batch":
+                    continue
+                work = scope["work"]
+                group = self.reference.groups[work["rank"]]
+                stamp = {**self.decision(work, None, None), "submitted_ns": row["time_ns"]}
+                self.predicted[group].append(stamp)
+                ports = {port["name"]: row["event_ids"][port["event"]] for port in scope["ports"]}
+                pending[ports["call.enter"]] = stamp, "entered_ns"
+                pending[ports["call.return"]] = stamp, "returned_ns"
+            elif kind == "completion" and row["event"] in pending:
+                stamp, boundary = pending.pop(row["event"])
+                stamp[boundary] = row["time_ns"]
+            elif kind == "resource" and row["capacity_increased"]:
+                op = row["operation"]
+                self.predicted_releases[row["group"]].append({"operation": op["kind"], "request": op.get("request"),
+                                                             "time_ns": row["time_ns"]})
+        if reader.complete and pending:
             raise ValueError("complete execution omitted a batch return")
-        return complete
+        return reader.complete
 
     @staticmethod
     def preceding(rows, stamp):

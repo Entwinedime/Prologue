@@ -3,10 +3,12 @@
 
 from prologue.common.io import read_json, write_json
 from prologue.host.workflow.latency import RequestLatency, percentile95
-
-from ..core.metrics import compare_request_metrics
-from ..core.publications import publication_marks
-from ..core.reference import RecordedSubmissions, ReferenceRecording
+from prologue.verification.core import (
+    RecordedSubmissions,
+    ReferenceRecording,
+    compare_request_metrics,
+    publication_marks,
+)
 
 
 class NativeLatencyMetrics:

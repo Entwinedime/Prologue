@@ -208,3 +208,13 @@
 **验证**　独立核验 `1aa58f2:src` 树哈希为 `f9d5c9ec461a2814fa361dec09b6ec290908765f`（与 R09 获批树完全一致）；`934c46f` 将 `sglang/acquisition/` 由 22f / 2,647 NE 收至 4f / 2,096 NE（净减 551 NE；含宿主链 R10 共 −554 NE，其中逻辑非导入 −441 NE；`>120` 列 0 行、分号 0 处、9 条规则全注册、仅合并 3 条重复 `raise` 且新增 1 条操作数检查、118/118 `require` 保留）；M4 较 M3 累计 −69f / −1,056 NE，`frameworks/sglang/` 达成 36f / 11,805 NE，6 个动态入口全存，0 处 `platforms.ascend`/`torch.npu`/`sglang.srt.` 越层，162 模块 AST 0 环 0 缺失导入，`ruff` 0 错误、活动源码 0 `.pyc`；[acceptance.json](../../../data/topology-extensibility-slimming/m4/acceptance.json) 全部 22 份证据 SHA-256 验真 0 误差；R10 单卡实采 16.68s/600s、后处理 59.73s/420s、峰值 30.3 MiB/6 GiB，增量发布与自主预测闭环通过，离线四目标 211,290 轨迹、678 样本拟合、43,276 固定图成本及 58 份集合发布资产逐字节一致；修订后窗口文档 0 跨层引用与 0 断链。
 
 **结论与限制**　M4 验收通过，准予立即进入 M5（R11–R13）。M5 严守 SymPy 有理数时钟认证、训练来源隔离、动作因果锚点、PD/CPU 协议前提、固定图重算与自主评分红线，在 R13 完成全链路真机闭环终验与 DoD 核验后停在终审点，不自行关窗。
+
+## 2026-11-26 — R11 共用验证内核与来源对照
+
+**范围**　复用 TP1、TP2、TP8、PD、宿主与传输录制，以及 M3、M4 真机留存的分轮与并发录制，共 11 组。每组用基线 `b500cbe` 与冻结的 R11 源码各执行一次 `verify source` 和 `verify inputs`。
+
+**改动**　共用内核统一问题计数和限量留样、轨迹解码、因果路径及报告生成。来源核验按原生坐标比较每个调用的端口、形状、条件、状态访问和边。状态核验直接维护每行的分配历史与所有者。核心目录从 21 个文件、6,015 个非空行收至 8 个、5,427 行。计入新内核及调用方后，全仓 Python 净减 12 个文件、294 个非空行，其中导入减少 25 行，其他内容减少 269 行。[规模明细](../../../data/topology-extensibility-slimming/m5/r11/source-measurements.json)
+
+**验证**　22 项对照的退出码、资格、计数与输入核验结论一致。成功提取的条件文件逐字节一致。对来源报告只归一计时示例的字段层次，逐项核对端点、时间与原始工作身份。Ruff 通过，150 个活动 Python 模块的导入无环、无缺失，验证边界检查通过。SciPy 候选基与 SymPy 有理数认证涉及的四个时钟类，其规范化 AST 与原版逐一相同。[对照明细](../../../data/topology-extensibility-slimming/m5/r11/source-comparison.json) · [守卫和边界](../../../data/topology-extensibility-slimming/m5/r11/guards-and-boundaries.json)
+
+**结论与限制**　R11 交付。TP8 与宿主/传输录制保留原有的资格限制，分轮 PD 只具备本地 worker 证据。首轮冻结副本缺少共享成本目录，已保留启动失败记录；补齐原目录并核对摘要后重新执行。此次离线对照新增物理卡时为零。M5 剩余三条路径的重构和最终真机验收。[证据清单](../../../data/topology-extensibility-slimming/m5/r11/acceptance.json)

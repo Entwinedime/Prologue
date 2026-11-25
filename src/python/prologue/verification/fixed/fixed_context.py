@@ -8,8 +8,8 @@ from itertools import pairwise
 
 from prologue.common.observation import ThreadService
 from prologue.verification.core.adapters import platform_evidence
+from prologue.verification.core.protocol import IngressEvidence
 
-from ..core.ingress import IngressEvidence
 from .host_queues import HostQueueEvidence
 
 

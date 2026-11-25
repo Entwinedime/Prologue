@@ -2,7 +2,8 @@
 
 from collections import Counter, defaultdict
 
-from ..core.actions import ActionIdentity
+from prologue.verification.core.actions import ActionIdentity
+from prologue.verification.engine import FindingLedger
 
 
 class StateValueComparison:
@@ -12,7 +13,7 @@ class StateValueComparison:
         self.predicted = defaultdict(list)
         self.returns = {}
         self.continuations = {}
-        self.findings = []
+        self.findings = FindingLedger()
         self.counts = {}
 
     @staticmethod
@@ -120,26 +121,22 @@ class StateValueComparison:
         counts = Counter()
         for origin, observed in (("native", self.native), ("predicted", self.predicted)):
             for key in observed.keys() - endpoints:
-                self.findings.append(
-                    (
+                self.findings.add(
                         "state_payload",
                         {"group": key[0], "request": key[1]},
                         {"origin": origin, "reason": "unexpected payload endpoint"},
                     )
-                )
             for group, request, operation in endpoints:
                 records = observed[group, request, operation]
                 if len(records) != 1:
                     counts[f"{origin}_unpaired"] += 1
                     continue
                 if records[0]["values"] is None:
-                    self.findings.append(
-                        (
+                    self.findings.add(
                             "state_payload",
                             {"group": group, "request": request},
                             {"origin": origin, "reason": "native metadata consumption did not commit a token"},
                         )
-                    )
 
             for (group, request), senders in requirements.items():
                 if (group, request) in senders:
@@ -156,9 +153,9 @@ class StateValueComparison:
                         continue
                     counts[f"{origin}_transfers_checked"] += 1
                     if written[0] != received[0]:
-                        self.findings.append(("state_payload", {"group": group, "request": request}, {
+                        self.findings.add("state_payload", {"group": group, "request": request}, {
                             "origin": origin, "sender": sender, "written": written[0], "consumed": received[0],
-                        }))
+                        })
                     else:
                         counts[f"{origin}_transfers_matched"] += 1
 
@@ -168,9 +165,9 @@ class StateValueComparison:
             if len(native) == len(predicted) == 1:
                 counts["endpoints_compared"] += 1
                 if native[0]["values"] != predicted[0]["values"]:
-                    self.findings.append(("state_payload", {"group": key[0], "request": key[1]}, {
+                    self.findings.add("state_payload", {"group": key[0], "request": key[1]}, {
                         "operation": key[2], "native": native[0]["values"], "predicted": predicted[0]["values"],
-                    }))
+                    })
                 else:
                     counts["endpoints_matched"] += 1
         self.counts = {

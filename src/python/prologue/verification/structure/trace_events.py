@@ -1,14 +1,11 @@
 """Decode complete trace records and dispatch them to the owners of each evidence check."""
 
-import json
 from collections import Counter
 
-from ..core.actions import QueryResults
-from ..core.contents import GraphContents
-from ..core.context_values import ContextValues
-from ..core.dependencies import CausalGraph
-from ..core.ingress import IngressEvidence
-from ..core.protocol_reads import PdPollingEvidence, PdPredictionEvidence
+from prologue.verification.core.actions import GraphContents, QueryResults
+from prologue.verification.core.protocol import IngressEvidence, PdPollingEvidence, PdPredictionEvidence
+from prologue.verification.engine import CausalIndex, TraceReader
+
 from .execution_inputs import ConsumedInputs
 from .execution_times import ExecutionTimes
 from .state_values import ActionResults, StateValueComparison
@@ -37,7 +34,7 @@ class PredictionEvents:
                         continue
                     index = source.source_ids[query["scope"]]
                     self.native_reads[self.case.groups[rank], index] = query["result"], identities[index]
-        self.predicted_dependencies = {rank: CausalGraph() for rank in self.case.sources}
+        self.predicted_dependencies = {rank: CausalIndex() for rank in self.case.sources}
         self.condition_inputs = ConsumedInputs(case, self.ingress, comparison.realization,
             peer_handoffs=comparison.peer_handoffs)
         self.queries = QueryResults()
@@ -46,32 +43,17 @@ class PredictionEvents:
         self.protocol = PdPredictionEvidence(self.case.protocol, self.case.readiness, self.ingress.origin_ns)
 
     def read(self, execution):
-        contexts = ContextValues()
-        with execution.open("rb") as stream:
-            for line in stream:
-                if not line.endswith(b"\n"):
-                    # The writer may be killed mid-record; only terminated records belong to the available prefix.
-                    self.ended = False
-                    break
-                row = json.loads(line)
-                kind = row["kind"]
-                self.ended = kind == "end"
-                if kind == "context_value":
-                    contexts.declare(row)
-                    continue
-                if kind == "graph":
-                    for scope in row["graph"]["scopes"]:
-                        scope["work"] = contexts.decode(scope["work"])
-                elif kind == "input_read":
-                    row["identity"] = contexts.decode(row["identity"])
-                self.dispatch(row)
+        trace = TraceReader(execution)
+        for row in trace:
+            self.dispatch(row)
+        self.ended = trace.complete
 
     def dispatch(self, row):
         kind = row["kind"]
         self.condition_inputs.observe(row)
         if kind == "rejected_layout":
             self.rejected = self.comparison.rejected_action(row, self.condition_inputs)
-            self.comparison.counts["measured_layout_difference"] += 1
+            self.comparison.issues.counts["measured_layout_difference"] += 1
             return
         self.execution_times.observe(row)
         self.stream_synchronization.observe(row)
@@ -150,9 +132,9 @@ class PredictionEvents:
 
     def check_completion(self):
         if not self.ended:
-            self.comparison.finding("incomplete_execution", {}, {})
+            self.comparison.issues.add("incomplete_execution", {}, {})
         if len(self.completed) != len(self.event_ranks):
-            self.comparison.finding("unfinished_events", {}, {"events": len(self.event_ranks) - len(self.completed)})
+            self.comparison.issues.add("unfinished_events", {}, {"events": len(self.event_ranks) - len(self.completed)})
         # Dynamic waits and state hazards are recorded after graph insertion; compare only after reading the whole
         # execution.
         for graph in self.predicted_dependencies.values():
@@ -185,7 +167,7 @@ class PredictionEvents:
             actual = self.queries.results[pairs[key]]
             query_counts["compared"] += 1
             if actual != result:
-                self.comparison.finding("query_outcome", identity,
+                self.comparison.issues.add("query_outcome", identity,
                     {"native_scope": key[1], "predicted_event": pairs[key][1],
                                                         "native": result, "predicted": actual})
             else:

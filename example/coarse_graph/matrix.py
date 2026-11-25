@@ -15,7 +15,7 @@ from prologue.host.registry import AdapterRegistry
 from prologue.host.runtime.docker import OwnedContainers
 from prologue.host.runtime.limits import OperationLimit
 from prologue.host.runtime.workspace import file_lock
-from prologue.verification.core.reference import ReferenceRecording
+from prologue.verification.core import ReferenceRecording
 from run import TaskCommands
 
 

@@ -2,6 +2,8 @@
 
 from collections import Counter, defaultdict
 
+from prologue.verification.engine import FindingLedger
+
 
 class StreamSynchronization:
     def __init__(self):
@@ -10,7 +12,7 @@ class StreamSynchronization:
         self.queued, self.last = defaultdict(set), {}
         self.declared, self.activated = set(), set()
         self.expected, self.actual = set(), set()
-        self.counts, self.findings = Counter(), []
+        self.counts, self.findings = Counter(), FindingLedger()
 
     def graph(self, body, events):
         incoming, finishes = defaultdict(set), defaultdict(set)
@@ -98,18 +100,18 @@ class StreamSynchronization:
     def finish(self):
         missing = self.declared - self.activated
         if missing:
-            self.findings.append(("stream_evidence", {}, {
+            self.findings.add("stream_evidence", {}, {
                 "missing_activations": len(missing), "events": sorted(missing)[:3],
                 "reason": "completion alone cannot establish command acceptance or the wait's snapshot",
-            }))
+            })
         for expected, actual, reason in (
             (self.expected, self.actual, "missing"),
             (self.actual, self.expected, "extra"),
         ):
             for activation, source, target in sorted(expected - actual):
-                self.findings.append(("stream_frontier", {"event": activation}, {
+                self.findings.add("stream_frontier", {"event": activation}, {
                     "source": source, "target": target, "reason": reason + " dependency for the actual wait snapshot",
-                }))
+                })
         return {
             **self.counts,
             "activation_points": len(self.declared),

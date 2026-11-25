@@ -1,8 +1,219 @@
-"""Check SGLang PD request/peer prerequisites using native services and actual target reads."""
+"""Verify request ingress, PD polling prerequisites and transferred KV and metadata."""
 
-from collections import defaultdict
+import json
+from collections import Counter, defaultdict
 
-from .dependencies import CausalGraph
+from prologue.verification.core.actions import ActionIdentity
+from prologue.verification.core.adapters import kv_buffers
+from prologue.verification.engine import CausalIndex, FindingLedger
+
+
+class IngressEvidence:
+    def __init__(self, instances, submissions):
+        self.sources = {instance["id"]: entry for instance, entry in zip(instances, submissions, strict=True)}
+        self.origin_ns, = {entry.origin_ns for entry in submissions}
+        self.expected = {}
+        self.actual = defaultdict(list)
+        self.input_attempts = {}
+        self.native_reads = {}
+        self.actual_reads = defaultdict(list)
+        self.received = defaultdict(set)
+        self.findings = FindingLedger()
+
+    def native(self, instance, raw):
+        if raw["request_ingress"]:
+            if instance in self.expected:
+                raise ValueError("instance has more than one observed external ingress")
+            entry = self.sources[instance]
+            self.expected[instance] = entry.receives(raw["request_ingress"])
+            self.input_attempts[instance] = self.attempts(raw)
+            self.native_reads[instance] = self.reads(instance, raw, entry.aliases, entry.origin_ns)
+
+    @staticmethod
+    def attempts(raw):
+        records = raw.get("request_input_attempts")
+        if records is None:
+            return {"status": "unobserved"}
+        received, previous_end = [], None
+        empty, unknown_context, control_only = 0, 0, 0
+        for record in records:
+            begin, end, messages = record["begin_raw_ns"], record["received_raw_ns"], record["message_count"]
+            if (any(type(value) is not int or value < 0 for value in (begin, end, messages))
+                    or begin > end or (previous_end is not None and begin < previous_end)):
+                raise ValueError("input attempts require ordered RAW intervals and nonnegative message counts")
+            previous_end = end
+            context = record["context"]
+            if context is not None and not isinstance(context, dict):
+                raise ValueError("input attempt context must be a native state snapshot or explicitly unobserved")
+            unknown_context += context is None
+            empty += messages == 0
+            control_only += messages > 0 and not record["requests"]
+            if record["requests"]:
+                if messages == 0:
+                    raise ValueError("empty input attempt cannot receive workload requests")
+                received.append({"requests": record["requests"], "received_raw_ns": end})
+        if received != raw["request_ingress"]:
+            raise ValueError("input attempts disagree with the observed external receive cohorts")
+
+        # These are read intervals, not socket availability, CPU cost, or a schedule to replay.
+        return {"status": "partial" if unknown_context else "observed", "attempts": len(records),
+                "empty": empty, "control_only": control_only, "unknown_context": unknown_context}
+
+    @staticmethod
+    def reads(instance, raw, aliases, origin_ns):
+        result, received = [], set()
+        for record in raw.get("request_input_attempts", ()):
+            members = [aliases[request] for request in record["requests"]]
+            time_ns = record["received_raw_ns"] - origin_ns
+            if time_ns < 0:
+                raise ValueError("input read return precedes the workload clock")
+
+            # Prior deliveries distinguish otherwise equal empty queues; neither the result nor poll ordinal is a key.
+            identity = None if record["context"] is None else {
+                "instance": instance, "context": record["context"], "received": sorted(received),
+            }
+            result.append({"identity": identity, "begin_ns": record["begin_raw_ns"] - origin_ns,
+                           "time_ns": time_ns, "requests": members})
+            received.update(members)
+        return result
+
+    @staticmethod
+    def idle(context):
+        queues = ("waiting", "running", "previous", "chunked")
+
+        # Placement fields may remain populated even after all request progress has drained.
+        return (context is not None and all(name in context and not context[name] for name in queues)
+                and not ActionIdentity.request_progress(context))
+
+    def readiness(self, instance):
+        submitted = self.sources[instance].by_request
+        return {request: {"submitted_ns": submitted[request]["submitted_ns"], "received_ns": read["time_ns"]}
+                for read in self.expected[instance] for request in read["requests"]}
+
+    @staticmethod
+    def groups(reads):
+        groups = defaultdict(list)
+        for row in reads:
+            if row["identity"] is not None:
+                groups[json.dumps(row["identity"], sort_keys=True)].append(row)
+        return groups
+
+    def observe(self, row):
+        if row["kind"] == "resources":
+            self.requests = [request["id"] for request in row["requests"]]
+        elif row["kind"] == "input_read":
+            identity = row["identity"]
+            instance = identity["instance"]
+            if instance not in self.sources:
+                raise ValueError("ingress names an unknown serving instance")
+            indices = row["request_indices"]
+            if any(type(index) is not int or not 0 <= index < len(self.requests) for index in indices):
+                raise ValueError("ingress has an invalid request index")
+            members = [self.requests[index] for index in indices]
+            previous = self.actual_reads[instance]
+            in_flow = row["in_flow"]
+            if (type(in_flow) is not bool or (members and not in_flow)
+                    or not isinstance(identity["context"], dict)
+                        or identity["received"] != sorted(self.received[instance])
+                    or len(set(members)) != len(members) or self.received[instance].intersection(members)
+                    or type(row["time_ns"]) is not int or row["time_ns"] < 0
+                    or (previous and row["time_ns"] < previous[-1]["time_ns"])):
+                raise ValueError("input read disagrees with its entering delivery history or clock")
+            observed = {"requests": members, "time_ns": row["time_ns"]}
+            previous.append({"identity": identity, "in_flow": in_flow,
+                "poll_deadline_ns": row.get("poll_deadline_ns"), **observed})
+            self.received[instance].update(members)
+            if members:
+                self.actual[instance].append(observed)
+
+    def compare_reads(self, instance, pairs):
+        reads = [row for row in self.actual_reads[instance] if row["in_flow"]]
+        outside = len(self.actual_reads[instance]) - len(reads)
+        if self.input_attempts[instance]["status"] == "unobserved":
+            self.findings.add("input_read_evidence", {"instance": instance},
+                {"reason": "native input attempts were not recorded"})
+            return {"status": "unobserved", "predicted_reads": len(reads), "outside_flow": outside}
+        if pairs is None:
+            native, actual = self.groups(self.native_reads[instance]), self.groups(reads)
+        else:
+
+            # A separately checked consumed prefix can identify otherwise repeatable reads.
+            native = {str(index): [row] for index, row in enumerate(self.native_reads[instance])}
+            actual = {str(source): [self.actual_reads[instance][index]] for index, source in pairs.items()}
+        matched, ambiguous, unmatched_native, unmatched_predicted, differences = 0, 0, 0, 0, []
+        for key in sorted(native.keys() | actual.keys()):
+            left, right = native.get(key, []), actual.get(key, [])
+            reason = None
+            if not left:
+                unmatched_predicted += len(right)
+                reason = "no native read with this entering context and delivery history"
+            elif not right:
+                unmatched_native += len(left)
+                reason = "no predicted read with this entering context and delivery history"
+            elif len(left) != 1 or len(right) != 1:
+                ambiguous += 1
+                reason = "logical read identity repeats"
+            elif pairs is None and not left[0]["requests"]:
+                ambiguous += 1
+                reason = "read returns no workload requests and may repeat"
+            elif pairs is None and not ActionIdentity.request_progress(left[0]["identity"]["context"]):
+                ambiguous += 1
+                reason = "entering context has no request work anchor for an exact read time"
+            elif (left[0]["identity"] == right[0]["identity"] and left[0]["time_ns"] == right[0]["time_ns"]
+                  and left[0]["requests"] == right[0]["requests"]):
+                matched += 1
+            else:
+                differences.append({"identity": left[0]["identity"], "native": left[0], "predicted": right[0]})
+
+            # Explain incomplete correspondence without treating an unmatched read as a proven control error.
+            if reason is not None:
+                self.findings.add("input_read_evidence", json.loads(key), {
+                    "reason": reason, "native_calls": len(left), "predicted_calls": len(right),
+                })
+        unknown = sum(row["identity"] is None for row in self.native_reads[instance])
+        if unknown:
+            self.findings.add("input_read_evidence", {"instance": instance}, {
+                "reason": "native entering context was not observed", "native_calls": unknown,
+            })
+        incomplete = ambiguous or unmatched_native or unmatched_predicted or unknown
+        return {"status": "different" if differences else "partial" if incomplete else "matched", "matched": matched,
+                "outside_flow": outside,
+                "ambiguous": ambiguous, "unmatched_native": unmatched_native,
+                    "unmatched_predicted": unmatched_predicted,
+                "unknown_native_context": unknown, "differences": differences}
+
+    def compare(self, read_pairs=None, *, complete):
+        results = {}
+        for instance in sorted(self.sources.keys() | self.actual.keys()):
+            native, actual = self.expected.get(instance), self.actual[instance]
+            if native is None:
+                results[instance] = {"status": "missing_native_evidence"}
+                continue
+
+            # A stopped run has not reached later delivery rounds; compare only its observed prefix.
+            expected = native if complete else native[:len(actual)]
+
+            # Time is paired only after request identities and receive cohorts agree, never by round number alone.
+            cohorts = [row["requests"] for row in expected] == [row["requests"] for row in actual]
+            differences = []
+            if cohorts:
+                for left, right in zip(expected, actual, strict=True):
+                    if left["time_ns"] != right["time_ns"]:
+                        differences.append({"requests": left["requests"], "native_ns": left["time_ns"],
+                                            "predicted_ns": right["time_ns"],
+                                                "delta_ns": right["time_ns"] - left["time_ns"]})
+            results[instance] = {"status": "matched" if cohorts and not differences else "different",
+                "cohorts_match": cohorts,
+                                 "comparison_scope": "complete_history" if complete else "observed_prefix",
+                                 "native_rounds": len(native), "predicted_rounds": len(actual),
+                                     "time_differences": differences,
+                                 "native_input_attempts": self.input_attempts[instance],
+                                 "input_reads": self.compare_reads(instance, None
+                                     if read_pairs is None else read_pairs[instance])}
+            if not cohorts:
+                results[instance].update(native_cohorts=[row["requests"] for row in native],
+                                         predicted_cohorts=[row["requests"] for row in actual])
+        return results
 
 
 class PdStateEvidence:
@@ -300,48 +511,28 @@ class PdStateEvidence:
                     field: first[field] for field in ("scope", "begin_raw_ns", "end_raw_ns")
                 },
             })
-        return {
+        def missing_receipts(actual):
+            return [{"publisher": sender, "request": request, "recipient": recipient}
+                    for sender, request, recipient in sorted(required_publications - actual)]
+
+        result = {
             "status": "observed_bounds_consistent" if endpoints else "not_applicable",
-            "endpoints": endpoints,
-            "reservations": publications,
-            "reservation_receipts": receipts,
+            "endpoints": endpoints, "reservations": publications, "reservation_receipts": receipts,
             "unobserved_transfer_peers": unobserved_peers,
-            "missing_publications": [
-                {"publisher": publisher, "request": request, "recipient": recipient}
-                for publisher, request, recipient in sorted(required_publications - published.keys())
-            ],
-            "missing_reservation_receipts": [
-                {"publisher": publisher, "request": request, "recipient": recipient}
-                for publisher, request, recipient in sorted(required_publications - received)
-            ],
+            "missing_publications": missing_receipts(published.keys()),
+            "missing_reservation_receipts": missing_receipts(received),
             "completion_updates_checked": sum(row["completion_update"] is not None for row in endpoints),
-            "state_writes_checked": sum(len(records) for records in self.states.values()),
             "reservation_updates_checked": sum(row["reservation_update"] is not None for row in endpoints),
-            "missing_reservation_updates": [
-                {"group": row["group"], "request": row["request"]}
-                for row in endpoints
-                if row["reservation_update"] is None
-            ],
-            "missing_completion_updates": [
-                {"group": row["group"], "request": row["request"]}
-                for row in endpoints
-                if row["completion_update"] is None
-            ],
-            "missing_success_reads": [
-                {"group": row["group"], "request": row["request"]} for row in endpoints if not row["success_reads"]
-            ],
-            "scope": (
-                "Native monotonic state-write intervals constrain readiness and Success reads, independently of "
-                "polling counts. Overlapping observations and all reads must admit one monotonic transition "
-                "sequence; overlapping or same-time reads remain unordered. Read constraints do not rewrite the "
-                "reported native write intervals. Sender readiness requires remote reservations; receiver readiness "
-                "means local bootstrap initialization, not transferred data. Success additionally requires actual "
-                "service returns. Missing transitions remain explicit; no timestamp is inferred from a poll. "
-                "Observed reservation sends must cover exactly the actual native transfer peers and precede remote "
-                "readiness. Send entry is a causal lower bound, not an exact wire publication time. These bounds do "
-                "not establish exact notification arrival, metadata visibility or complete protocol qualification."
-            ),
+            "state_writes_checked": sum(map(len, self.states.values())),
+            "scope": "Recorded reservations, monotonic state-write intervals and service-return prerequisites.",
         }
+        gaps = (("reservation_update", "missing_reservation_updates", None),
+                ("completion_update", "missing_completion_updates", None),
+                ("success_reads", "missing_success_reads", 0))
+        for field, missing, absent in gaps:
+            result[missing] = [{"group": row["group"], "request": row["request"]}
+                               for row in endpoints if row[field] == absent]
+        return result
 
 
 class PdPollingEvidence:
@@ -358,7 +549,7 @@ class PdPollingEvidence:
         self.checked, self.unobserved = 0, 0
         self.operand_differences = 0
         self.unobserved_commits, self.commit_differences = 0, 0
-        self.findings = []
+        self.findings = FindingLedger()
 
     @staticmethod
     def in_gate(work):
@@ -417,11 +608,11 @@ class PdPollingEvidence:
         if values["input"] != expected:
             self.operand_differences += 1
             category = "native_evidence" if origin == "native" else "polling_operands"
-            self.findings.append((category, {"group": group}, {
+            self.findings.add(category, {"group": group}, {
                 "reason": "PD MIN operands differ from the current reads or preceding group reduction",
                 "origin": origin, "boundary": boundary, "requests": requests,
                 "expected": expected, "actual": values["input"],
-            }))
+            })
 
     def commit(self, group, request, origin, boundary):
         if len(self.members[group]) == 1:
@@ -435,10 +626,10 @@ class PdPollingEvidence:
         self.commits += 1
         if request not in ready:
             self.commit_differences += 1
-            self.findings.append(("native_evidence" if origin == "native" else "admission_decision", {"group": group}, {
+            self.findings.add("native_evidence" if origin == "native" else "admission_decision", {"group": group}, {
                 "reason": "Decode commit does not consume a current unconsumed successful gate result",
                 "origin": origin, "boundary": boundary, "request": request,
-            }))
+            })
         else:
 
             # A successful result admits this request once; a later receive call must obtain a fresh decision.
@@ -737,7 +928,7 @@ class PdPredictionEvidence:
         if not effects:
             return
         sender = groups[root["work"]["rank"]]
-        dependencies = CausalGraph.observed(graph)
+        dependencies = CausalIndex.observed(graph)
         exported = set()
         for port in root["ports"]:
             if port["use"] != "signal" or port["direction"] != "output":
@@ -786,3 +977,310 @@ class PdPredictionEvidence:
                 "observations; overlapping intervals only qualify the causal order they establish."
             ),
         }
+
+
+class PdPayloadEvidence:
+    def __init__(self, registrations, sessions, pools):
+        self.registrations = registrations
+        self.groups, self.pools = sessions, pools
+        self.sessions = {group: session for session, group in sessions.items()}
+        self.buffers = {}
+        for session, recording in registrations.items():
+            self.buffers[session] = kv_buffers(recording)
+        self.findings, self.counts = FindingLedger(), Counter()
+
+    def ownership(self, contents, parent, call, source, target):
+        graph = contents.graph
+        scope = graph["scopes"][contents.source_ids[parent["id"]]]
+        entered, = [port["event"] for port in scope["ports"] if port["name"] == "call.enter"]
+        begin = graph["evidence"]["events"][entered]["time_ns"]
+        end = call["host_interval"]["end_raw_ns"]
+        if graph["evidence"]["clock"] != "monotonic_raw_ns" or begin is None or end < begin:
+            raise ValueError("native PD ownership has no common ordered host interval")
+        member, = parent["work"]["members"]
+        request, chunk = member["id"], parent["native_kv_chunk"]
+        transfer = call["native_transfer"]
+
+        # A table slot is required at enqueue only. Copies subsequently retain pages and metadata rows independently.
+        checks = [(source, "request", chunk.get("request_slot"), (begin, begin))]
+        if transfer["kind"] == "metadata":
+            checks.extend((session, "metadata", transfer[f"{side}_index"], (begin, end))
+                          for session, side in ((source, "source"), (target, "target")))
+        for session, field, slot, window in checks:
+            pool = self.pools.get(self.groups[session])
+            if pool is None or slot is None or not pool.owns(field, slot, request, window):
+                self.findings.add("binding_evidence", {"group": self.groups[session], "scope": parent["id"]}, {
+                    "request": request, "field": field, "slot": slot,
+                    "reason": "no measured ownership interval covers the enqueue or retained native transfer",
+                })
+            else:
+                self.counts[f"{field}_ownership_checked"] += 1
+
+        if transfer["kind"] != "kv":
+            return
+        for session, side in ((source, "source"), (target, "target")):
+            pool = self.pools.get(self.groups[session])
+            ranges = [] if pool is None else [[page - 1, 0, pool.page_size] for page in transfer[f"{side}_pages"]]
+            binding = {"slot": None, "begin": 0, "ranges": ranges}
+            if pool is None or pool.resolve(binding, (begin, end), graph["evidence"]["clock"]) is None:
+                self.findings.add("binding_evidence", {"group": self.groups[session], "scope": parent["id"]}, {
+                    "request": request, "reason": "a native transfer page has no release-free enqueue-to-copy interval",
+                })
+            else:
+                self.counts["queued_page_intervals_checked"] += len(binding["ranges"])
+
+    @staticmethod
+    def coverage(rectangles):
+        changes = defaultdict(list)
+        for begin, end, first, last in rectangles:
+            if not begin < end or not first < last:
+                raise ValueError("PD payload contains an empty or reversed byte rectangle")
+            changes[begin].append(((first, last), 1))
+            changes[end].append(((first, last), -1))
+        active, result, previous = Counter(), [], None
+        for position, events in sorted(changes.items()):
+            if active and previous < position:
+                columns = []
+                for first, last in sorted(active):
+                    if columns and first <= columns[-1][1]:
+                        columns[-1][1] = max(columns[-1][1], last)
+                    else:
+                        columns.append([first, last])
+                if result and result[-1][1] == previous and result[-1][2] == columns:
+                    result[-1][1] = position
+                else:
+                    result.append([previous, position, columns])
+            for column, delta in events:
+                active[column] += delta
+                if not active[column]:
+                    del active[column]
+            previous = position
+        return result
+
+    def page_map(self, transfer, member, source, target, maps):
+        source_pages, target_pages = transfer["source_pages"], transfer["target_pages"]
+        if len(source_pages) != len(target_pages):
+            raise ValueError("native PD endpoints have different page counts")
+        if self.buffers[source].page_size != self.buffers[target].page_size:
+            raise ValueError("native PD endpoints have different page sizes")
+        if source_pages and not transfer["blocks"]:
+            raise ValueError("native PD pages have no recorded copy payload")
+        for session, pages in ((source, source_pages), (target, target_pages)):
+            size = self.buffers[session].page_size
+            begin, count = member["context_tokens"], member["new_tokens"]
+            if begin % size or len(set(pages)) != len(pages) or len(pages) != (count + size - 1) // size:
+                raise ValueError("native PD page list differs from its captured page-aligned chunk")
+            positions = maps[session, member["id"]]
+            for index, page in enumerate(pages):
+                logical = begin + index * size
+                value = page * size, min(size, begin + count - logical)
+                if positions.setdefault(logical, value) != value:
+                    raise ValueError("one native PD chunk maps a logical page to competing physical pages")
+
+    def raw_kv(self, transfer, member, source, target, footprints):
+        misrouted = Counter()
+        for first, last, length in transfer["blocks"]:
+            endpoints = []
+            for session, mode, address, pages in ((source, "read", first, transfer["source_pages"]),
+                                                   (target, "write", last, transfer["target_pages"])):
+                buffers = self.buffers[session]
+                layout, size = buffers.layout, buffers.page_size
+                candidates = [
+                    index
+                    for index, (start, count) in enumerate(zip(buffers.starts, buffers.lengths, strict=True))
+                    if start <= address and address + length <= start + count
+                ]
+                if length <= 0 or len(candidates) != 1:
+                    raise ValueError("native PD bytes do not lie in one registered buffer")
+
+                buffer, = candidates
+                layers = layout.end_layer - layout.start_layer
+                width = layout.key_token_bytes if buffer < layers else layout.value_token_bytes
+                component = 0 if buffer < layers else layout.key_token_bytes
+                layer = layout.start_layer + buffer % layers
+                endpoints.append((layer, "key" if buffer < layers else "value"))
+                offset, covered = address - buffers.starts[buffer], 0
+                output = footprints[session, mode, layer, member["id"]]
+                for index, page in enumerate(pages):
+                    begin, end = max(offset, page * size * width), min(offset + length, (page + 1) * size * width)
+                    covered += max(0, end - begin)
+
+                    # Check raw byte intersections independently of the producer's address-to-region decoder.
+                    valid_tokens = max(0, min(size, member["new_tokens"] - index * size))
+                    end = min(end, (page * size + valid_tokens) * width)
+                    if begin >= end:
+                        continue
+
+                    head, tail = begin // width, (end - 1) // width
+                    if head == tail:
+                        output.append((head, head + 1, component + begin % width, component + (end - 1) % width + 1))
+                    else:
+                        output.append((head, head + 1, component + begin % width, component + width))
+                        if head + 1 < tail:
+                            output.append((head + 1, tail, component, component + width))
+                        output.append((tail, tail + 1, component, component + (end - 1) % width + 1))
+                if covered != length:
+                    raise ValueError("native PD bytes escape the chunk's actual physical pages")
+
+            # TP changes head slices, while a model layer's K/V identity must survive the copy.
+            if endpoints[0] != endpoints[1]:
+                misrouted[tuple(endpoints)] += 1
+            self.counts["recorded_kv_bytes"] += length
+        return misrouted
+
+    def metadata(self, transfer, parent, source, target):
+        member, = parent["work"]["members"]
+        chunk = parent["native_kv_chunk"]
+        if (transfer["room"], transfer["source_index"]) != (chunk["room"], chunk["metadata_index"]) or parent[
+            "parameters"
+        ]["last_chunk"] != 1:
+            raise ValueError("native metadata transfer differs from its final submitted chunk")
+        rows = []
+        for session, index in ((source, transfer["source_index"]), (target, transfer["target_index"])):
+            metadata = self.registrations[session]["registration"]["metadata"]
+            if metadata["reservations"][str(transfer["room"])] != {"request": member["id"], "index": index}:
+                raise ValueError("native metadata row differs from its request reservation")
+            rows.append(
+                [
+                    (pointer + index * width, width)
+                    for pointer, width in zip(metadata["pointers"], metadata["row_bytes"], strict=True)
+                ]
+            )
+            if any(width <= 0 or length % width or not 0 <= index < length // width
+                   for length, width in zip(metadata["lengths"], metadata["row_bytes"], strict=True)):
+                raise ValueError("native metadata row escapes its registered buffer")
+        if not rows[0] or [width for _, width in rows[0]] != [width for _, width in rows[1]]:
+            raise ValueError("native metadata endpoints have incompatible row layouts")
+        copied = defaultdict(list)
+        for source_address, target_address, length in transfer["blocks"]:
+            matches = [
+                (index, source_address - first)
+                for index, ((first, width), (last, _)) in enumerate(zip(*rows, strict=True))
+                if first <= source_address
+                and source_address + length <= first + width
+                and target_address - last == source_address - first
+            ]
+            if len(matches) != 1 or length <= 0:
+                raise ValueError("native metadata copy changes its field or row offset")
+            index, offset = matches[0]
+            copied[index].append((0, 1, offset, offset + length))
+            self.counts["recorded_metadata_bytes"] += length
+        if any(self.coverage(copied[index]) != [[0, 1, [[0, width]]]] for index, (_, width) in enumerate(rows[0])):
+            raise ValueError("native metadata bytes omit a registered request field")
+        self.counts["metadata_transfers"] += 1
+        return {
+            (source, "read", "metadata", member["id"], None),
+            (target, "write", "metadata", member["id"], "first-token"),
+        }
+
+    def inspect(self, contents, raw, group, dependencies):
+        writers = defaultdict(list)
+        for original in raw["scopes"]:
+            for access in original.get("state_accesses", []):
+                if (access["pool"], access.get("field"), access["access"]) == ("local", "metadata", "write"):
+                    for request in access["requests"]:
+                        writers[request].append(original["id"])
+
+        for index, scope in enumerate(contents.graph["scopes"]):
+            calls = [
+                raw["scopes"][origin]
+                for origin in scope["bindings"]["source_scopes"]
+                if "native_transfer" in raw["scopes"][origin]
+            ]
+            if not calls:
+                continue
+            native, declared = defaultdict(list), defaultdict(list)
+            maps, slots = defaultdict(dict), set()
+            for call in calls:
+                transfer = call["native_transfer"]
+                parent = raw["scopes"][call["submitted_by"]]
+                member, = parent["work"]["members"]
+                source, target = raw["kv_session"], transfer["session"]
+                self.ownership(contents, parent, call, source, target)
+                if transfer["kind"] == "metadata":
+                    slots.update(self.metadata(transfer, parent, source, target))
+                    origin, = writers[member["id"]]
+                    producer = contents.graph["scopes"][contents.source_ids[origin]]
+                    written, = [access["finish"] for access in producer["slot_accesses"]
+                                if (access["pool"], access["field"], access["access"]) == ("local", "metadata", "write")
+                                and member["id"] in access["requests"]]
+                    consumed, = [access["start"] for access in scope["slot_accesses"]
+                                 if access["pool"] == "local" and access["access"] == "read"]
+
+                    # The original field write and registered copy row establish content origin, independently of
+                    # prediction.
+                    if not dependencies.reaches(written, consumed):
+                        raise ValueError("native metadata copy loses its observed first-token producer")
+                    self.counts["metadata_producers_checked"] += 1
+                elif transfer["kind"] == "kv":
+                    if transfer["source_pages"] != parent["native_kv_chunk"]["source_pages"]:
+                        raise ValueError("native KV bytes differ from their enqueued source pages")
+                    self.page_map(transfer, member, source, target, maps)
+                    misrouted = self.raw_kv(transfer, member, source, target, native)
+                    if misrouted:
+                        self.findings.add("native_pd_payload", {"group": group, "scope": index}, {
+                            "reason": "native KV copy changes the model layer or K/V component",
+                            "request": member["id"], "misrouted_blocks": sum(misrouted.values()),
+                            "routes": [{"source": first, "target": last, "blocks": count}
+                                       for (first, last), count in sorted(misrouted.items())],
+                        })
+                    self.counts["kv_transfers"] += 1
+                else:
+                    raise ValueError("native PD transfer has an unknown payload kind")
+
+            for access in scope["kv_accesses"]:
+                session = self.sessions[contents.pool(access["pool"], group)]
+                layout = self.buffers[session].layout
+                interval = access["slice"]
+                if (not layout.start_layer <= access["layer"] < layout.end_layer
+                        or interval["token_bytes"] != layout.key_token_bytes + layout.value_token_bytes
+                        or not 0 <= interval["begin"] < interval["end"] <= interval["token_bytes"]):
+                    raise ValueError("declared PD access changes its registered layer/byte layout")
+                for region in access["regions"]:
+                    covered = 0
+                    for logical, (physical, count) in maps[session, region["request"]].items():
+                        begin, end = max(logical, region["begin"]), min(logical + count, region["end"])
+                        if begin < end:
+                            declared[session, access["access"], access["layer"], region["request"]].append(
+                                (
+                                    physical + begin - logical,
+                                    physical + end - logical,
+                                    interval["begin"],
+                                    interval["end"],
+                                )
+                            )
+                            covered += end - begin
+                    if covered != region["end"] - region["begin"]:
+                        raise ValueError("declared PD access escapes its native request/page mapping")
+
+            for access in scope["slot_accesses"]:
+                if (
+                    access["members"] != f"metadata/{access['access']}"
+                    or scope["work"][access["members"]] != access["requests"]
+                ):
+                    raise ValueError("declared PD metadata changes its request selector")
+            actual_slots = {
+                (
+                    self.sessions[contents.pool(access["pool"], group)],
+                    access["access"],
+                    access["field"],
+                    request,
+                    access.get("publication"),
+                )
+                for access in scope["slot_accesses"]
+                for request in access["requests"]
+            }
+            differences = [
+                key
+                for key in native.keys() | declared.keys()
+                if self.coverage(native[key]) != self.coverage(declared[key])
+            ]
+            if differences or slots != actual_slots:
+                self.findings.add("pd_payload", {"group": group, "scope": index}, {
+                    "reason": "declared PD state differs from the actual copied byte footprint or metadata rows",
+                    "kv_regions_different": len(differences), "metadata_rows_missing": len(slots - actual_slots),
+                    "metadata_rows_extra": len(actual_slots - slots),
+                })
+            self.counts["scopes_checked"] += 1
+            self.counts["kv_accesses_checked"] += len(scope["kv_accesses"])
+            self.counts["metadata_accesses_checked"] += len(scope["slot_accesses"])

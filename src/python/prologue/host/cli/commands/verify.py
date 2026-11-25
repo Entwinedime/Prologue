@@ -7,8 +7,7 @@ from prologue.host.libraries.release import LibraryRelease
 from prologue.verification.autonomous.autonomous import AutonomousVerification
 from prologue.verification.autonomous.latency_metrics import compare_publications
 from prologue.verification.autonomous.schedule import compare_schedule
-from prologue.verification.core.native_case import NativeCase
-from prologue.verification.core.source_evidence import ProductionEvidence
+from prologue.verification.core.source import NativeCase, ProductionEvidence
 from prologue.verification.fixed.fixed_graph import FixedPerformance
 from prologue.verification.structure.compare_actions import ActionComparison
 from prologue.verification.structure.execution_inputs import NativeInputs

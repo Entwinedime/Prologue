@@ -1,9 +1,10 @@
 """Compare action contents, causal boundaries and data/communication connections with a native case."""
 
-from collections import Counter
 
-from ..core.dependencies import ActionOrderComparison
-from ..core.native_case import NativeCase
+from prologue.verification.core.actions import ActionOrderComparison
+from prologue.verification.core.source import NativeCase
+from prologue.verification.engine import FindingLedger
+
 from .action_report import COMPARISON_SCOPE, write_action_report
 from .invocations import InvocationComparison
 from .local_graphs import LocalActionComparison
@@ -24,27 +25,9 @@ class ActionComparison:
         self.reference, self.execution, self.output, self.details = reference, execution, output, details
         self.realization, self.peer_handoffs = realization, peer_handoffs
         self.capture, self.graphs = reference.capture, reference.graphs
-        self.counts, self.findings = Counter(), []
+        self.issues = FindingLedger(None if details else 1)
 
-    def finding(self, category, identity, detail):
-        self.counts[category] += 1
-        if self.details or self.counts[category] == 1:
-            kind = "evidence_gap" if category in self.evidence_categories else "difference"
-            self.findings.append({"category": category, "kind": kind, "work": identity, **detail})
 
-    def outcome(self, incomplete):
-        categories = {category for category, count in self.counts.items() if count}
-        incomplete = incomplete or bool(categories & self.evidence_categories)
-
-        # Missing evidence must not hide a difference already established by another check.
-        return {
-            "status": "differences"
-            if categories - self.evidence_categories
-            else "incomplete"
-            if incomplete
-            else "actions_matched",
-            "coverage": "partial" if incomplete else "checked_scope",
-        }
 
     def rejected_action(self, row, conditions):
         group, step, graph = row["group"], row["step"], row["graph"]
@@ -91,7 +74,7 @@ class ActionComparison:
         wire, wire_differences = case.cpu.compare_wire_payloads(trace.condition_inputs.cpu_messages)
         cpu_scope["wire_payloads"] = wire
         for detail in wire_differences:
-            self.finding("cpu_wire_payload", {}, detail)
+            self.issues.add("cpu_wire_payload", {}, detail)
         order_ready = (
             case.connections.counts["native_communication_protocol_complete"]
             and case.connections.counts["predicted_communication_protocol_complete"]
@@ -100,7 +83,7 @@ class ActionComparison:
         if order_ready:
             calls.compare_boundaries(actual_graph, predicted_graph, ordering)
         else:
-            self.finding("ordering_evidence", {}, {
+            self.issues.add("ordering_evidence", {}, {
                 "reason": "all-rank causal comparison needs complete model communication and CPU protocols",
                 "native_model_protocol": case.connections.counts["native_communication_protocol_complete"],
                 "predicted_model_protocol": case.connections.counts["predicted_communication_protocol_complete"],
@@ -113,37 +96,22 @@ class ActionComparison:
     def check_effects(self, trace, calls, ordering, checked_prefix):
         case = self.reference
         stream_scope = trace.stream_synchronization.finish()
-        for category, identity, detail in (
-            *case.connections.findings,
-            *case.bindings.findings,
-            *case.bindings.lifetimes.findings,
-            *ordering.findings,
-            *case.cpu.findings,
-            *trace.stream_synchronization.findings,
-        ):
-            self.finding(category, identity, detail)
-        for category, identity, detail in case.effects.compare(complete=trace.ended):
-            self.finding(category, identity, detail)
-
-        for category, identity, detail in (
-            *trace.state_values.compare(case.protocol),
-            *trace.action_results.compare(calls.pairs),
-        ):
-            self.finding(category, identity, detail)
-        for category, identity, detail in (*trace.native_polling.findings, *trace.protocol.polling.findings):
-            self.finding(category, identity, detail)
+        self.issues.collect(case.connections.findings, case.bindings.findings, case.bindings.lifetimes.findings,
+                            ordering.findings, case.cpu.findings, trace.stream_synchronization.findings,
+                            case.effects.compare(complete=trace.ended), trace.state_values.compare(case.protocol),
+                            trace.action_results.compare(calls.pairs), trace.native_polling.findings,
+                            trace.protocol.polling.findings)
 
         input_delivery = trace.ingress.compare(
             trace.condition_inputs.input_pairs if checked_prefix else None, complete=trace.ended
         )
-        for category, identity, detail in trace.ingress.findings:
-            self.finding(category, identity, detail)
+        self.issues.collect(trace.ingress.findings)
         for instance, result in input_delivery.items():
             if result["status"] != "matched":
                 category = "native_evidence" if result["status"] == "missing_native_evidence" else "request_ingress"
-                self.finding(category, {"instance": instance}, result)
+                self.issues.add(category, {"instance": instance}, result)
             if result.get("input_reads", {}).get("status") == "different":
-                self.finding("input_read", {"instance": instance}, result["input_reads"])
+                self.issues.add("input_read", {"instance": instance}, result["input_reads"])
         for missing in (
             "missing_publications",
             "missing_reservation_updates",
@@ -152,15 +120,14 @@ class ActionComparison:
             "unobserved_transfer_peers",
         ):
             if case.readiness[missing]:
-                self.finding("native_evidence", {}, {missing: case.readiness[missing]})
+                self.issues.add("native_evidence", {}, {missing: case.readiness[missing]})
         return stream_scope, input_delivery
 
     def run(self):
         case = self.reference
-        calls = InvocationComparison(case, self.finding, self.details)
+        calls = InvocationComparison(case, self.issues.add, self.details)
         trace = PredictionEvents(case, self, calls)
-        for category, identity, detail in case.findings:
-            self.finding(category, identity, detail)
+        self.issues.collect(case.findings)
         native_evidence = case.report(self.details)
 
         trace.read(self.execution)
@@ -238,7 +205,7 @@ class ActionComparison:
             or report["condition_inputs"]["status"] == "partial"
         )
         return {
-            **self.outcome(incomplete),
+            **self.issues.outcome(self.evidence_categories, incomplete=incomplete, success="actions_matched"),
             "not_checked": [
                 detail
                 for missing, detail in (
@@ -288,8 +255,8 @@ class ActionComparison:
             },
             "first_rejected_action": trace.rejected,
             "unpaired_calls": unpaired,
-            "counts": dict(self.counts),
-            "findings": self.findings,
+            "counts": dict(self.issues.counts),
+            "findings": self.issues.examples(self.evidence_categories),
             "connections": case.connections.counts,
             "batch_synchronization": dict(case.connections.batch_sync.counts),
             "action_order": {

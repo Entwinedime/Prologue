@@ -3,7 +3,7 @@
 from functools import cached_property
 
 from prologue.common.io import write_json
-from prologue.verification.core.reference import ReferenceRecording
+from prologue.verification.core import ReferenceRecording
 
 
 class VerificationRun:

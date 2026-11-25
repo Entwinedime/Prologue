@@ -3,10 +3,9 @@
 import json
 from collections import Counter
 
-from ..core.actions import ActionIdentity
-from ..core.contents import GraphContents
-from ..core.dependencies import ActionBoundaries, CausalGraph
-from ..core.native_case import NativeCase
+from prologue.verification.core.actions import ActionBoundaries, ActionIdentity, GraphContents
+from prologue.verification.core.source import NativeCase
+from prologue.verification.engine import CausalIndex
 
 
 class LocalActionComparison:
@@ -21,8 +20,8 @@ class LocalActionComparison:
     def intrinsic(self, dependencies, graph, paths, retained):
         waits = {(port["event"], port["wait"]["resource"])
                  for scope in paths for port in graph["scopes"][scope]["ports"] if port.get("wait")}
-        signal = 1 << CausalGraph.relations.index("signal")
-        local = CausalGraph()
+        signal = 1 << CausalIndex.relations.index("signal")
+        local = CausalIndex()
         local.add_events(retained)
         for source in retained:
             for target, relations in dependencies.next[source].items():
@@ -66,7 +65,7 @@ class LocalActionComparison:
         retained.update(event for _, start, finish in native.work for event in (start, finish))
         local = self.intrinsic(case.dependencies[rank], source.graph, paths, retained)
         expected = local.signature(native)
-        actual = CausalGraph.observed(predicted).signature(generated)
+        actual = CausalIndex.observed(predicted).signature(generated)
         changes = list(expected.differences(actual))
         self.counts["dependencies_checked"] += 1
         self.counts["dependencies_matched"] += not changes
