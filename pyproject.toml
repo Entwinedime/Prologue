@@ -32,5 +32,5 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.ruff.format]
 quote-style = "double"
 
-[tool.setuptools.package-data]
-"prologue.performance" = ["families.json"]
+[tool.setuptools.data-files]
+"share/prologue" = ["shared/cost_families.json"]

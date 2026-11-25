@@ -20,7 +20,8 @@ class TaskCommands:
             mounts = [(self.repository, self.repository, False)]
         else:
             source = self.repository / "src"
-            mounts = [(source, source, True), *((path, path, readonly) for path, readonly in files)]
+            catalog = self.repository / "shared"
+            mounts = [(source, source, True), (catalog, catalog, True), *((path, path, readonly) for path, readonly in files)]
         if model is not None:
             destination = Path(model).absolute()
             mounts.append((destination.resolve(strict=True), destination, True))

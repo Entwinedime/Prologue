@@ -29,7 +29,7 @@ RUN bash /opt/prologue/install-sglang.sh /opt/prologue/sglang && rm /opt/prologu
 ENV ASCEND_USE_FA=true ASCEND_USE_FIA=false
 
 # The SDK dumper must publish its running flag before starting the background thread.
-COPY src/prologue/integrations/platforms/ascend/runtime/native /opt/prologue/native/ascend
+COPY probes/ascend /opt/prologue/native/ascend
 RUN bash /opt/prologue/native/ascend/profiler/install.sh
 
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh \
@@ -40,7 +40,7 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh \
     && cp /tmp/prologue-ascend/libprologue_ascend_{observer,weights}.so /opt/prologue/lib/ \
     && rm -rf /tmp/prologue-ascend
 
-COPY src/prologue/integrations/runtimes/pytorch/native /opt/prologue/native/pytorch
+COPY probes/pytorch /opt/prologue/native/pytorch
 RUN cmake -S /opt/prologue/native/pytorch -B /tmp/prologue-gloo -DCMAKE_BUILD_TYPE=Release \
     && cmake --build /tmp/prologue-gloo --parallel \
     && cp /tmp/prologue-gloo/libprologue_gloo.so /opt/prologue/lib/ \
@@ -54,8 +54,8 @@ RUN --mount=type=bind,from=capture-domains,target=/domains \
     --mount=type=bind,source=src,target=/source \
     --mount=type=bind,source=docker/images/package_runtime.py,target=/package_runtime.py \
     python3 /package_runtime.py /domains /source src prologue.app.capture_worker prologue.app.sglang_plugin \
-    && install /domains/prologue/integrations/platforms/ascend/runtime/capture.sh /opt/prologue/capture.sh \
-    && install /domains/prologue/integrations/platforms/ascend/runtime/export.sh /opt/prologue/export-profile.sh \
+    && install /opt/prologue/native/ascend/scripts/capture.sh /opt/prologue/capture.sh \
+    && install /opt/prologue/native/ascend/scripts/export.sh /opt/prologue/export-profile.sh \
     && python3 -m pip install --no-deps --no-build-isolation . && rm -rf /opt/prologue/collector
 
 WORKDIR /workspace/prologue

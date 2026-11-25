@@ -1,0 +1,32 @@
+#pragma once
+
+#include <cstdint>
+#include <map>
+#include <string>
+
+#include <nlohmann/json.hpp>
+
+#include "adapters/registry.hpp"
+
+namespace prologue::sglang {
+
+// Source-authorized relocation changes bindings, never the shared template definitions.
+class WorkerBindings final : public LocalWorkerBindings {
+public:
+    WorkerBindings(const TemplateLibrary & library, const nlohmann::json & environment);
+    void bind(TemplateFrame & frame, const std::string & instance, nlohmann::json & work) const override;
+    std::map<std::string, StateBindings> state_inputs(const nlohmann::json & bindings, const nlohmann::json & work) const override;
+
+private:
+    void bind_worker(TemplateFrame & frame, const std::string & instance, const nlohmann::json & work) const;
+    void bind_pool(const std::string & name, const nlohmann::json & source, const nlohmann::json & target);
+
+    const TemplateLibrary & library_;
+    const nlohmann::json & source_;
+    const nlohmann::json & target_;
+    std::map<std::string, std::string> sites_;
+    std::map<std::string, std::map<std::int64_t, std::int64_t>> layers_;
+    std::map<std::string, std::map<std::string, StateBindings>> states_;
+};
+
+} // namespace prologue::sglang

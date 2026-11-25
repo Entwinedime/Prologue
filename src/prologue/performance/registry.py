@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import dataclass
+from importlib.metadata import files
 from pathlib import Path
 
 from .backends import BoundedCurve, LinearRegression
@@ -103,7 +104,13 @@ class ModelBindingRegistry:
 
     @classmethod
     def from_catalog(cls):
-        families = json.loads(Path(__file__).with_name("families.json").read_bytes())
+        catalog = Path(__file__).resolve().parents[3] / "shared/cost_families.json"
+        if not catalog.is_file():
+
+            # Wheels install the same asset under the environment's data directory.
+            catalog = next(item.locate() for item in files("prologue-collection")
+                           if item.parts[-3:] == ("share", "prologue", "cost_families.json"))
+        families = json.loads(catalog.read_bytes())
         registry = cls(ModelBackendRegistry(BoundedCurve()))
         registry.published[registry.default] = families[registry.default.family]
         for family, spec in families.items():
