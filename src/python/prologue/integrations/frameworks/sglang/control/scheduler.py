@@ -5,19 +5,11 @@ from functools import partial
 from pathlib import Path
 
 import torch
-from sglang.srt.entrypoints.engine import _compute_parallelism_ranks
-from sglang.srt.layers.logits_processor import LogitsProcessorOutput
-from sglang.srt.managers import scheduler as scheduler_module
-from sglang.srt.managers.scheduler import Scheduler
-from sglang.srt.managers.utils import GenerationBatchResult
-from sglang.srt.mem_cache.registry import register_radix_cache_backend
-from sglang.srt.model_executor import model_runner
-from sglang.srt.model_executor.forward_batch_info import PPProxyTensors
-from sglang.srt.server_args import PortArgs, ServerArgs
 from torch.utils.weak import WeakIdKeyDictionary
 
 from prologue.common.workload.expert_routes import ExpertRoutes
 from prologue.integrations.bindings import platform_domain
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.control.flow import FlowExecution
 from prologue.integrations.frameworks.sglang.control.prefix_cache import PrefixCache
 from prologue.integrations.frameworks.sglang.control.requests import NativeRequestReceiver, RequestInput
@@ -29,6 +21,17 @@ from prologue.integrations.frameworks.sglang.shared.experts import ExpertBatch
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI, PipelineMessages
 from prologue.integrations.frameworks.sglang.shared.state_calls import RequestStateCalls
 from prologue.integrations.runtimes.pytorch.control.tensors import TensorValues
+
+_compute_parallelism_ranks = resolve(symbols().compute_parallelism_ranks)
+LogitsProcessorOutput = resolve(symbols().logits_processor_output)
+scheduler_module = resolve(symbols().scheduler_module)
+Scheduler = resolve(symbols().scheduler)
+GenerationBatchResult = resolve(symbols().generation_batch_result)
+register_radix_cache_backend = resolve(symbols().register_radix_cache_backend)
+model_runner = resolve(symbols().model_runner_module)
+PPProxyTensors = resolve(symbols().pp_proxy_tensors)
+PortArgs = resolve(symbols().port_args)
+ServerArgs = resolve(symbols().server_args)
 
 
 class NativeScheduler(Scheduler):
@@ -146,7 +149,6 @@ class NativeScheduler(Scheduler):
             self.signals.install()
 
     def handle_generate_request(self, request):
-
         # Native initialization binds this method into its dispatcher before call instrumentation is installed.
         self.calls.input(request)
         return super().handle_generate_request(request)
@@ -319,7 +321,6 @@ class NativeScheduler(Scheduler):
 
     @staticmethod
     def workflow_watchdog(*args, **kwargs):
-
         # Workflow owns wall-clock deadlines; native watchdog diagnostics would race the synchronous resource channel.
         return None
 

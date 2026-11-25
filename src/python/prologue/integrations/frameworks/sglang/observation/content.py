@@ -6,6 +6,8 @@ import torch
 
 from prologue.common.workload import WorkloadContent
 from prologue.common.workload.routing import RoutedContent
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import symbols
 from prologue.integrations.frameworks.sglang.shared.cache_keys import RoutedCacheKeys
 
 
@@ -67,10 +69,8 @@ class NativeContent(RoutedCacheKeys):
         return result
 
     def install(self) -> None:
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
-        HookRegistry.register("sglang.srt.managers.scheduler.Scheduler.run_batch", self.run_batch, HookType.AROUND)
-        HookRegistry.register("sglang.srt.model_executor.model_runner.ModelRunner.sample", self.sample, HookType.AROUND)
+        HookTable.around(symbols().scheduler_run_batch, self.run_batch)
+        HookTable.around(symbols().model_runner_sample, self.sample)
         if self.route_assignments is not None:
-            HookRegistry.register("sglang.srt.managers.schedule_batch.Req.__init__", self.request, HookType.AROUND)
+            HookTable.around(symbols().req_init, self.request)
             self.install_cache_keys()

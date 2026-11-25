@@ -1,6 +1,9 @@
 """Run native logical workers on one physical device and a host rendezvous."""
 
-from sglang.srt.entrypoints.engine import Engine
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
+
+Engine = resolve(symbols().engine)
+
 
 
 class SingleDeviceEngine(Engine):
@@ -8,7 +11,7 @@ class SingleDeviceEngine(Engine):
     def run_scheduler_process_func(server_args, port_args, gpu_id, tp_rank, attn_cp_rank, moe_dp_rank, moe_ep_rank,
                                    pp_rank, dp_rank, pipe_writer):
         import torch
-        from sglang.srt.managers.scheduler import run_scheduler_process
+        run_scheduler_process = resolve(symbols().run_scheduler_process)
 
         from prologue.integrations.frameworks.sglang.observation.local.shard_transport import ShardTransport
 

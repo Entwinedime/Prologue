@@ -4,12 +4,11 @@ from contextlib import ExitStack, contextmanager, nullcontext
 
 import torch
 import zmq
-from sglang.srt.managers.io_struct import BatchTokenIDOutput, sock_recv
-from sglang.srt.managers.utils import GenerationBatchResult
-from sglang.srt.utils.common import DynamicGradMode
 
 from prologue.common.io import write_json
 from prologue.integrations.bindings import device_runtime
+from prologue.integrations.frameworks.sglang.abi.hooks import HookSpec, HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.communications import NativeCommunications
 from prologue.integrations.frameworks.sglang.observation.flow_scopes import FlowScopes
 from prologue.integrations.frameworks.sglang.observation.host_samples import NativeHostSamples
@@ -18,6 +17,11 @@ from prologue.integrations.frameworks.sglang.observation.model_calls import Nati
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
+
+BatchTokenIDOutput = resolve(symbols().batch_token_id_output)
+sock_recv = resolve(symbols().sock_recv)
+GenerationBatchResult = resolve(symbols().generation_batch_result)
+DynamicGradMode = resolve(symbols().dynamic_grad_mode)
 
 
 class SchedulerBatchObservation(NativeModelObservation):
@@ -156,11 +160,8 @@ class SchedulerBatch:
             output.next_token_ids.copy_(supplied)
             return output
 
-        try:
-            worker.forward_batch_generation = supply
+        with HookTable.scoped(worker, HookSpec("forward_batch_generation", supply, "replace")):
             scheduler.process_batch_result(batch, scheduler.run_batch(batch))
-        finally:
-            worker.forward_batch_generation = forward
         scheduler.last_batch = batch
         return self.receive(receiver)
 

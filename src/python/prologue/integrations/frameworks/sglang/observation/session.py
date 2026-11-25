@@ -20,7 +20,6 @@ class ArrivalClock:
         self.origin = context.Value("q", 0)
 
     def __call__(self):
-
         # Worker receipts and profiler host anchors use the same machine's unadjusted monotonic clock.
         self.origin.value = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
 
@@ -31,7 +30,6 @@ class NativeRendezvous:
     @classmethod
     @contextmanager
     def loopback_listener(cls):
-
         # Port zero excludes other listeners but can still select a host NAT destination.
         for _ in range(4):
             with socket.socket() as listener:
@@ -94,7 +92,6 @@ class NativeServingSession:
 
     @staticmethod
     def execute(instance, barrier, clock, bootstrap, rendezvous, connection):
-
         # Each Engine owns descendants; cancellation must also stop that instance's native workers.
         try:
             os.setsid()

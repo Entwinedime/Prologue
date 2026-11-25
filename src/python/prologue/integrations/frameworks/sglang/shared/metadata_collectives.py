@@ -3,6 +3,7 @@
 import inspect
 from functools import partial
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.shared.calls import ActionCall
 
 
@@ -68,8 +69,8 @@ class MetadataCollectives:
 
     def install(self):
         import torch.distributed as distributed
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
+
 
         for name in ("broadcast", "all_gather_into_tensor", "all_reduce"):
             hook = partial(self.invoke, name, inspect.signature(getattr(distributed, name)))
-            HookRegistry.register(f"torch.distributed.{name}", hook, HookType.AROUND)
+            HookTable.around(f"torch.distributed.{name}", hook)

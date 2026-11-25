@@ -14,6 +14,8 @@ import torch
 import torch.multiprocessing as multiprocessing
 
 from prologue.common.control_peer import ControlPeer
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
 from prologue.integrations.runtimes.pytorch.control.collectives import CollectiveCalls, CpuCollectives
 from prologue.integrations.runtimes.pytorch.control.cpu import CpuDeclarations
@@ -115,8 +117,8 @@ class NativeWorkers:
                 connection.close()
         CpuDeclarations.install(kernel_python)
 
-        from sglang.srt.distributed import parallel_state
-        from sglang.srt.plugins.hook_registry import HookRegistry
+        parallel_state = resolve(symbols().parallel_state)
+
 
         from prologue.integrations.frameworks.sglang.control.scheduler import NativeScheduler
         from prologue.integrations.frameworks.sglang.shared.metadata_collectives import MetadataCollectives
@@ -139,7 +141,7 @@ class NativeWorkers:
             MetadataTransfers(scheduler.calls).install()
 
             # Apply once after every serving adapter registers; early application silently skips later hooks.
-            HookRegistry.apply_hooks()
+            HookTable.apply()
             peer.send({"kind": "ready"})
             try:
                 scheduler.run_event_loop()

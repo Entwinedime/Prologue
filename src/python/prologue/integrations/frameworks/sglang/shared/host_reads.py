@@ -1,5 +1,6 @@
 """Declare actual materialization of named native inputs, independently of caller segmentation."""
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.shared.calls import ActionCall
 
 
@@ -39,6 +40,4 @@ class HostReads:
         return original(tensor, *args, **kwargs)
 
     def install(self):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
-        HookRegistry.register(self.method, self.invoke, HookType.AROUND)
+        HookTable.around(self.method, self.invoke)

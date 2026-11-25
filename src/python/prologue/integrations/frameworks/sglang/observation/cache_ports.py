@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
 
 
 class AttentionCachePorts:
     def __init__(self, tensors: Any, module: Any, arguments: dict[str, Any]) -> None:
-        from sglang.srt.model_executor.forward_context import get_attn_backend
+        get_attn_backend = resolve(symbols().get_attn_backend)
 
         self.tensors = tensors
         self.layer = module.layer_id

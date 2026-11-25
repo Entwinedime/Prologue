@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Any
 
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.call_scopes import NativeCallObservation
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
@@ -54,7 +55,6 @@ class NativeModelObservation(NativeCallObservation):
             call.port(name, direction, self.tensors.observe(tensor, shape), use="device")
 
     def logits_port(self, call, direction, logits):
-
         # The runner hands the sampler one unpadded vocabulary row per admitted request.
         call.port(
             "next_token_logits", direction, self.tensors.observe(logits, ["members", logits.shape[1]]), use="device"
@@ -76,7 +76,7 @@ class NativeModelObservation(NativeCallObservation):
     def forward(self, original: Any, runner: Any, batch: Any, *args: Any, **kwargs: Any) -> Any:
         if not self.active:
             return original(runner, batch, *args, **kwargs)
-        from sglang.srt.layers.logits_processor import LogitsProcessorOutput
+        LogitsProcessorOutput = resolve(symbols().logits_processor_output)
 
         # The initialized native registry owns these allocations across calls; a module path does not.
         with self.tensors.metadata():
@@ -98,7 +98,6 @@ class NativeModelObservation(NativeCallObservation):
         return result
 
     def model_geometry(self, dimensions: dict[str, int]) -> None:
-
         # Check actual model tensors against the shared native padding contract, without replacing predicted features.
         parameters = self.capture.scopes[self.capture.current.get()]["parameters"]
         if any(parameters[name] != actual for name, actual in dimensions.items()):

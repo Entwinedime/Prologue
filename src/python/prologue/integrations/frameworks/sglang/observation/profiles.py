@@ -9,6 +9,8 @@ from typing import Any
 
 from prologue.common.io import write_json
 from prologue.common.observation.workers import ProfileWindow
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
 
 
@@ -49,7 +51,8 @@ class NativeProfiles:
             time.sleep(0.05)
 
     def request(self, original: Any, manager: Any, request: Any) -> Any:
-        from sglang.srt.managers.io_struct import ProfileReqOutput, ProfileReqType
+        ProfileReqOutput = resolve(symbols().profile_req_output)
+        ProfileReqType = resolve(symbols().profile_req_type)
 
         owner = self.observation
         if request.req_type == ProfileReqType.START_PROFILE:
@@ -108,16 +111,13 @@ class NativeProfiles:
         return result
 
     def install(self) -> None:
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         for target, hook in self.protocol.hooks():
-            HookRegistry.register(target, hook, HookType.AROUND)
+            HookTable.around(target, hook)
 
-        manager = "sglang.srt.managers.scheduler_components.profiler_manager.SchedulerProfilerManager."
+        manager = symbols().scheduler_profiler_manager + "."
         targets = {
             manager + "_profile": self.request,
             manager + "_init_profile": self.start,
             manager + "_stop_profile": self.stop,
         }
-        for target, hook in targets.items():
-            HookRegistry.register(target, hook, HookType.AROUND)
+        HookTable.group(targets).install()

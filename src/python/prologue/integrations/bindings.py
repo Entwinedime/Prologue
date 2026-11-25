@@ -68,7 +68,9 @@ def platform_backend() -> PlatformBackend:
 @lru_cache
 def _domain_from_wire(wire):
     fields = json.loads(wire)
-    return PlatformDomain(**{**fields, "strided_attention": tuple(fields["strided_attention"])})
+    fields["strided_attention"] = tuple(fields["strided_attention"])
+    fields["native_symbols"] = tuple(tuple(row) for row in fields["native_symbols"])
+    return PlatformDomain(**fields)
 
 
 def platform_domain() -> PlatformDomain:

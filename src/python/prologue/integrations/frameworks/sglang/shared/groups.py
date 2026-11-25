@@ -1,10 +1,12 @@
 """Name actual native process groups consistently in observation and control."""
 
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
+
 
 class ParallelGroups:
     def __init__(self):
         import torch.distributed as distributed
-        from sglang.srt.runtime_context import get_parallel
+        get_parallel = resolve(symbols().get_parallel)
 
         parallel = get_parallel()
         self.groups = {"default": distributed.group.WORLD}
@@ -14,7 +16,6 @@ class ParallelGroups:
             self.groups[name + "_cpu"] = group.cpu_group
 
     def name(self, group):
-
         # Native aliases share the same process-group object, not merely the same participants.
         for name, candidate in self.groups.items():
             if candidate is group:
@@ -22,7 +23,6 @@ class ParallelGroups:
         raise ValueError("native communication uses a group outside the declared parallel topology")
 
     def is_cpu(self, group):
-
         # Device-free control also stores device metadata on CPU; native group roles retain the distinction.
         return any(candidate is group for name, candidate in self.groups.items() if name.endswith("_cpu"))
 

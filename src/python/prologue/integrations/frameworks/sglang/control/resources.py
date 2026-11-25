@@ -3,24 +3,22 @@
 from contextlib import contextmanager
 
 import torch
-from sglang.srt.mem_cache.allocator.base import BaseTokenToKVPoolAllocator
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.shared.allocation import AllocationABI
 from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
 from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
 from prologue.integrations.frameworks.sglang.shared.resources import PoolCoordinates
 
+BaseTokenToKVPoolAllocator = resolve(symbols().base_token_to_kv_pool_allocator)
+
 
 class AllocationDemand:
     def __init__(self) -> None:
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         for method, hook in (("alloc_for_extend", self.for_extend), ("alloc_for_decode", self.for_decode)):
-            HookRegistry.register("sglang.srt.mem_cache.common." + method, hook, HookType.AROUND)
-        HookRegistry.register(
-            "sglang.srt.disaggregation.decode.DecodePreallocQueue._pre_alloc",
-            self.preallocate, HookType.AROUND,
-        )
+            HookTable.around(symbols().common + "." + method, hook)
+        HookTable.around(symbols().pre_alloc, self.preallocate)
 
     @staticmethod
     @contextmanager
@@ -179,7 +177,6 @@ class PageAllocator:
         return allocation["members"]
 
     def merge_and_sort_free(self, ordering):
-
         # The core already ordered the pages; ResourceCalls exposes this native operation's execution graph.
         return None
 
@@ -187,7 +184,6 @@ class PageAllocator:
         return self.indices(self.reserve(), dtype)
 
     def indices(self, bindings, dtype):
-
         # SGLang reserves physical page zero; the core uses zero-based page identities.
         indices = [index + self.page_size for binding in bindings for index in binding["indices"]]
         return torch.tensor(indices, dtype=dtype)
@@ -202,7 +198,7 @@ class PageAllocator:
     def alloc_extend(
         self, prefix_lens, prefix_lens_cpu, seq_lens, seq_lens_cpu, last_loc, extend_num_tokens, num_new_pages=None
     ):
-        from sglang.srt.mem_cache.allocator import alloc_extend_naive
+        alloc_extend_naive = resolve(symbols().alloc_extend_naive)
 
         # The declared allocator returns int32 from its paged entry points, unlike alloc().
         bindings = self.reserve()

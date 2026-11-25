@@ -6,11 +6,11 @@ from contextlib import ExitStack
 
 import torch
 import torch.distributed as distributed
-from sglang.srt.distributed import parallel_state
-from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
 from prologue.common.io import write_json
 from prologue.integrations.bindings import device_runtime, platform_domain
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.call_scopes import NativeCallObservation
 from prologue.integrations.frameworks.sglang.observation.communications import NativeCommunications
 from prologue.integrations.frameworks.sglang.observation.local.shard_transport import ShardTransport
@@ -22,13 +22,15 @@ from prologue.integrations.frameworks.sglang.observation.local.worker_output imp
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 from prologue.integrations.frameworks.sglang.shared.groups import ParallelGroups, WorkerRoles
 
+parallel_state = resolve(symbols().parallel_state)
+
 
 class EmbeddingReady(Exception):
     """Return the shard as soon as the upstream model constructor has finished creating it."""
 
     @staticmethod
     def capture(original, module, *args, **kwargs):
-        from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding
+        VocabParallelEmbedding = resolve(symbols().vocab_parallel_embedding)
 
         original(module, *args, **kwargs)
         if type(module) is VocabParallelEmbedding:
@@ -36,11 +38,12 @@ class EmbeddingReady(Exception):
 
     @classmethod
     def load(cls, domain, rank):
-        from sglang.srt.configs.load_config import LoadConfig
-        from sglang.srt.configs.model_config import ModelConfig
-        from sglang.srt.layers.dp_attention import initialize_dp_attention
-        from sglang.srt.model_loader import loader
-        from sglang.srt.server_args import ServerArgs, set_global_server_args_for_scheduler
+        LoadConfig = resolve(symbols().load_config)
+        ModelConfig = resolve(symbols().model_config)
+        initialize_dp_attention = resolve(symbols().initialize_dp_attention)
+        loader = resolve(symbols().loader)
+        ServerArgs = resolve(symbols().server_args)
+        set_global_server_args_for_scheduler = resolve(symbols().set_global_server_args_for_scheduler)
 
         impl = domain["implementation"]
         args = ServerArgs(
@@ -143,9 +146,8 @@ class EmbeddingRunner:
             transport = ShardTransport(output, owner.tensors.auxiliary, communication.local_exchange)
             transport.install_collectives(1)
         communication.cuts.install()
-        HookRegistry.register("sglang.srt.layers.vocab_parallel_embedding.VocabParallelEmbedding.__init__",
-                              EmbeddingReady.capture, HookType.AROUND)
-        HookRegistry.apply_hooks()
+        HookTable.around(symbols().vocab_parallel_embedding_init, EmbeddingReady.capture)
+        HookTable.apply()
         site, shard = EmbeddingReady.load(domain, rank)
         ModelScopes(owner).attach(site, "embedding", shard)
         cpu_group = owner.groups.groups["tp_cpu"]

@@ -4,16 +4,21 @@ from collections import defaultdict
 from functools import partial
 from threading import Lock
 
-from sglang.srt.disaggregation.base import BaseKVManager, KVArgs, KVPoll
-from sglang.srt.disaggregation.common.conn import CommonKVManager, CommonKVReceiver
-from sglang.srt.disaggregation.mooncake.conn import MooncakeKVReceiver, MooncakeKVSender
-from sglang.srt.disaggregation.utils import KVClassType
-from sglang.srt.environ import envs
-
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.control.kv_transfer import MetadataRows, PdTopology
 from prologue.integrations.frameworks.sglang.control.resources import StateSlots
-from prologue.integrations.frameworks.sglang.shared.clocks import DecisionClocks
 from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
+
+BaseKVManager = resolve(symbols().base_kv_manager)
+KVArgs = resolve(symbols().kv_args)
+KVPoll = resolve(symbols().kv_poll)
+CommonKVManager = resolve(symbols().common_kv_manager)
+CommonKVReceiver = resolve(symbols().common_kv_receiver)
+MooncakeKVReceiver = resolve(symbols().mooncake_kv_receiver)
+MooncakeKVSender = resolve(symbols().mooncake_kv_sender)
+KVClassType = resolve(symbols().kv_class_type)
+envs = resolve(symbols().envs)
 
 
 class NativePdBackend:
@@ -108,27 +113,23 @@ class NativePdBackend:
         return results
 
     def install_resources(self):
-        from sglang.srt.disaggregation import decode, prefill
-        from sglang.srt.managers import scheduler
+        decode = resolve(symbols().decode)
+        prefill = resolve(symbols().prefill)
+        scheduler = resolve(symbols().scheduler_module)
 
         # Replace the transport factory in this worker only; native queues and their control methods remain intact.
         decode.get_kv_class = prefill.get_kv_class = self.native_class
         scheduler.ReqToMetadataIdxAllocator = partial(StateSlots, peer=self.scheduler.peer, field="metadata")
 
     def install_calls(self):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         self.scheduler.calls.resources.bind_field("metadata", self.scheduler.req_to_metadata_buffer_idx_allocator)
 
         # Serving hooks must join the graph wrappers before the registry patches their shared targets.
-        HookRegistry.register(
-            "sglang.srt.disaggregation.utils.MetadataBuffers.set_buf", self.bind_metadata, HookType.AROUND
-        )
+        HookTable.around(symbols().metadata_buffers_set_buf, self.bind_metadata)
         for name in ("poll_and_all_reduce", "poll_and_all_reduce_attn_cp_tp_group"):
-            HookRegistry.register(f"sglang.srt.disaggregation.utils.{name}", self.group_poll, HookType.AROUND)
+            HookTable.around(f"{symbols().utils}.{name}", self.group_poll)
 
     def bind_metadata(self, original, buffers, req):
-
         # Native allocation precedes request admission; bind the row before its first graph write.
         self.scheduler.req_to_metadata_buffer_idx_allocator.bind(req, req.metadata_buffer_index)
         return original(buffers, req)
@@ -170,7 +171,6 @@ class NativeKvManager(BaseKVManager):
     update_status = CommonKVManager.update_status
 
     def register_to_bootstrap(self):
-
         # The serving task already supplies both native worlds; device-free control does not open a bootstrap server.
         return None
 
@@ -366,7 +366,7 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
                 publication["signals"] = {"reservation.ready": signal}
                 with calls.separate("kv_reservation", publication):
                     scheduler.action("kv_reservation", {}, publication)
-            self.init_time = calls.clocks.read("time", DecisionClocks.receiver_publication)
+            self.init_time = calls.clocks.read("time", symbols().mooncake_kv_receiver_send_metadata)
 
         # Register before polling: native receive-side publication progresses independently of the next scheduler turn.
         request = work["context"]["request"]["id"]

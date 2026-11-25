@@ -73,7 +73,6 @@ class FlowExecution(CallSegments):
         self.started = True
 
     def drained(self):
-
         # Close at the same local idle boundary as capture, never between future arrivals or inside a call.
         if not self.pending_inputs and self.current.get() is None:
             self.started = False
@@ -102,7 +101,6 @@ class FlowExecution(CallSegments):
         ]
 
     def collective(self, original, boundary, arguments):
-
         # Inputs are available at graph entry; consuming a result must not wait for peers' graph returns.
         work = original(**{**arguments, "async_op": True})
         returned = self.scheduler.action(
@@ -138,7 +136,6 @@ class FlowExecution(CallSegments):
 
     @contextmanager
     def read_boundary(self, kind, original, work, condition):
-
         # Native nonblocking reads complete at this virtual instant, independently of optional tracing.
         returned = self.scheduler.action("query", {}, work, condition=condition)
         query = {"boundary": returned["read_boundary"], "time_ns": returned["completed_ns"]}

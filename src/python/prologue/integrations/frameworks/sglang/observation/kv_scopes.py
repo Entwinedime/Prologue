@@ -5,13 +5,15 @@ from contextvars import ContextVar, copy_context
 from functools import partial
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
+
 
 class ObservedExecutor:
     def __init__(self, executor) -> None:
         self.executor = executor
 
     def submit(self, operation, *args, **kwargs):
-
         # Native workers remain native; only the observed caller identity follows each submitted job.
         return self.executor.submit(copy_context().run, operation, *args, **kwargs)
 
@@ -151,7 +153,7 @@ class NativeKvScopes:
             self.request.reset(previous)
 
     def enqueue(self, original, queue, item):
-        from sglang.srt.disaggregation.common.utils import TransferKVChunk
+        TransferKVChunk = resolve(symbols().transfer_kv_chunk)
 
         owner = self.observation
         if not self.calls.enabled or not isinstance(item, TransferKVChunk):
@@ -286,43 +288,41 @@ class NativeKvScopes:
         }
 
     def install(self):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         for target, hook in (
-            ("sglang.srt.disaggregation.utils.ReqToMetadataIdxAllocator.__init__", self.metadata_allocator),
-            ("sglang.srt.disaggregation.common.conn.CommonKVReceiver._connect_to_bootstrap_server",
+            (symbols().req_to_metadata_idx_allocator_init, self.metadata_allocator),
+            (symbols().connect_to_bootstrap_server,
                 self.connect_reservation),
-            ("sglang.srt.disaggregation.mooncake.conn.MooncakeKVSender.poll", self.poll),
-            ("sglang.srt.disaggregation.mooncake.conn.MooncakeKVReceiver.poll", self.poll),
-            ("sglang.srt.managers.scheduler.Scheduler.send_kv_chunk", self.send_chunk),
-            ("sglang.srt.disaggregation.mooncake.conn.MooncakeKVReceiver.send_metadata", self.reserve),
-            ("sglang.srt.disaggregation.common.utils.FastQueue.put", self.enqueue),
+            (symbols().mooncake_kv_sender_poll, self.poll),
+            (symbols().mooncake_kv_receiver_poll, self.poll),
+            (symbols().scheduler_send_kv_chunk, self.send_chunk),
+            (symbols().mooncake_kv_receiver_send_metadata, self.reserve),
+            (symbols().fast_queue_put, self.enqueue),
         ):
-            HookRegistry.register(target, hook, HookType.AROUND)
+            HookTable.around(target, hook)
         if self.observation is None:
             return
 
-        from sglang.srt.disaggregation.ascend.conn import AscendKVManager
-        from sglang.srt.disaggregation.mooncake.conn import MooncakeKVManager
+        DeviceKVManager = resolve(symbols().device_kv_manager)
+        MooncakeKVManager = resolve(symbols().mooncake_kv_manager)
 
         for target, hook in (
-            ("sglang.srt.disaggregation.common.conn.CommonKVManager.update_status", self.update_status),
-            ("sglang.srt.disaggregation.mooncake.conn.MooncakeKVManager.__init__", self.manager_init),
-            ("sglang.srt.disaggregation.mooncake.conn.TransferInfo.from_zmq", self.receive_reservation),
-            ("sglang.srt.disaggregation.utils.MetadataBuffers.set_buf", self.metadata),
-            ("sglang.srt.disaggregation.common.utils.FastQueue.get", self.dequeue),
+            (symbols().common_kv_manager_update_status, self.update_status),
+            (symbols().mooncake_kv_manager_init, self.manager_init),
+            (symbols().transfer_info_from_zmq, self.receive_reservation),
+            (symbols().metadata_buffers_set_buf, self.metadata),
+            (symbols().fast_queue_get, self.dequeue),
             (
-                "sglang.srt.distributed.device_communicators.mooncake_transfer_engine.MooncakeTransferEngine.batch_transfer_sync",
+                symbols().mooncake_transfer_engine_batch_transfer_sync,
                 self.transfer_data,
             ),
         ):
-            HookRegistry.register(target, hook, HookType.AROUND)
+            HookTable.around(target, hook)
         for cls, method in (
-            (AscendKVManager, "send_kvcache"),
+            (DeviceKVManager, "send_kvcache"),
             (MooncakeKVManager, "send_kvcache_slice"),
             (MooncakeKVManager, "send_aux"),
         ):
-            HookRegistry.register(
+            HookTable.around(
                 f"{cls.__module__}.{cls.__qualname__}.{method}",
-                partial(self.transfer, inspect.signature(getattr(cls, method))), HookType.AROUND,
+                partial(self.transfer, inspect.signature(getattr(cls, method))),
             )

@@ -6,6 +6,8 @@ from functools import partial
 from pathlib import Path
 
 from prologue.integrations.bindings import device_runtime
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
 
@@ -38,7 +40,7 @@ class DecodeAttentionObservation:
 
     def invoke(self, site, module, original, q, k, v, forward_batch, *args, **kwargs):
         import torch
-        from sglang.srt.model_executor.forward_context import get_attn_backend
+        get_attn_backend = resolve(symbols().get_attn_backend)
 
         if (self.window is not None and self.window.phase != "source") or not forward_batch.forward_mode.is_decode():
             return original(q, k, v, forward_batch, *args, **kwargs)
@@ -96,7 +98,5 @@ class DecodeAttentionObservation:
         return {"runtime": device_runtime().markers.environment(), "calls": self.rows}
 
     def install(self):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
-        target = "sglang.srt.model_executor.model_runner.ModelRunner.load_model"
-        HookRegistry.register(target, self.load_model, HookType.AROUND)
+        target = symbols().model_runner_load_model
+        HookTable.around(target, self.load_model)

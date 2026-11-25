@@ -9,10 +9,13 @@ from functools import partial, update_wrapper
 from typing import Any
 
 import torch
-from sglang.srt.model_executor.forward_batch_info import PPProxyTensors
 
 from prologue.integrations.bindings import platform_domain
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.module_layout import LayerCommunication
+
+PPProxyTensors = resolve(symbols().pp_proxy_tensors)
 
 
 def tensor_ports(value: Any, path: str) -> Iterator[tuple[str, torch.Tensor]]:
@@ -39,20 +42,19 @@ class ModelScopes:
 
     @staticmethod
     def install_batch_hooks(observer) -> None:
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         for target, hook in (
-            ("sglang.srt.managers.scheduler.Scheduler.run_batch", observer.run_batch),
-            ("sglang.srt.model_executor.model_runner.ModelRunner.forward", observer.forward),
-            ("sglang.srt.model_executor.model_runner.ModelRunner.sample", observer.sample),
+            (symbols().scheduler_run_batch, observer.run_batch),
+            (symbols().model_runner_forward, observer.forward),
+            (symbols().model_runner_sample, observer.sample),
         ):
-            HookRegistry.register(target, hook, HookType.AROUND)
+            HookTable.around(target, hook)
 
     @staticmethod
     def selected(modules):
-        from sglang.srt.layers.radix_attention import RadixAttention
-        from sglang.srt.layers.utils.common import PPMissingLayer
-        from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
+        RadixAttention = resolve(symbols().radix_attention)
+        PPMissingLayer = resolve(symbols().pp_missing_layer)
+        ParallelLMHead = resolve(symbols().parallel_lm_head)
+        VocabParallelEmbedding = resolve(symbols().vocab_parallel_embedding)
 
         selected = {"": "model_body"}
         containers = [name for name, module in modules.items() if isinstance(module, torch.nn.ModuleList)]
@@ -72,8 +74,8 @@ class ModelScopes:
 
     @staticmethod
     def expert_structure(modules):
-        from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
-        from sglang.srt.layers.moe.topk import TopK
+        FusedMoE = resolve(symbols().fused_mo_e)
+        TopK = resolve(symbols().top_k)
 
         experts = {name: module for name, module in modules.items() if isinstance(module, FusedMoE)}
         layers = []
@@ -91,7 +93,7 @@ class ModelScopes:
         self.bindings = {}
 
     def attach_model(self, model: Any) -> None:
-        from sglang.srt.layers.logits_processor import LogitsProcessor
+        LogitsProcessor = resolve(symbols().logits_processor)
 
         modules = dict(model.named_modules())
         self.experts, self.expert_layers = self.expert_structure(modules)

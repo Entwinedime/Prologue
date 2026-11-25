@@ -9,6 +9,7 @@ import torch
 
 from prologue.common.io import write_json
 from prologue.integrations.bindings import device_runtime, platform_domain
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.call_scopes import NativeCallObservation
 from prologue.integrations.frameworks.sglang.observation.flow_scopes import FlowScopes
 from prologue.integrations.frameworks.sglang.observation.local.worker_output import publish_capture, publish_facts
@@ -25,13 +26,15 @@ class ReceiverScheduler:
 
 class ReceiverPools:
     def __init__(self, job):
-        from sglang.srt.configs.model_config import ModelConfig
-        from sglang.srt.disaggregation.decode import DecodePreallocQueue, DecodeReqToTokenPool
-        from sglang.srt.hardware_backend.npu.allocator_npu import NPUPagedTokenToKVPoolAllocator
-        from sglang.srt.hardware_backend.npu.memory_pool_npu import NPUMHATokenToKVPool
-        from sglang.srt.mem_cache.cache_init_params import CacheInitParams
-        from sglang.srt.mem_cache.chunk_cache import ChunkCache
-        from sglang.srt.server_args import ServerArgs, set_global_server_args_for_scheduler
+        ModelConfig = resolve(symbols().model_config)
+        DecodePreallocQueue = resolve(symbols().decode_prealloc_queue)
+        DecodeReqToTokenPool = resolve(symbols().decode_req_to_token_pool)
+        PagedAllocator = resolve(symbols().paged_allocator)
+        MhaPool = resolve(symbols().mha_pool)
+        CacheInitParams = resolve(symbols().cache_init_params)
+        ChunkCache = resolve(symbols().chunk_cache)
+        ServerArgs = resolve(symbols().server_args)
+        set_global_server_args_for_scheduler = resolve(symbols().set_global_server_args_for_scheduler)
 
         domain, cap = job["domain"], job["capacity"]
         impl = domain["implementation"]
@@ -63,13 +66,13 @@ class ReceiverPools:
         layout = MhaKvLayout.read(domain["kv_layout"])
         dtype = getattr(torch, layout.dtype.removeprefix("torch."))
         width = dtype.itemsize * layout.head_num
-        self.kv = NPUMHATokenToKVPool(size, page, dtype, layout.head_num, layout.key_token_bytes // width,
+        self.kv = MhaPool(size, page, dtype, layout.head_num, layout.key_token_bytes // width,
                                       layout.end_layer - layout.start_layer, platform_domain().device_type, False,
                                       v_head_dim=layout.value_token_bytes // width,
                                       start_layer=layout.start_layer, end_layer=layout.end_layer)
         if MhaKvLayout.from_pool(self.kv) != layout:
             raise ValueError("allocated KV layout differs from the requested receiver")
-        self.allocator = NPUPagedTokenToKVPoolAllocator(
+        self.allocator = PagedAllocator(
             size, page, torch.int64, platform_domain().device_type, self.kv, False
         )
 
@@ -87,9 +90,10 @@ class ReceiverPools:
         self.reserve.token_to_kv_pool = self.kv
 
     def batch(self, members):
-        from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
-        from sglang.srt.sampling.sampling_params import SamplingParams
-        from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+        Req = resolve(symbols().req)
+        ScheduleBatch = resolve(symbols().schedule_batch)
+        SamplingParams = resolve(symbols().sampling_params)
+        SpeculativeAlgorithm = resolve(symbols().speculative_algorithm)
 
         requests, locations = [], []
         for i, member in enumerate(members, start=1):
@@ -126,7 +130,7 @@ class PrebuiltRunner:
         self.rank = job["rank"]
 
     def observe(self, pools):
-        from sglang.srt.managers.schedule_batch import ScheduleBatch
+        ScheduleBatch = resolve(symbols().schedule_batch)
 
         batches = [(members, *pools.batch(members)) for members in self.job["batches"]]
         markers = device_runtime().markers(detailed_timing=False)
@@ -164,7 +168,7 @@ class PrebuiltRunner:
         return raw
 
     def run(self, revision):
-        from sglang.srt.managers.schedule_batch import ScheduleBatch
+        ScheduleBatch = resolve(symbols().schedule_batch)
 
         started = monotonic_ns()
         device_runtime().api.set_device(0)

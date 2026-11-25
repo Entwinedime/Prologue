@@ -11,6 +11,8 @@ from typing import Any
 
 from prologue.common.observation.parameters import ScopeParameters
 from prologue.integrations.bindings import platform_domain
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.module_scopes import tensor_ports
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 from prologue.integrations.runtimes.pytorch.capture.boundaries import GatherLayout
@@ -24,7 +26,7 @@ class CollectiveOperand:
     output: Any | None = None
 
     def implementation(self):
-        communicator = getattr(self.coordinator, f"{platform_domain().device_type}_communicator")
+        communicator = getattr(self.coordinator, symbols().communicator_attribute)
         if communicator is None or communicator.disabled or not self.tensor.is_contiguous():
             return None
 
@@ -101,7 +103,6 @@ class DeviceCollectiveCuts:
 
     @contextmanager
     def outer(self):
-
         # Public group methods may call each other; record one scope for each native exchange.
         token = self.enclosing.set(True)
         try:
@@ -111,8 +112,8 @@ class DeviceCollectiveCuts:
 
     def install(self, expert_exchange=None) -> None:
         import torch.distributed as distributed
-        from sglang.srt.distributed.parallel_state import GroupCoordinator
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
+        GroupCoordinator = resolve(symbols().group_coordinator)
+
 
         for name in (
             "all_reduce",
@@ -124,19 +125,15 @@ class DeviceCollectiveCuts:
             "all_to_all_single",
             "broadcast",
         ):
-            target = f"sglang.srt.distributed.parallel_state.GroupCoordinator.{name}"
-            HookRegistry.register(
-                target, partial(self.invoke, inspect.signature(getattr(GroupCoordinator, name))), HookType.AROUND
-            )
+            target = f"{symbols().group_coordinator}.{name}"
+            HookTable.around(target, partial(self.invoke, inspect.signature(getattr(GroupCoordinator, name))))
         for name in ("all_gather_into_tensor", "all_gather", "all_reduce", "broadcast"):
             target = f"torch.distributed.{name}"
-            HookRegistry.register(
-                target, partial(self.distributed, inspect.signature(getattr(distributed, name))), HookType.AROUND
-            )
+            HookTable.around(target, partial(self.distributed, inspect.signature(getattr(distributed, name))))
         if expert_exchange is not None:
             for name in ("dispatch", "combine"):
-                target = f"sglang.srt.layers.moe.token_dispatcher.deepep.DeepEPDispatcher.{name}"
-                HookRegistry.register(target, expert_exchange, HookType.AROUND)
+                target = f"{symbols().deep_ep_dispatcher}.{name}"
+                HookTable.around(target, expert_exchange)
 
 
 class NativeCommunications:
@@ -261,7 +258,7 @@ class NativeCommunications:
             return source, target
 
         # Scheduler metadata and the native expert histogram have a fixed ABI for this domain.
-        if (parent["implementation"] == "sglang.srt.managers.scheduler_components.dp_attn.MLPSyncBatchInfo.all_gather"
+        if (parent["implementation"] == symbols().mlp_sync_batch_info_all_gather
                 or parent.get("communication", {}).get("operation") == "dispatch"):
             return source, target
         return None
@@ -383,7 +380,7 @@ class NativeCommunications:
         if not owner.active or not owner.selected:
             return original(dispatcher, *args, **kwargs)
 
-        from sglang.srt.distributed.parallel_state import get_tp_group
+        get_tp_group = resolve(symbols().get_tp_group)
 
         # SGLang supplies this process group to DeepEP; dispatch/combine include their local preparation and
         # completion waits.
@@ -423,9 +420,5 @@ class NativeCommunications:
             return result
 
     def install(self) -> None:
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         self.cuts.install(self.experts)
-        HookRegistry.register(
-            "sglang.srt.layers.linear.RowParallelLinear.forward", self.row_projection, HookType.AROUND
-        )
+        HookTable.around(symbols().row_parallel_linear_forward, self.row_projection)

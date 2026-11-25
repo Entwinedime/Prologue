@@ -278,7 +278,6 @@ class LocalSchedulerBatch(LocalRule):
 
     @staticmethod
     def select(queries, worker, facts, phase, asset, modeling):
-
         # Reuse production selection, including guards and ambiguity. Only a directly observed input can fill a gap.
         answers = []
         with TemporaryDirectory(dir=worker.recording.directory.parent) as scratch:

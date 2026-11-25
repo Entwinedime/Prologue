@@ -10,6 +10,8 @@ from time import monotonic_ns
 
 from prologue.common.io import write_json
 from prologue.integrations.bindings import device_runtime
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.local.worker_output import activate_device, publish_capture
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
@@ -69,7 +71,7 @@ class SchedulerRunner:
         self.output = output
 
     def prepare_pools(self, scheduler, args):
-        from sglang.benchmark import one_batch
+        one_batch = resolve(symbols().one_batch)
 
         # The control loop starts with empty request and KV pools after one real native forward in each phase.
         runner = scheduler.tp_worker.model_runner
@@ -101,9 +103,10 @@ class SchedulerRunner:
 
     def worker(self, rank, revision, args, ports, host_timing):
         import torch.distributed as distributed
-        from sglang.srt.distributed import get_world_group, parallel_state
-        from sglang.srt.managers.scheduler import Scheduler
-        from sglang.srt.plugins.hook_registry import HookRegistry
+        get_world_group = resolve(symbols().get_world_group)
+        parallel_state = resolve(symbols().parallel_state)
+        Scheduler = resolve(symbols().scheduler)
+
 
         from prologue.integrations.frameworks.sglang.observation.local.batch_runner import (
             SchedulerBatch,
@@ -131,7 +134,7 @@ class SchedulerRunner:
         observer.install()
 
         # Upstream applies all hooks for a target once. Install observation and transport together before model loading.
-        HookRegistry.apply_hooks()
+        HookTable.apply()
         scheduler = Scheduler(args, ports, gpu_id=device, tp_rank=rank, moe_ep_rank=0,
                               pp_rank=0, attn_cp_rank=0, moe_dp_rank=0, dp_rank=None)
         initialized = monotonic_ns()
@@ -186,7 +189,7 @@ class SchedulerRunner:
         )
 
     def run(self, revision, *, host_timing=False):
-        from sglang.benchmark import one_batch
+        one_batch = resolve(symbols().one_batch)
         from torch.multiprocessing import spawn
 
         args = one_batch.ServerArgs(**self.configuration.runner_options(self.model))

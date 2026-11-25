@@ -4,6 +4,9 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import symbols
+
 
 @dataclass
 class StateRecord:
@@ -112,7 +115,6 @@ class RequestStateCalls:
         return original(relay, indices, payload)
 
     def resolve(self, original, batch, relay):
-
         # These are the native read conditions before resolve_forward_inputs mutates the batch.
         if batch.prefill_input_ids_cpu is not None:
             if batch.mix_running_indices is not None:
@@ -122,13 +124,7 @@ class RequestStateCalls:
         return original(batch, relay)
 
     def install(self):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
-        HookRegistry.register("sglang.srt.managers.overlap_utils.FutureMap.stash", self.stash, HookType.AROUND)
-        HookRegistry.register("sglang.srt.managers.overlap_utils.resolve_forward_inputs", self.resolve, HookType.AROUND)
-        HookRegistry.register(
-            "sglang.srt.disaggregation.utils.MetadataBuffers.set_buf", self.set_metadata, HookType.AROUND
-        )
-        HookRegistry.register(
-            "sglang.srt.disaggregation.utils.MetadataBuffers.get_buf", self.get_metadata, HookType.AROUND
-        )
+        HookTable.around(symbols().future_map_stash, self.stash)
+        HookTable.around(symbols().resolve_forward_inputs, self.resolve)
+        HookTable.around(symbols().metadata_buffers_set_buf, self.set_metadata)
+        HookTable.around(symbols().metadata_buffers_get_buf, self.get_metadata)

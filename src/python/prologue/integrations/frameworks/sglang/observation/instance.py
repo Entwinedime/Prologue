@@ -10,6 +10,7 @@ from typing import Any
 
 from prologue.common.io import write_json
 from prologue.integrations.bindings import device_runtime, platform_domain
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
 from prologue.integrations.frameworks.sglang.observation.submissions import EngineSubmissions
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
@@ -57,7 +58,6 @@ class NativeServingInstance:
         print(f"prologue: native {phase} complete", flush=True)
 
     def reset(self, engine: Any, phase: str) -> None:
-
         # End observed serving at native idle before sending the driver's administrative reset.
         ObservationWindow.wait(self.output, self.roles, phase, "drained")
         result = engine.loop.run_until_complete(engine.tokenizer_manager.flush_cache(timeout_s=30))
@@ -176,7 +176,7 @@ class NativeServingInstance:
                 SingleDeviceEngine as Engine,
             )
         else:
-            from sglang.srt.entrypoints.engine import Engine
+            Engine = resolve(symbols().engine)
 
         options = self.instance.configuration.runner_options(self.model)
         options.update(
@@ -188,7 +188,7 @@ class NativeServingInstance:
                 disaggregation_bootstrap_port=bootstrap["port"],
                 disaggregation_decode_enable_radix_cache=mode == "decode" and self.configuration["prefix_cache"],
             )
-        from sglang.srt.plugins import load_plugins
+        load_plugins = resolve(symbols().load_plugins)
 
         # Native argument normalization can change EP size; reject that change before loading weights or
         # launching workers.

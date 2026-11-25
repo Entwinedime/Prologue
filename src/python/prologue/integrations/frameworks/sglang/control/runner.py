@@ -1,14 +1,17 @@
 """Preserve native initialization while replacing physical model and pool construction."""
 
 import torch
-from sglang.srt.distributed import parallel_state
-from sglang.srt.distributed.utils import get_pp_indices
-from sglang.srt.layers.dp_attention import get_attention_tp_group, initialize_dp_attention
-from sglang.srt.mem_cache.common import get_req_to_token_extra_context_len
-from sglang.srt.model_executor.model_runner import ModelRunner
-from sglang.srt.model_executor.pool_configurator import MemoryPoolConfig
 
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.control.resources import PageAllocator, RequestSlots
+
+parallel_state = resolve(symbols().parallel_state)
+get_pp_indices = resolve(symbols().get_pp_indices)
+get_attention_tp_group = resolve(symbols().get_attention_tp_group)
+initialize_dp_attention = resolve(symbols().initialize_dp_attention)
+get_req_to_token_extra_context_len = resolve(symbols().get_req_to_token_extra_context_len)
+ModelRunner = resolve(symbols().model_runner)
+MemoryPoolConfig = resolve(symbols().memory_pool_config)
 
 
 class UnexecutedModel(torch.nn.Module):
@@ -38,7 +41,6 @@ class MetadataRunner(ModelRunner):
         torch.set_num_threads(1)
 
     def init_torch_distributed(self):
-
         # Native request/control collectives run on CPU; model collectives belong to the simulated graph.
         parallel_state.init_distributed_environment(
             backend="gloo",
@@ -86,7 +88,6 @@ class MetadataRunner(ModelRunner):
         self.token_to_kv_pool = self.token_to_kv_pool_allocator.storage
 
     def init_shared_mooncake_transfer_engine(self):
-
         # The transfer adapter submits graph work; prediction never opens a physical transport engine.
         self.shared_mooncake_transfer_engine = None
 

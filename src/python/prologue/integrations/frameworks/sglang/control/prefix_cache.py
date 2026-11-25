@@ -1,24 +1,23 @@
 """Native request bookkeeping over the core's content index and page ownership."""
 
 import torch
-from sglang.srt.mem_cache.base_prefix_cache import (
-    DecLockRefResult,
-    EvictResult,
-    IncLockRefResult,
-    InsertResult,
-    MatchResult,
-)
-from sglang.srt.mem_cache.radix_cache import RadixCache
-from sglang.srt.mem_cache.registry import default_radix_cache_factory
 
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
 from prologue.integrations.frameworks.sglang.shared.resources import PoolCoordinates
+
+DecLockRefResult = resolve(symbols().dec_lock_ref_result)
+EvictResult = resolve(symbols().evict_result)
+IncLockRefResult = resolve(symbols().inc_lock_ref_result)
+InsertResult = resolve(symbols().insert_result)
+MatchResult = resolve(symbols().match_result)
+RadixCache = resolve(symbols().radix_cache)
+default_radix_cache_factory = resolve(symbols().default_radix_cache_factory)
 
 
 class PrefixCache(RadixCache):
     @staticmethod
     def build(context, *, expected):
-
         # Native chunk-only storage retains its request bookkeeping and never builds a content index.
         if context.disable_radix_cache and context.effective_chunked_prefill_size is not None:
             cache = default_radix_cache_factory(context)
@@ -55,7 +54,6 @@ class PrefixCache(RadixCache):
         self._empty_match_result = MatchResult(torch.empty(0, dtype=torch.int64), 0, 0, 0)
 
     def reset(self):
-
         # Each simulation starts with its own resource pool; native flush must not create a second tree.
         raise NotImplementedError("reset prefix state by starting a new simulation resource pool")
 

@@ -5,6 +5,8 @@ from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 
 from prologue.common.io import write_json
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.content import NativeContent
 from prologue.integrations.frameworks.sglang.observation.host_samples import NativeHostSamples
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
@@ -46,7 +48,7 @@ class NativeTiming:
             workers = [{"expert_layers": layers}]
             if self.pipeline_stages > 1:
                 import torch.distributed as distributed
-                from sglang.srt.distributed import get_world_group
+                get_world_group = resolve(symbols().get_world_group)
 
                 # Every stage loads its model before serving; cache keys need all expert layer identities.
                 group = get_world_group().cpu_group
@@ -66,7 +68,8 @@ class NativeTiming:
         return original(scheduler, request)
 
     def receive(self, original, receiver):
-        from sglang.srt.managers.io_struct import BatchTokenizedGenerateReqInput, TokenizedGenerateReqInput
+        BatchTokenizedGenerateReqInput = resolve(symbols().batch_tokenized_generate_req_input)
+        TokenizedGenerateReqInput = resolve(symbols().tokenized_generate_req_input)
 
         messages = original(receiver)
         if not messages or receiver.ps.pp_rank != 0:
@@ -85,7 +88,7 @@ class NativeTiming:
         return messages
 
     def publish(self, original, sender, output, *args, **kwargs):
-        from sglang.srt.managers.io_struct import BatchTokenIDOutput
+        BatchTokenIDOutput = resolve(symbols().batch_token_id_output)
 
         result = original(sender, output, *args, **kwargs)
         if sender.socket is None or not isinstance(output, BatchTokenIDOutput) or not output.rids:
@@ -142,31 +145,17 @@ class NativeTiming:
         return original(scheduler)
 
     def install(self, device_api):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         if self.host is not None:
             self.host.install(device_api)
         elif self.attention is not None:
             self.attention.install()
         else:
-            HookRegistry.register(
-                "sglang.srt.managers.scheduler_components.request_receiver.SchedulerRequestReceiver._pull_raw_reqs",
-                self.receive, HookType.AROUND,
-            )
-            HookRegistry.register(
-                "sglang.srt.managers.scheduler_components.output_sender.SenderWrapper.send_output",
-                self.publish, HookType.AROUND,
-            )
+            HookTable.around(symbols().pull_raw_reqs, self.receive)
+            HookTable.around(symbols().sender_wrapper_send_output, self.publish)
         self.content.install()
         if self.routing is not None:
-            HookRegistry.register(
-                "sglang.srt.model_executor.model_runner.ModelRunner.load_model",
-                self.load_routed_model,
-                HookType.AROUND,
-            )
+            HookTable.around(symbols().model_runner_load_model, self.load_routed_model)
             self.routing.install()
-        HookRegistry.register(
-            "sglang.srt.managers.scheduler.Scheduler.handle_generate_request", self.request, HookType.AROUND
-        )
-        HookRegistry.register("sglang.srt.managers.scheduler.Scheduler.flush_cache", self.flush, HookType.AROUND)
-        HookRegistry.register("sglang.srt.managers.scheduler.Scheduler.on_idle", self.idle, HookType.AROUND)
+        HookTable.around(symbols().scheduler_handle_generate_request, self.request)
+        HookTable.around(symbols().scheduler_flush_cache, self.flush)
+        HookTable.around(symbols().scheduler_on_idle, self.idle)

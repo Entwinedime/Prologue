@@ -49,6 +49,7 @@ COPY src/python/prologue/integrations/runtimes/pytorch/__init__.py ./python/prol
 COPY src/python/prologue/workers/__init__.py ./python/prologue/workers/
 COPY src/python/prologue/workers/capture.py src/python/prologue/workers/plugin.py ./python/prologue/workers/
 COPY src/python/prologue/common ./python/prologue/common/
+COPY src/python/prologue/integrations/frameworks/sglang/abi ./python/prologue/integrations/frameworks/sglang/abi/
 COPY src/python/prologue/integrations/frameworks/sglang/shared ./python/prologue/integrations/frameworks/sglang/shared/
 COPY src/python/prologue/integrations/frameworks/sglang/observation ./python/prologue/integrations/frameworks/sglang/observation/
 COPY src/python/prologue/integrations/runtimes/pytorch/shared ./python/prologue/integrations/runtimes/pytorch/shared/

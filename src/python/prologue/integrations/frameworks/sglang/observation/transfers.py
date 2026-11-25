@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from functools import partial
 
 from prologue.integrations.bindings import platform_domain
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 
 
@@ -76,13 +77,11 @@ class TensorTransfers:
 
     def install(self):
         import torch.distributed as distributed
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
+
 
         for name in ("isend", "irecv"):
-            HookRegistry.register(
-                f"torch.distributed.{name}",
-                partial(self.invoke, inspect.signature(getattr(distributed, name))),
-                HookType.AROUND,
+            HookTable.around(
+                f"torch.distributed.{name}", partial(self.invoke, inspect.signature(getattr(distributed, name))),
             )
 
 

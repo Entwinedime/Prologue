@@ -7,6 +7,8 @@ from inspect import signature
 from threading import get_native_id
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import symbols
 from prologue.integrations.frameworks.sglang.observation.communications import DeviceCollectiveCuts
 from prologue.integrations.frameworks.sglang.observation.flow_scopes import ServingCuts
 from prologue.integrations.frameworks.sglang.observation.kv_scopes import NativeKvScopes
@@ -231,14 +233,10 @@ class NativeHostSamples(ServingCuts):
             self.auxiliary_intervals.append([get_native_id(), begin, clock_gettime_ns(CLOCK_MONOTONIC_RAW)])
 
     def install(self, device_api):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         if self.protocol is not None:
             for target, hook in self.protocol.hooks():
-                HookRegistry.register(target, hook, HookType.AROUND)
-        HookRegistry.register(
-            "sglang.srt.model_executor.model_runner.ModelRunner.load_model", self.load_model, HookType.AROUND
-        )
+                HookTable.around(target, hook)
+        HookTable.around(symbols().model_runner_load_model, self.load_model)
         ModelScopes.install_batch_hooks(self)
         self.communications.install(self.observe_expert_exchange if self.ep_size > 1 else None)
         if self.mode != "null":

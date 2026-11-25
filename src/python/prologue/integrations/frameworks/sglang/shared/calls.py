@@ -71,7 +71,6 @@ class CallFrame:
         }
 
     def child(self, work):
-
         # Preserve the caller's logical position, not a run-local call counter or resource binding.
         if "observation_context" in self.work:
             work.setdefault("observation_context", self.work["observation_context"])
@@ -145,7 +144,6 @@ class CallSegments:
         return value
 
     def progress(self, requests):
-
         # Logical request progress is comparable across runs; native slots and object handles are not.
         return [
             {

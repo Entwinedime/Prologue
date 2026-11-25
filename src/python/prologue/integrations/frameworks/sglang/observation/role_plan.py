@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.module_layout import ModuleStructure
 from prologue.integrations.frameworks.sglang.shared.groups import ParallelGroups
 from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
@@ -13,8 +14,8 @@ class NativeWorkerLayout:
     """Read the same initialized worker at a serving or a local acquisition boundary."""
 
     def __init__(self, runner, revision, rank_offset):
-        from sglang.srt.layers.radix_attention import RadixAttention
-        from sglang.srt.runtime_context import get_parallel
+        RadixAttention = resolve(symbols().radix_attention)
+        get_parallel = resolve(symbols().get_parallel)
 
         self.model = runner.model
         self.rank_offset = rank_offset
@@ -72,7 +73,7 @@ class NativeWorkerLayout:
 class WorkerRolePlan:
     def __init__(self, model: Any, facts: dict[str, Any], observation_conditions) -> None:
         import torch.distributed as distributed
-        from sglang.srt.distributed import get_world_group
+        get_world_group = resolve(symbols().get_world_group)
 
         parallel = facts["parallel"]
         identity = parallel["rank"]

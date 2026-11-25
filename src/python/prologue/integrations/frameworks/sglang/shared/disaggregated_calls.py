@@ -5,6 +5,8 @@ from functools import partial
 import torch
 from torch.overrides import TorchFunctionMode
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import symbols
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.shared.calls import ActionCall
 
@@ -178,7 +180,6 @@ class DisaggregatedCalls:
             return result
 
     def commit(self, original, batch, *args, **kwargs):
-
         # Native cache calls interrupt a CPU loop; token materialization and relay writes follow its last iteration.
         return self.batch("prebuilt_commit", original, batch, (batch, *args), kwargs, device_tail=True)
 
@@ -200,15 +201,13 @@ class DisaggregatedCalls:
             return original(scheduler, req, last_chunk, end_idx)
 
     def install(self, mode):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
-        scheduler = "sglang.srt.managers.scheduler.Scheduler."
+        scheduler = symbols().scheduler + "."
         for name in ("poll_and_all_reduce", "poll_and_all_reduce_attn_cp_tp_group"):
-            HookRegistry.register(f"sglang.srt.disaggregation.utils.{name}", self.poll, HookType.AROUND)
+            HookTable.around(f"{symbols().utils}.{name}", self.poll)
 
         if mode == "prefill":
             hooks = (
-                ("sglang.srt.disaggregation.prefill.PrefillBootstrapQueue.create_sender", self.create_sender),
+                (symbols().prefill_bootstrap_queue_create_sender, self.create_sender),
                 # Preparation, cache, batch transforms and KV submission are separate child actions.
                 (
                     scheduler + "get_next_disagg_prefill_batch_to_run",
@@ -226,7 +225,7 @@ class DisaggregatedCalls:
         else:
             hooks = (
                 (
-                    "sglang.srt.disaggregation.decode.DecodePreallocQueue._create_receiver_and_enqueue",
+                    symbols().create_receiver_and_enqueue,
                     self.create_receiver,
                 ),
                 (
@@ -238,19 +237,19 @@ class DisaggregatedCalls:
                 # Cache matching, tensor preparation and commit are child actions; admission only selects requests.
                 (scheduler + "get_new_prebuilt_batch", partial(self.queue, "prebuilt_admit", host_only=True)),
                 (
-                    "sglang.srt.disaggregation.decode.DecodePreallocQueue.pop_preallocated",
+                    symbols().decode_prealloc_queue_pop_preallocated,
                     partial(self.queue, "decode_reserve"),
                 ),
-                ("sglang.srt.disaggregation.decode.DecodeTransferQueue.pop_transferred", self.transferred),
-                ("sglang.srt.disaggregation.decode.DecodePreallocQueue._pre_alloc", self.preallocate),
+                (symbols().decode_transfer_queue_pop_transferred, self.transferred),
+                (symbols().pre_alloc, self.preallocate),
                 ("torch.Tensor.cpu", self.read_reservation_indices),
-                ("sglang.srt.disaggregation.decode.DecodeTransferQueue._commit_transfer_to_req", self.receive),
-                ("sglang.srt.managers.schedule_batch.ScheduleBatch.prepare_for_prebuilt", self.prepare),
-                ("sglang.srt.managers.schedule_batch.ScheduleBatch.process_prebuilt", self.commit),
+                (symbols().commit_transfer_to_req, self.receive),
+                (symbols().schedule_batch_prepare_for_prebuilt, self.prepare),
+                (symbols().schedule_batch_process_prebuilt, self.commit),
                 (
-                    "sglang.srt.managers.scheduler_components.batch_result_processor.SchedulerBatchResultProcessor.process_batch_result_prebuilt",
+                    symbols().scheduler_batch_result_processor_process_batch_result_prebuilt,
                     self.result,
                 ),
             )
         for target, hook in hooks:
-            HookRegistry.register(target, hook, HookType.AROUND)
+            HookTable.around(target, hook)

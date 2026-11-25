@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from weakref import WeakValueDictionary
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 
 
@@ -40,7 +41,6 @@ class PipelineSignals:
         return result
 
     def publish(self, event, context):
-
         # Re-recording a handle creates a fresh generation; old waits retain their already submitted graph edge.
         identity = f"{self.scheduler.group}/signal/{self.sequence}"
         self.sequence += 1
@@ -91,10 +91,8 @@ class PipelineSignals:
         self.wait(event, device=True, stream=stream)
 
     def install(self):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
-        HookRegistry.register("torch.cpu.Event.query", self.query, HookType.AROUND)
-        HookRegistry.register("torch.cpu.Event.synchronize", self.synchronize, HookType.AROUND)
-        HookRegistry.register("torch.cpu.Event.record", self.record, HookType.AROUND)
-        HookRegistry.register("torch.cpu.Stream.wait_event", self.wait_event, HookType.AROUND)
-        HookRegistry.register("torch.cpu.Stream.wait_stream", self.wait_stream, HookType.AROUND)
+        HookTable.around("torch.cpu.Event.query", self.query)
+        HookTable.around("torch.cpu.Event.synchronize", self.synchronize)
+        HookTable.around("torch.cpu.Event.record", self.record)
+        HookTable.around("torch.cpu.Stream.wait_event", self.wait_event)
+        HookTable.around("torch.cpu.Stream.wait_stream", self.wait_stream)

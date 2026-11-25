@@ -3,13 +3,15 @@
 import sys
 
 import zmq
-from sglang.srt.disaggregation.utils import DisaggregationMode
-from sglang.srt.managers.io_struct import BatchTokenizedGenerateReqInput
 
 from prologue.common.workload.routing import RoutedContent
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.shared.cache_keys import RoutedCacheKeys
 from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
+
+DisaggregationMode = resolve(symbols().disaggregation_mode)
+BatchTokenizedGenerateReqInput = resolve(symbols().batch_tokenized_generate_req_input)
 
 
 class RequestInput(RoutedCacheKeys):
@@ -82,7 +84,6 @@ class NativeRequestReceiver:
         self.poll_deadline_ns = None
 
     def poll(self, timeout):
-
         # SGLang supplies the socket timeout. Simulated time advances at its next receive boundary.
         if self.scheduler.calls.started and timeout >= 0:
             self.poll_deadline_ns = self.scheduler.peer.call("clock") + timeout * 1_000_000

@@ -3,6 +3,7 @@
 from collections import defaultdict
 
 from prologue.common.workload import WorkloadContent
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.shared.clocks import DecisionClocks
 
 
@@ -38,7 +39,7 @@ class BatchOperands:
         consumer = condition.get("read", {}).get("consumer")
         if (
             action == "query"
-            and consumer == f"sglang.srt.observability.req_time_stats.{DecisionClocks.wait_queue_entry}"
+            and consumer == f"{symbols().req_time_stats}.{DecisionClocks.wait_queue_entry}"
             and condition.get("query") == "clock"
             and context.get("waiting")
             and all(context.get(key) == [] for key in ("running", "previous", "chunked"))
@@ -106,9 +107,9 @@ class RequestSubmissions:
     def tokenized(identity, tokens, sampling, vocab_size, mode, *, extra_key=None, room=None):
         from array import array
 
-        from sglang.srt.managers.io_struct import TokenizedGenerateReqInput
-        from sglang.srt.observability.req_time_stats import APIServerReqTimeStats
-        from sglang.srt.sampling.sampling_params import SamplingParams
+        TokenizedGenerateReqInput = resolve(symbols().tokenized_generate_req_input)
+        APIServerReqTimeStats = resolve(symbols().api_server_req_time_stats)
+        SamplingParams = resolve(symbols().sampling_params)
 
         parameters = SamplingParams(**sampling)
         parameters.normalize(None)

@@ -1,5 +1,6 @@
 """Lower native resource and shape declarations for projection and source checking."""
 
+from prologue.integrations.frameworks.sglang.abi.registry import symbols
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.shared.resources import ResourceInputs
 
@@ -7,20 +8,20 @@ from prologue.integrations.frameworks.sglang.shared.resources import ResourceInp
 class SourceLayout:
     relay_ports = {"run_batch": "output", "output_prepare": "input"}
 
-    # Each entry comes from the native decoder's layout at its observation boundary.
-    position_layouts = {
-        "sglang.srt.models.qwen3.Qwen3DecoderLayer": {"prefill", "mixed", "first_decode"},
-        "sglang.srt.models.qwen3_moe.Qwen3MoeDecoderLayer": {"first_decode"},
-        "sglang.srt.models.llama.LlamaDecoderLayer": {"first_decode"},
-    }
-    packed_value_layouts = {
-        "sglang.srt.models.llama.LlamaDecoderLayer": {"prefill", "mixed"},
-        "sglang.srt.models.qwen2_moe.Qwen2MoeDecoderLayer": {"decode"},
-    }
     model_calls = {"launch", "run_batch", "model"}
     prebuilt_batches = {"prebuilt_prepare", "prebuilt_commit", "prebuilt_result"}
 
     def __init__(self, environment, platform_layouts):
+        # Each entry comes from the native decoder's layout at its observation boundary.
+        self.position_layouts = {
+            symbols().qwen3_decoder_layer: {"prefill", "mixed", "first_decode"},
+            symbols().qwen3_moe_decoder_layer: {"first_decode"},
+            symbols().llama_decoder_layer: {"first_decode"},
+        }
+        self.packed_value_layouts = {
+            symbols().llama_decoder_layer: {"prefill", "mixed"},
+            symbols().qwen2_moe_decoder_layer: {"decode"},
+        }
         self.layouts = platform_layouts(environment)
         self.environment = environment
         self.backend = environment["implementation"]["attention_backend"]
@@ -33,7 +34,7 @@ class SourceLayout:
 
             # FutureMap writes these values through Python indexed assignment, which strips leading unit axes.
             return "next_token_ids", direction
-        if (scope["implementation"] == "sglang.srt.mem_cache.common.alloc_for_decode"
+        if (scope["implementation"] == symbols().alloc_for_decode
                 and scope["role"] == "segment" and scope["work"]["continuation"]["exit"] == "call.return"):
             return "cache_locations", "output"
         role = scope["role"]

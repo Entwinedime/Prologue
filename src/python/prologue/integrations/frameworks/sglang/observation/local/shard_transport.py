@@ -11,6 +11,8 @@ import torch
 import torch.distributed as distributed
 
 from prologue.integrations.bindings import device_runtime
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 
 
 class StagedWork:
@@ -40,7 +42,7 @@ class StagedWork:
 class ShardTransport:
     @staticmethod
     def world(size, rank, rendezvous):
-        from sglang.srt.distributed import parallel_state
+        parallel_state = resolve(symbols().parallel_state)
 
         # SGLang reuses this host group for real logical shards placed together on device zero.
         distributed.init_process_group("gloo", init_method=rendezvous, world_size=size, rank=rank)
@@ -150,47 +152,37 @@ class ShardTransport:
         buffer._alltoall_layout = None
 
     def install_collectives(self, ep_size):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         for name, source, output in (
             ("all_reduce", "tensor", "tensor"), ("broadcast", "tensor", "tensor"),
             ("all_gather_into_tensor", "input_tensor", "output_tensor"), ("all_gather", "tensor", "tensor_list"),
             ("reduce_scatter_tensor", "input", "output"), ("all_to_all_single", "input", "output"),
         ):
             signature = inspect.signature(getattr(distributed, name))
-            HookRegistry.register(
-                f"torch.distributed.{name}", partial(self.exchange, name, signature, source, output), HookType.AROUND
-            )
+            HookTable.around(f"torch.distributed.{name}", partial(self.exchange, name, signature, source, output))
 
         for name in ("isend", "irecv"):
             signature = inspect.signature(getattr(distributed, name))
-            HookRegistry.register(f"torch.distributed.{name}", partial(self.post, name, signature), HookType.AROUND)
+            HookTable.around(f"torch.distributed.{name}", partial(self.post, name, signature))
 
         if ep_size > 1:
-            HookRegistry.register("deep_ep.Buffer.__init__", self.expert_buffer, HookType.REPLACE)
+            HookTable.replace("deep_ep.Buffer.__init__", self.expert_buffer)
 
     def install(self, description):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         from prologue.integrations.frameworks.sglang.observation.local.shard_weights import ShardWeights
 
         self.install_collectives(description["ep_size"])
         weights = ShardWeights(Path(description["instance_directory"]), description["worker_count"], self.auxiliary)
-        HookRegistry.register(
-            "sglang.srt.model_executor.model_runner.ModelRunner.init_torch_distributed",
-            weights.measure,
-            HookType.AROUND,
-        )
+        HookTable.around(symbols().model_runner_init_torch_distributed, weights.measure)
 
         # Park loaded layers before granting the device to another loader or entering the model runner's cross-rank
         # barrier.
         for target in (
-            "sglang.srt.model_loader.loader.DefaultModelLoader.load_model",
-            "sglang.srt.model_loader.loader.DummyModelLoader.load_model",
+            symbols().default_model_loader_load_model,
+            symbols().dummy_model_loader_load_model,
         ):
-            HookRegistry.register(target, partial(self.compute, weights.load), HookType.AROUND)
+            HookTable.around(target, partial(self.compute, weights.load))
         for target in (
-            "sglang.srt.model_executor.model_runner.ModelRunner.forward",
-            "sglang.srt.model_executor.model_runner.ModelRunner.sample",
+            symbols().model_runner_forward,
+            symbols().model_runner_sample,
         ):
-            HookRegistry.register(target, self.compute, HookType.AROUND)
+            HookTable.around(target, self.compute)

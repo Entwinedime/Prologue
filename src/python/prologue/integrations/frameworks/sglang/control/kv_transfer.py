@@ -61,7 +61,6 @@ class MetadataRows:
         self.buffers = [tensors[pointer] for pointer in pointers]
 
     def read(self, index):
-
         # Preserve native values, including its room gate; copying them here does not make them ready in simulated time.
         return [buffer[index].tolist() for buffer in self.buffers]
 

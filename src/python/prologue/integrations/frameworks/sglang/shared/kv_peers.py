@@ -1,7 +1,11 @@
 """Use the native PD rank resolver to declare topology-local peer interfaces."""
 
-from sglang.srt.disaggregation.base import KVArgs
-from sglang.srt.disaggregation.common.conn import CommonKVManager, PrefillServerInfo
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
+
+KVArgs = resolve(symbols().kv_args)
+CommonKVManager = resolve(symbols().common_kv_manager)
+PrefillServerInfo = resolve(symbols().prefill_server_info)
+
 
 
 class NativeKvTopology:

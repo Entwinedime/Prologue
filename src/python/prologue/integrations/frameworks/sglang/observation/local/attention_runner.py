@@ -4,6 +4,7 @@ from time import monotonic_ns
 
 from prologue.common.io import write_json
 from prologue.integrations.bindings import device_runtime
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.local.attention_observation import DecodeAttentionObservation
 from prologue.integrations.frameworks.sglang.observation.local.worker_output import publish_capture
 from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
@@ -135,7 +136,7 @@ class AttentionRunner:
 
     def run(self, revision):
         started = monotonic_ns()
-        from sglang.benchmark import one_batch
+        one_batch = resolve(symbols().one_batch)
 
         config = NativeConfiguration(self.job["runner"]["configuration"])
         args = one_batch.ServerArgs(**config.runner_options(self.job["runner"]["model"]))

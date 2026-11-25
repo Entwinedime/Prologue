@@ -7,10 +7,13 @@ import inspect
 import sys
 import textwrap
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
+
 
 class AllocationABI:
     def __init__(self, implementation: str) -> None:
-        if implementation != "sglang.srt.hardware_backend.npu.allocator_npu.NPUPagedTokenToKVPoolAllocator":
+        if implementation != symbols().paged_allocator:
             raise ValueError(f"allocation structure has no declared implementation: {implementation}")
         self.implementation = implementation
 
@@ -29,7 +32,6 @@ class AllocationABI:
 
     @staticmethod
     def extend_branch(pages):
-
         # NPUPagedTokenToKVPoolAllocator.alloc_extend selects its native kernel below 200 new pages.
         return "extend_kernel" if pages < 200 else "extend_naive"
 
@@ -38,7 +40,7 @@ class AllocationPrefixes:
     """Wrap each native prefix expression, leaving its branch and enclosing loop native."""
 
     def __init__(self, calls) -> None:
-        from sglang.srt.mem_cache.common import alloc_for_extend
+        alloc_for_extend = resolve(symbols().alloc_for_extend)
 
         self.calls = calls
         self.original = inspect.unwrap(alloc_for_extend)
@@ -86,9 +88,7 @@ class AllocationPrefixes:
         self.instrumented = namespace["instrument"](self.prefix)
 
     def install(self):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
-        HookRegistry.register("sglang.srt.mem_cache.common.alloc_for_extend", self.allocate, HookType.REPLACE)
+        HookTable.replace(symbols().alloc_for_extend, self.allocate)
 
     def allocate(self, batch):
         if not self.calls.enabled or self.calls.current.get() is None:
@@ -112,8 +112,8 @@ class AllocationIndices:
         self.calls = calls
 
     def install(self):
-        from sglang.srt.mem_cache.allocator.paged import alloc_extend_naive
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
+        alloc_extend_naive = resolve(symbols().paged_alloc_extend_naive)
+
 
         original = inspect.unwrap(alloc_extend_naive)
         lines, start = inspect.getsourcelines(original)
@@ -129,7 +129,7 @@ class AllocationIndices:
                 for statement in branch.body:
                     for line in range(start + statement.lineno - 1, start + statement.end_lineno):
                         self.parts[line] = name
-        HookRegistry.register("sglang.srt.mem_cache.allocator.paged.alloc_extend_naive", self.invoke, HookType.AROUND)
+        HookTable.around(symbols().paged_alloc_extend_naive, self.invoke)
 
     def invoke(self, original, prefix_lens, seq_lens, last_loc, free_pages, out_indices, page_size, device):
         arguments = (prefix_lens, seq_lens, last_loc, free_pages, out_indices, page_size, device)

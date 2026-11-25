@@ -7,6 +7,7 @@ from functools import partial
 
 import torch.distributed as distributed
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.runtimes.pytorch.shared.protocol_work import CpuTransfer
 
 
@@ -66,9 +67,7 @@ class MetadataTransfers:
         return MetadataWork(self, result, name, transfer, group) if name in {"isend", "irecv"} else result
 
     def install(self):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         for name in ("send", "recv", "isend", "irecv"):
             hook = partial(self.invoke, name, inspect.signature(getattr(distributed, name)))
             for module in ("torch.distributed", "torch.distributed.distributed_c10d"):
-                HookRegistry.register(f"{module}.{name}", hook, HookType.AROUND)
+                HookTable.around(f"{module}.{name}", hook)

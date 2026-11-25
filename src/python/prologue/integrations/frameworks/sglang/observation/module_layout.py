@@ -6,6 +6,8 @@ from functools import partial, update_wrapper
 from inspect import signature
 from typing import Any
 
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
+
 
 class LayerCommunication:
     def __init__(self, native) -> None:
@@ -13,7 +15,7 @@ class LayerCommunication:
 
     @classmethod
     def read(cls, module):
-        from sglang.srt.layers.communicator import LayerCommunicator
+        LayerCommunicator = resolve(symbols().layer_communicator)
 
         native = getattr(module, "layer_communicator", None)
         return cls(native) if isinstance(native, LayerCommunicator) else None
@@ -36,7 +38,7 @@ class LayerCommunication:
     def observe_hidden(owner, rows, original, hidden_states, *args, **kwargs):
         if owner.active and owner.selected:
             import torch
-            from sglang.srt.layers.communicator import get_attn_tp_context
+            get_attn_tp_context = resolve(symbols().get_attn_tp_context)
 
             # The ordinary layer ABI owns a flat token axis and a fixed hidden width on this shard.
             with owner.tensors.metadata():
@@ -83,7 +85,7 @@ class ModuleStructure:
     @classmethod
     def read(cls, module: Any, layers: dict[int, int], storages: dict[int, int]) -> Any:
         import torch
-        from sglang.srt.layers.utils.common import PPMissingLayer
+        PPMissingLayer = resolve(symbols().pp_missing_layer)
 
         if isinstance(module, PPMissingLayer):
             return None

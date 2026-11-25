@@ -47,7 +47,6 @@ class NativeResourceHistory:
         return None if value is None else value.id
 
     def available(self):
-
         # Diagnostic snapshots call the original readers, never the hooks for real control observations.
         return {name: int(original()) // unit for name, (original, unit) in self.capacity_readers.items()}
 
@@ -269,7 +268,6 @@ class NativeResourceHistory:
         return value
 
     def close(self):
-
         # Native flush resets the pools next; preserve the end-of-serving state before it runs.
         self.final = self.available()
         self.state_free = {field: list(pool.free_slots) for field, pool in self.fields.items()}

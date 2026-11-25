@@ -70,12 +70,10 @@ class NativeConfiguration:
         return workload["ep_routes"][self.values["ep"]["id"]]
 
     def model_token_alignment(self) -> int:
-
         # This adapter enables eager MLP synchronization through DeepEP.
         return self.tp if self.ep > 1 else 1
 
     def structure(self) -> dict:
-
         # Capacities and chunk length are target parameters; changing the native mechanism needs another source.
         return {
             "tp": self.tp, "pp": self.pp, "ep": self.ep,

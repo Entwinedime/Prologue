@@ -2,6 +2,8 @@
 
 import torch
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import symbols
 from prologue.integrations.frameworks.sglang.shared.groups import ParallelGroups
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 from prologue.integrations.runtimes.pytorch.control.point_to_point import CpuPointToPoint
@@ -109,17 +111,9 @@ class PipelineTransfers(CpuPointToPoint):
         return works, data
 
     def install(self):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         super().install()
         self.scheduler.pipeline_messages.install()
-        HookRegistry.register(
-            "sglang.srt.managers.scheduler.Scheduler._pp_send_dict_to_next_stage", self.send_dict, HookType.AROUND,
-        )
+        HookTable.around(symbols().pp_send_dict_to_next_stage, self.send_dict)
         for name in ("_pp_pd_send_consensus_bootstrapped_ids", "_pp_pd_send_consensus_release_ids"):
-            HookRegistry.register(
-                "sglang.srt.managers.scheduler.Scheduler." + name, self.send_consensus, HookType.AROUND
-            )
-        HookRegistry.register(
-            "sglang.srt.distributed.parallel_state.GroupCoordinator.all_gather", self.gather, HookType.AROUND
-        )
+            HookTable.around(symbols().scheduler + "." + name, self.send_consensus)
+        HookTable.around(symbols().group_coordinator_all_gather, self.gather)

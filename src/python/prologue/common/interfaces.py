@@ -13,6 +13,7 @@ class PlatformDomain:
     collective_backend: str
     strided_attention: tuple[str, ...]
     pd_transfer: str
+    native_symbols: tuple[tuple[str, str, str], ...] = ()
 
 
 class DeviceRuntime(Protocol):

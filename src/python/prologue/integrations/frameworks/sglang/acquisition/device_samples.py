@@ -140,7 +140,6 @@ class CostSamples:
 
     @classmethod
     def worker_services(cls, worker, model, workspace):
-
         # Project work and timing from the same recording. Local staging cannot measure service between peers.
         with TemporaryDirectory(dir=workspace) as scratch:
             facts, catalog = worker.catalog(model, Path(scratch))

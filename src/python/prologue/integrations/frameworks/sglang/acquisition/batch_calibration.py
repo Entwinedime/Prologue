@@ -54,7 +54,6 @@ class BatchCalibration:
 
     @staticmethod
     def products(recording, rank, model):
-
         batches = recording.inputs["job"]["calibration"]
         if batches.keys() != recording.manifest["calibration"].keys():
             raise ValueError("native calibration did not return each planned batch cut")

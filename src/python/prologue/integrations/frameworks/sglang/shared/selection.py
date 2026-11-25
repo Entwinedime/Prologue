@@ -1,5 +1,7 @@
 """Expose native selection as control continuations around independent batch actions."""
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.shared.allocation import AllocationIndices, AllocationPrefixes
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.shared.calls import ActionCall
@@ -30,7 +32,6 @@ class BatchPreparation(ActionCall):
 class BatchTransform(ActionCall):
     @staticmethod
     def private(operation, members):
-
         # Native filter_batch returns before accessing tensors when its input batch is empty.
         return operation == "filter" and members == 0
 
@@ -204,7 +205,7 @@ class BatchSelection:
         with self.calls.call("batch_sync_exchange", original, parameters={}, work=work) as frame:
             result = original(info, device, group)
             if observing:
-                from sglang.srt.distributed.parallel_state import get_tp_group
+                get_tp_group = resolve(symbols().get_tp_group)
 
                 # Native all_gather already materialized these Python results; observation performs no device read.
                 frame.values["batch_sync"] = {
@@ -223,15 +224,10 @@ class BatchSelection:
             return result
 
     def install(self) -> None:
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         AllocationIndices(self.calls).install()
         AllocationPrefixes(self.calls).install()
-        HookRegistry.register(
-            "sglang.srt.managers.scheduler_components.dp_attn.MLPSyncBatchInfo.all_gather",
-            self.gather, HookType.AROUND,
-        )
-        owner = "sglang.srt.managers.schedule_batch.ScheduleBatch."
+        HookTable.around(symbols().mlp_sync_batch_info_all_gather, self.gather)
+        owner = symbols().schedule_batch + "."
         for method, hook in (
             ("prepare_for_extend", self.prepare),
             ("prepare_for_decode", self.prepare),
@@ -240,13 +236,8 @@ class BatchSelection:
             ("merge_batch", self.merge),
             ("mix_with_running", self.mix),
         ):
-            HookRegistry.register(owner + method, hook, HookType.AROUND)
+            HookTable.around(owner + method, hook)
         for method in ("alloc_for_extend", "alloc_for_decode"):
-            HookRegistry.register("sglang.srt.mem_cache.common." + method, self.allocate, HookType.AROUND)
-        HookRegistry.register(
-            "sglang.srt.managers.scheduler.Scheduler.get_next_batch_to_run", self.select, HookType.AROUND
-        )
-        HookRegistry.register(
-            "sglang.srt.managers.scheduler_components.dp_attn.SchedulerDPAttnAdapter.prepare_mlp_sync_batch",
-            self.synchronize, HookType.AROUND,
-        )
+            HookTable.around(symbols().common + "." + method, self.allocate)
+        HookTable.around(symbols().scheduler_get_next_batch_to_run, self.select)
+        HookTable.around(symbols().scheduler_dp_attn_adapter_prepare_mlp_sync_batch, self.synchronize)

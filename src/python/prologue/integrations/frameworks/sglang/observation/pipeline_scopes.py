@@ -1,5 +1,7 @@
 """Observe native pipeline actions; the framework keeps microbatch rotation and event ownership."""
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import symbols
 from prologue.integrations.frameworks.sglang.observation.transfers import HostTransfers, NativeTransfers
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI, PipelineMessages
@@ -25,20 +27,18 @@ class PipelineCuts:
             return original(stream, other)
 
     def install(self, device_api):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         self.messages.install()
         self.transfers.install()
-        scheduler = "sglang.srt.managers.scheduler.Scheduler."
+        scheduler = symbols().scheduler + "."
         for name, hook in (
             ("_pp_launch_batch", self.launch),
             ("_pp_prep_batch_result", self.prepare),
             ("_pp_make_skip_output_result", self.skip_output),
         ):
-            HookRegistry.register(scheduler + name, hook, HookType.AROUND)
+            HookTable.around(scheduler + name, hook)
         for name in ("record", "wait", "synchronize", "query"):
-            HookRegistry.register(f"{device_api}.Event.{name}", getattr(self.signals, name), HookType.AROUND)
-        HookRegistry.register(f"{device_api}.Stream.wait_stream", self.wait_stream, HookType.AROUND)
+            HookTable.around(f"{device_api}.Event.{name}", getattr(self.signals, name))
+        HookTable.around(f"{device_api}.Stream.wait_stream", self.wait_stream)
 
 
 class PipelineScopes(PipelineCuts):

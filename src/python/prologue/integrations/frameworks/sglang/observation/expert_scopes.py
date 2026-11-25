@@ -2,6 +2,7 @@
 
 from functools import partial, update_wrapper
 
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.module_layout import ModuleStructure
 
 
@@ -9,9 +10,9 @@ class ExpertScopes:
     def __init__(self, observation, modules) -> None:
         import os
 
-        from sglang.srt.batch_overlap.two_batch_overlap import MaybeTboDeepEPDispatcher
-        from sglang.srt.layers.moe.token_dispatcher.deepep import DeepEPDispatcher
-        from sglang.srt.layers.moe.token_dispatcher.standard import StandardDispatcher
+        MaybeTboDeepEPDispatcher = resolve(symbols().maybe_tbo_deep_ep_dispatcher)
+        DeepEPDispatcher = resolve(symbols().deep_ep_dispatcher)
+        StandardDispatcher = resolve(symbols().standard_dispatcher)
 
         self.observation = observation
         self.sites = []

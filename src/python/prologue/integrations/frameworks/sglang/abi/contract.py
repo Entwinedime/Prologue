@@ -1,0 +1,181 @@
+"""Typed, process-independent declarations of the SGLang operations Prologue consumes."""
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from types import MappingProxyType
+
+
+@dataclass(frozen=True, slots=True)
+class NativeSymbols:
+    communicator_attribute: str
+    alloc_extend_naive: str
+    alloc_for_decode: str
+    alloc_for_extend: str
+    api_server_req_time_stats: str
+    base_kv_manager: str
+    base_token_to_kv_pool_allocator: str
+    batch_token_id_output: str
+    batch_tokenized_generate_req_input: str
+    build_kv_cache: str
+    cache_init_params: str
+    chunk_cache: str
+    commit_transfer_to_req: str
+    common: str
+    common_kv_manager: str
+    common_kv_manager_update_status: str
+    common_kv_receiver: str
+    compute_parallelism_ranks: str
+    conn: str
+    connect_to_bootstrap_server: str
+    create_receiver_and_enqueue: str
+    dec_lock_ref_result: str
+    decode: str
+    decode_prealloc_queue: str
+    decode_prealloc_queue_pop_preallocated: str
+    decode_req_to_token_pool: str
+    decode_transfer_queue_pop_transferred: str
+    deep_ep_dispatcher: str
+    default_model_loader_load_model: str
+    default_radix_cache_factory: str
+    device_kv_manager: str
+    disaggregation_mode: str
+    dummy_model_loader_load_model: str
+    dynamic_grad_mode: str
+    engine: str
+    envs: str
+    evict_from_tree_cache: str
+    evict_result: str
+    expert_location_dispatch_info: str
+    fast_queue_get: str
+    fast_queue_put: str
+    fused_mo_e: str
+    future_map_stash: str
+    generation_batch_result: str
+    get_attention_tp_group: str
+    get_attn_backend: str
+    get_attn_tp_context: str
+    get_global_server_args: str
+    get_moe_ep_group: str
+    get_parallel: str
+    get_pp_indices: str
+    get_req_to_token_extra_context_len: str
+    get_tp_group: str
+    get_world_group: str
+    group_coordinator: str
+    group_coordinator_all_gather: str
+    hook_registry: str
+    hook_type: str
+    inc_lock_ref_result: str
+    initialize_dp_attention: str
+    insert_result: str
+    kv_args: str
+    kv_class_type: str
+    kv_poll: str
+    layer_communicator: str
+    llama_decoder_layer: str
+    load_config: str
+    load_plugins: str
+    loader: str
+    logits_processor: str
+    logits_processor_output: str
+    match_result: str
+    maybe_tbo_deep_ep_dispatcher: str
+    memory_pool_config: str
+    metadata_buffers_get_buf: str
+    metadata_buffers_set_buf: str
+    mha_pool: str
+    mlp_sync_batch_info_all_gather: str
+    model_config: str
+    model_runner_module: str
+    model_runner_forward: str
+    model_runner_init_torch_distributed: str
+    model_runner_load_model: str
+    model_runner: str
+    model_runner_sample: str
+    mooncake_conn: str
+    mooncake_kv_manager: str
+    mooncake_kv_manager_init: str
+    mooncake_kv_receiver: str
+    mooncake_kv_receiver_poll: str
+    mooncake_kv_receiver_send_metadata: str
+    mooncake_kv_sender: str
+    mooncake_kv_sender_poll: str
+    mooncake_transfer_engine_batch_transfer_sync: str
+    one_batch: str
+    paged_alloc_extend_naive: str
+    paged_allocator: str
+    parallel_lm_head: str
+    parallel_state: str
+    port_args: str
+    pp_missing_layer: str
+    pp_proxy_tensors: str
+    pp_send_dict_to_next_stage: str
+    pre_alloc: str
+    prefill: str
+    prefill_bootstrap_queue_create_sender: str
+    prefill_server_info: str
+    profile_req_output: str
+    profile_req_type: str
+    pull_raw_reqs: str
+    qwen2_moe_decoder_layer: str
+    qwen3_decoder_layer: str
+    qwen3_moe_decoder_layer: str
+    radix_attention: str
+    radix_cache: str
+    radix_key_init: str
+    register_radix_cache_backend: str
+    req: str
+    req_init: str
+    req_time_stats: str
+    req_to_metadata_idx_allocator_init: str
+    resolve_forward_inputs: str
+    row_parallel_linear_forward: str
+    run_scheduler_process: str
+    sampling_params: str
+    schedule_batch: str
+    schedule_batch_prepare_for_prebuilt: str
+    schedule_batch_process_prebuilt: str
+    scheduler_module: str
+    scheduler_batch_result_processor_process_batch_result_prebuilt: str
+    scheduler_dp_attn_adapter_prepare_mlp_sync_batch: str
+    scheduler_flush_cache: str
+    scheduler_flush_wrapper_init: str
+    scheduler_get_next_batch_to_run: str
+    scheduler_handle_generate_request: str
+    scheduler_on_idle: str
+    scheduler_process_batch_result: str
+    scheduler_profiler_manager: str
+    scheduler_request_receiver: str
+    scheduler_run_batch: str
+    scheduler: str
+    scheduler_send_kv_chunk: str
+    sender_wrapper_send_output: str
+    server_args: str
+    set_global_server_args_for_scheduler: str
+    sock_recv: str
+    speculative_algorithm: str
+    standard_dispatcher: str
+    tensor_metadata: str
+    tokenized_generate_req_input: str
+    top_k: str
+    topk_ids_logical_to_physical: str
+    transfer_info_from_zmq: str
+    transfer_kv_chunk: str
+    utils: str
+    vocab_parallel_embedding: str
+    vocab_parallel_embedding_init: str
+
+
+@dataclass(frozen=True, slots=True)
+class SGLangABI:
+    revision: str
+    symbols: NativeSymbols
+    capabilities: frozenset[str]
+    native_platform: str
+    aliases: tuple[str, ...] = ()
+    hook_paths: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+
+    def extend(self, revision, *, symbols=None, aliases=(), capabilities=None, hooks=None):
+        return SGLangABI(revision, replace(self.symbols, **(symbols or {})),
+                         self.capabilities if capabilities is None else frozenset(capabilities),
+                         self.native_platform, tuple(aliases), MappingProxyType(dict(self.hook_paths) | (hooks or {})))

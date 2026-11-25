@@ -3,6 +3,9 @@
 from contextvars import ContextVar
 from functools import partial
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
+
 
 class PipelineMessages:
     def __init__(self, calls, *, wire_device=None):
@@ -48,7 +51,7 @@ class PipelineMessages:
         if message is None or message["direction"] != "send":
             return metadata, tensors
 
-        from sglang.srt.distributed.parallel_state import TensorMetadata
+        TensorMetadata = resolve(symbols().tensor_metadata)
 
         message["kind"] = tensor_dict.get("__msg_type__")
         names = [name for name, value in metadata if isinstance(value, TensorMetadata)]
@@ -68,7 +71,7 @@ class PipelineMessages:
 
     @staticmethod
     def devices(metadata, source, target):
-        from sglang.srt.distributed.parallel_state import TensorMetadata
+        TensorMetadata = resolve(symbols().tensor_metadata)
 
         translated = []
         for name, value in metadata:
@@ -80,23 +83,20 @@ class PipelineMessages:
         return translated
 
     def fields(self, entries, *, paired):
-
         # Attribute the native loop's current field, including equal-shaped tensors and sliced views.
         for name, value in entries:
             self.message.get()["field"] = name
             yield (name, value) if paired else value
 
     def install(self):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
-        module = "sglang.srt.distributed.parallel_state."
+        module = symbols().parallel_state + "."
         for target, hook in (
             (module + "GroupCoordinator.send_tensor_dict", partial(self.dictionary, "send")),
             (module + "GroupCoordinator.recv_tensor_dict", partial(self.dictionary, "receive")),
             (module + "_split_tensor_dict", self.split),
             (module + "GroupCoordinator.recv_object", self.receive_metadata),
         ):
-            HookRegistry.register(target, hook, HookType.AROUND)
+            HookTable.around(target, hook)
 
 
 class PipelineABI:
@@ -135,7 +135,6 @@ class PipelineABI:
 
     @staticmethod
     def pending_model_sends(scheduler):
-
         # Empty request forwarding continues while idle; proxy/output sends still retain model work.
         return scheduler.ps.pp_size > 1 and bool(scheduler.send_proxy_work or scheduler.send_output_work)
 

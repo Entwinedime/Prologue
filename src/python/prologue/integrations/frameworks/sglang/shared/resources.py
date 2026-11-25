@@ -4,6 +4,8 @@ import inspect
 from contextvars import ContextVar
 from functools import partial, update_wrapper
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import symbols
 from prologue.integrations.frameworks.sglang.shared.calls import ActionCall
 
 
@@ -57,7 +59,6 @@ class ResourceInputs:
 
     @classmethod
     def scopes(cls, scopes, environment):
-
         # Native records retain the enclosing observation; only formal inputs cross a resource call boundary.
         owners = {}
         enabled = not environment["implementation"]["cache"]["disabled"]
@@ -308,10 +309,8 @@ class ResourceCalls:
                 setattr(owner, name, update_wrapper(wrapper, original))
 
     def install(self):
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         # Register before the framework applies hooks; cache objects are bound later during worker construction.
-        HookRegistry.register("sglang.srt.mem_cache.common.evict_from_tree_cache", self.evict, HookType.AROUND)
+        HookTable.around(symbols().evict_from_tree_cache, self.evict)
 
 
 class PoolCoordinates:

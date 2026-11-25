@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from prologue.common.io import write_json
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.model_calls import NativeModelObservation
 from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
@@ -46,7 +48,6 @@ class SGLangObservation(NativeModelObservation):
 
     @property
     def protocol_enabled(self):
-
         # Nonrepresentative workers still supply protocol evidence until the source group drains.
         return self.window.phase == "source" and not self.window.drained
 
@@ -123,7 +124,8 @@ class SGLangObservation(NativeModelObservation):
         return original(scheduler, request)
 
     def receive(self, original: Any, receiver: Any, *, ingress=False) -> Any:
-        from sglang.srt.managers.io_struct import BatchTokenizedGenerateReqInput, TokenizedGenerateReqInput
+        BatchTokenizedGenerateReqInput = resolve(symbols().batch_tokenized_generate_req_input)
+        TokenizedGenerateReqInput = resolve(symbols().tokenized_generate_req_input)
 
         attempt = None
         if (ingress and self.resource_history is not None and self.selected
@@ -231,8 +233,6 @@ class SGLangObservation(NativeModelObservation):
         return original(scheduler)
 
     def install(self, device_api, shard_transport) -> None:
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         from prologue.integrations.frameworks.sglang.observation.communications import NativeCommunications
         from prologue.integrations.frameworks.sglang.observation.flow_scopes import FlowScopes
         from prologue.integrations.frameworks.sglang.observation.kv_scopes import NativeKvScopes
@@ -240,18 +240,17 @@ class SGLangObservation(NativeModelObservation):
         from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
         from prologue.integrations.frameworks.sglang.shared.metadata_transfers import MetadataTransfers
 
-        receiver = "sglang.srt.managers.scheduler_components.request_receiver.SchedulerRequestReceiver"
+        receiver = symbols().scheduler_request_receiver
         targets = {
-            "sglang.srt.model_executor.model_runner.ModelRunner.load_model": self.load_model,
-            "sglang.srt.managers.scheduler.Scheduler.handle_generate_request": self.request,
+            symbols().model_runner_load_model: self.load_model,
+            symbols().scheduler_handle_generate_request: self.request,
             f"{receiver}.recv_requests": self.receive,
             f"{receiver}._pull_raw_reqs": partial(self.receive, ingress=True),
-            "sglang.srt.managers.scheduler.Scheduler.flush_cache": self.flush,
-            "sglang.srt.managers.scheduler.Scheduler.on_idle": self.idle,
-            "sglang.srt.managers.scheduler_components.flush_wrapper.SchedulerFlushWrapper.__init__": self.flush_wrapper,
+            symbols().scheduler_flush_cache: self.flush,
+            symbols().scheduler_on_idle: self.idle,
+            symbols().scheduler_flush_wrapper_init: self.flush_wrapper,
         }
-        for target, hook in targets.items():
-            HookRegistry.register(target, hook, HookType.AROUND)
+        HookTable.group(targets).install()
         ModelScopes.install_batch_hooks(self)
         self.request_state.install()
         self.calls = FlowScopes(self)

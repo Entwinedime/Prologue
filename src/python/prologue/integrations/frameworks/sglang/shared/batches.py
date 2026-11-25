@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from prologue.integrations.bindings import platform_domain
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 
 
 class BatchTensors:
@@ -28,7 +29,6 @@ class BatchTensors:
 
     @staticmethod
     def boundaries(batch: Any) -> dict[str, tuple[Any, list[str]]]:
-
         # Capture and control publish the same batch ABI; native scratch tensors stay inside the call.
         return {
             "request_slots": (batch.req_pool_indices, ["members"]),
@@ -92,7 +92,7 @@ class BatchTensors:
     def model_parameters(batch: Any, tokens: int) -> dict[str, int]:
         model_tokens, model_members = tokens, len(batch.reqs)
         if batch.global_num_tokens is not None:
-            from sglang.srt.runtime_context import get_parallel
+            get_parallel = resolve(symbols().get_parallel)
 
             # Native eager MLP-sync pads token rows and, for Decode, the model's batch metadata as well.
             parallel = get_parallel()
@@ -105,7 +105,6 @@ class BatchTensors:
 
     @staticmethod
     def model_padding_guards(parameters: dict[str, int]) -> list[list[str]]:
-
         # Padding zero rows and materializing a positive tail run different native work.
         dimensions = (("input_tokens", "model_tokens"), ("members", "model_members"))
         return [["eq" if parameters[actual] == parameters[padded] else "lt", actual, padded]

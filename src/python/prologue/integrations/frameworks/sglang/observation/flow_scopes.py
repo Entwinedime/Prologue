@@ -2,6 +2,8 @@
 
 from contextlib import contextmanager, nullcontext
 
+from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.receiver_table import ReceiverTableCopies
 from prologue.integrations.frameworks.sglang.shared.allocation import AllocationABI
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
@@ -63,7 +65,7 @@ class ServingCuts(CallSegments):
             return result
 
     def publication(self, original, sender, output, *args, **kwargs):
-        from sglang.srt.managers.io_struct import BatchTokenIDOutput
+        BatchTokenIDOutput = resolve(symbols().batch_token_id_output)
 
         if self.current.get() is None or not isinstance(output, BatchTokenIDOutput) or sender.socket is None:
             return original(sender, output, *args, **kwargs)
@@ -92,19 +94,15 @@ class ServingCuts(CallSegments):
         return result
 
     def install(self) -> None:
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
-        HookRegistry.register("sglang.srt.mem_cache.kv_cache_builder.build_kv_cache", self.build, HookType.AROUND)
+        HookTable.around(symbols().build_kv_cache, self.build)
         self.install_calls()
 
     def install_calls(self) -> None:
-        from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
         for target, hook in (
-            ("sglang.srt.managers.scheduler.Scheduler.process_batch_result", self.result),
-            ("sglang.srt.managers.scheduler_components.output_sender.SenderWrapper.send_output", self.publication),
+            (symbols().scheduler_process_batch_result, self.result),
+            (symbols().sender_wrapper_send_output, self.publication),
         ):
-            HookRegistry.register(target, hook, HookType.AROUND)
+            HookTable.around(target, hook)
         self.selection.install()
         self.resources.install()
         DecisionClocks(self).install()
@@ -198,7 +196,6 @@ class FlowScopes(ServingCuts):
 
     @contextmanager
     def enclosing(self, frame):
-
         # Segments and child calls own every device operation; this envelope preserves only their nesting.
         with self.observation.call(
             "invocation", frame.original, parameters=frame.parameters, work=frame.work,

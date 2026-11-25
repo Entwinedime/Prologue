@@ -16,6 +16,7 @@ COPY src/python/prologue/integrations/runtimes/pytorch/__init__.py ./prologue/in
 COPY src/python/prologue/workers/__init__.py ./prologue/workers/
 COPY src/python/prologue/workers/control.py ./prologue/workers/
 COPY src/python/prologue/common ./prologue/common/
+COPY src/python/prologue/integrations/frameworks/sglang/abi ./prologue/integrations/frameworks/sglang/abi/
 COPY src/python/prologue/integrations/frameworks/sglang/shared ./prologue/integrations/frameworks/sglang/shared/
 COPY src/python/prologue/integrations/frameworks/sglang/control ./prologue/integrations/frameworks/sglang/control/
 COPY src/python/prologue/integrations/runtimes/pytorch/shared ./prologue/integrations/runtimes/pytorch/shared/

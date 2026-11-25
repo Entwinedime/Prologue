@@ -4,6 +4,7 @@ import json
 
 from prologue.host.acquisition.rules import EvidenceGap, missing_root
 from prologue.integrations.bindings import platform_domain
+from prologue.integrations.frameworks.sglang.abi.registry import symbols
 from prologue.integrations.frameworks.sglang.acquisition.local_base import LocalRule
 from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangPlacement
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
@@ -50,8 +51,8 @@ class LocalPrebuilt(LocalRule):
             raise ValueError("receiver pool capacities must be positive integers")
         impl = domain["implementation"]
         if (not impl["cache"]["disabled"] or capacity["page_size"] != impl["page_size"]
-                or impl["allocator"] != "sglang.srt.hardware_backend.npu.allocator_npu.NPUPagedTokenToKVPoolAllocator"
-                or impl["cache"]["type"] != "sglang.srt.mem_cache.chunk_cache.ChunkCache"):
+                or impl["allocator"] != symbols().paged_allocator
+                or impl["cache"]["type"] != symbols().chunk_cache):
             raise EvidenceGap("unsupported_receiver_pool", allocator=impl["allocator"], cache=impl["cache"])
         batches = [cls.operands(q) for q in queries]
         page = capacity["page_size"]
