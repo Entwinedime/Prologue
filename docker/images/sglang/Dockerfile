@@ -1,16 +1,4 @@
 ARG BASE_IMAGE=prologue-sglang-env:ubuntu22.04
-FROM scratch AS capture-domains
-COPY src/prologue/app /prologue/app/
-COPY src/prologue/runtime /prologue/runtime/
-COPY src/prologue/performance /prologue/performance/
-COPY src/prologue/contracts /prologue/contracts/
-COPY src/prologue/acquisition/observation /prologue/acquisition/observation/
-COPY src/prologue/integrations/frameworks/sglang/shared /prologue/integrations/frameworks/sglang/shared/
-COPY src/prologue/integrations/frameworks/sglang/observation /prologue/integrations/frameworks/sglang/observation/
-COPY src/prologue/integrations/platforms/ascend/runtime /prologue/integrations/platforms/ascend/runtime/
-COPY src/prologue/integrations/platforms/ascend/analysis /prologue/integrations/platforms/ascend/analysis/
-COPY src/prologue/integrations/runtimes/pytorch /prologue/integrations/runtimes/pytorch/
-
 FROM ${BASE_IMAGE}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -50,13 +38,26 @@ ENV LD_PRELOAD=/opt/prologue/lib/libprologue_ascend_observer.so:/opt/prologue/li
 
 WORKDIR /opt/prologue/collector
 COPY docker/images/sglang/pyproject.toml .
-RUN --mount=type=bind,from=capture-domains,target=/domains \
-    --mount=type=bind,source=src,target=/source \
-    --mount=type=bind,source=docker/images/package_runtime.py,target=/package_runtime.py \
-    python3 /package_runtime.py /domains /source src prologue.app.capture_worker prologue.app.sglang_plugin \
-    && install /opt/prologue/native/ascend/scripts/capture.sh /opt/prologue/capture.sh \
+COPY python/prologue/__init__.py ./python/prologue/
+COPY python/prologue/integrations/__init__.py ./python/prologue/integrations/
+COPY python/prologue/integrations/frameworks/__init__.py ./python/prologue/integrations/frameworks/
+COPY python/prologue/integrations/frameworks/sglang/__init__.py ./python/prologue/integrations/frameworks/sglang/
+COPY python/prologue/integrations/platforms/__init__.py ./python/prologue/integrations/platforms/
+COPY python/prologue/integrations/platforms/ascend/__init__.py ./python/prologue/integrations/platforms/ascend/
+COPY python/prologue/integrations/runtimes/__init__.py ./python/prologue/integrations/runtimes/
+COPY python/prologue/integrations/runtimes/pytorch/__init__.py ./python/prologue/integrations/runtimes/pytorch/
+COPY python/prologue/workers/__init__.py ./python/prologue/workers/
+COPY python/prologue/workers/capture.py python/prologue/workers/plugin.py ./python/prologue/workers/
+COPY python/prologue/common ./python/prologue/common/
+COPY python/prologue/integrations/frameworks/sglang/shared ./python/prologue/integrations/frameworks/sglang/shared/
+COPY python/prologue/integrations/frameworks/sglang/observation ./python/prologue/integrations/frameworks/sglang/observation/
+COPY python/prologue/integrations/runtimes/pytorch/shared ./python/prologue/integrations/runtimes/pytorch/shared/
+COPY python/prologue/integrations/runtimes/pytorch/capture ./python/prologue/integrations/runtimes/pytorch/capture/
+COPY python/prologue/integrations/platforms/ascend/runtime ./python/prologue/integrations/platforms/ascend/runtime/
+COPY python/prologue/integrations/platforms/ascend/analysis ./python/prologue/integrations/platforms/ascend/analysis/
+RUN install /opt/prologue/native/ascend/scripts/capture.sh /opt/prologue/capture.sh \
     && install /opt/prologue/native/ascend/scripts/export.sh /opt/prologue/export-profile.sh \
-    && python3 -m pip install --no-deps --no-build-isolation . && rm -rf /opt/prologue/collector
+    && python3 -m pip install --no-compile --no-deps --no-build-isolation . && rm -rf /opt/prologue/collector
 
 WORKDIR /workspace/prologue
 

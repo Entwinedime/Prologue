@@ -5,4 +5,4 @@ set -u
 
 # Native capture resolves real driver libraries before the toolkit's analysis-only interfaces.
 export LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:${LD_LIBRARY_PATH:-}"
-exec python3 -m prologue.app.capture_worker capture "$@"
+exec python3 -m prologue.workers.capture capture "$@"

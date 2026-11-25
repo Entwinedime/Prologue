@@ -8,16 +8,15 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
-from run import TaskCommands
-
-from prologue.acquisition.recording import PublishedCapture
-from prologue.app.registry import AdapterRegistry
-from prologue.libraries.release import LibraryRelease
-from prologue.runtime.docker import OwnedContainers
-from prologue.runtime.io import write_json
-from prologue.runtime.limits import OperationLimit
-from prologue.runtime.workspace import file_lock
+from prologue.common.io import write_json
+from prologue.host.acquisition.recording import PublishedCapture
+from prologue.host.libraries.release import LibraryRelease
+from prologue.host.registry import AdapterRegistry
+from prologue.host.runtime.docker import OwnedContainers
+from prologue.host.runtime.limits import OperationLimit
+from prologue.host.runtime.workspace import file_lock
 from prologue.verification.core.reference import ReferenceRecording
+from run import TaskCommands
 
 
 class MatrixRun:

@@ -9,16 +9,16 @@ requires-python = ">=3.10"
 description = "Serving execution prediction, evidence acquisition and verification"
 
 [project.scripts]
-prologue-cli = "prologue.app.cli:main"
+prologue-cli = "prologue.host.cli.cli:main"
 
 [project.entry-points."sglang.srt.plugins"]
-prologue = "prologue.app.sglang_plugin:install"
+prologue = "prologue.workers.plugin:install"
 
 [tool.setuptools]
 include-package-data = false
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["python"]
 include = ["prologue", "prologue.*"]
 namespaces = false
 
