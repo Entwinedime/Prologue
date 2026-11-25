@@ -7,7 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from prologue.integrations.platforms.ascend.analysis.host_alignment import ThreadService
+from prologue.common.observation.thread_service import ThreadService
 from prologue.integrations.platforms.ascend.analysis.services import SynchronousCopy, uses_peer_service
 
 from .device_events import DeviceEvents

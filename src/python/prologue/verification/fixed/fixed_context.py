@@ -6,7 +6,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from itertools import pairwise
 
-from prologue.verification.core.adapters import Interval, ThreadIntervals, ThreadService
+from prologue.common.observation.thread_service import ThreadService
+from prologue.verification.core.adapters import platform_evidence
 
 from ..core.ingress import IngressEvidence
 from .host_queues import HostQueueEvidence
@@ -77,8 +78,8 @@ class FixedThreadActivity(ThreadService):
         super().__init__(rows, dequeues, excluded)
         covered = [row for row in rows if row["thread"] in self.activity]
         self.targeted = {row["thread"] for row in covered if "target_wakes" in row}
-        self.calls = ThreadIntervals([
-            Interval(row["begin_raw_ns"], row["end_raw_ns"], row["thread"], row)
+        self.calls = platform_evidence().thread_intervals([
+            platform_evidence().interval(row["begin_raw_ns"], row["end_raw_ns"], row["thread"], row)
             for row in runtime if row["result"] == 0 and row["thread"] in self.targeted
         ])
         self.runnable, self.blocked_at, self.sleep = {}, {}, {}
@@ -190,7 +191,7 @@ class FixedThreadActivity(ThreadService):
                 return early
 
         # A native call independently bounds a single sleep even if earlier wakes share the CPU slice.
-        call = self.calls.enclosing(Interval(out, resumed, thread, {}))
+        call = self.calls.enclosing(platform_evidence().interval(out, resumed, thread, {}))
         if call is None or not opened <= call.begin < call.end <= closed:
             return ()
         if self.within(self.sleep[thread], call.begin, call.end) != [(out, resumed)]:
@@ -396,7 +397,7 @@ class FixedHostContext:
             if thread is not None and piece["kind"] == "collective":
                 begin, end = (events[event]["time_ns"] for event in (piece["start"], piece["finish"]))
                 if begin is not None and end is not None and begin < end:
-                    windows.append(Interval(begin, end, thread, piece))
+                    windows.append(platform_evidence().interval(begin, end, thread, piece))
                 continue
 
             resource = graph["resources"][lane]
@@ -407,11 +408,15 @@ class FixedHostContext:
             native = self.native["scopes"][origin]
             if "service" in native:
                 interval = native["host_interval"]
-                windows.append(Interval(interval["begin_raw_ns"], interval["end_raw_ns"], native["thread"], piece))
-        return ThreadIntervals(windows)
+                windows.append(
+                    platform_evidence().interval(
+                        interval["begin_raw_ns"], interval["end_raw_ns"], native["thread"], piece
+                    )
+                )
+        return platform_evidence().thread_intervals(windows)
 
     def call_at(self, thread, stamp):
-        call = self.call_windows.enclosing(Interval(stamp, stamp, thread, {}))
+        call = self.call_windows.enclosing(platform_evidence().interval(stamp, stamp, thread, {}))
         return call if call is not None and stamp < call.end else None
 
     def serial_wake_anchor(self, thread, stamp):

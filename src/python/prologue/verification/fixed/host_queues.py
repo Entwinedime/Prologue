@@ -4,7 +4,8 @@ from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from itertools import pairwise
 
-from prologue.verification.core.adapters import Interval, ThreadIntervals, ThreadService
+from prologue.common.observation.thread_service import ThreadService
+from prologue.verification.core.adapters import platform_evidence
 
 
 class HostQueueEvidence:
@@ -13,10 +14,14 @@ class HostQueueEvidence:
         recorded = {"eventfd_read": [], "eventfd_write": []}
         for row in source.runtime:
             if row["api"] in recorded:
-                recorded[row["api"]].append(Interval(row["begin_raw_ns"], row["end_raw_ns"], row["fd"], row))
+                recorded[row["api"]].append(
+                    platform_evidence().interval(row["begin_raw_ns"], row["end_raw_ns"], row["fd"], row)
+                )
         self.notifications = sum(map(len, recorded.values()))
         self.reads = recorded["eventfd_read"]
-        self.read_index, self.write_index = (ThreadIntervals(records) for records in recorded.values())
+        self.read_index, self.write_index = (
+            platform_evidence().thread_intervals(records) for records in recorded.values()
+        )
         self.takes, self.completions = defaultdict(list), defaultdict(list)
         for correlation, command in source.dequeue_ids.items():
             self.takes[command.thread].append(command)

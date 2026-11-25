@@ -5,7 +5,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from math import prod
 
-from prologue.verification.core.adapters import CpuProtocolWork, CpuTransfer
+from prologue.verification.core.adapters import framework_evidence
 
 from .actions import ActionIdentity
 from .dependencies import CausalGraph
@@ -26,7 +26,10 @@ class NativeCpuCall:
     def identity(self):
         work = self.execution["work"]
         context = work["context"]
-        normalized = {**work, "context": {**context, "cpu_transfer": CpuTransfer.identity(context["cpu_transfer"])}}
+        normalized = {
+            **work,
+            "context": {**context, "cpu_transfer": framework_evidence().cpu_transfer.identity(context["cpu_transfer"])},
+        }
         return {"operation": self.execution["operation"], "work": ActionIdentity.work_identity(normalized)}
 
     def source(self):
@@ -36,7 +39,7 @@ class NativeCpuCall:
         operation = self.execution["operation"]
         if self.posted is None:
             return ((self.entered[1], self.returned[1], operation),)
-        before, after = CpuProtocolWork.post_operations(operation)
+        before, after = framework_evidence().cpu_protocol.post_operations(operation)
         return ((self.entered[1], self.posted[1], before), (self.posted[1], self.returned[1], after))
 
 
@@ -142,7 +145,7 @@ class CpuProtocolEvidence:
         return peers[rank]
 
     def native_transport(self, post):
-        transport = CpuProtocolWork.transport(post)
+        transport = framework_evidence().cpu_protocol.transport(post)
         if transport is None:
             self.counts["native_unobserved_transport_posts"] += 1
         else:
@@ -155,7 +158,7 @@ class CpuProtocolEvidence:
             return None
         last_post = max(peer["transport"]["post_raw_ns"] for peer in peers.values())
         windows = {
-            rank: CpuProtocolWork.ready_window(
+            rank: framework_evidence().cpu_protocol.ready_window(
                 peer["transport"], last_post, None if peer["consumed"] is None else self.native_times[peer["consumed"]]
             )
             for rank, peer in peers.items()

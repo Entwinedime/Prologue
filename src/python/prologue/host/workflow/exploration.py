@@ -2,6 +2,7 @@
 
 import math
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import datetime, timezone
 from itertools import product
 from pathlib import Path
@@ -112,7 +113,8 @@ class ExplorationTask:
                     )
                     pending.append(
                         workers.submit(
-                            target.predict, self.adapter, self.run_options, self.release, self.limit, basis
+                            copy_context().run, target.predict, self.adapter, self.run_options, self.release,
+                            self.limit, basis
                         )
                     )
 

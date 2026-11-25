@@ -13,7 +13,7 @@ COPY src/python/prologue/integrations/frameworks/__init__.py ./prologue/integrat
 COPY src/python/prologue/integrations/frameworks/sglang/__init__.py ./prologue/integrations/frameworks/sglang/
 COPY src/python/prologue/integrations/runtimes/__init__.py ./prologue/integrations/runtimes/
 COPY src/python/prologue/integrations/runtimes/pytorch/__init__.py ./prologue/integrations/runtimes/pytorch/
-COPY src/python/prologue/workers/__init__.py ./prologue/workers/
+COPY src/python/prologue/workers/__init__.py src/python/prologue/workers/registry.py ./prologue/workers/
 COPY src/python/prologue/workers/control.py ./prologue/workers/
 COPY src/python/prologue/common ./prologue/common/
 COPY src/python/prologue/integrations/frameworks/sglang/abi ./prologue/integrations/frameworks/sglang/abi/

@@ -1,7 +1,6 @@
 """Keep native worker returns independent and expose their control waits to the broker."""
 
 import json
-import os
 from collections import deque
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -14,6 +13,7 @@ import torch
 import torch.multiprocessing as multiprocessing
 
 from prologue.common.control_peer import ControlPeer
+from prologue.integrations.bindings import route
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
@@ -51,7 +51,7 @@ class NativeWorkers:
         if source["kind"] != "source" or configuration["kind"] != "configure":
             raise ValueError("Native control requires template metadata and core configuration first")
         runtime = {
-            "framework_revision": NativeConfiguration.upstream_revision(os.environ.get("PROLOGUE_FRAMEWORK_REVISION")),
+            "framework_revision": NativeConfiguration.upstream_revision(route().revision),
             "torch": str(torch.__version__),
         }
         for instance in source["instances"]:

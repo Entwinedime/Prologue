@@ -2,12 +2,9 @@
 
 from pathlib import Path
 
-from prologue.common.io import read_json
 from prologue.host.acquisition.options import ReplenishmentOptions
 from prologue.host.acquisition.replenishment import Replenishment
 from prologue.host.cli.arguments import command, control, modeling, options, paths, source_image, timeout
-from prologue.host.libraries.release import LibraryRelease
-from prologue.host.registry import AdapterRegistry
 from prologue.host.workflow.exploration import ExplorationTask
 from prologue.host.workflow.options import ExplorationOptions, PredictionOptions
 from prologue.host.workflow.prediction import PredictionProcess
@@ -36,15 +33,15 @@ def register(group):
 
 
 def run(args):
-    process = PredictionProcess(options(PredictionOptions, args), LibraryRelease(args.libraries),
-                                read_json(args.input), AdapterRegistry.select().prediction)
+    process = PredictionProcess(options(PredictionOptions, args), args.release,
+                                args.source, args.adapters.prediction)
     return 0 if process.run() else 1
 
 
 def explore(args):
-    source = read_json(args.input)
+    source = args.source
     framework = source["framework"]
-    adapters = AdapterRegistry.select(framework)
+    adapters = args.adapters
     task = ExplorationTask(options(ExplorationOptions, args), adapters.prediction, framework, source)
     acquisition = None
     if args.deployment:

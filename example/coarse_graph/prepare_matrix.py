@@ -111,7 +111,8 @@ class MatrixInputs:
             workload = self.workload(case, configuration["instances"], model["geometry"])
             common = {"model": model["model"], "instances": configuration["instances"], "workload": workload}
             native = {**common, "observe_all_workers": True}
-            AdapterRegistry.select().capture_input(native)
+            with AdapterRegistry.bind(source=native) as (_, adapter):
+                adapter.capture_input(native)
             inputs.append((case, native, common))
 
         # Freeze the whole request draw from its declared inputs, independently of template or cost coverage.

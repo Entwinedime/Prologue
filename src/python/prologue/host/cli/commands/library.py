@@ -8,9 +8,7 @@ from prologue.host.acquisition.options import LocalAcquisitionOptions, Qualifica
 from prologue.host.acquisition.recording import PublishedCapture, SourceProductions
 from prologue.host.cli.arguments import command, modeling, native, options, paths, timeout
 from prologue.host.libraries.increment import LocalLibraryIncrement
-from prologue.host.libraries.release import LibraryRelease
 from prologue.host.libraries.store import LibraryStore
-from prologue.host.registry import AdapterRegistry
 from prologue.host.runtime.docker import ModelingProcess
 
 
@@ -55,19 +53,19 @@ def missing_source(args):
 
 
 def inspect_library(args):
-    print(json.dumps(LibraryRelease(args.libraries).summarize(), indent=2))
+    print(json.dumps(args.release.summarize(), indent=2))
 
 
 def acquire_local(args):
-    release = LibraryRelease(args.libraries) if args.libraries else None
+    release = args.release
     configuration = options(LocalAcquisitionOptions, args)
-    acquisition = AdapterRegistry.select().native.local_acquisition(release, configuration)
+    acquisition = args.adapters.native.local_acquisition(release, configuration)
     result = acquisition.run(configuration, [read_json(q) for q in args.query], read_json(args.deployment))
     return 0 if result["status"] == "qualified" else 1
 
 
 def publish_session(args):
-    adapters = AdapterRegistry.select()
+    adapters = args.adapters
     model = ModelingProcess(args.binary, args.modeling_image, args.timeout)
     acquisition = adapters.native.local_acquisition(None, options(QualificationOptions, args))
     increment = LocalLibraryIncrement(

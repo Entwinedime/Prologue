@@ -1,31 +1,10 @@
-"""Native control endpoint; standard streams carry the shared control protocol."""
+"""Serve the control protocol through the framework declared by the native image."""
 
-import argparse
-import os
-import sys
-from pathlib import Path
-
-from prologue.common.control_peer import ControlPeer
-from prologue.integrations.runtimes.pytorch.control.cpu import CpuDeclarations
+from prologue.workers.registry import entry
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--kernel-python", type=Path, required=True)
-    parser.add_argument("--platform-domain", required=True)
-    arguments = parser.parse_args()
-    os.environ["PROLOGUE_PLATFORM_DOMAIN"] = arguments.platform_domain
-
-    # Native libraries also write directly to fd 1; reserve a separate descriptor for the protocol.
-    with os.fdopen(os.dup(sys.stdout.fileno()), "w", buffering=1) as protocol:
-        os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
-        os.environ["SGLANG_USE_CPU_ENGINE"] = "1"
-        os.environ["OMP_NUM_THREADS"] = "1"
-        CpuDeclarations.install(arguments.kernel_python)
-
-        from prologue.integrations.frameworks.sglang.control.workers import NativeWorkers
-
-        NativeWorkers.run(ControlPeer(sys.stdin, protocol), arguments.kernel_python)
+def main():
+    entry("control.entry").main()
 
 
 if __name__ == "__main__":

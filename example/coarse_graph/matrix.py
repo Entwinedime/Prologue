@@ -137,9 +137,10 @@ class MatrixRun:
         if "checks" not in source:
             return {"source_status": source["status"]}
         release = LibraryRelease(Path(source["libraries"]))
-        task = AdapterRegistry.select().prediction(prediction, release.templates)
-        if task.binding is None:
-            return {"source_status": "source-unavailable", "source_failure": task.missing_workers()}
+        with AdapterRegistry.bind(source=prediction, release=release) as (_, adapter):
+            task = adapter.prediction(prediction, release.templates)
+            if task.binding is None:
+                return {"source_status": "source-unavailable", "source_failure": task.missing_workers()}
 
         # Only the observations used in this target's binding need an independently mapped source.
         checked = {row["recording"] for row in source["checks"] if row["mapped"]}

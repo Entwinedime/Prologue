@@ -12,7 +12,6 @@ from prologue.host.acquisition.options import (
     HostSampleOptions,
 )
 from prologue.host.cli.arguments import command, modeling, options, paths, source_image, timeout
-from prologue.host.registry import AdapterRegistry
 from prologue.host.runtime.docker import ModelingProcess
 
 
@@ -69,26 +68,26 @@ def missing_kind(args):
 
 
 def extract_device(args):
-    AdapterRegistry.select().samples.export(options(DeviceSampleOptions, args))
+    args.adapters.samples.export(options(DeviceSampleOptions, args))
 
 
 def extract_batch(args):
     model = ModelingProcess(args.binary, args.modeling_image, args.timeout)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    samples = AdapterRegistry.select().samples.batch(args.session, model, args.output.parent)
+    samples = args.adapters.samples.batch(args.session, model, args.output.parent)
     write_json(args.output, samples, replace=False)
 
 
 def extract_host(args):
-    AdapterRegistry.select().host_samples(options(HostSampleOptions, args)).run()
+    args.adapters.host_samples(options(HostSampleOptions, args)).run()
 
 
 def fit_costs(args):
-    FitCosts(options(FitCostsOptions, args), AdapterRegistry.select().reuse.match).run()
+    FitCosts(options(FitCostsOptions, args), args.adapters.reuse.match).run()
 
 
 def acquire_costs(args):
-    adapters = AdapterRegistry.select()
+    adapters = args.adapters
     profiles = TransportSamples(args.transport_samples)
     CostAcquisition(options(CostAcquisitionOptions, args), adapters.native, adapters.reuse.match,
                     transport_samples=profiles, sample_adapter=adapters.native).run()

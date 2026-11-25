@@ -23,6 +23,13 @@ class Route:
         if not self.revision:
             raise ValueError("a framework revision is required")
 
+    def require_job(self, job):
+        declared = {"framework": self.framework, "platform": self.platform,
+                    "framework_revision": self.revision}
+        for name, value in declared.items():
+            if name in job and job[name] != value:
+                raise ValueError(f"worker image {name} differs from the job declaration")
+
     def framework_module(self, component):
         return import_module(f"prologue.integrations.frameworks.{self.framework}.{component}")
 

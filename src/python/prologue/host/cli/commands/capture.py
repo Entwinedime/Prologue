@@ -7,7 +7,6 @@ from prologue.host.acquisition.options import CaptureOptions, ProductionOptions
 from prologue.host.acquisition.production import CaptureProduction
 from prologue.host.acquisition.recording import PublishedCapture
 from prologue.host.cli.arguments import command, modeling, native, options, paths, source_image
-from prologue.host.registry import AdapterRegistry
 
 
 def register(group):
@@ -31,7 +30,7 @@ def register(group):
 
 
 def run(args):
-    launch = AdapterRegistry.select().native(read_json(args.input), read_json(args.deployment))
+    launch = args.adapters.native(args.source, read_json(args.deployment))
     sites = read_json(args.attention_sites) if args.attention_sites else None
     launch.capture(options(CaptureOptions, args), attention_sites=sites, latency_only=args.latency_only,
                    host_timing=args.host_timing, service_reference=args.service_reference).run()
@@ -39,4 +38,4 @@ def run(args):
 
 def project_capture(args):
     CaptureProduction(options(ProductionOptions, args), PublishedCapture(args.capture),
-                      AdapterRegistry.select().native).run()
+                      args.adapters.native).run()

@@ -4,7 +4,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from itertools import chain
 
-from prologue.verification.core.adapters import CpuProtocolWork, ObservedServices
+from prologue.verification.core.adapters import framework_evidence, platform_evidence
 
 from ..core.cpu_protocol import NativeCpuCall
 from ..core.ingress import IngressEvidence
@@ -574,7 +574,7 @@ class FixedReference:
                 for _, lane, begin, end, payload in measurements.get("collectives", ())
                 if payload is not None
             }
-            services = ObservedServices(graph, document, {}, physical_peers=case.joint_execution)
+            services = platform_evidence().observed_services(graph, document, {}, physical_peers=case.joint_execution)
             isolated = case.measured_service_pairs(rank, graph, raw, resources=document["resources"])
             for index, piece in enumerate(graph["work"]):
                 start, finish = piece["start"], piece["finish"]
@@ -645,7 +645,7 @@ class FixedReference:
             return {
                 "kind": interval.kind,
                 "scope": "cpu_protocol",
-                "site": CpuProtocolWork.readiness_operation(descriptor),
+                "site": framework_evidence().cpu_protocol.readiness_operation(descriptor),
                 "phase": "",
                 "direction": "receive" if descriptor["receiving"] else "send",
                 "caller": None,
@@ -677,13 +677,13 @@ class FixedReference:
     def external_cost(self, interval):
         if isinstance(interval, CpuTransportInterval):
             call = interval.post
-            operation = CpuProtocolWork.readiness_operation(call.descriptor)
+            operation = framework_evidence().cpu_protocol.readiness_operation(call.descriptor)
             execution = interval.execution
         elif call := interval.cpu_call:
             operation, execution = interval.cpu_operation, call.execution
         else:
             return None
-        identity, features = CpuProtocolWork.service(call.descriptor, execution, operation)
+        identity, features = framework_evidence().cpu_protocol.service(call.descriptor, execution, operation)
         return call.returned[0], identity, features
 
     def entry_releases(self):

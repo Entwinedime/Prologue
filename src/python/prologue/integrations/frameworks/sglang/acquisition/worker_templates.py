@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 
-from prologue.integrations.bindings import platform_domain
+from prologue.integrations.bindings import platform_domain, route
 from prologue.integrations.frameworks.sglang.shared.configuration import (
     InstanceConfiguration,
     NativeConfiguration,
@@ -27,7 +27,15 @@ class WorkerDomain(WorkerRoles):
     @staticmethod
     def image_revision(image: dict) -> str:
         labels = image["Config"]["Labels"] or {}
-        return NativeConfiguration.upstream_revision(labels.get("org.prologue.sglang.revision"))
+        revision = NativeConfiguration.upstream_revision(labels.get("org.prologue.sglang.revision"))
+        selection = route()
+        if revision != selection.revision:
+            raise ValueError("selected framework ABI and native image revision differ")
+        image_env = dict(entry.split("=", 1) for entry in image["Config"].get("Env", ()))
+        for field, expected in (("PROLOGUE_FRAMEWORK", selection.framework), ("PROLOGUE_PLATFORM", selection.platform)):
+            if field in image_env and image_env[field] != expected:
+                raise ValueError(f"native image {field} differs from the selected adapter")
+        return revision
 
     @staticmethod
     def require_control(image: dict, libraries: list[dict]) -> None:

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 from prologue.common.io import write_json
+from prologue.integrations.bindings import route
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.model_calls import NativeModelObservation
@@ -23,7 +23,7 @@ class SGLangObservation(NativeModelObservation):
         from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
 
         self.description = description
-        self.framework_revision = NativeConfiguration.upstream_revision(os.environ.get("PROLOGUE_FRAMEWORK_REVISION"))
+        self.framework_revision = NativeConfiguration.upstream_revision(route().revision)
         self.directory = Path(description["output"])
         self.kv_pools = self.directory / "kv-pools"
         self.window = ObservationWindow(self.directory, description)

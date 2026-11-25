@@ -4,6 +4,7 @@ from collections import Counter, defaultdict
 
 from prologue.common.cost import ServiceSamples, WorkCatalog
 from prologue.common.io import read_json, read_jsonl, write_json
+from prologue.common.observation.thread_service import ThreadService
 from prologue.common.observation.workers import CapturedWorkers
 from prologue.host.acquisition.recording import PublishedCapture
 from prologue.integrations.bindings import platform_backend
@@ -53,7 +54,7 @@ class HostCostSamples:
     def collectives(self, records, rank, cold):
         channels = defaultdict(lambda: defaultdict(list))
         by_thread = {
-            actor: platform_backend().thread_service.by_thread(windows.values()) for actor, windows in cold.items()
+            actor: ThreadService.by_thread(windows.values()) for actor, windows in cold.items()
         }
         for actor, record in records.items():
             for scope in record["scopes"]:
@@ -72,7 +73,7 @@ class HostCostSamples:
             local = members.index(rank)
             for participants in zip(*(actors[actor] for actor in members), strict=True):
                 if any(
-                    platform_backend().thread_service.within(
+                    ThreadService.within(
                         by_thread[actor].get(scope["thread"], ()), *scope["raw_interval"]
                     )
                     for actor, scope in zip(members, participants, strict=True)

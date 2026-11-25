@@ -3,7 +3,7 @@
 import json
 
 from prologue.host.acquisition.recording import PublishedCapture
-from prologue.verification.core.adapters import CaptureInput, ServingInput
+from prologue.verification.core.adapters import framework_evidence
 
 
 class RecordedSubmissions:
@@ -64,7 +64,7 @@ class ReferenceRecording(PublishedCapture):
             if job[field] != target[field]:
                 return field
 
-        native = CaptureInput(job)
+        native = framework_evidence().capture_input(job)
         order = [row["id"] for row in native.workload["requests"]]
         return None if native.submission_groups == [order] else "native submission groups"
 
@@ -75,7 +75,7 @@ class ReferenceRecording(PublishedCapture):
 
     @staticmethod
     def session_difference(source, instances, sessions):
-        target = ServingInput(source)
+        target = framework_evidence().serving_input(source)
         if len(instances) != len(target.instances):
             return "instances"
 

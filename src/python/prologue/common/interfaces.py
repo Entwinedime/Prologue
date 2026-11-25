@@ -49,13 +49,12 @@ class PlatformBackend(Protocol):
     host_alignment: type
     collectives: type
     transport_profile: type
-    thread_service: type
     observed_services: type
     trace: type
-    calibration: type
     interval: type
     thread_intervals: type
     recording: type
     reference_evidence: type
     stream_effects: type
     profile_glob: str
+    image_tag: str

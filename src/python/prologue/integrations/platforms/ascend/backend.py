@@ -57,15 +57,14 @@ class AscendPlatformBackend:
     host_alignment = Component(".analysis.host_alignment", "AscendHostAlignment")
     collectives = Component(".host.collectives", "CollectiveServices")
     transport_profile = Component(".host.transport_profile", "AscendTransportProfile")
-    thread_service = Component(".analysis.host_alignment", "ThreadService")
     observed_services = Component(".analysis.services", "ObservedServices")
     trace = Component(".analysis.trace", "AscendTrace")
-    calibration = Component(".analysis.clock", "DeviceCalibration")
     interval = Component(".analysis.trace", "Interval")
     thread_intervals = Component(".analysis.trace", "ThreadIntervals")
     recording = Component(".reference.recording", "SdkRecording")
     reference_evidence = Component(".reference.reference", "NativeEffectEvidence")
     stream_effects = Component(".reference.stream_effects", "StreamEffects")
+    image_tag = "ubuntu22.04"
     profile_glob = "*_ascend_pt"
 
 

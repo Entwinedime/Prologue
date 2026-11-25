@@ -4,7 +4,6 @@ from pathlib import Path
 
 from prologue.host.cli.arguments import command, control, modeling, paths, timeout
 from prologue.host.libraries.release import LibraryRelease
-from prologue.host.registry import AdapterRegistry
 from prologue.verification.autonomous.autonomous import AutonomousVerification
 from prologue.verification.autonomous.latency_metrics import compare_publications
 from prologue.verification.autonomous.schedule import compare_schedule
@@ -106,7 +105,7 @@ def compare_actions(args):
 
 
 def verify_structure(args):
-    return 0 if StructureVerification(args, AdapterRegistry.select().prediction).run() else 1
+    return 0 if StructureVerification(args, args.adapters.prediction).run() else 1
 
 
 def fixed_graph(args):
@@ -122,4 +121,4 @@ def schedule(args):
 
 
 def verify_autonomous(args):
-    return 0 if AutonomousVerification(args, AdapterRegistry.select().prediction).run() else 1
+    return 0 if AutonomousVerification(args, args.adapters.prediction).run() else 1

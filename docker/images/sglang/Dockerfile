@@ -5,7 +5,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG SGLANG_REVISION
 RUN [[ "$SGLANG_REVISION" =~ ^[0-9a-f]{40}$ ]]
-ENV PROLOGUE_FRAMEWORK=sglang PROLOGUE_PLATFORM=ascend PROLOGUE_FRAMEWORK_REVISION=${SGLANG_REVISION}
+ENV PROLOGUE_SGLANG_REVISION=${SGLANG_REVISION}
 LABEL org.prologue.sglang.revision=${SGLANG_REVISION}
 
 COPY docker/images/sglang/install_sglang.sh /opt/prologue/install-sglang.sh
@@ -36,6 +36,8 @@ RUN cmake -S /opt/prologue/native/pytorch -B /tmp/prologue-gloo -DCMAKE_BUILD_TY
 
 ENV LD_PRELOAD=/opt/prologue/lib/libprologue_ascend_observer.so:/opt/prologue/lib/libprologue_gloo.so
 
+ENV PROLOGUE_FRAMEWORK=sglang PROLOGUE_PLATFORM=ascend PROLOGUE_FRAMEWORK_REVISION=${PROLOGUE_SGLANG_REVISION}
+
 WORKDIR /opt/prologue/collector
 COPY docker/images/sglang/pyproject.toml .
 COPY src/python/prologue/__init__.py ./python/prologue/
@@ -46,7 +48,7 @@ COPY src/python/prologue/integrations/platforms/__init__.py ./python/prologue/in
 COPY src/python/prologue/integrations/platforms/ascend/__init__.py src/python/prologue/integrations/platforms/ascend/backend.py ./python/prologue/integrations/platforms/ascend/
 COPY src/python/prologue/integrations/runtimes/__init__.py ./python/prologue/integrations/runtimes/
 COPY src/python/prologue/integrations/runtimes/pytorch/__init__.py ./python/prologue/integrations/runtimes/pytorch/
-COPY src/python/prologue/workers/__init__.py ./python/prologue/workers/
+COPY src/python/prologue/workers/__init__.py src/python/prologue/workers/registry.py ./python/prologue/workers/
 COPY src/python/prologue/workers/capture.py src/python/prologue/workers/plugin.py ./python/prologue/workers/
 COPY src/python/prologue/common ./python/prologue/common/
 COPY src/python/prologue/integrations/frameworks/sglang/abi ./python/prologue/integrations/frameworks/sglang/abi/
