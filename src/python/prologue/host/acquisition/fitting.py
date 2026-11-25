@@ -82,7 +82,7 @@ class FitCosts:
         }
 
     def run(self):
-        sources = {path.resolve(strict=True): read_json(path) for path in self.arguments.samples}
+        sources = self.arguments.samples
         demand = CostRequirements()
         for graph_path, identities_path in self.arguments.demand:
             demand.graph(str(graph_path.resolve()), WorkCatalog(graph_path, identities_path))

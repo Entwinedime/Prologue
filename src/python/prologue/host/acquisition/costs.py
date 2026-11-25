@@ -78,9 +78,7 @@ class CostAcquisition:
         self.collections = collections
         self.sources = {}
         self.demand = CostRequirements()
-        self.samples = {
-            path: read_json(path) for path in dict.fromkeys(path.resolve(strict=True) for path in args.samples)
-        }
+        self.samples = dict(args.samples)
         if any("transport_profile" in source for source in self.samples.values()):
             raise ValueError("select physical peer service profiles with --transport-samples")
         self.samples.update(transport_samples.sources)

@@ -50,7 +50,7 @@ class FitCostsOptions:
     binary: Path | None
     modeling_image: str
     timeout: float
-    samples: Sequence[Path]
+    samples: dict[Path, dict]
     gap: Sequence[Path]
     demand: Sequence[tuple[Path, Path]]
     check: Sequence[Path]
@@ -69,7 +69,7 @@ class CostAcquisitionOptions:
     attempt_limit: int
     keep_intermediates: bool
     production: Sequence[Path]
-    samples: Sequence[Path]
+    samples: dict[Path, dict]
     gap: Sequence[Path]
     demand: Sequence[tuple[Path, Path]]
 

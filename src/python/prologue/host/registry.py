@@ -91,10 +91,16 @@ class AdapterRegistry:
         args.source = read_json(args.input) if getattr(args, "input", None) else None
         args.release = LibraryRelease(args.libraries) if getattr(args, "libraries", None) else None
         domains = []
-        for path in getattr(args, "samples", ()):
-            sample = read_json(path)
-            if "domain" in sample:
-                domains.append(sample["domain"])
+        if hasattr(args, "samples"):
+            samples = dict.fromkeys(path.resolve(strict=True) for path in args.samples)
+            args.samples = {path: read_json(path) for path in samples}
+            domains.extend(sample["domain"] for sample in args.samples.values() if "domain" in sample)
+
+        production = getattr(args, "production", None)
+        for directory in production if isinstance(production, list) else [production] if production else []:
+            manifest = directory / "production.json"
+            if manifest.is_file():
+                domains.append(read_json(manifest)["inputs"]["capture"])
         captures = getattr(args, "capture", None)
         for directory in captures if isinstance(captures, list) else [captures] if captures else []:
             manifest = directory / "execution.json"

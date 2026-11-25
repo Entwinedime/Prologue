@@ -8,12 +8,14 @@ from prologue.host.acquisition.options import LocalAcquisitionOptions, Qualifica
 from prologue.host.acquisition.recording import PublishedCapture, SourceProductions
 from prologue.host.cli.arguments import command, modeling, native, options, paths, timeout
 from prologue.host.libraries.increment import LocalLibraryIncrement
+from prologue.host.libraries.release import LibraryRelease
 from prologue.host.libraries.store import LibraryStore
 from prologue.host.runtime.docker import ModelingProcess
 
 
 def register(group):
     inspect = command(group, "inspect", "print a read-only summary of a release or store", inspect_library)
+    inspect.set_defaults(portable_library=True)
     paths(inspect, "libraries")
     acquire = command(group, "acquire", "collect compatible queries in one bounded native session", acquire_local)
     native(acquire)
@@ -43,6 +45,7 @@ def publication(parser, args):
         return publish_session
     elif args.from_collection:
         parser.add_argument("--costs", type=Path, help="optional fitted costs for the release")
+        args.portable_library = True
         return publish_archived
     else:
         return missing_source
@@ -53,7 +56,7 @@ def missing_source(args):
 
 
 def inspect_library(args):
-    print(json.dumps(args.release.summarize(), indent=2))
+    print(json.dumps(LibraryRelease(args.libraries).summarize(), indent=2))
 
 
 def acquire_local(args):

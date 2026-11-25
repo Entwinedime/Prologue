@@ -27,6 +27,10 @@ def main(argv=None):
         args = args.parser.parse_args(remaining, namespace=args)
     elif remaining:
         parser.error("unrecognized arguments: " + " ".join(remaining))
+    if getattr(args, "portable_library", False) and not any(
+        hasattr(args, key) for key in ("framework", "platform", "framework_version")
+    ):
+        return handler(args)
     with AdapterRegistry.command(args) as (selection, args.adapters):
         for field, image in args.adapters.images(selection).items():
             if hasattr(args, field) and getattr(args, field) is None:
