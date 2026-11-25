@@ -120,11 +120,14 @@ flowchart LR
 flowchart TB
     EX["example/：场景构造、留出矩阵与跨案例汇总"] --> APP["app/ 与 workflow/：公开入口、编排、预算与恢复"]
     EX --> VER["verification/：原生核对、三路对照与误差归因"]
-    APP --> ACQ["acquisition/ 与 libraries.py：观测合同、规则调度与双库发布"]
+    APP --> ACQ["acquisition/：观测合同、预算与采集规则调度"]
+    ACQ --> LIB["libraries/：双库读取与增量发布"]
+    APP --> LIB
+    ACQ --> RT["runtime/：宿主文件、工作区、时限与 Docker"]
     APP --> INT_FW["integrations/frameworks/sglang/：批次、控制、切口与局部规则"]
-    ACQ --> INT_FW
-    ACQ --> INT_PF["integrations/platforms/ascend/：设备部署、SDK 桥、校时与通知"]
-    INT_FW --> INT_RT["integrations/runtimes/：Docker 编排与 PyTorch 公共边界"]
+    INT_FW -. 实现采集接口 .-> ACQ
+    INT_FW --> INT_PF["integrations/platforms/ascend/：设备部署、SDK 桥、校时与通知"]
+    INT_FW --> INT_RT["integrations/runtimes/：PyTorch 与 Gloo 公共边界"]
     INT_FW --> CORE
     VER --> CORE
 
@@ -148,7 +151,7 @@ flowchart TB
 | --- | --- |
 | **C++23 模拟与模板核心**<br/>（`contracts/`、`graph/`、`templates/`、`serving/`、`performance/*.cpp`） | 粗图投影规约；模板编译、归一化、候选选择、局部补充与实例化；模拟资源服务（槽位、KV 页池、前缀树）、虚拟时钟、依赖与通信推进；统一的成本覆盖判定、求值与固定图时序重算。独立于具体框架构建。 |
 | **C++23 框架声明桥**<br/>（`integrations/frameworks/sglang/*.cpp`） | 为 `prologue` 与 `prologue_local_graphs` 提供框架特有的模板域、worker 绑定与动作声明解析，封装为 `prologue_sglang` 静态库，不污染 `prologue_core`。 |
-| **Python 应用、采集与拟合**<br/>（`app/`、`workflow/`、`acquisition/`、`performance/*.py`、`integrations/`） | 公开命令行装配与容器调度；探索任务、补库规划、预算与原子发布；接入原生框架观测与无设备控制；离线样本提取、时钟校准与成本模型拟合。 |
+| **Python 应用、采集与拟合**<br/>（`app/`、`workflow/`、`acquisition/`、`runtime/`、`libraries/`、`performance/*.py`、`integrations/`） | 公开命令行装配与容器调度；探索任务、补库规划、预算与原子发布；接入原生框架观测与无设备控制；离线样本提取、时钟校准与成本模型拟合。 |
 | **Python 正式验证**<br/>（`verification/`） | 独立核对原生参考证据、生成受控执行输入、执行结构对照/固定图归因/自主闭环评分；固定图成本求值与重算按图批量调用 C++23。 |
 | **场景示例**<br/>（`example/`） | 公开预测与验证能力的组合调用、工作负载准备、留出矩阵编排与跨案例汇总。`src` 不导入 `example`，预测路径不导入 `verification`。 |
 
@@ -158,14 +161,14 @@ flowchart TB
 | --- | --- |
 | [`src/prologue/app/`](../../src/prologue/app/) | Python 公开 CLI（`__main__.py`）、预测调度（`prediction.py`）、采集/控制容器内入口（`capture_worker.py`、`control_worker.py`）以及 C++ 可执行程序入口（`main.cpp`、`execution_trace.cpp`）。 |
 | [`src/prologue/workflow/`](../../src/prologue/workflow/) | 配置集探索编排（`exploration.py`）、目标状态与额度约束（`targets.py`、`limits.py`）与摘要报告（`report.py`）。 |
-| [`src/prologue/acquisition/`](../../src/prologue/acquisition/) | 通用观测合同（`observation/`）、采集规则与会话管理（`capture.py`、`rules.py`、`allowances.py`）、离线图/模板生产（`production.py`）、增量补库与双库存储（`replenishment.py`、`library_increment.py`、`library_store.py`）、成本采样与拟合编排（`costs.py`、`fitting.py`）。 |
-| [`src/prologue/libraries.py`](../../src/prologue/libraries.py) / [`artifacts.py`](../../src/prologue/artifacts.py) | 固定双库发布读取与跨进程原子文件发布。 |
+| [`src/prologue/acquisition/`](../../src/prologue/acquisition/) | 通用观测合同（`observation/`）、采集规则与会话管理（`capture.py`、`rules.py`、`budget.py`）、离线图/模板生产（`production.py`）、协调缺项补采与发布（`replenishment.py`）、成本采样与拟合编排（`costs.py`、`fitting.py`）。 |
+| [`libraries/`](../../src/prologue/libraries) / [`runtime/`](../../src/prologue/runtime) | 双库的读取、拼接与增量发布集中在库层。宿主底座负责文件、工作区锁、时限与容器。 |
 | [`src/prologue/contracts/`](../../src/prologue/contracts/) | C++ 表达式与 serving 公共数据结构、Python workload 及条件 EP 路由校验（`workload/`）。 |
 | [`src/prologue/graph/`](../../src/prologue/graph/) | 共同图数据结构、状态访问与原生观测到粗图的投影规约（`projection.cpp`）。 |
-| [`src/prologue/templates/`](../../src/prologue/templates/) | 模板编译、接口导出、绑定、归一化、局部叶复用、候选选择、局部证据补充与实例化，以及 Python 侧发布辅助（`publication.py`）。 |
+| [`src/prologue/templates/`](../../src/prologue/templates/) | 模板编译、接口导出、绑定、归一化、局部叶复用、候选选择、局部证据补充与实例化。 |
 | [`src/prologue/serving/`](../../src/prologue/serving/) | 控制交互（`controller/`）、唯一资源服务（`resources/`）、事件时间线与依赖/通信推进（`execution/`）、会话编排（`session.cpp`）及耗时/执行输入接入。 |
 | [`src/prologue/performance/`](../../src/prologue/performance/) | C++23 统一工作特征提取与成本求值（`work_features.cpp`、`work_costs.cpp`、`service_model.cpp`）；Python 离线拟合、模型族注册与样本合同（`fitting.py`、`models.py`、`backends.py`、`requirements.py`、`samples.py`）。 |
-| [`src/prologue/integrations/`](../../src/prologue/integrations/) | `frameworks/sglang/`（唯一解释 SGLang 批次、KV、MoE 层几何、观测、无设备控制与 Ascend 组合局部规则）、`platforms/ascend/`（物理部署、SDK 桥、时钟与通知取证）、`runtimes/`（Docker 调度与 PyTorch/Gloo 公共协议边界）。 |
+| [`src/prologue/integrations/`](../../src/prologue/integrations/) | `frameworks/sglang/`（唯一解释 SGLang 批次、KV、MoE 层几何、观测、无设备控制与 Ascend 组合局部规则）、`platforms/ascend/`（物理部署、SDK 桥、时钟与通知取证）、`runtimes/`（PyTorch/Gloo 公共协议边界）。 |
 | [`src/prologue/verification/`](../../src/prologue/verification/) | 原生整组核对（`source_evidence.py`、`native_case.py`）、受控时间提取（`execution_inputs.py`）、结构/固定图/自主三路验证与局部构图（`structure.py`、`compare_actions.py`、`fixed_graph.py`、`autonomous.py`、`local_graphs.cpp`）。 |
 
 - **条件 EP 路由与拓扑规范化**：条件 EP 路由归属 workload 合同，采集与控制共用实现；框架适配器按原生 MoE 块配对路由器与专家模块取得逐层 top-k、层号和专家数，禁止从首个 router 推断全模型。原生参数规范化若改写用户请求的拓扑，须在启动 worker 前报错，不得将改写结果记为原配置成功。
