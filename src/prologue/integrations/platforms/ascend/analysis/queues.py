@@ -6,10 +6,7 @@ from dataclasses import dataclass
 from functools import cached_property
 from itertools import accumulate, pairwise
 
-
-def queue_marker(task, flips):
-    return (task["Task Type"] == "PLACE_HOLDER_SQE"
-            and (int(task["Physic Stream Id"]), int(task["Task Id"]), int(task["Batch Id"])) in flips)
+from .sdk_rows import driver_submissions, queue_marker
 
 
 class NativeQueues:
@@ -17,26 +14,10 @@ class NativeQueues:
         self.apis, self.flips = apis, flips
         self.device = [row["args"] for row in rows if row.get("ph") == "X" and "Task Type" in row.get("args", {})]
         self.resolved = {}
-        queues = {}
-        self.submissions = []
+        self.submissions = list(driver_submissions(runtime))
         calls = defaultdict(list)
-        for native in sorted(runtime, key=lambda value: value.begin):
-            row = native.record
-            if not row["api"].startswith("halSq"):
-                continue
-            if row["result"] != 0:
-                raise ValueError("recorded driver queue operation failed")
-            key = row["device"], row["task_system"], row["queue"]
-            if row["api"] == "halSqCqAllocate":
-                queues[key] = row["stream"]
-            elif row["api"] == "halSqCqFree":
-                del queues[key]
-            elif row["api"] == "halSqTaskSend":
-                stream = queues[key]
-                if type(row["tasks"]) is not int or row["tasks"] < 0:
-                    raise ValueError("driver queue posting requires an observed nonnegative SQE count")
-                self.submissions.append((stream, native))
-                calls[native.thread, stream].append(native)
+        for stream, native in self.submissions:
+            calls[native.thread, stream].append(native)
         self.calls = {key: ([call.begin for call in values], values) for key, values in calls.items()}
 
     def inside(self, api, stream: int) -> list:
@@ -107,7 +88,9 @@ class NativeQueues:
     def assign_slots(self, stream, connection, posts):
         def missing():
             api = self.apis[connection]
-            return ValueError(f"stream {stream} lacks a unique driver release for {api.record['name']} connection {connection}")
+            return ValueError(
+                f"stream {stream} lacks a unique driver release for {api.record['name']} connection {connection}"
+            )
 
         posting = self.posting_range(stream, posts)
         if posting is None:
@@ -239,7 +222,7 @@ class ServiceExecutions:
             if task.stream in grouped:
                 grouped[task.stream].append(task)
         for stream, submissions in self.submissions.items():
-            if any(left[0].end > right[0].begin for left, right in zip(submissions, submissions[1:])):
+            if any(left[0].end > right[0].begin for left, right in zip(submissions, submissions[1:], strict=False)):
                 raise ValueError("concurrent private-queue submissions have no established order")
 
             # Driver submission sizes define correspondence, independently of CPU/device clock calibration.

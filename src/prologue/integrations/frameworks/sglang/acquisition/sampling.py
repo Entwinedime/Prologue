@@ -12,7 +12,7 @@ from prologue.integrations.frameworks.sglang.acquisition.local_attention import 
 from prologue.integrations.frameworks.sglang.acquisition.local_copy import LocalCopies
 from prologue.integrations.frameworks.sglang.acquisition.worker_capture import WorkerCapture
 from prologue.integrations.frameworks.sglang.shared.attention import AttentionCatalog
-from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
+from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
 from prologue.libraries.release import asset_path
 from prologue.performance.requirements import cost_identity
 from prologue.runtime.io import content_id, read_json, write_json

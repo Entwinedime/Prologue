@@ -6,7 +6,7 @@ from prologue.acquisition.capture import NativeAttempt
 from prologue.acquisition.rules import EvidenceGap
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
 from prologue.integrations.frameworks.sglang.shared.configuration import CaptureInput
-from prologue.integrations.platforms.ascend.deployment import AscendDeployment
+from prologue.integrations.platforms.ascend.host.deployment import AscendDeployment
 from prologue.runtime.docker import DockerImage
 
 

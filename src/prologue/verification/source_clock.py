@@ -6,7 +6,7 @@ from fractions import Fraction
 from itertools import combinations
 from math import ceil, floor
 
-from prologue.integrations.platforms.ascend.clock import DeviceCalibration
+from prologue.integrations.platforms.ascend.analysis.clock import DeviceCalibration
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +51,9 @@ class ClockSegment:
                 causes.append(cause if current_distance == 0 and distances[offset - 1] > 0 else self.causes[offset])
             if current_distance * next_distance < 0:
                 fraction = current_distance / (current_distance - next_distance)
-                clipped.append(tuple(left + fraction * (right - left) for left, right in zip(point, other, strict=True)))
+                clipped.append(
+                    tuple(left + fraction * (right - left) for left, right in zip(point, other, strict=True))
+                )
                 causes.append(self.causes[following] if current_distance < 0 else cause)
         if not clipped:
             self.conflict = {"witness": [value for value in self.causes if value is not None],
@@ -150,8 +152,12 @@ class ClockConstraints(DeviceCalibration):
                 owner = graph["events"][event]
                 scope = graph["scopes"][owner["scope"]]
                 context[side] = {
-                    "event": event, "scope": owner["scope"], "role": scope["role"], "site": scope["site"],
-                    "resource": graph["resources"][owner["resource"]], "measurement": graph["evidence"]["events"][event],
+                    "event": event,
+                    "scope": owner["scope"],
+                    "role": scope["role"],
+                    "site": scope["site"],
+                    "resource": graph["resources"][owner["resource"]],
+                    "measurement": graph["evidence"]["events"][event],
                 }
                 point = self.points[event]
                 if isinstance(point, CounterPoint):
@@ -159,8 +165,11 @@ class ClockConstraints(DeviceCalibration):
                     context[side]["device_counter"] = str(segment.first_counter + point.position * segment.counts)
             constraints.append(context)
         index = self.conflict.get("segment")
-        return {"first_conflict": self.conflict, "calibration": self.samples if index is None else self.samples[index:index + 2],
-                "constraints": constraints}
+        return {
+            "first_conflict": self.conflict,
+            "calibration": self.samples if index is None else self.samples[index : index + 2],
+            "constraints": constraints,
+        }
 
     def window(self, event):
         return self.point_window(self.points[event])
@@ -219,12 +228,20 @@ class ClockRealization:
                 continue
             begin, end = max(clock.counters[0], other.counters[0]), min(clock.counters[-1], other.counters[-1])
             if begin <= end:
-                counters = {begin, end} | {value for owner in (clock, other) for value in owner.counters if begin < value < end}
+                counters = {begin, end} | {
+                    value for owner in (clock, other) for value in owner.counters if begin < value < end
+                }
                 for counter in sorted(counters):
-                    row, limit, _ = self.difference((rank, clock.at_counter(counter)), (peer, other.at_counter(counter)))
+                    row, limit, _ = self.difference(
+                        (rank, clock.at_counter(counter)), (peer, other.at_counter(counter))
+                    )
                     self.equalities.append((row, limit))
             else:
-                before, after = ((rank, clock), (peer, other)) if clock.counters[-1] < other.counters[0] else ((peer, other), (rank, clock))
+                before, after = (
+                    ((rank, clock), (peer, other))
+                    if clock.counters[-1] < other.counters[0]
+                    else ((peer, other), (rank, clock))
+                )
                 row, limit, _ = self.difference((before[0], before[1].at_counter(before[1].counters[-1])),
                                                 (after[0], after[1].at_counter(after[1].counters[0])))
                 self.restrict(row, limit)
@@ -250,7 +267,12 @@ class ClockRealization:
             if begin > end:
                 raise ValueError("native causal relation contradicts fixed RAW measurements")
             return
-        if rank == peer and isinstance(begin, CounterPoint) and isinstance(end, CounterPoint) and begin.segment == end.segment:
+        if (
+            rank == peer
+            and isinstance(begin, CounterPoint)
+            and isinstance(end, CounterPoint)
+            and begin.segment == end.segment
+        ):
             if begin.position > end.position:
                 raise ValueError("native causal relation reverses ordered device ticks")
             return
@@ -352,18 +374,32 @@ class ClockRealization:
         inequalities = [(dict(row), limit) for row, limit in self.constraints.items()]
 
         def matrix(rows):
-            entries = [(index, column, float(value)) for index, (row, _) in enumerate(rows) for column, value in row.items() if value]
+            entries = [
+                (index, column, float(value))
+                for index, (row, _) in enumerate(rows)
+                for column, value in row.items()
+                if value
+            ]
             return coo_matrix(([value for _, _, value in entries],
                                ([index for index, _, _ in entries], [column for _, column, _ in entries])),
                               shape=(len(rows), self.size)).tocsr()
 
         # HiGHS proposes a sparse active basis; numerical tolerances never determine acceptance of evidence.
-        result = linprog([0] * (self.size - 1) + [-1], matrix(inequalities), [float(limit) for _, limit in inequalities],
-                         matrix(self.equalities) if self.equalities else None,
-                         [float(value) for _, value in self.equalities] if self.equalities else None, method="highs")
+        result = linprog(
+            [0] * (self.size - 1) + [-1],
+            matrix(inequalities),
+            [float(limit) for _, limit in inequalities],
+            matrix(self.equalities) if self.equalities else None,
+            [float(value) for _, value in self.equalities] if self.equalities else None,
+            method="highs",
+        )
         if not result.success:
-            raise ValueError(f"clock candidate unavailable; exact joint realization remains unverified: {result.message}")
-        active = self.equalities + [row for row, residual in zip(inequalities, result.ineqlin.residual, strict=True) if residual == 0]
+            raise ValueError(
+                f"clock candidate unavailable; exact joint realization remains unverified: {result.message}"
+            )
+        active = self.equalities + [
+            row for row, residual in zip(inequalities, result.ineqlin.residual, strict=True) if residual == 0
+        ]
         active += [({column: 1}, 0) for column, residual in enumerate(result.lower.residual) if residual == 0]
         equations = SparseMatrix(len(active), self.size, {
             (index, column): Rational(value.numerator, value.denominator)
@@ -412,10 +448,21 @@ class ClockRealization:
 
     def report(self):
         return {
-            "status": "jointly_realized", "device_clocks": len({clock.device_id for clock in self.clocks.values()}),
-            "causal_constraints": self.measured, "conditioned_measurements": self.conditioned,
-            "clock_maps": [{"rank": rank, "device": self.clocks[rank].device_id,
-                            "snapshot_corrections_ns": [str(value) for value in corrections]}
-                           for rank, corrections in self.solution.items()],
-            "scope": "One feasible shared piecewise affine counter/RAW realization, using only independently observed snapshot knots and rounded upward to integer nanoseconds. Original calibration uncertainty remains; this is not a unique measured trajectory.",
+            "status": "jointly_realized",
+            "device_clocks": len({clock.device_id for clock in self.clocks.values()}),
+            "causal_constraints": self.measured,
+            "conditioned_measurements": self.conditioned,
+            "clock_maps": [
+                {
+                    "rank": rank,
+                    "device": self.clocks[rank].device_id,
+                    "snapshot_corrections_ns": [str(value) for value in corrections],
+                }
+                for rank, corrections in self.solution.items()
+            ],
+            "scope": (
+                "One feasible shared piecewise affine counter/RAW realization, using only independently "
+                "observed snapshot knots and rounded upward to integer nanoseconds. Original calibration "
+                "uncertainty remains; this is not a unique measured trajectory."
+            ),
         }

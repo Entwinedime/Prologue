@@ -4,7 +4,8 @@ from bisect import bisect_right
 from collections import Counter, defaultdict
 from itertools import pairwise
 
-from prologue.integrations.platforms.ascend.trace import Interval, ThreadIntervals
+from prologue.integrations.platforms.ascend.analysis.sdk_rows import HOST_WAITS
+from prologue.integrations.platforms.ascend.analysis.trace import Interval, ThreadIntervals
 
 
 def merged(ranges):
@@ -96,7 +97,9 @@ class ThreadService:
             covered = self.intersect(covered, self.within(self.dequeues.get(thread, ()), begin, end))
         covered = list(covered)
         occupied = sum(y - x for x, y in covered)
-        excluded = sum(y - x for x, y in self.intersect(covered, self.within(self.excluded.get(thread, ()), begin, end)))
+        excluded = sum(
+            y - x for x, y in self.intersect(covered, self.within(self.excluded.get(thread, ()), begin, end))
+        )
         return occupied - excluded
 
 
@@ -150,7 +153,7 @@ class AscendHostAlignment:
         for row in runtime:
             thread = row["thread"]
             before, after = row["before_raw_ns"], row["after_raw_ns"]
-            if row["api"] in trace.host_waits or (row["api"] == "aclrtMemcpy" and row["bytes"]):
+            if row["api"] in HOST_WAITS or (row["api"] == "aclrtMemcpy" and row["bytes"]):
                 excluded_time.append((thread, before, after))
             else:
                 excluded_time.extend(((thread, before, row["begin_raw_ns"]), (thread, row["end_raw_ns"], after)))
@@ -161,7 +164,7 @@ class AscendHostAlignment:
             if row["result"] == 0 and excluded.enclosing(call) is None:
                 runtime_intervals.append(call)
         self.runtime = ThreadIntervals(runtime_intervals)
-        self.apis = trace.host_waits | trace.stream_waits | {
+        self.apis = HOST_WAITS | trace.stream_waits | {
             "aclrtMemcpy", "aclrtMemcpyAsync", "drvMemcpy", "halMemcpy", "halSqTaskSend",
         }
         self.previous, self.current = self.queues(filtered)
@@ -200,7 +203,8 @@ class AscendHostAlignment:
             left, right = Counter(original), Counter(measured)
             shared = {key for key, count in left.items() if count == right[key]}
 
-            # A transient runtime call can disappear after warmup. Pair only cuts with equal multiplicity and preserved order.
+            # A transient runtime call can disappear after warmup. Pair only cuts with equal multiplicity and
+            # preserved order.
             if [key for key in original if key in shared] != [key for key in measured if key in shared]:
                 return ()
             old = [row for row, key in zip(old, original, strict=True) if key in shared]
@@ -235,7 +239,9 @@ class AscendHostAlignment:
                 continue
             old_runtime = [row for row in self.calls(self.trace.runtime_ranges.inside(old_scope))
                            if self.trace.owner(row) == scope and self.trace.excluded_ranges.enclosing(row) is None]
-            new_runtime = [row for row in self.calls(self.runtime.inside(measured)) if self.owners.enclosing(row) is measured]
+            new_runtime = [
+                row for row in self.calls(self.runtime.inside(measured)) if self.owners.enclosing(row) is measured
+            ]
             ranges = [(old_runtime, new_runtime)]
             enqueues = []
             for (_, entered, finished), (_, produced, consumed) in zip(old, new, strict=True):

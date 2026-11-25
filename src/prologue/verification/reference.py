@@ -42,7 +42,9 @@ class RecordedSubmissions:
             if not members or time_ns < 0 or (rounds and time_ns < rounds[-1]["time_ns"]):
                 raise ValueError("receive rounds require nonempty members and nondecreasing times")
             for member in members:
-                if member in received or time_ns < max(self.requests[member]["arrival_ns"], self.by_request[member]["submitted_ns"]):
+                if member in received or time_ns < max(
+                    self.requests[member]["arrival_ns"], self.by_request[member]["submitted_ns"]
+                ):
                     raise ValueError(f"receive repeats {member} or precedes its submission")
                 received.add(member)
             rounds.append({"time_ns": time_ns, "requests": members})
@@ -107,11 +109,21 @@ class ReferenceRecording(PublishedCapture):
                 unknown.append({"cost_asset": str(costs), "reason": "sample recordings unavailable"})
             else:
                 for index, recordings in enumerate(origins):
-                    if not isinstance(recordings, list) or not recordings or not all(isinstance(r, str) and r for r in recordings):
+                    if (
+                        not isinstance(recordings, list)
+                        or not recordings
+                        or not all(isinstance(r, str) and r for r in recordings)
+                    ):
                         unknown.append({"sample": index, "source": sources[index]})
                     elif self.attempt_id in recordings:
                         shared.append({"sample": index, "source": sources[index]})
 
         status = "reference_used_for_training" if shared else "training_origin_unverified" if unknown else "separate"
-        return {"status": status, "target_attempt": self.attempt_id, "template_recordings": len(records), "sample_files": samples,
-                "shared": shared, "unknown": unknown}
+        return {
+            "status": status,
+            "target_attempt": self.attempt_id,
+            "template_recordings": len(records),
+            "sample_files": samples,
+            "shared": shared,
+            "unknown": unknown,
+        }

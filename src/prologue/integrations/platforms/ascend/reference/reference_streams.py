@@ -4,7 +4,7 @@ from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 
-from prologue.integrations.platforms.ascend.queues import queue_marker
+from prologue.integrations.platforms.ascend.analysis.sdk_rows import queue_marker
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,8 +109,10 @@ class SdkStreams:
         return None, ()
 
     def release_evidence(self, graph, launches, queues, calibration, observer_joins):
-        coordinates = {(graph["resources"][event["resource"]]["identity"], point["order"]): index
-                       for index, (event, point) in enumerate(zip(graph["events"], graph["evidence"]["events"], strict=True))}
+        coordinates = {
+            (graph["resources"][event["resource"]]["identity"], point["order"]): index
+            for index, (event, point) in enumerate(zip(graph["events"], graph["evidence"]["events"], strict=True))
+        }
         releases = {}
         for identity, (post, order) in launches.items():
             stream, ordinal = identity
@@ -145,7 +147,9 @@ class SdkStreams:
                         # Retained causal edges tighten the same measured clock range.
                         seen = calibration.point_window(calibration.point(completed, True))
                         if seen[1] > entered and (previous is None or previous in observer_joins):
-                            previous, omitted = self.omitted_records(stream, ordinal, coordinates, queues, observer_joins)
+                            previous, omitted = self.omitted_records(
+                                stream, ordinal, coordinates, queues, observer_joins
+                            )
             releases[target] = DeviceRelease(submitted, previous, seen, ordinal == 0, recorded == completion,
                                              completion, omitted)
         return releases
@@ -189,7 +193,9 @@ class SdkStreams:
                 if slot - index != left or left != right:
                     raise ValueError("elided native wait changes or lacks its unique raw SDK position")
 
-        self.logical_gaps = {stream: [slot - index for index, slot in enumerate(slots)] for stream, slots in positions.items()}
+        self.logical_gaps = {
+            stream: [slot - index for index, slot in enumerate(slots)] for stream, slots in positions.items()
+        }
         self.logical_slots = positions
         for identity, span in commands.items():
             if span != self.span(identity):

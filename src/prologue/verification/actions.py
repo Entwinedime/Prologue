@@ -4,7 +4,7 @@ import json
 from collections import Counter, defaultdict
 
 from prologue.integrations.frameworks.sglang.shared.source_layout import SourceLayout
-from prologue.integrations.platforms.ascend.scoped_tasks import tensor_layouts
+from prologue.integrations.platforms.ascend.analysis.scoped_tasks import tensor_layouts
 
 
 class QueryResults:
@@ -42,7 +42,9 @@ class QueryResults:
             self.clock_epoch_ns = record["clock_epoch_ns"]
             if type(self.clock_epoch_ns) is not int or self.clock_epoch_ns <= 0:
                 raise ValueError("native control clock requires a positive declared epoch")
-            self.groups = {group["rank"]: group["id"] for instance in record["instances"] for group in instance["groups"]}
+            self.groups = {
+                group["rank"]: group["id"] for instance in record["instances"] for group in instance["groups"]
+            }
         elif kind == "graph":
             graph = record["graph"]
             scope = graph["scopes"][0]
@@ -50,7 +52,9 @@ class QueryResults:
             rank = graph["resources"][graph["events"][ports["call.return"]]["resource"]]["rank"]
             group = self.groups[rank]
             if group in self.caller_returns.values() or any(query["group"] == group for query in self.pending.values()):
-                raise ValueError("native action was submitted before its preceding read and caller continuation completed")
+                raise ValueError(
+                    "native action was submitted before its preceding read and caller continuation completed"
+                )
             for port in scope["ports"]:
                 if port["use"] == "signal" and port["direction"] == "output":
                     event = record["event_ids"][port["event"]]
@@ -84,10 +88,17 @@ class QueryResults:
                 self.signal_completions[event] = record["time_ns"]
         elif kind == "notification_ready":
             events = record["prerequisites"]
-            if (self.notices.pop(record["event"]) != record["identity"]
-                    or self.signal_completions[record["event"]] != record["time_ns"] or not events or len(events) != len(set(events))
-                    or set(events) != self.notice_inputs.pop(record["event"])
-                    or any(self.signal_completions[event] is None or self.signal_completions[event] > record["time_ns"] for event in events)):
+            if (
+                self.notices.pop(record["event"]) != record["identity"]
+                or self.signal_completions[record["event"]] != record["time_ns"]
+                or not events
+                or len(events) != len(set(events))
+                or set(events) != self.notice_inputs.pop(record["event"])
+                or any(
+                    self.signal_completions[event] is None or self.signal_completions[event] > record["time_ns"]
+                    for event in events
+                )
+            ):
                 raise ValueError("notification was released before its actual producers completed")
             self.notifications += 1
         elif kind == "completion_read":
@@ -105,7 +116,9 @@ class QueryResults:
             query["last_read"] = record
             self.completion_reads += 1
             if ((event, record["boundary"]) in self.observation_edges) != record["result"]:
-                raise ValueError("completion read lacks its actual observation edge or turns an unsuccessful read into a wait")
+                raise ValueError(
+                    "completion read lacks its actual observation edge or turns an unsuccessful read into a wait"
+                )
             return query
         elif kind == "state_query":
             query = self.pending.pop(record["boundary"])
@@ -122,7 +135,11 @@ class QueryResults:
             for clock in record["clocks"]:
                 self.clock(clock, query["returned_ns"], self.clock_epoch_ns)
             if query["kind"] == "clock":
-                self.clock({"read": query["work"]["context"]["read"], "result": record["result"]}, query["returned_ns"], self.clock_epoch_ns)
+                self.clock(
+                    {"read": query["work"]["context"]["read"], "result": record["result"]},
+                    query["returned_ns"],
+                    self.clock_epoch_ns,
+                )
             else:
                 self.results[query["group"], query["entered"]] = record["result"]
             self.counts["nested_clocks"] += len(record["clocks"])
@@ -191,9 +208,15 @@ class ActionScopes:
     def tensor_publications(raw):
         ends = {int(row["name"].split("/")[1]): row["end_counter"]
                 for row in raw["host_observation"]["intervals"] if row["name"].startswith("prologue.scope/")}
-        ends.update({scope["id"]: scope["host_interval"]["end_counter"] for scope in raw["scopes"] if "service" in scope})
-        outputs = [(ends[scope["id"]], scope["id"], port) for scope in raw["scopes"] for port in scope["ports"]
-                   if port["direction"] == "output" and port["use"] in {"host", "device"} and port.get("tensor") is not None]
+        ends.update(
+            {scope["id"]: scope["host_interval"]["end_counter"] for scope in raw["scopes"] if "service" in scope}
+        )
+        outputs = [
+            (ends[scope["id"]], scope["id"], port)
+            for scope in raw["scopes"]
+            for port in scope["ports"]
+            if port["direction"] == "output" and port["use"] in {"host", "device"} and port.get("tensor") is not None
+        ]
         published = {}
         for _, scope, port in sorted(outputs, key=lambda row: (row[0], row[1])):
             tensor = port["tensor"]
@@ -231,7 +254,9 @@ class ActionScopes:
 
                 required = [rank for rank, send, receive in zip(group["members"], sent, received, strict=True)
                             if rank == group["rank"] or send or receive]
-                tensors = {port["direction"]: port["tensor"] for port in observed["ports"] if port["name"] == "hidden_states"}
+                tensors = {
+                    port["direction"]: port["tensor"] for port in observed["ports"] if port["name"] == "hidden_states"
+                }
                 parent = raw["scopes"][observed["parent"]]
                 topk, = [port["tensor"]["shape"][1] for port in parent["ports"] if port["name"] == "topk_ids"]
 
@@ -245,16 +270,25 @@ class ActionScopes:
             bindings.update({name: observed[name] for name in ("effects", "publication") if name in observed})
             bindings["source_scopes"] = origins
             parent = None if observed["parent"] is None else self.source_ids[observed["parent"]]
-            if (not observed["complete"] or scope["bindings"] != bindings or scope["parent"] != parent
-                    or scope.get("row_call") != observed.get("row_call")
-                    or scope.get("communication") != communication
-                    or any(scope[field] != observed[field] for field in ("role", "site", "implementation", "parameters", "constants", "work"))
-                    or self.declaration_expressions(scope) != self.declaration_expressions(observed)):
+            if (
+                not observed["complete"]
+                or scope["bindings"] != bindings
+                or scope["parent"] != parent
+                or scope.get("row_call") != observed.get("row_call")
+                or scope.get("communication") != communication
+                or any(
+                    scope[field] != observed[field]
+                    for field in ("role", "site", "implementation", "parameters", "constants", "work")
+                )
+                or self.declaration_expressions(scope) != self.declaration_expressions(observed)
+            ):
                 raise ValueError(f"graph scope {index} differs from its native recording")
 
             # Check native tensor facts before either interpretation or projection can become the comparison's truth.
             ports = {(port["name"], port["direction"]): port for port in scope["ports"]}
-            native_tensors = {(port["name"], port["direction"]) for port in observed["ports"] if port.get("tensor") is not None}
+            native_tensors = {
+                (port["name"], port["direction"]) for port in observed["ports"] if port.get("tensor") is not None
+            }
             graph_tensors = {key for key, port in ports.items() if port.get("tensor") is not None}
             if len(ports) != len(scope["ports"]) or native_tensors != graph_tensors:
                 raise ValueError(f"graph scope {index} omits, duplicates or invents native tensor ports")
@@ -281,19 +315,36 @@ class ActionScopes:
                         ancestor = raw["scopes"][ancestor]["parent"]
                     if producer != observed["id"] and ancestor is not None:
 
-                        # Re-exporting a descendant's published version keeps that child's readiness, not the parent's return.
+                        # Re-exporting a descendant's published version keeps that child's readiness, not the parent's
+                        # return.
                         outputs = self.graph["scopes"][self.source_ids[producer]]["ports"]
-                        ready, = [value["event"] for value in outputs if value["name"] == name and value["direction"] == "output"]
+                        (ready,) = [
+                            value["event"]
+                            for value in outputs
+                            if value["name"] == name and value["direction"] == "output"
+                        ]
                 if boundary["use"] != use or boundary["relation"] != relation or boundary["event"] != ready:
-                    raise ValueError(f"graph scope {index} changes native tensor use or readiness: {port['name']}/{port['direction']}")
+                    raise ValueError(
+                        f"graph scope {index} changes native tensor use or readiness: "
+                        f"{port['name']}/{port['direction']}"
+                    )
                 projected = boundary["tensor"]
-                if (projected is None
-                        or any(tensor[field] != projected[field] for field in ("dtype", "shape", "value", "storage", "version", "buffer"))
-                        or self.packing_key(tensor) != self.packing_key(projected)
-                        or projected["allocation"] != (None if tensor["allocation"] is None else self.source_ids[tensor["allocation"]])
-                        or projected["writer"] != (None if tensor["writer"] is None else self.source_ids[tensor["writer"]])
-                        or self.expression_list_key(tensor.get("shape_rule")) != self.expression_list_key(projected.get("shape_rule"))):
-                    raise ValueError(f"graph scope {index} changes native tensor port {port['name']}/{port['direction']}")
+                if (
+                    projected is None
+                    or any(
+                        tensor[field] != projected[field]
+                        for field in ("dtype", "shape", "value", "storage", "version", "buffer")
+                    )
+                    or self.packing_key(tensor) != self.packing_key(projected)
+                    or projected["allocation"]
+                    != (None if tensor["allocation"] is None else self.source_ids[tensor["allocation"]])
+                    or projected["writer"] != (None if tensor["writer"] is None else self.source_ids[tensor["writer"]])
+                    or self.expression_list_key(tensor.get("shape_rule"))
+                    != self.expression_list_key(projected.get("shape_rule"))
+                ):
+                    raise ValueError(
+                        f"graph scope {index} changes native tensor port {port['name']}/{port['direction']}"
+                    )
 
                 # A blocking host read consumes by return, regardless of the tensor's storage device.
                 if port.get("at_return", False):
@@ -356,11 +407,18 @@ class ActionScopes:
                     for side, endpoint in (("begin", "start"), ("end", "finish")):
                         event = projected[endpoint]
                         resource = self.graph["resources"][self.graph["events"][event]["resource"]]
-                        if (resource["kind"] != "service" or resource["identity"] != f"service/{observed['thread']}"
-                                or self.graph["evidence"]["events"][event]["order"] != observed["host_interval"][side + "_counter"]):
+                        if (
+                            resource["kind"] != "service"
+                            or resource["identity"] != f"service/{observed['thread']}"
+                            or self.graph["evidence"]["events"][event]["order"]
+                            != observed["host_interval"][side + "_counter"]
+                        ):
                             raise ValueError(f"graph scope {index} changes its declared service access interval")
                     continue
-                entered, returned = {"call": ("call.enter", "call.return"), "device": ("device.enter", "device.complete")}[interval]
+                entered, returned = {
+                    "call": ("call.enter", "call.return"),
+                    "device": ("device.enter", "device.complete"),
+                }[interval]
                 begin, end = ports[entered, "input"]["event"], ports[returned, "output"]["event"]
                 if (projected["start"], projected["finish"]) != (begin, end):
                     raise ValueError(f"graph scope {index} changes its declared {space} access interval")
@@ -413,7 +471,8 @@ class ActionScopes:
         if record["work"]["observation_context"] is not None:
             return record
 
-        # Nested calls inherit the envelope's entry position; their own continuation and logical progress remain separate.
+        # Nested calls inherit the envelope's entry position; their own continuation and logical progress remain
+        # separate.
         owner = index
         while owner is not None:
             if owner in self.placements:
@@ -476,7 +535,12 @@ class ActionIdentity:
 
     @classmethod
     def record(cls, scope, group):
-        return {"group": group, "action": scope["role"], "parameters": scope["parameters"], "work": cls.work_identity(scope["work"])}
+        return {
+            "group": group,
+            "action": scope["role"],
+            "parameters": scope["parameters"],
+            "work": cls.work_identity(scope["work"]),
+        }
 
     @staticmethod
     def logical_key(record, contexts):
@@ -495,9 +559,20 @@ class ActionIdentity:
         # Shared structure ignores caller state; logical pairing retains it and only absolute timing keeps placement.
         work = record["work"]
         callers = [{"owner": caller["owner"], "entry": caller["entry"]} for caller in work["callers"]]
-        return json.dumps(contexts.encode({**record, "work": {
-            "members": work["members"], "context": work["context"], "callers": callers, "continuation": work["continuation"],
-        }}), sort_keys=True)
+        return json.dumps(
+            contexts.encode(
+                {
+                    **record,
+                    "work": {
+                        "members": work["members"],
+                        "context": work["context"],
+                        "callers": callers,
+                        "continuation": work["continuation"],
+                    },
+                }
+            ),
+            sort_keys=True,
+        )
 
     @staticmethod
     def group(graph, instance):

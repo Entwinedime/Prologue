@@ -74,7 +74,7 @@ def main() -> None:
     elif arguments.command == "capture" and arguments.local_copy:
         import os
 
-        from prologue.integrations.platforms.ascend.copy_sampling import TensorCopySamples
+        from prologue.integrations.platforms.ascend.runtime.copy_sampling import TensorCopySamples
 
         TensorCopySamples().sample(
             json.loads(arguments.input.read_text()), arguments.output, os.environ["PROLOGUE_SGLANG_REVISION"]
@@ -104,11 +104,17 @@ def main() -> None:
         runtime.mkdir(parents=True)
         os.environ["PROLOGUE_NATIVE_RUNTIME_DIR"] = str(runtime)
         if arguments.local_embedding:
-            from prologue.integrations.frameworks.sglang.observation.local.embedding_runner import EmbeddingRunner as Runner
+            from prologue.integrations.frameworks.sglang.observation.local.embedding_runner import (
+                EmbeddingRunner as Runner,
+            )
         elif arguments.local_worker or arguments.local_host:
-            from prologue.integrations.frameworks.sglang.observation.local.scheduler_runner import SchedulerRunner as Runner
+            from prologue.integrations.frameworks.sglang.observation.local.scheduler_runner import (
+                SchedulerRunner as Runner,
+            )
         else:
-            from prologue.integrations.frameworks.sglang.observation.local.prebuilt_runner import PrebuiltRunner as Runner
+            from prologue.integrations.frameworks.sglang.observation.local.prebuilt_runner import (
+                PrebuiltRunner as Runner,
+            )
 
         runner = Runner(job, arguments.output)
         options = {"host_timing": True} if arguments.local_host else {}
@@ -129,7 +135,7 @@ def main() -> None:
             local_shards=arguments.local_shards,
         ).run()
         if attention:
-            from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
+            from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
 
             # The workers have exited. Exporting SDK evidence can no longer disturb the observed serving calls.
             ScopedTasks.publish(arguments.output)
@@ -139,7 +145,7 @@ def main() -> None:
         publish_cuts(arguments.input, arguments.work, arguments.rank, arguments.identities, arguments.runner,
                      arguments.output)
     elif arguments.command == "export":
-        from prologue.integrations.platforms.ascend.export import AscendExport
+        from prologue.integrations.platforms.ascend.runtime.export import AscendExport
 
         AscendExport.run(arguments.input, arguments.rank, arguments.output)
     else:

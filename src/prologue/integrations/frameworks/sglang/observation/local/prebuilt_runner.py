@@ -13,8 +13,8 @@ from prologue.integrations.frameworks.sglang.observation.local.worker_output imp
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.shared.disaggregated_calls import DisaggregatedCalls
 from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
-from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
-from prologue.integrations.platforms.ascend.markers import AscendMarkers
+from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
+from prologue.integrations.platforms.ascend.runtime.markers import AscendMarkers
 from prologue.runtime.io import write_json
 
 

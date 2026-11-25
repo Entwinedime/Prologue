@@ -23,7 +23,7 @@ from prologue.integrations.frameworks.sglang.acquisition.placement import SGLang
 from prologue.integrations.frameworks.sglang.acquisition.sampling import SGLangSampling
 from prologue.integrations.frameworks.sglang.acquisition.worker_capture import WorkerCapture
 from prologue.integrations.frameworks.sglang.shared.attention import AttentionCatalog
-from prologue.integrations.platforms.ascend.export import AscendExport
+from prologue.integrations.platforms.ascend.runtime.export import AscendExport
 from prologue.runtime.docker import DockerImage
 
 

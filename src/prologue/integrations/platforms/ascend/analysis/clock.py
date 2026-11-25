@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
 import json
 from bisect import bisect_right
 from decimal import Decimal
@@ -18,9 +17,12 @@ class DeviceCalibration:
         if len(samples) < 2:
             raise ValueError("device clock requires at least two independent samples")
         self.device_id = samples[0]["device"]
-        if (any(sample["device"] != self.device_id or sample["begin_raw_ns"] > sample["end_raw_ns"] for sample in samples)
-                or any(left["counter"] >= right["counter"] or left["end_raw_ns"] >= right["begin_raw_ns"]
-                       for left, right in zip(samples, samples[1:]))):
+        if any(
+            sample["device"] != self.device_id or sample["begin_raw_ns"] > sample["end_raw_ns"] for sample in samples
+        ) or any(
+            left["counter"] >= right["counter"] or left["end_raw_ns"] >= right["begin_raw_ns"]
+            for left, right in zip(samples, samples[1:], strict=False)
+        ):
             raise ValueError("device clock requires advancing, separated calibration intervals from one device")
         self.samples = samples
         self.counters = [sample["counter"] for sample in samples]
@@ -78,29 +80,6 @@ class DeviceCalibration:
 
 
 class AscendClock(DeviceCalibration):
-    @staticmethod
-    def sample(user_device: int) -> dict:
-        acl = ctypes.CDLL("libascendcl.so")
-        device_id = acl.aclrtGetLogicDevIdByUserDevId
-        device_id.argtypes = [ctypes.c_int32, ctypes.POINTER(ctypes.c_int32)]
-        device_id.restype = ctypes.c_int
-        device = ctypes.c_int32()
-        status = device_id(user_device, ctypes.byref(device))
-        if status:
-            raise RuntimeError(f"Ascend clock device mapping failed: {status}")
-
-        sample = ctypes.CDLL(None).prologue_sample_device
-        sample.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint64)]
-        sample.restype = ctypes.c_int
-        values = (ctypes.c_uint64 * 3)()
-
-        # The native helper brackets only the actual queries; Python releases the GIL outside that interval.
-        status = sample(device.value, values)
-        if status:
-            raise RuntimeError(f"Ascend native clock acquisition failed: {status}")
-        counter, begin, end = values
-        return {"device": device.value, "counter": counter, "begin_raw_ns": begin, "end_raw_ns": end}
-
     def __init__(self, device: Path, samples: list[dict]) -> None:
         super().__init__(samples)
         physical = device.name.removeprefix("device_")
@@ -116,7 +95,9 @@ class AscendClock(DeviceCalibration):
         host = self.values(device / f"host_start.log.{physical}")
         native = self.values(device / f"dev_start.log.{physical}")
         host_frequency = Decimal(info["CPU"][0]["Frequency"]) * 1_000_000
-        self.host_anchor = host["clock_monotonic_raw"] + round(Decimal(host["cntvct_diff"]) * 1_000_000_000 / host_frequency)
+        self.host_anchor = host["clock_monotonic_raw"] + round(
+            Decimal(host["cntvct_diff"]) * 1_000_000_000 / host_frequency
+        )
         self.counter_anchor = native["cntvct"]
 
     @staticmethod
@@ -163,4 +144,7 @@ class HostCounter:
         anchor = self.framework_raw if framework else self.cann_raw
         begin = Decimal(str(record["ts"])) * 1000
         end = begin + Decimal(str(record["dur"])) * 1000
-        return tuple(self.anchor + round((value - self.offset - anchor) * self.frequency / 1_000_000_000) for value in (begin, end))
+        return tuple(
+            self.anchor + round((value - self.offset - anchor) * self.frequency / 1_000_000_000)
+            for value in (begin, end)
+        )

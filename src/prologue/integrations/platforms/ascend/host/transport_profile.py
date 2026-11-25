@@ -24,7 +24,9 @@ class AscendTransportProfile:
         if len({(p["host"], p["device"]) for p in placement.values()}) != len(peers):
             raise ValueError("external transport calibration requires distinct physical peers")
         self.qualification["placement"] = placement
-        self.qualification["logical_workers"] = {str(actor): doc["environment"]["parallel"] for actor, doc in peers.items()}
+        self.qualification["logical_workers"] = {
+            str(actor): doc["environment"]["parallel"] for actor, doc in peers.items()
+        }
 
         # SDK link ranks are communicator-local. Keep the observed link types separate from the physical rank map.
         links = set()
@@ -102,7 +104,9 @@ class AscendTransportProfile:
             native_dtype = f"torch.{self.dtypes[dtype]}"
 
             # For variable exchanges the scalar SDK count cannot identify the payload split.
-            compatible = {name for name, _ in operands} == {native_dtype} if row_axes else operands == {(native_dtype, elements)}
+            compatible = (
+                {name for name, _ in operands} == {native_dtype} if row_axes else operands == {(native_dtype, elements)}
+            )
             if not compatible:
                 absent["sdk_operand_mismatch"] += 1
                 continue

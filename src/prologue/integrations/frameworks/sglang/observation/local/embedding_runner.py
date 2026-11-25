@@ -19,8 +19,8 @@ from prologue.integrations.frameworks.sglang.observation.local.worker_output imp
 )
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 from prologue.integrations.frameworks.sglang.shared.groups import ParallelGroups, WorkerRoles
-from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
-from prologue.integrations.platforms.ascend.markers import AscendMarkers
+from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
+from prologue.integrations.platforms.ascend.runtime.markers import AscendMarkers
 from prologue.runtime.io import write_json
 
 

@@ -4,83 +4,17 @@ from __future__ import annotations
 
 import json
 import struct
-from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from prologue.integrations.platforms.ascend.clock import AscendClock, HostCounter
-from prologue.integrations.platforms.ascend.notifications import HcclNotifications
-from prologue.integrations.platforms.ascend.queues import NativeQueues, ServiceExecutions, queue_marker
+from prologue.integrations.platforms.ascend.analysis.clock import AscendClock, HostCounter
+from prologue.integrations.platforms.ascend.analysis.notifications import HcclNotifications
 
-
-@dataclass
-class Interval:
-    begin: int
-    end: int
-    thread: int
-    record: dict[str, Any]
-
-    @classmethod
-    def read(cls, record: dict[str, Any], counter: HostCounter) -> Interval:
-        begin, end = counter.interval(record)
-        return cls(begin, end, int(record["tid"]), record)
-
-    def contains(self, other: Interval) -> bool:
-        return self.thread == other.thread and self.begin <= other.begin and other.end <= self.end
-
-
-class ThreadIntervals:
-    def __init__(self, intervals: list[Interval]) -> None:
-        self.threads: dict[int, tuple[list[int], list[Interval], list[int], list[int]]] = {}
-        grouped: dict[int, list[Interval]] = defaultdict(list)
-        for interval in intervals:
-            grouped[interval.thread].append(interval)
-        for thread, values in grouped.items():
-            values.sort(key=lambda value: (value.begin, -value.end))
-            parents = []
-            furthest = []
-            active = []
-            for index, value in enumerate(values):
-                while active and not values[active[-1]].contains(value):
-                    active.pop()
-                parents.append(active[-1] if active else -1)
-                active.append(index)
-                furthest.append(max(value.end, furthest[-1] if furthest else value.end))
-            self.threads[thread] = [value.begin for value in values], values, parents, furthest
-
-    def enclosing(self, interval: Interval) -> Interval | None:
-        if interval.thread not in self.threads:
-            return None
-        starts, values, parents, _ = self.threads[interval.thread]
-        index = bisect_right(starts, interval.begin) - 1
-        while index >= 0:
-            if values[index].contains(interval):
-                return values[index]
-            index = parents[index]
-        return None
-
-    def inside(self, interval: Interval) -> list[Interval]:
-        if interval.thread not in self.threads:
-            return []
-        starts, values, _, _ = self.threads[interval.thread]
-        begin = bisect_right(starts, interval.begin - 1)
-        end = bisect_right(starts, interval.end)
-        return [value for value in values[begin:end] if interval.contains(value)]
-
-    def overlapping(self, interval: Interval) -> list[Interval]:
-        if interval.thread not in self.threads:
-            return []
-        starts, values, _, furthest = self.threads[interval.thread]
-        index = bisect_right(starts, interval.end) - 1
-        result = []
-        while index >= 0 and furthest[index] >= interval.begin:
-            if values[index].end >= interval.begin:
-                result.append(values[index])
-            index -= 1
-        return result
+from .queues import NativeQueues, ServiceExecutions
+from .sdk_rows import HOST_WAITS, Interval, ThreadIntervals, queue_marker, task_flips
 
 
 @dataclass
@@ -103,10 +37,6 @@ class DevicePoint:
     stream: int
 
 class AscendTrace:
-    host_waits = frozenset({
-        "aclrtSynchronizeStream", "aclrtSynchronizeStreamWithTimeout", "aclrtSynchronizeEvent",
-        "aclrtSynchronizeEventWithTimeout", "aclrtSynchronizeDeviceWithTimeout",
-    })
     stream_waits = frozenset({"aclrtStreamWaitEvent", "aclrtStreamWaitEventWithTimeout"})
 
     @classmethod
@@ -115,7 +45,7 @@ class AscendTrace:
             identity = call["thread"], call["begin_counter"]
             if identity in repeated_host_waits:
                 continue
-            if call["api"] in cls.host_waits or (call["api"] == "aclrtMemcpy" and call["bytes"]):
+            if call["api"] in HOST_WAITS or (call["api"] == "aclrtMemcpy" and call["bytes"]):
                 yield call["thread"], call["begin_raw_ns"], call["end_raw_ns"]
 
     def __init__(self, profile: Path, runtime: Path, raw: dict, trace: Path, *, evidence=False) -> None:
@@ -134,7 +64,7 @@ class AscendTrace:
         self.clock = AscendClock(device, raw["device_clock"])
         rows = json.loads(trace.read_text(), parse_float=Decimal)
         self.notifications = HcclNotifications(rows) if evidence else None
-        flips = self.task_flips(profile)
+        flips = task_flips(profile)
         intervals = [self.device_interval(row) if "Task Type" in row.get("args", {}) else Interval.read(row, counter)
                      for row in rows if row.get("ph") == "X"
                      and (row.get("cat") in {"enqueue", "dequeue"} or "connection_id" in row.get("args", {}))]
@@ -191,9 +121,17 @@ class AscendTrace:
                 if not queue_marker(args, flips):
                     streams[int(args["Physic Stream Id"])].append(interval)
 
-        # A zero-time wait still has distinct entry and completion. Wall-clock coincidence must not change graph topology.
+        # A zero-time wait still has distinct entry and completion. Wall-clock coincidence must not change graph
+        # topology.
         for tasks in streams.values():
-            tasks.sort(key=lambda value: (value.begin, value.record["args"]["Batch Id"], value.record["args"]["Task Id"], value.record["args"]["Subtask Id"]))
+            tasks.sort(
+                key=lambda value: (
+                    value.begin,
+                    value.record["args"]["Batch Id"],
+                    value.record["args"]["Task Id"],
+                    value.record["args"]["Subtask Id"],
+                )
+            )
             for order, interval in enumerate(tasks):
                 task = DeviceTask(2 * order, 2 * order + 1, interval.record)
                 self.tasks[task.record["args"]["connection_id"]].append(task)
@@ -206,7 +144,9 @@ class AscendTrace:
             if identity in self.scopes:
                 raise ValueError(f"service has two competing host observations: {identity}")
             interval = scope["host_interval"]
-            self.scopes[identity] = self.native_interval({**interval, "thread": scope["thread"], "name": f"prologue.scope/{identity}"})
+            self.scopes[identity] = self.native_interval(
+                {**interval, "thread": scope["thread"], "name": f"prologue.scope/{identity}"}
+            )
         self.scope_ranges = ThreadIntervals(list(self.scopes.values()))
         self.excluded_ranges = ThreadIntervals(self.excluded)
         self.enqueue_ranges = ThreadIntervals(enqueues)
@@ -226,7 +166,9 @@ class AscendTrace:
         for native in self.runtime:
             row = native.record
             if row["api"].startswith("aclrt") and row["stream_status"] == 0 and row["stream"] in self.services.streams:
-                raise ValueError("a private transport queue has external runtime operations; explicit ports are required")
+                raise ValueError(
+                    "a private transport queue has external runtime operations; explicit ports are required"
+                )
         self.services.assign(self.device_tasks)
 
         self.runtime_ranges = ThreadIntervals(self.runtime)
@@ -238,13 +180,15 @@ class AscendTrace:
                 records[row["event"]] = native
             elif row["api"] == "aclrtDestroyEvent":
                 records.pop(row["event"], None)
-            elif row["api"] in self.host_waits | self.stream_waits:
+            elif row["api"] in HOST_WAITS | self.stream_waits:
 
                 # Resolve the generation while the handle is live; a later record can reuse the same handle.
                 self.synchronizations.append((native, records.get(row.get("event"))))
         self.device_points = {identity: self.device_point(identity) for identity in self.points}
         self.observer_connections = {
-            point.api.record["args"]["connection_id"] for identity, point in self.device_points.items() if identity not in native_points
+            point.api.record["args"]["connection_id"]
+            for identity, point in self.device_points.items()
+            if identity not in native_points
         }
 
     def native_interval(self, record: dict) -> Interval:
@@ -272,7 +216,9 @@ class AscendTrace:
             slices = sorted((path for path in paths if path.name.rsplit("_", 1)[-1].isdigit()),
                             key=lambda path: int(path.name.rsplit("_", 1)[1]))
             data = b"".join(path.read_bytes() for path in slices)
-            for magic, _, _, thread, _, stamp, _, dtype, algorithm, count, _ in layout.iter_unpack(data[len(data) % layout.size:]):
+            for magic, _, _, thread, _, stamp, _, dtype, algorithm, count, _ in layout.iter_unpack(
+                data[len(data) % layout.size :]
+            ):
                 if magic != 0x5A5A:
                     raise ValueError("invalid SDK HCCL op record")
                 owner = calls.enclosing(Interval(stamp, stamp, thread, {}))
@@ -280,26 +226,6 @@ class AscendTrace:
                     records[owner.record["scope"]].append([dtype, algorithm, count])
         return {scope: rows[0] for scope, rows in records.items() if len(rows) == 1}
 
-    @staticmethod
-    def task_flips(profile: Path) -> set[tuple[int, int, int]]:
-        directory, = profile.glob("PROF_*/device_*/data")
-        files = [path for path in directory.glob("ts_track.data.*.slice_*") if path.name.rsplit("_", 1)[1].isdigit()]
-        files.sort(key=lambda path: int(path.name.rsplit("_", 1)[1]))
-        data = b"".join(path.read_bytes() for path in files)
-        record = struct.Struct("=BBHLQHHHH16B")
-
-        # Match the SDK TsTrack parser's aged-prefix alignment and TS_TASK_FLIP layout.
-        records = [row for row in record.iter_unpack(data[len(data) % record.size:]) if row[1] == 14]
-        batches: dict[int, int] = defaultdict(int)
-        flips = set()
-        for row in sorted(records, key=lambda row: row[4]):
-            stream, flip, task = row[5], row[6], row[8]
-
-            # DeviceTaskCollector increments the epoch for every flip, including stream destruction (65535).
-            batches[stream] += 1
-            if flip != 65535:
-                flips.add((stream, task, batches[stream]))
-        return flips
 
     @staticmethod
     def queue_index(intervals: list[Interval]) -> dict[int, Interval]:

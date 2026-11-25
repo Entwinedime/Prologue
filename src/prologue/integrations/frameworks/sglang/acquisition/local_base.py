@@ -3,7 +3,7 @@
 from prologue.acquisition.options import LocalAcquisitionOptions, QualificationOptions
 from prologue.acquisition.rules import EvidenceGap
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
-from prologue.integrations.platforms.ascend.deployment import AscendDeployment
+from prologue.integrations.platforms.ascend.host.deployment import AscendDeployment
 from prologue.runtime.docker import ModelingProcess
 
 

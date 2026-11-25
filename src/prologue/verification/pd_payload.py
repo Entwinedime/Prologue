@@ -115,8 +115,11 @@ class PdPayloadEvidence:
                                                    (target, "write", last, transfer["target_pages"])):
                 buffers = self.buffers[session]
                 layout, size = buffers.layout, buffers.page_size
-                candidates = [index for index, (start, count) in enumerate(zip(buffers.starts, buffers.lengths, strict=True))
-                              if start <= address and address + length <= start + count]
+                candidates = [
+                    index
+                    for index, (start, count) in enumerate(zip(buffers.starts, buffers.lengths, strict=True))
+                    if start <= address and address + length <= start + count
+                ]
                 if length <= 0 or len(candidates) != 1:
                     raise ValueError("native PD bytes do not lie in one registered buffer")
 
@@ -158,14 +161,21 @@ class PdPayloadEvidence:
     def metadata(self, transfer, parent, source, target):
         member, = parent["work"]["members"]
         chunk = parent["native_kv_chunk"]
-        if (transfer["room"], transfer["source_index"]) != (chunk["room"], chunk["metadata_index"]) or parent["parameters"]["last_chunk"] != 1:
+        if (transfer["room"], transfer["source_index"]) != (chunk["room"], chunk["metadata_index"]) or parent[
+            "parameters"
+        ]["last_chunk"] != 1:
             raise ValueError("native metadata transfer differs from its final submitted chunk")
         rows = []
         for session, index in ((source, transfer["source_index"]), (target, transfer["target_index"])):
             metadata = self.registrations[session]["registration"]["metadata"]
             if metadata["reservations"][str(transfer["room"])] != {"request": member["id"], "index": index}:
                 raise ValueError("native metadata row differs from its request reservation")
-            rows.append([(pointer + index * width, width) for pointer, width in zip(metadata["pointers"], metadata["row_bytes"], strict=True)])
+            rows.append(
+                [
+                    (pointer + index * width, width)
+                    for pointer, width in zip(metadata["pointers"], metadata["row_bytes"], strict=True)
+                ]
+            )
             if any(width <= 0 or length % width or not 0 <= index < length // width
                    for length, width in zip(metadata["lengths"], metadata["row_bytes"], strict=True)):
                 raise ValueError("native metadata row escapes its registered buffer")
@@ -173,9 +183,13 @@ class PdPayloadEvidence:
             raise ValueError("native metadata endpoints have incompatible row layouts")
         copied = defaultdict(list)
         for source_address, target_address, length in transfer["blocks"]:
-            matches = [(index, source_address - first) for index, ((first, width), (last, _)) in enumerate(zip(*rows, strict=True))
-                       if first <= source_address and source_address + length <= first + width
-                       and target_address - last == source_address - first]
+            matches = [
+                (index, source_address - first)
+                for index, ((first, width), (last, _)) in enumerate(zip(*rows, strict=True))
+                if first <= source_address
+                and source_address + length <= first + width
+                and target_address - last == source_address - first
+            ]
             if len(matches) != 1 or length <= 0:
                 raise ValueError("native metadata copy changes its field or row offset")
             index, offset = matches[0]
@@ -184,7 +198,10 @@ class PdPayloadEvidence:
         if any(self.coverage(copied[index]) != [[0, 1, [[0, width]]]] for index, (_, width) in enumerate(rows[0])):
             raise ValueError("native metadata bytes omit a registered request field")
         self.counts["metadata_transfers"] += 1
-        return {(source, "read", "metadata", member["id"], None), (target, "write", "metadata", member["id"], "first-token")}
+        return {
+            (source, "read", "metadata", member["id"], None),
+            (target, "write", "metadata", member["id"], "first-token"),
+        }
 
     def inspect(self, contents, raw, group, dependencies):
         writers = defaultdict(list)
@@ -195,7 +212,11 @@ class PdPayloadEvidence:
                         writers[request].append(original["id"])
 
         for index, scope in enumerate(contents.graph["scopes"]):
-            calls = [raw["scopes"][origin] for origin in scope["bindings"]["source_scopes"] if "native_transfer" in raw["scopes"][origin]]
+            calls = [
+                raw["scopes"][origin]
+                for origin in scope["bindings"]["source_scopes"]
+                if "native_transfer" in raw["scopes"][origin]
+            ]
             if not calls:
                 continue
             native, declared = defaultdict(list), defaultdict(list)
@@ -216,7 +237,8 @@ class PdPayloadEvidence:
                     consumed, = [access["start"] for access in scope["slot_accesses"]
                                  if access["pool"] == "local" and access["access"] == "read"]
 
-                    # The original field write and registered copy row establish content origin, independently of prediction.
+                    # The original field write and registered copy row establish content origin, independently of
+                    # prediction.
                     if not dependencies.reaches(written, consumed):
                         raise ValueError("native metadata copy loses its observed first-token producer")
                     self.counts["metadata_producers_checked"] += 1
@@ -250,19 +272,39 @@ class PdPayloadEvidence:
                         begin, end = max(logical, region["begin"]), min(logical + count, region["end"])
                         if begin < end:
                             declared[session, access["access"], access["layer"], region["request"]].append(
-                                (physical + begin - logical, physical + end - logical, interval["begin"], interval["end"]))
+                                (
+                                    physical + begin - logical,
+                                    physical + end - logical,
+                                    interval["begin"],
+                                    interval["end"],
+                                )
+                            )
                             covered += end - begin
                     if covered != region["end"] - region["begin"]:
                         raise ValueError("declared PD access escapes its native request/page mapping")
 
             for access in scope["slot_accesses"]:
-                if access["members"] != f"metadata/{access['access']}" or scope["work"][access["members"]] != access["requests"]:
+                if (
+                    access["members"] != f"metadata/{access['access']}"
+                    or scope["work"][access["members"]] != access["requests"]
+                ):
                     raise ValueError("declared PD metadata changes its request selector")
             actual_slots = {
-                (self.sessions[contents.pool(access["pool"], group)], access["access"], access["field"], request, access.get("publication"))
-                for access in scope["slot_accesses"] for request in access["requests"]
+                (
+                    self.sessions[contents.pool(access["pool"], group)],
+                    access["access"],
+                    access["field"],
+                    request,
+                    access.get("publication"),
+                )
+                for access in scope["slot_accesses"]
+                for request in access["requests"]
             }
-            differences = [key for key in native.keys() | declared.keys() if self.coverage(native[key]) != self.coverage(declared[key])]
+            differences = [
+                key
+                for key in native.keys() | declared.keys()
+                if self.coverage(native[key]) != self.coverage(declared[key])
+            ]
             if differences or slots != actual_slots:
                 self.findings.append(("pd_payload", {"group": group, "scope": index}, {
                     "reason": "declared PD state differs from the actual copied byte footprint or metadata rows",

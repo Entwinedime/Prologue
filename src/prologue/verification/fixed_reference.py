@@ -4,7 +4,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from itertools import chain
 
-from prologue.integrations.platforms.ascend.services import ObservedServices
+from prologue.integrations.platforms.ascend.analysis.services import ObservedServices
 from prologue.integrations.runtimes.pytorch.protocol_work import CpuProtocolWork
 
 from .cpu_protocol import NativeCpuCall
@@ -63,8 +63,11 @@ class FixedTimeline:
         self.post_frontiers = {}
         released = set(reference.active_input_reads)
         released.update(wait.take_entry for wait in reference.host_waits.values() if wait.take_entry is not None)
-        self.progress = {(rank, cut): self.event(max(0, cut.observed_ns - reference.origin_ns) if cut in released else 0)
-                         for (rank, _, _), cuts in reference.progress_cuts.items() for cut in cuts}
+        self.progress = {
+            (rank, cut): self.event(max(0, cut.observed_ns - reference.origin_ns) if cut in released else 0)
+            for (rank, _, _), cuts in reference.progress_cuts.items()
+            for cut in cuts
+        }
         self.input_progress = {cut: self.event() for cut in reference.active_input_reads}
 
     def event(self, release_ns=0):
@@ -138,11 +141,15 @@ class FixedReference:
         self.input_releases = {}
         self.active_input_reads = {}
         self.requests = self.align_requests()
-        self.cpu_calls = [call for calls in case.cpu.native_calls.values() for call in calls if call.execution["in_flow"]]
+        self.cpu_calls = [
+            call for calls in case.cpu.native_calls.values() for call in calls if call.execution["in_flow"]
+        ]
         self.cpu_points = {point: call for call in self.cpu_calls
                            for point in (call.entered, call.posted, call.returned) if point is not None}
         self.external_cpu_points = case.cpu.native_times.keys() - self.cpu_points.keys()
-        self.specialization_loads = {rank: raw.get("specialization_loads") for rank, (_, raw, _) in case.sources.items()}
+        self.specialization_loads = {
+            rank: raw.get("specialization_loads") for rank, (_, raw, _) in case.sources.items()
+        }
 
         dispatches = {(rank, start): dispatch for rank, record in case.measurements.items()
                       for start, dispatch in record["device_releases"].items()}
@@ -176,8 +183,11 @@ class FixedReference:
         self.publications = FixedPublications(case, self.requests, self.origin_ns)
         if missing := self.publications.coverage_gaps():
             self.gaps["incomplete_publication_boundaries"] = missing
-        self.host_conditions = {((rank, source), (rank, target)): conditions for rank, record in case.measurements.items()
-                                for (source, target), conditions in record["fixed_host_delays"].items()}
+        self.host_conditions = {
+            ((rank, source), (rank, target)): conditions
+            for rank, record in case.measurements.items()
+            for (source, target), conditions in record["fixed_host_delays"].items()
+        }
         self.host_fences, self.fence_evidence = self.bind_completions(
             fences, predecessors, "host_fence_timing_unqualified"
         )
@@ -206,7 +216,9 @@ class FixedReference:
             witness = wait.source
             if not isinstance(witness, KernelWake):
                 continue
-            location = (rank, witness.local_thread) if witness.local_thread is not None else owners.get(witness.kernel_thread)
+            location = (
+                (rank, witness.local_thread) if witness.local_thread is not None else owners.get(witness.kernel_thread)
+            )
             if location is None:
                 self.host_waits[rank, stopped] = replace(wait, source=ExternalWake(witness.raw_ns))
                 continue
@@ -294,7 +306,9 @@ class FixedReference:
                     ready = min(wait.source.raw_ns for wait in matches)
                     for wait in matches:
                         delay = wait.source.raw_ns - ready + wait.delay_ns
-                        self.host_waits[rank, wait.stopped] = replace(wait, source=CpuReadinessWake(call.posted[1]), delay_ns=delay)
+                        self.host_waits[rank, wait.stopped] = replace(
+                            wait, source=CpuReadinessWake(call.posted[1]), delay_ns=delay
+                        )
                 elif sleeps and last >= case.cpu.native_times[self.cpu_points[consumer].entered]:
                     unbound.append((key, rank))
 
@@ -304,7 +318,9 @@ class FixedReference:
                         self.cpu_initial_readiness[call.posted] = consumer, ready
                 else:
                     execution = call.execution if call.execution["in_flow"] else active[0]
-                    transfers.append(CpuTransportInterval(call, consumer, frontiers, execution, (first, last), ready - posted))
+                    transfers.append(
+                        CpuTransportInterval(call, consumer, frontiers, execution, (first, last), ready - posted)
+                    )
 
         for name, missing in (("unmeasured_cpu_transport", unmeasured), ("unbound_cpu_transport_wakes", unbound)):
             if missing:
@@ -458,7 +474,9 @@ class FixedReference:
                 basis = "first_observed_command"
             elif preceding is not None and preceding[1] <= driver_entry:
                 frontier = {source}
-                basis = "preceding_task_before_calibration" if preceding[0] is None else "preceding_task_already_complete"
+                basis = (
+                    "preceding_task_before_calibration" if preceding[0] is None else "preceding_task_already_complete"
+                )
             elif records := self.bind_omitted_records(rank, dispatch, parents):
                 frontier = {source, previous}
                 basis = "observed_unpublished_command"
@@ -526,7 +544,9 @@ class FixedReference:
                     self.input_releases[rank, cut.stopped] = cut
                     continue
 
-                submission = self.origin_ns + max(submitted.by_request[name]["submitted_ns"] for name in read["requests"])
+                submission = self.origin_ns + max(
+                    submitted.by_request[name]["submitted_ns"] for name in read["requests"]
+                )
                 attempt = reads.get(received)
                 if (attempt is not None and attempt["context"] is not None
                         and not IngressEvidence.idle(attempt["context"]) and submission <= attempt["begin_raw_ns"]):
@@ -535,9 +555,14 @@ class FixedReference:
                         self.active_input_reads[cut] = read["requests"]
                         continue
 
-                self.gaps.setdefault("unqualified_input_readiness", []).append({
-                    "rank": rank, "requests": read["requests"], "submission_raw_ns": submission, "received_raw_ns": received,
-                })
+                self.gaps.setdefault("unqualified_input_readiness", []).append(
+                    {
+                        "rank": rank,
+                        "requests": read["requests"],
+                        "submission_raw_ns": submission,
+                        "received_raw_ns": received,
+                    }
+                )
 
     def services(self):
         case = self.case
@@ -545,8 +570,11 @@ class FixedReference:
             graph = contents.graph
             document = case.measurements[rank]
             measurements = document["measurements"]
-            captured_collectives = {(lane, begin, end) for _, lane, begin, end, payload in measurements.get("collectives", ())
-                                    if payload is not None}
+            captured_collectives = {
+                (lane, begin, end)
+                for _, lane, begin, end, payload in measurements.get("collectives", ())
+                if payload is not None
+            }
             services = ObservedServices(graph, document, {}, physical_peers=case.joint_execution)
             isolated = case.measured_service_pairs(rank, graph, raw, resources=document["resources"])
             for index, piece in enumerate(graph["work"]):
@@ -615,8 +643,14 @@ class FixedReference:
     def work_fields(self, interval):
         if isinstance(interval, CpuTransportInterval):
             descriptor = interval.post.descriptor
-            return {"kind": interval.kind, "scope": "cpu_protocol", "site": CpuProtocolWork.readiness_operation(descriptor),
-                    "phase": "", "direction": "receive" if descriptor["receiving"] else "send", "caller": None}
+            return {
+                "kind": interval.kind,
+                "scope": "cpu_protocol",
+                "site": CpuProtocolWork.readiness_operation(descriptor),
+                "phase": "",
+                "direction": "receive" if descriptor["receiving"] else "send",
+                "caller": None,
+            }
         if call := interval.cpu_call:
             return {"kind": interval.kind, "scope": "cpu_protocol", "site": interval.cpu_operation,
                     "phase": "", "direction": "receive" if call.descriptor["receiving"] else "send", "caller": None}
@@ -624,8 +658,14 @@ class FixedReference:
         piece = graph["work"][interval.index]
         scope = graph["scopes"][piece["scope"]]
         copy = piece.get("copy", {})
-        return {"kind": interval.kind, "scope": scope["role"], "site": scope["site"], "phase": scope["work"].get("phase"),
-                "direction": copy.get("direction"), "caller": copy.get("caller")}
+        return {
+            "kind": interval.kind,
+            "scope": scope["role"],
+            "site": scope["site"],
+            "phase": scope["work"].get("phase"),
+            "direction": copy.get("direction"),
+            "caller": copy.get("caller"),
+        }
 
     def detail(self, interval):
         if isinstance(interval, CpuTransportInterval):
@@ -653,7 +693,9 @@ class FixedReference:
         # Prefix protocol events can constrain serving readiness without turning startup into modeled work.
         has_predecessor = {target for source, targets in causal.next.items() if source not in self.external_cpu_points
                            for target in targets}
-        entries = {point: max(0, self.case.cpu.native_times[point] - self.origin_ns) for point in self.external_cpu_points}
+        entries = {
+            point: max(0, self.case.cpu.native_times[point] - self.origin_ns) for point in self.external_cpu_points
+        }
         for rank, event in causal.positions:
             if event < 0 or (rank, event) in has_predecessor or (rank, event) in self.signal_submissions:
                 continue
@@ -706,7 +748,11 @@ class FixedReference:
             rank, _ = target
             predecessor = indices[rank, previous]
             for record in records:
-                post = timeline.progress[rank, record.post] if isinstance(record.post, WorkProgress) else indices[rank, record.post]
+                post = (
+                    timeline.progress[rank, record.post]
+                    if isinstance(record.post, WorkProgress)
+                    else indices[rank, record.post]
+                )
                 complete = timeline.event()
                 timeline.dependencies.extend(((post, complete, record.duration_ns),
                                               (predecessor, complete, record.duration_ns)))
@@ -723,7 +769,9 @@ class FixedReference:
         if fixed or order_cuts:
             raise ValueError("fixed timing condition does not belong to a verified dependency")
         self.protocol_positions = timeline.protocol
-        self.input_positions = {cut: (reached, timeline.progress[cut.rank, cut]) for cut, reached in timeline.input_progress.items()}
+        self.input_positions = {
+            cut: (reached, timeline.progress[cut.rank, cut]) for cut, reached in timeline.input_progress.items()
+        }
         return timeline.document()
 
     def compare_active_input_reads(self, replayed, *, measured=False):
@@ -737,11 +785,20 @@ class FixedReference:
             if actual != max(observed, reached) or (measured and reached != observed):
                 differences.append({"rank": cut.rank, "requests": self.active_input_reads[cut],
                                     "observed_ns": observed, "local_progress_ns": reached, "replayed_ns": actual})
-        return {"checked": len(self.input_positions), "delayed_deliveries": delayed, "total_delivery_wait_ns": waiting_ns,
-                "different": len(differences), "differences": differences}
+        return {
+            "checked": len(self.input_positions),
+            "delayed_deliveries": delayed,
+            "total_delivery_wait_ns": waiting_ns,
+            "different": len(differences),
+            "differences": differences,
+        }
 
     def transport_baseline(self, replayed):
-        report = {"checked": len(self.cpu_transfers), "initial_conditions": len(self.cpu_initial_readiness), "different": 0}
+        report = {
+            "checked": len(self.cpu_transfers),
+            "initial_conditions": len(self.cpu_initial_readiness),
+            "different": 0,
+        }
         for interval in self.cpu_transfers:
             stamp = self.origin_ns + replayed[self.protocol_positions[interval.post.posted]]
             begin, end = interval.window_ns
@@ -821,7 +878,11 @@ class FixedReference:
             differences["early" if time < begin else "late"] += 1
             if first is None or begin < first["measured_window_ns"][0]:
                 call = self.cpu_points.get((rank, event))
-                scope = {"cpu_protocol": call.source()} if call else self.case.sources[rank][0].graph["events"][event]["scope"]
+                scope = (
+                    {"cpu_protocol": call.source()}
+                    if call
+                    else self.case.sources[rank][0].graph["events"][event]["scope"]
+                )
                 first = {"rank": rank, "event": event, "scope": scope,
                          "measured_window_ns": [begin, end], "replayed_ns": time}
         return {"checked_boundaries": checked, "observer_joins": len(self.observer_joins),

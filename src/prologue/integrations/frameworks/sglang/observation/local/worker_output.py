@@ -1,9 +1,9 @@
 """Bind a native worker to its device and publish its closed observation."""
 
 from prologue.integrations.frameworks.sglang.shared.source_layout import SourceLayout
-from prologue.integrations.platforms.ascend.observation import AscendObservation
-from prologue.integrations.platforms.ascend.scoped_tasks import tensor_layouts
-from prologue.integrations.platforms.ascend.export import AscendExport
+from prologue.integrations.platforms.ascend.analysis.observation import AscendObservation
+from prologue.integrations.platforms.ascend.analysis.scoped_tasks import tensor_layouts
+from prologue.integrations.platforms.ascend.runtime.export import AscendExport
 from prologue.runtime.io import write_json
 
 

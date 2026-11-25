@@ -5,7 +5,7 @@ from time import monotonic_ns
 from prologue.integrations.frameworks.sglang.observation.local.attention_observation import DecodeAttentionObservation
 from prologue.integrations.frameworks.sglang.observation.local.worker_output import publish_capture
 from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
-from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
+from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
 from prologue.runtime.io import write_json
 
 

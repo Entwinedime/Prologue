@@ -8,17 +8,40 @@ import threading
 import time
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
+from inspect import signature
 from typing import Any
 
 import torch
 import torch_npu
 
-from prologue.integrations.platforms.ascend.clock import AscendClock
-from prologue.integrations.platforms.ascend.host_profile import AscendSpecializations
-from prologue.integrations.platforms.ascend.thread_activity import AscendThreadActivity
+from prologue.integrations.platforms.ascend.runtime.host_profile import AscendSpecializations
+from prologue.integrations.platforms.ascend.runtime.thread_activity import AscendThreadActivity
 
 
 class AscendMarkers:
+    @staticmethod
+    def sample_clock(user_device: int) -> dict:
+        acl = ctypes.CDLL("libascendcl.so")
+        device_id = acl.aclrtGetLogicDevIdByUserDevId
+        device_id.argtypes = [ctypes.c_int32, ctypes.POINTER(ctypes.c_int32)]
+        device_id.restype = ctypes.c_int
+        device = ctypes.c_int32()
+        status = device_id(user_device, ctypes.byref(device))
+        if status:
+            raise RuntimeError(f"Ascend clock device mapping failed: {status}")
+
+        sample = ctypes.CDLL(None).prologue_sample_device
+        sample.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint64)]
+        sample.restype = ctypes.c_int
+        values = (ctypes.c_uint64 * 3)()
+
+        # The native helper brackets only the actual queries; Python releases the GIL outside that interval.
+        status = sample(device.value, values)
+        if status:
+            raise RuntimeError(f"Ascend native clock acquisition failed: {status}")
+        counter, begin, end = values
+        return {"device": device.value, "counter": counter, "begin_raw_ns": begin, "end_raw_ns": end}
+
     def __init__(self, *, detailed_timing: bool) -> None:
         self.points: list[dict[str, Any]] = []
         self.stream_events: dict[Any, Any] = {}
@@ -52,7 +75,7 @@ class AscendMarkers:
             self.specializations.start()
         try:
             with observer:
-                self.clock_samples.append(AscendClock.sample(torch_npu.npu.current_device()))
+                self.clock_samples.append(self.sample_clock(torch_npu.npu.current_device()))
                 self.observing = True
                 try:
                     with self.scope("prologue.window"):
@@ -63,7 +86,7 @@ class AscendMarkers:
                             self.enable_native(0)
                 finally:
                     self.observing = False
-                    self.clock_samples.append(AscendClock.sample(torch_npu.npu.current_device()))
+                    self.clock_samples.append(self.sample_clock(torch_npu.npu.current_device()))
         finally:
             if self.specializations is not None:
                 self.specializations.finish()
@@ -81,7 +104,7 @@ class AscendMarkers:
     def timing_evidence(self):
 
         # A submitted operation can finish after the host window closes. Every caller exports after its device fence.
-        drained = AscendClock.sample(torch_npu.npu.current_device())
+        drained = self.sample_clock(torch_npu.npu.current_device())
         result = {"device_clock": [*self.clock_samples, drained], "host_observation": self.host_observation()}
         if self.specializations is not None:
             result["specialization_loads"] = self.specializations.loads
@@ -96,7 +119,7 @@ class AscendMarkers:
 
         # Sampling cadence controls observation overhead; the actual independent snapshots define the clock segments.
         with self.scope("prologue.observer"):
-            self.clock_samples.append(AscendClock.sample(torch_npu.npu.current_device()))
+            self.clock_samples.append(self.sample_clock(torch_npu.npu.current_device()))
 
     def timestamp(self, record, side):
         sample = (ctypes.c_uint64 * 2)()
@@ -168,3 +191,27 @@ class AscendMarkers:
     def release(self) -> None:
         with self.scope("prologue.observer"), self.lock:
             self.stream_events.clear()
+
+
+class AscendProfiling:
+    @staticmethod
+    def configuration(original, configuration, *args, **kwargs):
+        arguments = signature(original).bind(configuration, *args, **kwargs)
+
+        # Keep the native trace level and HCCL/API data; no structural consumer reads AI Core counters.
+        arguments.arguments["aic_metrics"] = torch_npu.profiler.AiCMetrics.AiCoreNone
+        return original(*arguments.args, **arguments.kwargs)
+
+    @staticmethod
+    def handler(original, directory, *args, **kwargs):
+
+        # Native recording must close before CPU-only SDK export and graph production begin.
+        kwargs["analyse_flag"] = False
+        return original(directory, *args, **kwargs)
+
+    @classmethod
+    def hooks(cls):
+        return {
+            "torch_npu.profiler._ExperimentalConfig.__init__": cls.configuration,
+            "torch_npu.profiler.tensorboard_trace_handler": cls.handler,
+        }

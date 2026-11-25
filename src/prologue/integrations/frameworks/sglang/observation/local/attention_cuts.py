@@ -1,7 +1,7 @@
 """Export a trained attention cut from a closed native profiling window."""
 
 from prologue.integrations.frameworks.sglang.shared.attention import AttentionCatalog
-from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
+from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
 from prologue.runtime.io import read_json, write_json
 
 

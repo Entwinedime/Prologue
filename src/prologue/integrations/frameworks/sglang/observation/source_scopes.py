@@ -3,8 +3,8 @@
 from prologue.integrations.frameworks.sglang.observation.kv_facts import NativeKvFacts
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 from prologue.integrations.frameworks.sglang.shared.source_layout import SourceLayout
-from prologue.integrations.platforms.ascend.observation import AscendObservation
-from prologue.integrations.platforms.ascend.scoped_tasks import tensor_layouts
+from prologue.integrations.platforms.ascend.analysis.observation import AscendObservation
+from prologue.integrations.platforms.ascend.analysis.scoped_tasks import tensor_layouts
 
 
 def serving_facts(directory, rank, trace, *, evidence):

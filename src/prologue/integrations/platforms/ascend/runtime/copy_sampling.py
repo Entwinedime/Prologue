@@ -5,8 +5,8 @@ from collections import defaultdict
 from threading import get_native_id
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 
-from prologue.integrations.platforms.ascend.host_profile import AscendRuntimeTiming
-from prologue.integrations.platforms.ascend.services import SynchronousCopy
+from prologue.integrations.platforms.ascend.analysis.services import SynchronousCopy
+from prologue.integrations.platforms.ascend.runtime.host_profile import AscendRuntimeTiming
 from prologue.runtime.io import write_json
 
 
@@ -27,7 +27,7 @@ class TensorCopySamples:
     def sample(self, job, directory, revision):
         import torch
 
-        from prologue.integrations.platforms.ascend.markers import AscendMarkers
+        from prologue.integrations.platforms.ascend.runtime.markers import AscendMarkers
 
         directory.mkdir(parents=True)
         start = self.now()

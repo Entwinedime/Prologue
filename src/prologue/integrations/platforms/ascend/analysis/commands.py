@@ -6,8 +6,26 @@ from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 
-from prologue.integrations.platforms.ascend.trace import AscendTrace, DeviceTask, Interval, ThreadIntervals
-from prologue.acquisition.observation.observation import ObservationReferences
+from prologue.integrations.platforms.ascend.analysis.trace import AscendTrace, DeviceTask, Interval, ThreadIntervals
+
+
+def span_references(result):
+    for edge in result["dependencies"]:
+        yield edge["source"]
+        yield edge["target"]
+
+    for scope in result["scopes"]:
+        for port in scope["ports"]:
+            yield port["at"]
+            if "wait" in port:
+                yield port["wait"]["begin"]
+            if "rendezvous" in port:
+                yield port["rendezvous"]
+
+        for field in ("kv_accesses", "slot_accesses"):
+            for access in scope[field]:
+                yield access["start"]
+                yield access["finish"]
 
 
 @dataclass
@@ -136,7 +154,10 @@ class StreamCommands:
                         command_positions = CommandPositions(trace, tasks)
                     lower, upper = command_positions.bounds(call.api)
                     if lower != upper:
-                        raise ValueError(f"stream {stream} operation in scope {call.scope} has no unique command position: {lower}..{upper}")
+                        raise ValueError(
+                            f"stream {stream} operation in scope {call.scope} has no unique "
+                            f"command position: {lower}..{upper}"
+                        )
                     position = lower
                 gaps[position].append(call)
 
@@ -147,8 +168,10 @@ class StreamCommands:
                     local.sort(key=lambda call: trace.tasks[call.api.record["args"]["connection_id"]][0].begin)
                 else:
                     local.sort(key=lambda call: call.api.begin)
-                    if any(left.api.end > right.api.begin for left, right in zip(local, local[1:])):
-                        raise ValueError(f"concurrent native stream operations have no established order on stream {stream}")
+                    if any(left.api.end > right.api.begin for left, right in zip(local, local[1:], strict=False)):
+                        raise ValueError(
+                            f"concurrent native stream operations have no established order on stream {stream}"
+                        )
                 ordered.extend(local)
                 if position < len(tasks):
                     ordered.append(tasks[position])
@@ -157,7 +180,11 @@ class StreamCommands:
             for index, source in enumerate(ordered):
                 command = StreamCommand(source, 2 * index, 2 * index + 1)
                 self.commands.append(command)
-                physical = [source] if isinstance(source, DeviceTask) else trace.tasks.get(source.api.record["args"]["connection_id"], [])
+                physical = (
+                    [source]
+                    if isinstance(source, DeviceTask)
+                    else trace.tasks.get(source.api.record["args"]["connection_id"], [])
+                )
                 for task in physical:
                     self.physical[task.stream, task.begin] = command
                 if isinstance(source, NativeStreamCall):
@@ -190,7 +217,10 @@ class StreamCommands:
             tasks = trace.tasks.get(api.record["args"]["connection_id"], [])
             if not tasks or not api.contains(call.api) or trace.owner(trace.origin(api)) != call.scope:
                 continue
-            if all(task.stream == call.stream for task in tasks) and trace.queues.inside(api, call.stream) == submissions:
+            if (
+                all(task.stream == call.stream for task in tasks)
+                and trace.queues.inside(api, call.stream) == submissions
+            ):
                 groups.append(tasks)
         if len(groups) > 1:
             raise ValueError(f"native copy in scope {call.scope} has competing SDK command groups")
@@ -254,7 +284,10 @@ class StreamCommands:
             return result
         selected = self.frontiers if stream is None else {stream: self.frontiers[stream]}
         for stream, (starts, latest) in selected.items():
-            if any(window.begin < before < window.end for window in self.submitting.overlapping(Interval(before, before, stream, {}))):
+            if any(
+                window.begin < before < window.end
+                for window in self.submitting.overlapping(Interval(before, before, stream, {}))
+            ):
                 raise ValueError(f"stream {stream} fence overlaps a native queue submission")
             index = bisect_right(starts, before) - 1
             if index >= 0:
@@ -268,20 +301,36 @@ class StreamCommands:
             commands = []
             for command in self.effects[connection]:
                 source = command.source
-                physical = [source] if isinstance(source, DeviceTask) else self.trace.tasks.get(source.api.record["args"]["connection_id"], [])
+                physical = (
+                    [source]
+                    if isinstance(source, DeviceTask)
+                    else self.trace.tasks.get(source.api.record["args"]["connection_id"], [])
+                )
                 task = physical[0].record["args"] if physical else None
-                commands.append({
-                    "begin": command.begin, "end": command.end,
-                    "sdk": {name: task[name] for name in ("connection_id", "Batch Id", "Task Id", "Subtask Id")} if task else None,
-                })
-            records.append({
-                "thread": call.native.thread, "begin_counter": call.native.begin, "connection": connection,
-                "source_scope": call.scope,
-                "resource": resources["thread", call.completion.thread] if call.completion else resources["stream", call.stream],
-                "commands": commands,
-                "completion": {key: call.completion.record[key] for key in ("api", "thread", "begin_counter")}
-                              if call.completion else None,
-            })
+                commands.append(
+                    {
+                        "begin": command.begin,
+                        "end": command.end,
+                        "sdk": {name: task[name] for name in ("connection_id", "Batch Id", "Task Id", "Subtask Id")}
+                        if task
+                        else None,
+                    }
+                )
+            records.append(
+                {
+                    "thread": call.native.thread,
+                    "begin_counter": call.native.begin,
+                    "connection": connection,
+                    "source_scope": call.scope,
+                    "resource": resources["thread", call.completion.thread]
+                    if call.completion
+                    else resources["stream", call.stream],
+                    "commands": commands,
+                    "completion": {key: call.completion.record[key] for key in ("api", "thread", "begin_counter")}
+                    if call.completion
+                    else None,
+                }
+            )
         return records
 
     def measurements(self, observation: dict) -> dict:
@@ -290,13 +339,17 @@ class StreamCommands:
         positions = [set() for _ in resources]
         for span in spans:
             positions[span["resource"]].update((span["begin"], span["end"]))
-        for anchor in ObservationReferences(observation):
+        for anchor in span_references(observation):
             positions[spans[anchor["span"]]["resource"]].add(anchor["order"])
 
         clocks = {}
         for command in self.commands:
             source = command.source
-            physical = [source] if isinstance(source, DeviceTask) else trace.tasks.get(source.api.record["args"]["connection_id"], [])
+            physical = (
+                [source]
+                if isinstance(source, DeviceTask)
+                else trace.tasks.get(source.api.record["args"]["connection_id"], [])
+            )
             interval = trace.device_interval(physical[0].record) if physical else None
 
             # Only real SDK tasks provide device timestamps. Unmeasured waits remain pure boundaries.
@@ -317,8 +370,14 @@ class StreamCommands:
             for order in sorted(orders):
 
                 # Every retained host cut names an observed native or SDK endpoint; missing handoff is an error.
-                measured = clocks[stream, order] if stream is not None else trace.host_times[descriptor["identity"], order]
-                if stream is not None and measured is not None and not trace.clock.begin_ns <= measured <= trace.clock.end_ns:
+                measured = (
+                    clocks[stream, order] if stream is not None else trace.host_times[descriptor["identity"], order]
+                )
+                if (
+                    stream is not None
+                    and measured is not None
+                    and not trace.clock.begin_ns <= measured <= trace.clock.end_ns
+                ):
                     raise ValueError("observed device boundary lies outside the clock calibration window")
                 coordinates.append({"resource": resource, "order": order, "time_ns": measured})
             if stream is not None:
@@ -331,7 +390,10 @@ class StreamCommands:
                     device_services.append([resource, begin, end, finish - start])
         return {
             "clock": "monotonic_raw_ns",
-            "window_ns": [trace.host_times[f"thread/{trace.window.thread}", side] for side in (trace.window.begin, trace.window.end)],
+            "window_ns": [
+                trace.host_times[f"thread/{trace.window.thread}", side]
+                for side in (trace.window.begin, trace.window.end)
+            ],
             "coordinates": coordinates,
             "device_services": device_services,
         }

@@ -16,9 +16,9 @@ from prologue.integrations.frameworks.sglang.observation.model_calls import Nati
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
-from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
-from prologue.integrations.platforms.ascend.host_profile import AscendHostProfile
-from prologue.integrations.platforms.ascend.markers import AscendMarkers
+from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
+from prologue.integrations.platforms.ascend.runtime.host_profile import AscendHostProfile
+from prologue.integrations.platforms.ascend.runtime.markers import AscendMarkers
 from prologue.runtime.io import write_json
 
 

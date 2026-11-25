@@ -14,7 +14,7 @@ from prologue.integrations.frameworks.sglang.observation.profiles import NativeP
 from prologue.integrations.frameworks.sglang.observation.role_plan import NativeWorkerLayout
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
-from prologue.integrations.platforms.ascend.markers import AscendMarkers
+from prologue.integrations.platforms.ascend.runtime.markers import AscendMarkers
 from prologue.runtime.io import write_json
 
 

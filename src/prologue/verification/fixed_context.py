@@ -1,13 +1,13 @@
 """Project independently observed host conditions onto serial steps of a fixed graph."""
 
+import json
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import pairwise
-import json
 
-from prologue.integrations.platforms.ascend.host_alignment import ThreadService
-from prologue.integrations.platforms.ascend.trace import Interval, ThreadIntervals
+from prologue.integrations.platforms.ascend.analysis.host_alignment import ThreadService
+from prologue.integrations.platforms.ascend.analysis.trace import Interval, ThreadIntervals
 
 from .host_queues import HostQueueEvidence
 from .ingress import IngressEvidence
@@ -132,14 +132,18 @@ class FixedThreadActivity(ThreadService):
         self.report = {
             "threads": sum("kernel_events" in row for row in covered),
             "target_wakes": sum(len(row.get("target_wakes", ())) for row in covered),
-            "additional_runnable_pauses": sum(len(self.runnable[row["thread"]]) - len(row["preemptions"]) for row in covered),
+            "additional_runnable_pauses": sum(
+                len(self.runnable[row["thread"]]) - len(row["preemptions"]) for row in covered
+            ),
         }
 
     @staticmethod
     def switch_points(row):
         pauses = {tuple(pair) for pair in row["preemptions"]}
         blocked = {}
-        states = [(stamp, payload[-1]) for kind, stamp, *payload in row.get("kernel_events", ()) if kind == "switch_out"]
+        states = [
+            (stamp, payload[-1]) for kind, stamp, *payload in row.get("kernel_events", ()) if kind == "switch_out"
+        ]
         stamps = [stamp for stamp, _ in states]
         on_cpu = row["window_ns"][0]
         for (out, running), (resume, _) in pairwise(row["switches"]):
@@ -309,7 +313,9 @@ class FixedHostContext:
                                              submission=thread in self.submissions)
         if service is None:
             return None
-        return WorkProgress(self.rank, step.start, step.finish, stamp, service, sum(conditions.values()), step.service_ns)
+        return WorkProgress(
+            self.rank, step.start, step.finish, stamp, service, sum(conditions.values()), step.service_ns
+        )
 
     def step_at(self, thread, stamp):
         host = self.steps.get(thread, ())
@@ -467,7 +473,9 @@ class FixedHostContext:
         notifications = defaultdict(list)
         for row in report["notifications"]:
             notifications[row["consumer"]].append(row)
-        self.submissions = {thread for lane, thread in threads.items() if graph["resources"][lane]["role"] == "submission"}
+        self.submissions = {
+            thread for lane, thread in threads.items() if graph["resources"][lane]["role"] == "submission"
+        }
         delays, counts = queues.handoffs(graph, positions, arrivals)
         waits, idle_inputs, idle = [], {}, {}
         self.steps = {thread: [] for thread in threads.values()}
@@ -477,7 +485,11 @@ class FixedHostContext:
             if call.execution["in_flow"]:
                 protocol.update(((start, finish), None) for start, finish, _ in call.services())
                 by_thread[call.thread].append(call)
-        order = {(edge["source"], edge["target"]) for edge in graph["edges"] if edge["kind"] == "order"} if protocol else set()
+        order = (
+            {(edge["source"], edge["target"]) for edge in graph["edges"] if edge["kind"] == "order"}
+            if protocol
+            else set()
+        )
         for lane, events in lanes.items():
             events.sort()
             thread = threads[lane]

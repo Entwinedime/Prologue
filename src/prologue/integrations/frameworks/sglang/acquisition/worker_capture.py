@@ -3,8 +3,8 @@
 import json
 
 from prologue.integrations.frameworks.sglang.shared.source_layout import SourceLayout
-from prologue.integrations.platforms.ascend.observation import AscendObservation
-from prologue.integrations.platforms.ascend.scoped_tasks import tensor_layouts
+from prologue.integrations.platforms.ascend.analysis.observation import AscendObservation
+from prologue.integrations.platforms.ascend.analysis.scoped_tasks import tensor_layouts
 from prologue.libraries.release import asset_path
 from prologue.performance.samples import WorkCatalog
 from prologue.runtime.io import write_json

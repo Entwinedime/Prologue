@@ -9,7 +9,8 @@ from pathlib import Path
 
 from prologue.acquisition.recording import PublishedCapture
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
-from prologue.integrations.platforms.ascend.reference import NativeEffectEvidence
+from prologue.integrations.platforms.ascend.reference.reference import NativeEffectEvidence
+from prologue.integrations.platforms.ascend.reference.stream_effects import StreamEffects
 from prologue.libraries.release import LibraryRelease, asset_path
 
 from .actions import ActionScopes
@@ -306,7 +307,7 @@ class ProductionEvidence:
         native_evidence = NativeEffectEvidence(
             self.capture, rank, native, facts, self.production / f"work/{rank}-sdk/trace.json",
         )
-        effects = native_evidence.inspect(graph)
+        effects = StreamEffects(native_evidence).inspect(graph)
         host_fences = native_evidence.inspect_host_fences(graph)
         effects["host_fences"] = len(host_fences)
         contents = native_case.observe(rank, graph, native, logical_coordinates=native_evidence.logical_coordinates)

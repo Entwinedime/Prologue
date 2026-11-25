@@ -20,7 +20,7 @@ include = [
     "prologue", "prologue.runtime", "prologue.app", "prologue.contracts.workload", "prologue.acquisition.observation", "prologue.performance",
     "prologue.integrations.frameworks.sglang", "prologue.integrations.frameworks.sglang.observation",
     "prologue.integrations.frameworks.sglang.shared", "prologue.integrations.frameworks.sglang.observation.local",
-    "prologue.integrations.platforms.ascend", "prologue.integrations.runtimes.pytorch",
+    "prologue.integrations.platforms.ascend", "prologue.integrations.platforms.ascend.runtime", "prologue.integrations.platforms.ascend.analysis", "prologue.integrations.runtimes.pytorch",
 ]
 
 [tool.ruff]

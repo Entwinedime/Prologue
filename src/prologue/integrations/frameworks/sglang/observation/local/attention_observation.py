@@ -73,7 +73,7 @@ class DecodeAttentionObservation:
         }
         profile = None
         if self.calls[key] == 2:
-            from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks
+            from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
 
             root = Path("cuts") / f"rank-{self.rank}" / str(len(self.rows))
             row["profile"] = str(root)
@@ -94,7 +94,7 @@ class DecodeAttentionObservation:
         return result
 
     def document(self):
-        from prologue.integrations.platforms.ascend.markers import AscendMarkers
+        from prologue.integrations.platforms.ascend.runtime.markers import AscendMarkers
 
         return {"runtime": AscendMarkers.environment(), "calls": self.rows}
 

@@ -6,7 +6,7 @@ from prologue.acquisition.rules import EvidenceGap, missing_root
 from prologue.integrations.frameworks.sglang.acquisition.local_base import LocalRule
 from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangAscendPlacement
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
-from prologue.integrations.platforms.ascend.deployment import AscendDeployment
+from prologue.integrations.platforms.ascend.host.deployment import AscendDeployment
 
 
 class LocalEmbedding(LocalRule):

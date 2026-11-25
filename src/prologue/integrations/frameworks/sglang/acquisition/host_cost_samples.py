@@ -6,8 +6,8 @@ from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.acquisition.recording import PublishedCapture
 from prologue.integrations.frameworks.sglang.acquisition.host_scopes import NativeHostCalls
 from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangAscendPlacement
-from prologue.integrations.platforms.ascend.host_alignment import AscendHostAlignment, ThreadService
-from prologue.integrations.platforms.ascend.trace import AscendTrace
+from prologue.integrations.platforms.ascend.analysis.host_alignment import AscendHostAlignment, ThreadService
+from prologue.integrations.platforms.ascend.analysis.trace import AscendTrace
 from prologue.integrations.runtimes.pytorch.protocol_work import CpuProtocolWork
 from prologue.performance.samples import ServiceSamples, WorkCatalog
 from prologue.runtime.io import read_json, read_jsonl, write_json

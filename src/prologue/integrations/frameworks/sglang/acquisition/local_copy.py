@@ -7,7 +7,7 @@ from prologue.acquisition.rules import EvidenceGap
 from prologue.integrations.frameworks.sglang.acquisition.local_base import LocalRule
 from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangAscendPlacement
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
-from prologue.integrations.platforms.ascend.copy_sampling import TensorCopySamples
+from prologue.integrations.platforms.ascend.runtime.copy_sampling import TensorCopySamples
 from prologue.performance.requirements import cost_identity
 from prologue.performance.samples import ServiceSamples
 

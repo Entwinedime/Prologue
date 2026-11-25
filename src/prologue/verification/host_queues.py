@@ -4,8 +4,8 @@ from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from itertools import pairwise
 
-from prologue.integrations.platforms.ascend.host_alignment import ThreadService
-from prologue.integrations.platforms.ascend.trace import Interval, ThreadIntervals
+from prologue.integrations.platforms.ascend.analysis.host_alignment import ThreadService
+from prologue.integrations.platforms.ascend.analysis.trace import Interval, ThreadIntervals
 
 
 class HostQueueEvidence:
@@ -154,8 +154,11 @@ class HostQueueEvidence:
         }, arrivals, read_wakes
 
     def blocked(self, read, thread):
-        return [(first, last) for first, last in ThreadService.within(self.activity.sleep.get(thread, ()), read.begin, read.end)
-                if read.begin <= first < last <= read.end]
+        return [
+            (first, last)
+            for first, last in ThreadService.within(self.activity.sleep.get(thread, ()), read.begin, read.end)
+            if read.begin <= first < last <= read.end
+        ]
 
     def handoffs(self, graph, positions, arrivals):
         delays, counts = {}, Counter()

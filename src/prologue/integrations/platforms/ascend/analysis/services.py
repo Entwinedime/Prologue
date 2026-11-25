@@ -29,7 +29,9 @@ class SynchronousCopy:
         operands = []
         for name, tensor in chain(inputs, scope.get("local_copies", {}).items()):
             source = tensor.get("copy_source")
-            if source and cls.matches(native, source["address"], source["element_bytes"] * prod(tensor["shape"]), source["direction"]):
+            if source and cls.matches(
+                native, source["address"], source["element_bytes"] * prod(tensor["shape"]), source["direction"]
+            ):
                 operands.append({
                     "operand": name, "tensor": {"dtype": tensor["dtype"], "shape": tensor["shape_rule"]},
                     "element_bytes": source["element_bytes"],

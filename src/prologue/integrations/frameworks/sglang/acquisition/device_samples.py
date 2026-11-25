@@ -13,9 +13,9 @@ from prologue.integrations.frameworks.sglang.acquisition.local_embedding import 
 from prologue.integrations.frameworks.sglang.acquisition.pd_samples import PdNotificationSamples
 from prologue.integrations.frameworks.sglang.acquisition.worker_capture import WorkerCapture
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
-from prologue.integrations.platforms.ascend.services import ObservedServices
-from prologue.integrations.platforms.ascend.collectives import CollectiveServices
-from prologue.integrations.platforms.ascend.transport_profile import AscendTransportProfile
+from prologue.integrations.platforms.ascend.analysis.services import ObservedServices
+from prologue.integrations.platforms.ascend.host.collectives import CollectiveServices
+from prologue.integrations.platforms.ascend.host.transport_profile import AscendTransportProfile
 from prologue.performance.fitting import FittedCosts
 from prologue.performance.requirements import CostRequirements
 from prologue.performance.samples import ServiceSamples, WorkCatalog

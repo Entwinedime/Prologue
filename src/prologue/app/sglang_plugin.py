@@ -22,12 +22,14 @@ def install() -> None:
     # A latency-only worker must start without the observer bridge or a device profiler.
     if description["latency_only"]:
         from prologue.integrations.frameworks.sglang.observation.timing import NativeTiming
-        from prologue.integrations.platforms.ascend.host_profile import AscendHostProfile, AscendSpecializations
+        from prologue.integrations.platforms.ascend.runtime.host_profile import AscendHostProfile, AscendSpecializations
 
         if description["host_timing"]:
             timing = NativeTiming(description, host_profile=AscendHostProfile)
         elif "attention_sites" in description:
-            from prologue.integrations.frameworks.sglang.observation.local.attention_observation import DecodeAttentionObservation
+            from prologue.integrations.frameworks.sglang.observation.local.attention_observation import (
+                DecodeAttentionObservation,
+            )
 
             timing = NativeTiming(description, attention=DecodeAttentionObservation)
         else:
@@ -44,8 +46,7 @@ def install() -> None:
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
     from prologue.integrations.frameworks.sglang.observation.hooks import SGLangObservation
-    from prologue.integrations.platforms.ascend.markers import AscendMarkers
-    from prologue.integrations.platforms.ascend.profiling import AscendProfiling
+    from prologue.integrations.platforms.ascend.runtime.markers import AscendMarkers, AscendProfiling
 
     for target, hook in AscendProfiling.hooks().items():
         HookRegistry.register(target, hook, HookType.AROUND)

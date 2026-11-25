@@ -17,12 +17,12 @@ RUN bash /opt/prologue/install-sglang.sh /opt/prologue/sglang && rm /opt/prologu
 ENV ASCEND_USE_FA=true ASCEND_USE_FIA=false
 
 # The SDK dumper must publish its running flag before starting the background thread.
-COPY src/prologue/integrations/platforms/ascend/native/profiler /opt/prologue/native/ascend/profiler
+COPY src/prologue/integrations/platforms/ascend/runtime/native/profiler /opt/prologue/native/ascend/profiler
 RUN bash /opt/prologue/native/ascend/profiler/install.sh
 
-COPY src/prologue/integrations/platforms/ascend/native/CMakeLists.txt \
-    src/prologue/integrations/platforms/ascend/native/*.cpp \
-    src/prologue/integrations/platforms/ascend/native/*.hpp /opt/prologue/native/ascend/
+COPY src/prologue/integrations/platforms/ascend/runtime/native/CMakeLists.txt \
+    src/prologue/integrations/platforms/ascend/runtime/native/*.cpp \
+    src/prologue/integrations/platforms/ascend/runtime/native/*.hpp /opt/prologue/native/ascend/
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh \
     && cmake -S /opt/prologue/native/ascend -B /tmp/prologue-ascend -DCMAKE_BUILD_TYPE=Release \
         -DPROLOGUE_ASCEND_INCLUDE_DIR=/usr/local/Ascend/ascend-toolkit/latest/include \
@@ -39,8 +39,8 @@ RUN cmake -S /opt/prologue/native/pytorch -B /tmp/prologue-gloo -DCMAKE_BUILD_TY
 
 ENV LD_PRELOAD=/opt/prologue/lib/libprologue_ascend_observer.so:/opt/prologue/lib/libprologue_gloo.so
 
-COPY --chmod=755 src/prologue/integrations/platforms/ascend/export.sh /opt/prologue/export-profile.sh
-COPY --chmod=755 src/prologue/integrations/platforms/ascend/capture.sh /opt/prologue/capture.sh
+COPY --chmod=755 src/prologue/integrations/platforms/ascend/runtime/export.sh /opt/prologue/export-profile.sh
+COPY --chmod=755 src/prologue/integrations/platforms/ascend/runtime/capture.sh /opt/prologue/capture.sh
 # Package the native worker and its actual dependencies, independently of the coordinator and control backend.
 WORKDIR /opt/prologue/collector
 COPY pyproject.toml .
@@ -51,7 +51,8 @@ COPY src/prologue/acquisition/observation src/prologue/acquisition/observation/
 COPY src/prologue/performance/samples.py src/prologue/performance/
 COPY src/prologue/integrations/frameworks/sglang/shared src/prologue/integrations/frameworks/sglang/shared/
 COPY src/prologue/integrations/frameworks/sglang/observation src/prologue/integrations/frameworks/sglang/observation/
-COPY src/prologue/integrations/platforms/ascend/*.py src/prologue/integrations/platforms/ascend/
+COPY src/prologue/integrations/platforms/ascend/runtime src/prologue/integrations/platforms/ascend/runtime/
+COPY src/prologue/integrations/platforms/ascend/analysis src/prologue/integrations/platforms/ascend/analysis/
 COPY src/prologue/integrations/runtimes/pytorch/*.py src/prologue/integrations/runtimes/pytorch/
 RUN python3 -m pip install --no-deps --no-build-isolation . && rm -rf /opt/prologue/collector
 

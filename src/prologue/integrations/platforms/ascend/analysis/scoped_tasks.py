@@ -6,11 +6,11 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from prologue.integrations.platforms.ascend.clock import HostCounter
-from prologue.integrations.platforms.ascend.commands import StreamCommands
-from prologue.integrations.platforms.ascend.export import AscendExport
-from prologue.integrations.platforms.ascend.queues import queue_marker
-from prologue.integrations.platforms.ascend.trace import AscendTrace, Interval, ThreadIntervals
+from prologue.integrations.platforms.ascend.analysis.clock import HostCounter
+from prologue.integrations.platforms.ascend.analysis.commands import StreamCommands
+from prologue.integrations.platforms.ascend.analysis.sdk_rows import queue_marker, task_flips
+from prologue.integrations.platforms.ascend.analysis.trace import AscendTrace, Interval, ThreadIntervals
+from prologue.integrations.platforms.ascend.runtime.export import AscendExport
 from prologue.runtime.io import write_json
 
 
@@ -94,7 +94,7 @@ class ScopedTasks:
                     elif info["id"] == "aclrtRecordEvent":
                         boundary[name].add(info["connection_id"])
 
-        flips = AscendTrace.task_flips(profile)
+        flips = task_flips(profile)
         tasks = [r for r in rows if "Task Type" in r.get("args", {}) and not queue_marker(r["args"], flips)]
         endpoints = []
         for name in ("prologue.sample.begin", "prologue.sample.end"):

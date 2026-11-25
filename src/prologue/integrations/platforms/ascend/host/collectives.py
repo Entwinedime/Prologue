@@ -5,8 +5,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from itertools import permutations
 
-from prologue.integrations.platforms.ascend.clock import DeviceCalibration
-from prologue.integrations.platforms.ascend.notifications import NotifyProgress
+from prologue.integrations.platforms.ascend.analysis.clock import DeviceCalibration
+from prologue.integrations.platforms.ascend.analysis.notifications import NotifyProgress
 from prologue.performance.samples import RendezvousService
 
 
@@ -104,7 +104,9 @@ class CollectiveClock:
     def service(self, rank, required):
         finish = self.positions[rank, "finish"]
         starts = [self.positions[actor, "ready"] for actor in {rank, *required}]
-        return RendezvousService.after_peers([(-self.upper[finish][start], self.upper[start][finish]) for start in starts])
+        return RendezvousService.after_peers(
+            [(-self.upper[finish][start], self.upper[start][finish]) for start in starts]
+        )
 
 
 class CollectiveServices:
@@ -148,8 +150,11 @@ class CollectiveServices:
             if not posts:
                 continue
             clock = CollectiveClock(peers)
-            measurable = {rank: post for rank, post in posts.items()
-                          if post.elapsed is not None and all(peers[actor].ready is not None for actor in post.required)}
+            measurable = {
+                rank: post
+                for rank, post in posts.items()
+                if post.elapsed is not None and all(peers[actor].ready is not None for actor in post.required)
+            }
             for rank, post in posts.items():
                 service = clock.service(rank, post.required) if rank in measurable else None
                 self.samples[rank][post.position] = service, post.payload
@@ -182,11 +187,16 @@ class CollectiveServices:
             start, finish = points[resource, begin], points[resource, end]
             group = document["scopes"][scope]["communication"]
             intervals[scope] = CollectivePost(
-                (resource, begin, end), payload, group["required"], group.get("peer_rows"),
-                clock.bounds(start) if start is not None else None, clock.bounds(finish) if finish is not None else None,
+                (resource, begin, end),
+                payload,
+                group["required"],
+                group.get("peer_rows"),
+                clock.bounds(start) if start is not None else None,
+                clock.bounds(finish) if finish is not None else None,
                 clock.elapsed_bounds(start, finish) if start is not None and finish is not None else None,
                 NotifyProgress.within(notifications.get(str(scope), ()), start, finish, clock)
-                if start is not None and finish is not None else {},
+                if start is not None and finish is not None
+                else {},
             )
         return intervals
 
@@ -200,7 +210,9 @@ class CollectiveServices:
                 continue
             entry = next((port["at"] for port in scope["ports"] if port["name"] == "call.enter"), None)
             lane, order = (None, None) if entry is None else (spans[entry["span"]]["resource"], entry["order"])
-            channels[exchange["channel"]].append((lane, order, index, exchange["operation"], tuple(exchange["members"])))
+            channels[exchange["channel"]].append(
+                (lane, order, index, exchange["operation"], tuple(exchange["members"]))
+            )
 
         # A single observed issuing thread establishes the channel's order independently of batch annotations.
         for channel, posts in channels.items():
