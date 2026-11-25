@@ -85,7 +85,7 @@ RUN mkdir /tmp/sgl-kernel-npu \
 
 COPY install_batch_invariant_ops.sh /tmp/install_batch_invariant_ops.sh
 RUN chmod +x /tmp/install_batch_invariant_ops.sh \
-    && /tmp/install_batch_invariant_ops.sh \
+    && /tmp/install_batch_invariant_ops.sh "$DEVICE_TYPE" \
     && rm -f /tmp/install_batch_invariant_ops.sh
 
 WORKDIR /workspace/prologue

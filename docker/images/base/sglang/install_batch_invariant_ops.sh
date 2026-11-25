@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # Install the Ascend NPU batch_invariant_ops required by SGLang #21197.
-#
-# The pinned 910B AArch64 base image determines the platform.
 set -euo pipefail
 
 readonly WORK_DIR="/tmp/batch-invariant-ops"
-readonly RUN_PACKAGE="cann-ops-batch_invariant-910b-1.0.0-linux.aarch64.run"
+readonly RUN_PACKAGE="cann-ops-batch_invariant-${1:?CANN device type required}-1.0.0-linux.aarch64.run"
 readonly RUN_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${RUN_PACKAGE}"
 readonly EXTENSION_ZIP="batch_invariant-torch_ops_extension-1.0.0.zip"
 readonly EXTENSION_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${EXTENSION_ZIP}"
