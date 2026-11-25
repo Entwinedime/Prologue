@@ -2,7 +2,22 @@
 
 import argparse
 import json
+from dataclasses import fields
 from pathlib import Path
+from typing import TypeVar
+
+from prologue.acquisition.options import (
+    CaptureOptions, CostAcquisitionOptions, DeviceSampleOptions, FitCostsOptions, HostSampleOptions,
+    LocalAcquisitionOptions, ProductionOptions, QualificationOptions, ReplenishmentOptions,
+)
+from prologue.workflow.options import ExplorationOptions, PredictionOptions
+
+Options = TypeVar("Options")
+
+
+def parsed(contract: type[Options], arguments: argparse.Namespace) -> Options:
+    values = vars(arguments)
+    return contract(**{field.name: values[field.name] for field in fields(contract) if field.name in values})
 
 
 def main() -> None:
@@ -113,13 +128,15 @@ def main() -> None:
         from prologue.acquisition.production import CaptureProduction
         from prologue.acquisition.recording import PublishedCapture
 
-        CaptureProduction(arguments, PublishedCapture(arguments.capture), SGLangAscendLaunch).run()
+        CaptureProduction(parsed(ProductionOptions, arguments), PublishedCapture(arguments.capture), SGLangAscendLaunch).run()
     elif arguments.command == "acquire-local":
         from prologue.libraries import LibraryRelease
 
         queries = [json.loads(path.read_bytes()) for path in arguments.query]
         release = LibraryRelease(arguments.libraries) if arguments.libraries else None
-        result = SGLangAscendLaunch.local_acquisition(release, arguments).run(arguments, queries, json.loads(arguments.deployment.read_bytes()))
+        options = parsed(LocalAcquisitionOptions, arguments)
+        acquisition = SGLangAscendLaunch.local_acquisition(release, options)
+        result = acquisition.run(options, queries, json.loads(arguments.deployment.read_bytes()))
         raise SystemExit(0 if result["status"] == "qualified" else 1)
     elif arguments.command == "publish-local":
         from prologue.acquisition.library_increment import LocalLibraryIncrement
@@ -128,7 +145,7 @@ def main() -> None:
         from prologue.integrations.runtimes.docker import ModelingProcess
 
         model = ModelingProcess(arguments.binary, arguments.modeling_image, arguments.timeout)
-        acquisition = SGLangAscendLaunch.local_acquisition(None, arguments)
+        acquisition = SGLangAscendLaunch.local_acquisition(None, parsed(QualificationOptions, arguments))
         queries = [json.loads(path.read_bytes()) for path in arguments.query]
         increment = LocalLibraryIncrement(arguments.session, queries, acquisition, model, CostSamples)
         published = LibraryStore(arguments.libraries).publish(increment)
@@ -136,12 +153,12 @@ def main() -> None:
     elif arguments.command == "capture":
         sites = json.loads(arguments.attention_sites.read_bytes()) if arguments.attention_sites else None
         launch = SGLangAscendLaunch(json.loads(arguments.input.read_text()), json.loads(arguments.deployment.read_text()))
-        launch.capture(arguments, attention_sites=sites, latency_only=arguments.latency_only, host_timing=arguments.host_timing,
+        launch.capture(parsed(CaptureOptions, arguments), attention_sites=sites, latency_only=arguments.latency_only, host_timing=arguments.host_timing,
                        service_reference=arguments.service_reference).run()
     elif arguments.command == "cost-samples":
         from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples
 
-        CostSamples.export(arguments)
+        CostSamples.export(parsed(DeviceSampleOptions, arguments))
     elif arguments.command == "batch-cost-samples":
         from prologue.artifacts import write_json
         from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples
@@ -153,29 +170,30 @@ def main() -> None:
     elif arguments.command == "host-cost-samples":
         from prologue.integrations.frameworks.sglang.ascend.host_samples import HostCostSamples
 
-        HostCostSamples(arguments).run()
+        HostCostSamples(parsed(HostSampleOptions, arguments)).run()
     elif arguments.command == "fit-costs":
         from prologue.acquisition.fitting import FitCosts
 
-        FitCosts(arguments, BatchHostReuse.match).run()
+        FitCosts(parsed(FitCostsOptions, arguments), BatchHostReuse.match).run()
     elif arguments.command == "acquire-costs":
         from prologue.acquisition.costs import CostAcquisition
         from prologue.acquisition.fitting import TransportSamples
 
         profiles = TransportSamples(arguments.transport_samples)
-        CostAcquisition(arguments, SGLangAscendLaunch, BatchHostReuse.match, transport_samples=profiles).run()
+        CostAcquisition(parsed(CostAcquisitionOptions, arguments), SGLangAscendLaunch, BatchHostReuse.match,
+                        transport_samples=profiles, sample_adapter=SGLangAscendLaunch).run()
     elif arguments.command == "explore":
         from prologue.app.prediction import PredictionProcess
         from prologue.workflow.exploration import ExplorationTask
 
-        task = ExplorationTask(arguments, PredictionProcess)
+        task = ExplorationTask(parsed(ExplorationOptions, arguments), PredictionProcess, framework="sglang")
         acquisition = None
         if arguments.deployment:
             from prologue.acquisition.replenishment import Replenishment
             from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples
             from prologue.integrations.frameworks.sglang.ascend.launch import SGLangAscendLaunch
 
-            acquisition = Replenishment(task, arguments, SGLangAscendLaunch.local_acquisition, CostSamples)
+            acquisition = Replenishment(task, parsed(ReplenishmentOptions, arguments), SGLangAscendLaunch.local_acquisition, CostSamples)
         elif any(x is not None for x in (arguments.card_budget_seconds, arguments.postprocessing_budget_seconds, arguments.attempt_limit)):
             parser.error("acquisition allowances require --deployment")
         if not task.run(acquisition):
@@ -184,7 +202,8 @@ def main() -> None:
         from prologue.app.prediction import PredictionProcess
         from prologue.libraries import LibraryRelease
 
-        process = PredictionProcess(arguments, LibraryRelease(arguments.libraries), json.loads(arguments.input.read_bytes()))
+        process = PredictionProcess(parsed(PredictionOptions, arguments), LibraryRelease(arguments.libraries),
+                                    json.loads(arguments.input.read_bytes()))
         raise SystemExit(0 if process.run() else 1)
 
 

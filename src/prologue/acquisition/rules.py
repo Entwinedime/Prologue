@@ -3,10 +3,11 @@
 import fcntl
 import json
 import subprocess
-from argparse import Namespace
+from dataclasses import replace
 from contextlib import nullcontext
 from typing import Protocol
 
+from prologue.acquisition.options import LocalAcquisitionOptions
 from prologue.acquisition.capture import NativeAttempt
 from prologue.acquisition.recording import PublishedCapture
 from prologue.artifacts import content_id, write_json
@@ -25,7 +26,7 @@ class EvidenceRule(Protocol):
 
     def matches(self, query: dict) -> bool: ...
     def session_key(self, query: dict, deployment: dict): ...
-    def prepare(self, queries: list[dict], deployment: dict, arguments: Namespace, limit: OperationLimit) -> NativeAttempt: ...
+    def prepare(self, queries: list[dict], deployment: dict, arguments: LocalAcquisitionOptions, limit: OperationLimit) -> NativeAttempt: ...
     def qualify(self, queries: list[dict], recording: PublishedCapture, timeout=None) -> tuple[dict, list[dict]]: ...
 
 
@@ -69,10 +70,9 @@ class LocalAcquisition:
         directory = arguments.output
         if not (directory / "result.json").is_file():
             with processing() as seconds:
-                arguments.preparation_seconds = seconds
-                attempt = rule.prepare(queries, deployment, arguments, limit)
+                attempt = rule.prepare(queries, deployment, replace(arguments, preparation_seconds=seconds), limit)
             attempt.inputs.update(rule=rule.name, queries=keys)
-            if getattr(arguments, "card_budget_ns", None) is not None:
+            if arguments.card_budget_ns is not None:
                 attempt.limit_ns = arguments.card_budget_ns // len(attempt.inputs["physical_devices"])
             attempt.run()
         recording = PublishedCapture(directory)
@@ -135,7 +135,7 @@ class LocalAcquisition:
             limit.check()
 
             # NativeAttempt owns the bounded process, recovery, physical placement receipt and teardown.
-            child = Namespace(**(vars(arguments) | {"output": native}))
+            child = replace(arguments, output=native)
             recording = self.recording(rule, queries, keys, deployment, child, limit, processing)
             with processing() as seconds:
                 products, answers = self.products(rule, queries, recording, seconds)

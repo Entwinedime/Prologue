@@ -3,6 +3,7 @@
 import json
 import subprocess
 import time
+from dataclasses import replace
 
 from prologue.artifacts import write_json
 from prologue.serving.latency import RequestLatency
@@ -38,10 +39,9 @@ class ExplorationTarget:
             output = self.root / "attempts" / str(number)
             previous = {"number": number, "basis": basis, "release": release.identity}
             write_json(journal, previous)
-            options.output = output
             start = time.monotonic_ns()
             try:
-                predictor(options, release, self.source, limit).run()
+                predictor(replace(options, output=output), release, self.source, limit).run()
                 result, evidence = self.evidence(predictor, output)
             except AllowanceExhausted:
                 raise

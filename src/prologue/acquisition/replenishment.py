@@ -2,12 +2,12 @@
 
 import json
 from collections import defaultdict
-from types import SimpleNamespace
 
 from prologue.acquisition.allowances import AcquisitionBudget
 from prologue.acquisition.capture import NativeAttempt
 from prologue.acquisition.library_increment import LocalLibraryIncrement
 from prologue.acquisition.library_store import LibraryStore
+from prologue.acquisition.options import LocalAcquisitionOptions, QualificationOptions, ReplenishmentOptions
 from prologue.acquisition.recording import PublishedCapture
 from prologue.acquisition.rules import EvidenceGap
 from prologue.artifacts import content_id, write_json
@@ -18,7 +18,7 @@ from prologue.workflow.limits import AllowanceExhausted
 
 
 class Replenishment:
-    def __init__(self, task, args, rules, source_costs):
+    def __init__(self, task, args: ReplenishmentOptions, rules, source_costs):
         self.root, self.rules, self.source_costs = task.root, rules, source_costs
         self.store = LibraryStore(task.release.root)
         if (self.store.root / "release.json").exists():
@@ -27,8 +27,8 @@ class Replenishment:
         self.deployment = json.loads(args.deployment.read_bytes())
         self.source_image = NativeAttempt.image(args.source_image)["Id"]
         self.budget = AcquisitionBudget(self.root, self.store, args)
-        self.options = dict(timeout=args.timeout, storage_bytes=args.storage_bytes, source_image=self.source_image,
-                            modeling_image=task.runtime["modeling_image"], binary=task.root / "inputs/prologue")
+        self.qualification = QualificationOptions(timeout=args.timeout, modeling_image=task.runtime["modeling_image"],
+                                                  binary=task.root / "inputs/prologue")
         self.failed = {}
         self.measured = {}
         self.unresolved_services = {}
@@ -41,7 +41,7 @@ class Replenishment:
         return release
 
     def groups(self, queries, release, answers):
-        acquisition = self.rules(release, SimpleNamespace(**self.options))
+        acquisition = self.rules(release, self.qualification)
         origin = str(release.directory.relative_to(self.store.root)) if release.identity else None
         pending = {}
         for path in sorted(self.sessions.glob("*/demand.json")):
@@ -83,8 +83,11 @@ class Replenishment:
             write_json(path, demand, replace=False)
 
         sources = [path.parent for path in sorted(self.sessions.glob("*/session/result.json"))]
-        args = SimpleNamespace(**self.options, output=directory, structure_session=sources, budget_seconds=card_ns / 1e9,
-                               card_budget_ns=card_ns, attempt_limit=attempts)
+        args = LocalAcquisitionOptions(
+            binary=self.qualification.binary, timeout=self.qualification.timeout, modeling_image=self.qualification.modeling_image,
+            source_image=self.source_image, storage_bytes=self.budget.limit.storage_bytes, output=directory,
+            structure_session=sources, budget_seconds=card_ns / 1e9, card_budget_ns=card_ns, attempt_limit=attempts,
+        )
         origin = LibraryRelease(asset_path(self.store.root, demand["origin"])) if demand["origin"] else None
         acquisition = self.rules(origin, args)
         queries = demand["queries"]
@@ -120,7 +123,7 @@ class Replenishment:
                 if previous and "transport_profile" not in previous[0] and all(points[key] not in previous[1] for key in keys):
                     continue
                 with self.budget.processing() as seconds:
-                    model = ModelingProcess(self.options["binary"], self.options["modeling_image"], min(seconds, self.options["timeout"]))
+                    model = ModelingProcess(self.qualification.binary, self.qualification.modeling_image, min(seconds, self.qualification.timeout))
                     group = [queries[key] for key in keys]
                     if source not in self.measured:
                         table = self.source_costs.extract(directory, native, group, model, self.sessions)
@@ -156,7 +159,7 @@ class Replenishment:
         if not demand.points:
             return {}
         with self.budget.processing() as seconds:
-            model = ModelingProcess(self.options["binary"], self.options["modeling_image"], min(seconds, self.options["timeout"]))
+            model = ModelingProcess(self.qualification.binary, self.qualification.modeling_image, min(seconds, self.qualification.timeout))
             domains = json.loads(release.costs.read_bytes())["domains"]
             _, missing, _ = demand.check(model, domains, self.sessions)
         queries = [demand.work_query(point) for point in missing]

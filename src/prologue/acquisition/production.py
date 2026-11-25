@@ -8,6 +8,8 @@ import subprocess
 import time
 from uuid import uuid4
 
+from prologue.acquisition.adapters import ProductionAdapter
+from prologue.acquisition.options import ProductionOptions
 from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.artifacts import write_json
 from prologue.integrations.runtimes.docker import OwnedContainers
@@ -20,7 +22,7 @@ class CaptureProduction:
         state = directory / "production.json"
         return Usage(processing_ns=json.loads(state.read_text())["spent_ns"]) if state.is_file() else Usage()
 
-    def __init__(self, arguments, recording, adapter, limit=None) -> None:
+    def __init__(self, arguments: ProductionOptions, recording, adapter: type[ProductionAdapter], limit=None) -> None:
         self.arguments, self.adapter = arguments, adapter
         self.operation_limit = limit if limit is not None else OperationLimit()
         self.output = arguments.output.resolve()
@@ -42,7 +44,7 @@ class CaptureProduction:
         images = {}
         for role, image in (("source", arguments.source_image), ("modeling", arguments.modeling_image)):
             images[role] = json.loads(subprocess.check_output(["docker", "image", "inspect", image], text=True))[0]
-        if adapter.domain.image_revision(images["source"]) != capture["framework_revision"]:
+        if adapter.image_revision(images["source"]) != capture["framework_revision"]:
             raise ValueError("source postprocessing image differs from the captured framework revision")
         self.inputs = {"capture_path": str(self.capture), "capture": capture, "native_image": recording.inputs["image"],
                        "images": {role: image["Id"] for role, image in images.items()},
@@ -139,7 +141,7 @@ class CaptureProduction:
 
                 # The cumulative reservation also bounds the container after coordinator interruption.
                 command = [
-                    "docker", "run", "--rm", "--init", "--runtime", "runc" if image == "modeling" else "ascend",
+                    "docker", "run", "--rm", "--init", "--runtime", "runc" if image == "modeling" else self.adapter.platform_runtime.source_docker_runtime(),
                     "--network", "none", "--name", container,
                     "--entrypoint", "/usr/bin/timeout", "-e", "LD_PRELOAD=",
                     "--mount", f"type=bind,src={self.capture},dst=/source,readonly",
@@ -180,11 +182,9 @@ class CaptureProduction:
                 terminal = f"{rank}-templates" if templates else f"{rank}-project"
                 if terminal not in self.state["completed"]:
                     self.step(f"{rank}-export", exported, "source", self.adapter.export_profile(rank, f"/production/{exported}"))
-                    self.step(f"{rank}-interpret", facts, "source", [
-                        "python3", "-m", "prologue.app.capture_worker", "interpret", "--input", "/source", "--rank", str(rank),
-                        "--trace", f"/production/{exported}/trace.json", "--output", f"/production/{facts}",
-                        *(["--evidence"] if evidence else []),
-                    ])
+                    command = self.adapter.interpret(rank, f"/production/{exported}/trace.json", f"/production/{facts}",
+                                                     evidence=evidence)
+                    self.step(f"{rank}-interpret", facts, "source", command)
                 self.step(f"{rank}-project", graph, "modeling", [
                     "/production/inputs/prologue", "project", f"/production/{facts}", f"/production/{graph}",
                     *(["--evidence"] if evidence else []),
@@ -198,11 +198,9 @@ class CaptureProduction:
                     self.step(f"{rank}-work", identities, "modeling", [
                         "/production/inputs/prologue", "work-identities", f"/production/{graph}", f"/production/{identities}",
                     ])
-                    self.step(f"{rank}-cuts", f"sampling/{rank}.json", "source", [
-                        "python3", "-m", "prologue.app.capture_worker", "sampling-cuts", "--input", "/source", "--rank", str(rank),
-                        "--work", "/production/work", "--identities", f"/production/{identities}", "--runner", "/production/inputs/sampling.json",
-                        "--output", f"/production/sampling/{rank}.json",
-                    ])
+                    cuts = f"sampling/{rank}.json"
+                    command = self.adapter.sampling_cuts(rank, f"/production/{identities}", f"/production/{cuts}")
+                    self.step(f"{rank}-cuts", cuts, "source", command)
 
             # Observed target graphs remain valid independently of source-template selection and transformation rules.
             if templates:

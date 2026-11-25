@@ -10,25 +10,25 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from itertools import product
 from pathlib import Path
-from types import SimpleNamespace
 
 from prologue.artifacts import write_json
 from prologue.libraries import LibraryRelease
 from prologue.workflow.limits import OperationLimit, Usage, retained_bytes
+from prologue.workflow.options import ExplorationOptions, PredictionOptions
 from prologue.workflow.report import ExplorationReport
 from prologue.workflow.targets import ExplorationTarget
 
 
 class ExplorationTask:
-    def __init__(self, args, predictor):
+    def __init__(self, args: ExplorationOptions, predictor, framework: str):
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         self.root = (args.output or Path("data") / f"{stamp}_exploration").resolve()
         self.release = LibraryRelease(args.libraries)
         self.predictor = predictor
         self.binary = args.binary.resolve(strict=True)
         self.source = json.loads(args.input.read_bytes())
-        if self.source.keys() != {"framework", "model", "configurations", "workloads"} or self.source["framework"] != "sglang":
-            raise ValueError("exploration requires an SGLang model, configurations and workloads")
+        if self.source.keys() != {"framework", "model", "configurations", "workloads"} or self.source["framework"] != framework:
+            raise ValueError(f"exploration requires a {framework} model, configurations and workloads")
         if self.root.is_relative_to(self.release.root) or self.release.root.is_relative_to(self.root):
             raise ValueError("exploration output and published libraries must be separate")
         if (not math.isfinite(args.timeout) or args.timeout <= 0
@@ -46,7 +46,8 @@ class ExplorationTask:
         self.runtime = {name: subprocess.check_output(
             ["docker", "image", "inspect", "--format", "{{.Id}}", getattr(args, name)], text=True,
         ).strip() for name in ("control_image", "modeling_image")}
-        self.run_options = {"timeout": args.timeout, "execution_trace": args.details, **self.runtime}
+        self.run_options = PredictionOptions(output=self.root, binary=self.root / "inputs/prologue", timeout=args.timeout,
+                                             execution_trace=args.details, **self.runtime)
 
     def named(self, key):
         rows = self.source[key]
@@ -62,7 +63,7 @@ class ExplorationTask:
         manifest = directory / "task.json"
         executable = directory / "prologue"
         identity = {"input": self.source, "libraries": str(self.release.directory), "release_id": self.release.identity, "images": self.runtime,
-                    "binary": hashlib.sha256(self.binary.read_bytes()).hexdigest(), "details": self.run_options["execution_trace"]}
+                    "binary": hashlib.sha256(self.binary.read_bytes()).hexdigest(), "details": self.run_options.execution_trace}
         if acquisition:
             identity.update(libraries=str(self.release.root), deployment=acquisition.deployment, source_image=acquisition.source_image)
             del identity["release_id"]
@@ -81,7 +82,6 @@ class ExplorationTask:
             snapshot.chmod(0o700)
             (staging / manifest.name).write_text(json.dumps(identity, indent=2) + "\n")
             staging.rename(directory)
-        self.run_options["binary"] = executable
 
     def explore(self, acquisition):
         targets = []
@@ -95,8 +95,7 @@ class ExplorationTask:
                 pending = []
                 for target in targets:
                     basis = self.predictor.basis(target.source, self.release) if acquisition else self.release.identity
-                    options = SimpleNamespace(**self.run_options, execution_inputs=None)
-                    pending.append(workers.submit(target.predict, self.predictor, options, self.release, self.limit, basis))
+                    pending.append(workers.submit(target.predict, self.predictor, self.run_options, self.release, self.limit, basis))
 
                 # Every target reads the same frozen release. Only the coordinator can schedule acquisition or publish the next one.
                 rows = [future.result() for future in pending]

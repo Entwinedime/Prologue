@@ -11,9 +11,34 @@ from prologue.integrations.platforms.ascend.export import AscendExport
 
 
 class SGLangAscendLaunch:
+    platform_runtime = AscendDeployment
+    image_revision = staticmethod(WorkerDomain.image_revision)
     domain = WorkerDomain
     export_profile = staticmethod(AscendExport.command)
     sampling_input = staticmethod(AttentionCuts.runner)
+
+    @staticmethod
+    def interpret(rank, trace, output, *, evidence):
+        return ["python3", "-m", "prologue.app.capture_worker", "interpret", "--input", "/source", "--rank", str(rank),
+                "--trace", trace, "--output", output, *(["--evidence"] if evidence else [])]
+
+    @staticmethod
+    def sampling_cuts(rank, identities, output):
+        return ["python3", "-m", "prologue.app.capture_worker", "sampling-cuts", "--input", "/source",
+                "--rank", str(rank), "--work", "/production/work", "--identities", identities,
+                "--runner", "/production/inputs/sampling.json", "--output", output]
+
+    @staticmethod
+    def host_samples(options):
+        from prologue.integrations.frameworks.sglang.ascend.host_samples import HostCostSamples
+
+        HostCostSamples(options).run()
+
+    @staticmethod
+    def device_samples(options):
+        from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples
+
+        CostSamples.export(options)
 
     @classmethod
     def local_acquisition(cls, release, arguments):
@@ -50,7 +75,7 @@ class SGLangAscendLaunch:
                 raise ValueError("local sample output must be outside the native model directory")
             mounts = ["--mount", f"type=bind,src={path},dst={Path(model).absolute()},readonly"]
         options = platform.options(latency_only=not runtime_trace, host_timing=host_timing)
-        return NativeAttempt(arguments, inputs, options, [worker], mounts, limit)
+        return NativeAttempt(arguments, inputs, options, [worker], mounts, cls.platform_runtime, limit)
 
     @staticmethod
     def check_local_placement(query, deployment):
@@ -136,4 +161,4 @@ class SGLangAscendLaunch:
                              ("--host-timing", host_timing), ("--service-reference", service_reference)):
             if active:
                 worker.append(flag)
-        return NativeAttempt(arguments, inputs, runtime, worker, mounts, limit)
+        return NativeAttempt(arguments, inputs, runtime, worker, mounts, self.platform_runtime, limit)

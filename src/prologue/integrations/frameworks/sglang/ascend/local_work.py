@@ -119,7 +119,7 @@ class LocalHostWork(LocalSchedulerWork):
         return query.get("work") == "host" and query["domain"]["framework"] == "sglang" and "torch_npu" in query["domain"]
 
     def sources(self, deployment, rank):
-        for directory in getattr(self.arguments, "structure_session", ()):
+        for directory in self.arguments.structure_session:
             receipt = json.loads((directory / "result.json").read_bytes())
             if (receipt.get("rule") not in {LocalSchedulerBatch.name, LocalWorkerBinding.name}
                     or receipt["status"] not in {"qualified", "incomplete"}):

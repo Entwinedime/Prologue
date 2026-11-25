@@ -5,6 +5,14 @@ from pathlib import Path
 
 class AscendDeployment:
     @staticmethod
+    def source_docker_runtime() -> str:
+        return "ascend"
+
+    @staticmethod
+    def capture_entrypoint() -> str:
+        return "/opt/prologue/capture.sh"
+
+    @staticmethod
     def is_single_device(source: dict) -> bool:
         mode = source.get("acquisition_mode", "full")
         if mode not in ("full", "single_device"):
@@ -46,7 +54,7 @@ class AscendDeployment:
             self.environment["ASCEND_MF_TRANSFER_PROTOCOL"] = protocol
 
     def options(self, *, detailed_timing=False, host_timing=False, latency_only=False) -> list[str]:
-        arguments = ["--runtime", "ascend", "--ipc", "host", "--network", self.network]
+        arguments = ["--runtime", self.source_docker_runtime(), "--ipc", "host", "--network", self.network]
         if not self.single_device:
             arguments.append("--privileged")
         elif detailed_timing or host_timing:

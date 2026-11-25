@@ -4,10 +4,10 @@ import argparse
 import json
 from pathlib import Path
 from subprocess import TimeoutExpired
-from types import SimpleNamespace
 
 from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.app.prediction import PredictionProcess
+from prologue.workflow.options import PredictionOptions
 from prologue.artifacts import write_json
 from prologue.libraries import LibraryRelease
 
@@ -84,7 +84,7 @@ class AutonomousVerification:
         self.output.mkdir(parents=True)
         source = json.loads(args.input.read_text())
         release = LibraryRelease(args.libraries)
-        options = SimpleNamespace(output=self.output / "prediction", timeout=args.timeout, binary=args.binary,
+        options = PredictionOptions(output=self.output / "prediction", timeout=args.timeout, binary=args.binary,
                                   modeling_image=args.modeling_image, control_image=args.control_image,
                                   execution_inputs=None, execution_trace=args.details)
         process = PredictionProcess(options, release, source)

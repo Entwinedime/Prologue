@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+from prologue.acquisition.adapters import PlatformRuntimeAdapter
+from prologue.acquisition.options import CaptureOptions
 from prologue.artifacts import write_json
 from prologue.integrations.runtimes.docker import OwnedContainers
 from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
@@ -31,7 +33,8 @@ class NativeAttempt:
     def charges(attempts):
         return Usage(sum(row["charged_ns"] for row in attempts), len(attempts))
 
-    def __init__(self, arguments, inputs, options, worker_options, mounts, limit=None):
+    def __init__(self, arguments: CaptureOptions, inputs, options, worker_options, mounts, runtime: type[PlatformRuntimeAdapter], limit=None):
+        self.entrypoint = runtime.capture_entrypoint()
         self.arguments, self.inputs = arguments, inputs
         self.options, self.worker_options, self.mounts = options, worker_options, mounts
         self.output = arguments.output.resolve()
@@ -102,7 +105,7 @@ class NativeAttempt:
             *self.mounts,
             "--mount", f"type=bind,src={self.output / 'input.json'},dst=/input.json,readonly",
             "--mount", f"type=bind,src={output},dst=/capture",
-            self.inputs["image"], "--signal=KILL", f"{allowance_ns / 1_000_000_000}s", "/opt/prologue/capture.sh",
+            self.inputs["image"], "--signal=KILL", f"{allowance_ns / 1_000_000_000}s", self.entrypoint,
             "--input", "/input.json", "--output", "/capture/source",
             *self.worker_options,
         ]

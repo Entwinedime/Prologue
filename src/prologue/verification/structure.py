@@ -6,9 +6,9 @@ from pathlib import Path
 from subprocess import CalledProcessError, TimeoutExpired
 from tempfile import TemporaryDirectory
 from time import monotonic_ns
-from types import SimpleNamespace
 
 from prologue.app.prediction import PredictionProcess
+from prologue.workflow.options import PredictionOptions
 from prologue.artifacts import write_json
 from prologue.integrations.runtimes.docker import ModelingProcess
 from prologue.libraries import LibraryRelease
@@ -43,7 +43,7 @@ class StructureVerification:
             return self.finish("input_mismatch", stages | {"input_difference": difference})
         prediction = self.output / "prediction"
         timing = self.output / "timing"
-        options = SimpleNamespace(output=prediction, timeout=args.timeout, binary=args.binary,
+        options = PredictionOptions(output=prediction, timeout=args.timeout, binary=args.binary,
                                   modeling_image=args.modeling_image, control_image=args.control_image,
                                   execution_inputs=timing / "execution-inputs.json", execution_trace=True)
         process = PredictionProcess(options, LibraryRelease(args.libraries), source)

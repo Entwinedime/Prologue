@@ -4,10 +4,18 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass
+from multiprocessing import get_context
 
 
 class AllowanceExhausted(RuntimeError):
     pass
+
+
+def _sample_in_worker(operation, options, log_path):
+    with log_path.open("a") as log:
+        os.dup2(log.fileno(), 1)
+        os.dup2(log.fileno(), 2)
+        operation(options)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,3 +98,24 @@ class OperationLimit:
             if process.poll() is None:
                 process.kill()
             process.wait()
+
+    def run_worker(self, operation, options, log_path, timeout):
+        """Bound an offline adapter call by the same wall clock and storage limits as an external tool."""
+        self.check()
+        deadline = time.monotonic() + timeout
+        worker = get_context("spawn").Process(target=_sample_in_worker, args=(operation, options, log_path))
+        worker.start()
+        try:
+            while worker.exitcode is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(operation.__qualname__, timeout)
+                worker.join(min(remaining, 1) if self.root is not None else remaining)
+                self.check()
+            if worker.exitcode:
+                raise subprocess.CalledProcessError(worker.exitcode, operation.__qualname__)
+        finally:
+            if worker.is_alive():
+                worker.kill()
+            worker.join()
+            worker.close()

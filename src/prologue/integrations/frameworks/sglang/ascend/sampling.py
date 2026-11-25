@@ -1,7 +1,10 @@
 """Choose native measurements from work actually observed in an SGLang deployment."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
+
+from prologue.acquisition.options import HostSampleOptions
 
 from prologue.acquisition.recording import PublishedCapture
 from prologue.acquisition.rules import EvidenceGap, LocalAcquisition
@@ -23,17 +26,18 @@ class HostWindow:
         source = self.owner.source
         launch = type(self.owner.launch)(self.job, source.deployment)
         launch.require_recorded_placement(source.recording.inputs["deployment"])
-        arguments.source_image = source.recording.inputs["image"]
+        arguments = replace(arguments, source_image=source.recording.inputs["image"])
         launch.capture(arguments, limit, host_timing=True).run()
 
     def samples(self, output, acquisition):
         source, work = self.owner.source, self.owner.source.projection / "work"
         for rank in source.ranks:
             path = source.output / f"{self.name}-{rank}-host.json"
-            sample = acquisition.samples_from(path, "host-cost-samples", detailed=source.recording.directory, host=output,
-                                             facts=work / f"{rank}-facts.json", trace=work / f"{rank}-sdk/trace.json",
-                                             graph=work / f"{rank}-graph.json", work_identities=source.identities(rank))
-            yield path, sample
+            options = HostSampleOptions(detailed=source.recording.directory, host=output, facts=work / f"{rank}-facts.json",
+                                        trace=work / f"{rank}-sdk/trace.json", graph=work / f"{rank}-graph.json",
+                                        work_identities=source.identities(rank), output=path)
+            acquisition.sample(path, acquisition.sample_adapter.host_samples, options)
+            yield path, json.loads(path.read_bytes())
 
 
 class SourceRuleWindow:

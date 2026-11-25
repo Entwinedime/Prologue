@@ -14,10 +14,11 @@ from prologue.integrations.frameworks.sglang.ingress import BatchOperands
 from prologue.integrations.frameworks.sglang.worker_templates import SGLangTask, WorkerDomain
 from prologue.integrations.runtimes.docker import OwnedContainers
 from prologue.workflow.limits import OperationLimit
+from prologue.workflow.options import PredictionOptions
 
 
 class PredictionProcess:
-    def __init__(self, arguments, release, source, limit=None) -> None:
+    def __init__(self, arguments: PredictionOptions, release, source, limit=None) -> None:
         self.arguments = arguments
         self.release = release
         self.limit = limit if limit is not None else OperationLimit()

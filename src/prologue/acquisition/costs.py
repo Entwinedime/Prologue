@@ -6,10 +6,10 @@ import json
 import math
 import shutil
 import subprocess
-import sys
 import time
 from contextlib import contextmanager
-from types import SimpleNamespace
+from prologue.acquisition.adapters import CostSampleAdapter
+from prologue.acquisition.options import CostAcquisitionOptions, DeviceSampleOptions, LocalAcquisitionOptions, ProductionOptions
 
 from prologue.acquisition.capture import NativeAttempt
 from prologue.acquisition.fitting import FitCosts
@@ -48,7 +48,8 @@ class CostSource:
 
 
 class CostAcquisition:
-    def __init__(self, args, place, reuse_samples, *, transport_samples):
+    def __init__(self, args: CostAcquisitionOptions, place, reuse_samples, *, transport_samples, sample_adapter: type[CostSampleAdapter]):
+        self.sample_adapter = sample_adapter
         self.args = args
         self.place = place
         self.reuse_samples = reuse_samples
@@ -163,12 +164,11 @@ class CostAcquisition:
         command = ModelingCommand(self.output / "prologue", self.images["modeling"], operation, output, *inputs)
         self.command(output, command)
 
-    def samples_from(self, output, action, **inputs):
-        command = [sys.executable, "-m", "prologue.app", action]
-        for name, value in {**inputs, "output": output}.items():
-            command.extend(("--" + name.replace("_", "-"), str(value)))
-        self.command(output, command)
-        return read(output)
+    def sample(self, output, operation, options):
+        if not output.is_file():
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with self.processing() as seconds:
+                self.limit.run_worker(operation, options, output.with_suffix(".log"), seconds)
 
     def project(self, source):
         if all((source.production / "work" / f"{rank}-{file}").is_file()
@@ -180,7 +180,7 @@ class CostAcquisition:
         allowance = self.budget.available_to(CaptureProduction.usage(source.projection), self.spending(self.output))
         if allowance.processing_ns <= 0:
             raise AllowanceExhausted("cost projection allowance exhausted")
-        CaptureProduction(SimpleNamespace(
+        CaptureProduction(ProductionOptions(
             output=source.projection, binary=self.output / "prologue", product="graphs",
             budget_seconds=allowance.processing_ns / 1e9, source_image=self.images["source"],
             modeling_image=self.images["modeling"], keep_intermediates=True,
@@ -211,14 +211,12 @@ class CostAcquisition:
                 source.sampling.observe(rank, owner, catalog, requirements)
 
     def export_device_samples(self, source, pending):
-        command = [sys.executable, "-m", "prologue.app", "cost-samples", "--production", str(source.production)]
-        if source.projection != source.production:
-            command.extend(("--projection", str(source.projection)))
-        for rank, path in pending.items():
-            command.extend(("--rank", str(rank), "--work-identities", str(source.identities(rank)), "--output", str(path)))
+        options = DeviceSampleOptions(production=source.production, projection=source.projection, rank=tuple(pending),
+                                      work_identities=tuple(source.identities(rank) for rank in pending),
+                                      output=tuple(pending.values()))
 
-        # One bounded process calibrates the joint capture and publishes each completed rank in order.
-        self.command(next(reversed(pending.values())), command)
+        # Joint device samples share the clock calibration of one bounded worker.
+        self.sample(options.output[-1], self.sample_adapter.device_samples, options)
 
     @staticmethod
     def projection_usage(directory):
@@ -233,9 +231,10 @@ class CostAcquisition:
         return Usage.total((processing, cls.projection_usage(directory), *native))
 
     def measure(self, recipe, output, requested, allowance_ns):
-        arguments = SimpleNamespace(
+        arguments = LocalAcquisitionOptions(
             output=output, timeout=self.args.timeout, budget_seconds=allowance_ns / 1e9,
-            attempt_limit=1, source_image=self.images["source"], resource_trace=False,
+            attempt_limit=1, source_image=self.images["source"], binary=self.output / "prologue",
+            modeling_image=self.images["modeling"],
         )
         recipe.collect(arguments, requested, self.limit)
         self.samples.update(recipe.samples(output, self))

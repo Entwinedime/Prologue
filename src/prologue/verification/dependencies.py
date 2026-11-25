@@ -1,9 +1,16 @@
 """Compare causal relationships without pairing opaque event numbers or measured times."""
 
 from collections import Counter, defaultdict
-from types import SimpleNamespace
+from dataclasses import dataclass
 
 from .actions import ActionIdentity
+
+
+@dataclass(frozen=True, slots=True)
+class RankedBoundaries:
+    events: dict
+    work: list
+    resources: dict
 
 
 class ActionBoundaries:
@@ -45,7 +52,7 @@ class ActionBoundaries:
                 self.work.append((identity, event_ids[work["start"]], event_ids[work["finish"]]))
 
     def ranked(self, rank):
-        return SimpleNamespace(
+        return RankedBoundaries(
             events={name: (rank, event) for name, event in self.events.items()},
             work=[(identity, (rank, start), (rank, finish)) for identity, start, finish in self.work],
             resources=self.resources,

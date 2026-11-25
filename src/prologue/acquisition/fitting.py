@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from contextlib import nullcontext
 from statistics import median
 
+from prologue.acquisition.options import FitCostsOptions
 from prologue.artifacts import write_json
 from prologue.integrations.runtimes.docker import ModelingProcess
 from prologue.performance.fitting import FittedCosts
@@ -46,7 +47,7 @@ class TransportSamples:
 
 
 class FitCosts:
-    def __init__(self, arguments, reuse_samples):
+    def __init__(self, arguments: FitCostsOptions, reuse_samples):
         self.arguments = arguments
         self.reuse_samples = reuse_samples
 
