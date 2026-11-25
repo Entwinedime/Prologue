@@ -204,7 +204,7 @@ class PageAllocator:
     ):
         from sglang.srt.mem_cache.allocator import alloc_extend_naive
 
-        # The declared NPU allocator returns int32 from its paged entry points, unlike alloc().
+        # The declared allocator returns int32 from its paged entry points, unlike alloc().
         bindings = self.reserve()
         result = self.indices(bindings, torch.int32)
         pages = [PoolCoordinates.native(page) for binding in bindings for page in binding["new_pages"]]

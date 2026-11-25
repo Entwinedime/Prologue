@@ -74,7 +74,7 @@ class NativeServingSession:
     def __init__(self, source, output: Path, *, resource_trace: bool = False, latency_only: bool = False,
                  host_timing: bool = False, service_reference: bool = False, local_shards: bool = False,
                  attention_sites=None) -> None:
-        self.framework_revision = NativeConfiguration.upstream_revision(os.environ.get("PROLOGUE_SGLANG_REVISION"))
+        self.framework_revision = NativeConfiguration.upstream_revision(os.environ.get("PROLOGUE_FRAMEWORK_REVISION"))
         serving = CaptureInput(source)
         self.output = output.resolve()
         latency_only = latency_only or host_timing or bool(attention_sites)

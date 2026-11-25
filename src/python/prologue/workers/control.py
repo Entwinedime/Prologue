@@ -12,7 +12,9 @@ from prologue.integrations.runtimes.pytorch.control.cpu import CpuDeclarations
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel-python", type=Path, required=True)
+    parser.add_argument("--platform-domain", required=True)
     arguments = parser.parse_args()
+    os.environ["PROLOGUE_PLATFORM_DOMAIN"] = arguments.platform_domain
 
     # Native libraries also write directly to fd 1; reserve a separate descriptor for the protocol.
     with os.fdopen(os.dup(sys.stdout.fileno()), "w", buffering=1) as protocol:

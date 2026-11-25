@@ -3,8 +3,9 @@
 import json
 
 from prologue.host.acquisition.rules import EvidenceGap, missing_root
+from prologue.integrations.bindings import platform_domain
 from prologue.integrations.frameworks.sglang.acquisition.local_base import LocalRule
-from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangAscendPlacement
+from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangPlacement
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 
@@ -20,7 +21,7 @@ class LocalPrebuilt(LocalRule):
         domain = query["domain"]
         return (missing_root(query)
                 and query.get("action") == "segment" and query["condition"] == cls.condition
-                and domain["framework"] == "sglang" and "torch_npu" in domain
+                and domain["framework"] == "sglang" and platform_domain().runtime_domain_key in domain
                 and domain["implementation"]["disaggregation_mode"] == "decode")
 
     @classmethod
@@ -60,7 +61,7 @@ class LocalPrebuilt(LocalRule):
         rank = WorkerDomain.rank(domain)
         job = {"domain": domain, "rank": rank, "capacity": capacity, "batches": batches}
         card = cls.physical_card(domain, deployment)
-        return SGLangAscendPlacement.local_attempt(
+        return SGLangPlacement.local_attempt(
             arguments, limit, deployment, [card], impl["framework_revision"], job, "--local-prebuilt",
             runtime_trace=True, model=impl["model"]["_name_or_path"],
         )

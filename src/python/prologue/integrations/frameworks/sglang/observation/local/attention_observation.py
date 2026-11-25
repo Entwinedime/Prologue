@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 
+from prologue.integrations.bindings import device_runtime
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
 
@@ -73,13 +74,11 @@ class DecodeAttentionObservation:
         }
         profile = None
         if self.calls[key] == 2:
-            from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
-
             root = Path("cuts") / f"rank-{self.rank}" / str(len(self.rows))
             row["profile"] = str(root)
-            profile = ScopedTasks.profile(self.directory / root, self.rank)
-        begin, end = (torch.npu.Event(enable_timing=True) for _ in range(2))
-        torch.npu.current_stream().synchronize()
+            profile = device_runtime().scoped_tasks.profile(self.directory / root, self.rank)
+        begin, end = (device_runtime().api.Event(enable_timing=True) for _ in range(2))
+        device_runtime().api.current_stream().synchronize()
         marker = torch.autograd.profiler.record_function if profile is not None else nullcontext
         with profile if profile is not None else nullcontext():
             with marker("prologue.sample.begin"):
@@ -94,9 +93,7 @@ class DecodeAttentionObservation:
         return result
 
     def document(self):
-        from prologue.integrations.platforms.ascend.runtime.markers import AscendMarkers
-
-        return {"runtime": AscendMarkers.environment(), "calls": self.rows}
+        return {"runtime": device_runtime().markers.environment(), "calls": self.rows}
 
     def install(self):
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType

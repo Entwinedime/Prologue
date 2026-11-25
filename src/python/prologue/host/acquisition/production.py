@@ -130,7 +130,7 @@ class CaptureProduction:
                         "--rm",
                         "--init",
                         "--runtime",
-                        "runc" if image == "modeling" else self.adapter.platform_runtime.source_docker_runtime(),
+                        "runc" if image == "modeling" else self.adapter.platform_runtime().source_docker_runtime(),
                         "--network",
                         "none",
                         "--name",

@@ -18,7 +18,7 @@ class ExpertScopes:
         self.implementations = {}
         geometry = observation.routing.geometry
         if geometry.size > 1 and os.environ.get("DEEP_USE_ALLTOALL_MODE") != "1":
-            raise ValueError("expert geometry requires the Ascend DeepEP normal AllToAll layout")
+            raise ValueError("expert geometry requires the native DeepEP normal AllToAll layout")
         dispatcher = StandardDispatcher if geometry.size == 1 else MaybeTboDeepEPDispatcher
         observation.implementation["expert_layout"] = geometry.layout
         for path, module in modules.items():

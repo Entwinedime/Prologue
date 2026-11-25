@@ -9,13 +9,13 @@ from tempfile import TemporaryDirectory
 from time import monotonic_ns
 
 from prologue.common.io import write_json
+from prologue.integrations.bindings import device_runtime
 from prologue.integrations.frameworks.sglang.observation.local.worker_output import activate_device, publish_capture
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
 from prologue.integrations.frameworks.sglang.observation.role_plan import NativeWorkerLayout
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
-from prologue.integrations.platforms.ascend.runtime.markers import AscendMarkers
 
 
 class WorkerProbes:
@@ -144,7 +144,7 @@ class SchedulerRunner:
             if experts:
                 raise ValueError("this scheduler cut requires a dense model")
             roles = layout.roles(ModelScopes.selected(modules), experts, ()).document(None)
-            environment = layout.environment(scheduler, roles["workers"], AscendMarkers.environment())
+            environment = layout.environment(scheduler, roles["workers"], device_runtime().markers.environment())
             write_json(directory / "binding.json", self.prepare_pools(scheduler, args))
             observer.bind(scheduler, layout, environment)
             prepared = monotonic_ns()

@@ -3,10 +3,10 @@
 import json
 
 from prologue.host.acquisition.rules import EvidenceGap, missing_root
+from prologue.integrations.bindings import platform_backend, platform_domain
 from prologue.integrations.frameworks.sglang.acquisition.local_base import LocalRule
-from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangAscendPlacement
+from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangPlacement
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
-from prologue.integrations.platforms.ascend.host.deployment import AscendDeployment
 
 
 class LocalEmbedding(LocalRule):
@@ -22,7 +22,7 @@ class LocalEmbedding(LocalRule):
                 and set(query["parameters"]) == {"model_tokens"}
                 and condition.keys() == {"phase", "state_accesses"} and condition["state_accesses"] == []
                 and condition["phase"] in {"prefill", "decode", "mixed"}
-                and domain["framework"] == "sglang" and "torch_npu" in domain
+                and domain["framework"] == "sglang" and platform_domain().runtime_domain_key in domain
                 and parallel["logical_tp"] > 1 and parallel["logical_pp"] == parallel["logical_ep"] == 1
                 and impl["disaggregation_mode"] == "null" and impl["load_format"] == "dummy"
                 and not impl["model"].get("quantization_config") and not domain["expert_layers"])
@@ -48,11 +48,11 @@ class LocalEmbedding(LocalRule):
             if role is None or WorkerDomain.bind_worker(domain, role) != requested:
                 raise EvidenceGap("different_sessions_required", conditions=["model_domain", "embedding_call"])
             ranks.add(rank)
-        placement = AscendDeployment(deployment, domain["parallel"]["logical_tp"], False)
+        placement = platform_backend().deployment(deployment, domain["parallel"]["logical_tp"], False)
         impl = domain["implementation"]
         job = {"domain": domain, "ranks": sorted(ranks), "phase": first["condition"]["phase"],
                "tokens": count, "single_device": placement.single_device}
-        return SGLangAscendPlacement.local_attempt(
+        return SGLangPlacement.local_attempt(
             arguments, limit, deployment, placement.devices, impl["framework_revision"], job, "--local-embedding",
             runtime_trace=True, model=impl["model"]["_name_or_path"],
         )
@@ -85,7 +85,7 @@ class LocalEmbedding(LocalRule):
                 or exchange["members"] != group["members"] or exchange["required"] != group["members"]):
             raise ValueError("embedding call, weight readback and native peer contract disagree")
 
-        # Native HCCL can divide one logical reduction over several physical stream intervals.
+        # A native collective can divide one logical reduction over several physical stream intervals.
         services = [s for s in facts["spans"] if s["scope"] == child and s["kind"] == "collective"]
         if not services:
             raise ValueError("embedding reduction lacks an observed peer service")
@@ -116,6 +116,14 @@ class LocalEmbedding(LocalRule):
                 readback = json.loads((recording.source / native["readback"]).read_bytes())
                 cls.check_call(facts, readback, query, job, rank)
                 assets[asset] = facts
-            answers.append({"status": "qualified", "asset": asset, "rank": rank,
-                            "transport": "staged_gloo" if job["single_device"] else "physical_hccl"})
+            answers.append(
+                {
+                    "status": "qualified",
+                    "asset": asset,
+                    "rank": rank,
+                    "transport": "staged_gloo"
+                    if job["single_device"]
+                    else f"physical_{platform_domain().collective_backend}",
+                }
+            )
         return assets, answers

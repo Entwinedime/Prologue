@@ -71,7 +71,7 @@ class MetadataRunner(ModelRunner):
             if self.server_args.disaggregation_mode == "decode" else 0
         )
 
-        # Ascend uses paged allocation even at page_size=1; only PD defers and sorts returned pages.
+        # The observed worker uses paged allocation even at page_size=1; only PD defers and sorts returned pages.
         reuse = "deferred_sorted" if self.server_args.disaggregation_mode in {"prefill", "decode"} else "prepend"
         self.peer.call("declare_resources", slots=self.max_running_requests + extra,
                        page_reuse=reuse, fields=["output_token"])

@@ -10,6 +10,8 @@ from pathlib import Path
 import torch
 import torch.distributed as distributed
 
+from prologue.integrations.bindings import device_runtime
+
 
 class StagedWork:
     """Keep posted operands alive and publish the received values at the native wait."""
@@ -59,7 +61,7 @@ class ShardTransport:
         with self.auxiliary():
 
             # All streams from this segment finish before a different worker can use the card.
-            torch.npu.synchronize()
+            device_runtime().api.synchronize()
             fcntl.flock(self.lease, fcntl.LOCK_UN)
         self.lease = None
 
@@ -141,7 +143,7 @@ class ShardTransport:
         if low_latency_mode or os.environ.get("DEEP_USE_ALLTOALL_MODE") != "1":
             raise ValueError("single-device expert exchange requires the native normal AllToAll layout")
 
-        # This native layout uses the process group and per-dispatch row splits. Its HCCL buffer belongs to other
+        # This native layout uses the process group and per-dispatch row splits. Its device buffer belongs to other
         # transports.
         buffer.group, buffer.rank, buffer.group_size = group, group.rank(), group.size()
         buffer.low_latency_mode, buffer.alltoall_mode = False, True

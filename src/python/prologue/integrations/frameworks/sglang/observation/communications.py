@@ -10,6 +10,7 @@ from functools import partial
 from typing import Any
 
 from prologue.common.observation.parameters import ScopeParameters
+from prologue.integrations.bindings import platform_domain
 from prologue.integrations.frameworks.sglang.observation.module_scopes import tensor_ports
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 from prologue.integrations.runtimes.pytorch.capture.boundaries import GatherLayout
@@ -23,7 +24,7 @@ class CollectiveOperand:
     output: Any | None = None
 
     def implementation(self):
-        communicator = self.coordinator.npu_communicator
+        communicator = getattr(self.coordinator, f"{platform_domain().device_type}_communicator")
         if communicator is None or communicator.disabled or not self.tensor.is_contiguous():
             return None
 
@@ -47,7 +48,7 @@ class DeviceCollectiveCuts:
         arguments = signature.bind(group, *args, **kwargs)
         arguments.apply_defaults()
         tensors = list(tensor_ports(arguments.arguments, "arguments"))
-        if not any(tensor.device.type == "npu" for _, tensor in tensors):
+        if not any(tensor.device.type == platform_domain().device_type for _, tensor in tensors):
             return original(group, *args, **kwargs)
 
         root_rank = group.ranks[arguments.arguments["src"]] if original.__name__ == "broadcast" else None
@@ -73,7 +74,7 @@ class DeviceCollectiveCuts:
         arguments = signature.bind(*args, **kwargs)
         arguments.apply_defaults()
         tensors = tensor_ports(arguments.arguments, "arguments")
-        if not any(tensor.device.type == "npu" for _, tensor in tensors):
+        if not any(tensor.device.type == platform_domain().device_type for _, tensor in tensors):
             return original(*args, **kwargs)
         if arguments.arguments["async_op"]:
             raise ValueError("asynchronous native collectives need an explicit work-completion boundary")

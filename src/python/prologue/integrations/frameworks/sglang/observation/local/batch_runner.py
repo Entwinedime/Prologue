@@ -9,6 +9,7 @@ from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.utils.common import DynamicGradMode
 
 from prologue.common.io import write_json
+from prologue.integrations.bindings import device_runtime
 from prologue.integrations.frameworks.sglang.observation.communications import NativeCommunications
 from prologue.integrations.frameworks.sglang.observation.flow_scopes import FlowScopes
 from prologue.integrations.frameworks.sglang.observation.host_samples import NativeHostSamples
@@ -17,14 +18,11 @@ from prologue.integrations.frameworks.sglang.observation.model_calls import Nati
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
-from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
-from prologue.integrations.platforms.ascend.runtime.host_profile import AscendHostProfile
-from prologue.integrations.platforms.ascend.runtime.markers import AscendMarkers
 
 
 class SchedulerBatchObservation(NativeModelObservation):
     def __init__(self, output, description, *, model):
-        super().__init__(AscendMarkers(detailed_timing=False), "null")
+        super().__init__(device_runtime().markers(detailed_timing=False), "null")
         self.output, self.description, self.model = output, description, model
         self.aliases, self.routing = {}, None
         self.calls = FlowScopes(self)
@@ -56,7 +54,7 @@ class SchedulerBatchObservation(NativeModelObservation):
     def recording(self):
         runtime = self.capture.runtime
         runtime.synchronize()
-        with ScopedTasks.profile(self.output, self.parallel["rank"]), runtime.window():
+        with device_runtime().scoped_tasks.profile(self.output, self.parallel["rank"]), runtime.window():
             self.active = True
             try:
                 yield
@@ -79,7 +77,7 @@ class SchedulerBatchHostTiming:
     def __init__(self, output, description, *, model):
         self.output, self.description, self.model = output, description, model
         self.aliases = {}
-        self.calls = NativeHostSamples(self.aliases, description, AscendHostProfile)
+        self.calls = NativeHostSamples(self.aliases, description, device_runtime().host_profile)
 
     def install(self):
         if self.model:
@@ -195,7 +193,7 @@ class SchedulerBatch:
             finished.update(row["id"] for row in published if row["finished"])
             batches += 1
         scheduler.cur_batch = scheduler.last_batch = None
-        torch.npu.synchronize()
+        device_runtime().api.synchronize()
         if self.publishes and finished != requests.keys():
             raise ValueError("native warmup did not complete every local request")
         if not scheduler.flush_cache(empty_cache=False) or (allocator.available_size(), slots.available_size()) != free:

@@ -11,12 +11,12 @@ from prologue.host.acquisition.recording import PublishedCapture
 from prologue.host.acquisition.rules import EvidenceGap, LocalAcquisition
 from prologue.host.libraries.release import asset_path
 from prologue.host.runtime.limits import AllowanceExhausted
+from prologue.integrations.bindings import device_runtime
 from prologue.integrations.frameworks.sglang.acquisition.host_cost_samples import HostCostSamples
 from prologue.integrations.frameworks.sglang.acquisition.local_attention import LocalAttention
 from prologue.integrations.frameworks.sglang.acquisition.local_copy import LocalCopies
 from prologue.integrations.frameworks.sglang.acquisition.worker_capture import WorkerCapture
 from prologue.integrations.frameworks.sglang.shared.attention import AttentionCatalog
-from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
 
 
 class HostWindow:
@@ -157,7 +157,7 @@ class SGLangSampling:
                 rank,
                 source.identities(rank),
                 self.runner_input,
-                ScopedTasks.source,
+                device_runtime().scoped_tasks.source,
             )
         yield source.recording.attempt_id, cut
 

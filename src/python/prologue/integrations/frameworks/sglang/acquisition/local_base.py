@@ -3,8 +3,8 @@
 from prologue.host.acquisition.options import LocalAcquisitionOptions, QualificationOptions
 from prologue.host.acquisition.rules import EvidenceGap
 from prologue.host.runtime.docker import ModelingProcess
+from prologue.integrations.bindings import platform_backend
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
-from prologue.integrations.platforms.ascend.host.deployment import AscendDeployment
 
 
 class LocalRule:
@@ -18,7 +18,7 @@ class LocalRule:
     @staticmethod
     def physical_card(domain, deployment):
         workers = max(map(int, domain["worker_roles"])) + 1
-        placement = AscendDeployment(deployment, workers, False)
+        placement = platform_backend().deployment(deployment, workers, False)
         return placement.card(WorkerDomain.rank(domain))
 
     @staticmethod

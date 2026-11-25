@@ -21,7 +21,7 @@ class MhaKvLayout:
 
         buffers = pool.k_buffer, pool.v_buffer
         if any(not isinstance(buffer, torch.Tensor) or buffer.ndim != 5 for buffer in buffers):
-            raise NotImplementedError("KV transfer layout requires contiguous paged Ascend MHA buffers")
+            raise NotImplementedError("KV transfer layout requires contiguous paged MHA buffers")
         widths = [prod(buffer.shape[3:]) * buffer.element_size() for buffer in buffers]
         return cls(
             pool.start_layer, pool.start_layer + pool.layer_num, pool.head_num, str(pool.k_buffer.dtype), *widths

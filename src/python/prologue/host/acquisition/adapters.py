@@ -2,19 +2,13 @@
 
 from typing import Protocol
 
+from prologue.common.interfaces import Deployment
 from prologue.host.acquisition.options import DeviceSampleOptions, HostSampleOptions
 
 
-class PlatformRuntimeAdapter(Protocol):
-    @staticmethod
-    def source_docker_runtime() -> str: ...
-
-    @staticmethod
-    def capture_entrypoint() -> str: ...
-
-
 class ProductionAdapter(Protocol):
-    platform_runtime: type[PlatformRuntimeAdapter]
+    @staticmethod
+    def platform_runtime() -> type[Deployment]: ...
 
     @staticmethod
     def image_revision(image: dict) -> str: ...

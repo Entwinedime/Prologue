@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
+
+from prologue.integrations.bindings import platform_domain
 from prologue.integrations.frameworks.sglang.shared.configuration import (
     InstanceConfiguration,
     NativeConfiguration,
@@ -66,13 +70,11 @@ class WorkerDomain(WorkerRoles):
 
 
 class SGLangTask:
-    control_command = (
-        "python3",
-        "-m",
-        "prologue.workers.control",
-        "--kernel-python",
-        "/opt/prologue/sglang/sgl-kernel/python",
-    )
+    @property
+    def control_command(self):
+        domain = json.dumps(asdict(platform_domain()), separators=(",", ":"))
+        return ("python3", "-m", "prologue.workers.control", "--kernel-python",
+                "/opt/prologue/sglang/sgl-kernel/python", "--platform-domain", domain)
 
     def execution_domains(self):
         for instance in self.serving.instances:

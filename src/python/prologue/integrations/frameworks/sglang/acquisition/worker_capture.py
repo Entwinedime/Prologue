@@ -5,9 +5,8 @@ import json
 from prologue.common.cost import WorkCatalog
 from prologue.common.io import write_json
 from prologue.host.libraries.release import asset_path
+from prologue.integrations.bindings import device_runtime
 from prologue.integrations.frameworks.sglang.shared.source_layout import SourceLayout
-from prologue.integrations.platforms.ascend.analysis.observation import AscendObservation
-from prologue.integrations.platforms.ascend.analysis.scoped_tasks import tensor_layouts
 
 
 class WorkerCapture:
@@ -65,7 +64,7 @@ class WorkerCapture:
             return facts["resources"]
 
         # Synchronous cuts run in the caller's stream. Both device markers record that actual stream, including
-        # around HCCL.
+        # around collective transport.
         streams = {
             facts["spans"][port["at"]["span"]]["resource"]
             for scope in facts["scopes"]
@@ -86,8 +85,8 @@ class WorkerCapture:
     @staticmethod
     def observed_facts(source, rank, trace):
         raw = json.loads((source / f"rank-{rank}.json").read_bytes())
-        raw["scopes"] = SourceLayout(raw["environment"], tensor_layouts).lower(raw["scopes"])
-        return AscendObservation(source, rank, raw, trace, evidence=True).document()
+        raw["scopes"] = SourceLayout(raw["environment"], device_runtime().tensor_layouts).lower(raw["scopes"])
+        return device_runtime().observation(source, rank, raw, trace, evidence=True).document()
 
     @staticmethod
     def project_work(facts, model, directory):

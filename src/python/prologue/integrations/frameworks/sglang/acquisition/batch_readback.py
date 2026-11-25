@@ -1,8 +1,12 @@
 """Validate measured batch geometry, host effects and model operands for every consumer."""
 
+from prologue.integrations.bindings import RuleName, platform_domain
+
+scheduler_batch_rule = RuleName("scheduler_batch")
+
 
 class BatchReadback:
-    rule = "sglang.ascend.scheduler_batch"
+    rule = scheduler_batch_rule
 
     @classmethod
     def observed_asset(cls, batch, boundary, facts):
@@ -26,7 +30,11 @@ class BatchReadback:
     def check_model(bounds, facts):
         native = bounds["output"]
         count = len(bounds["members"])
-        if len(native["tokens"]) != count or native["tokens"] != native["relayed"] or native["device"] != "npu":
+        if (
+            len(native["tokens"]) != count
+            or native["tokens"] != native["relayed"]
+            or native["device"] != platform_domain().device_type
+        ):
             raise ValueError("each sampled device token must reach its original native request slot")
         scopes = facts["scopes"]
         root, = (i for i, s in enumerate(scopes) if s["role"] == "run_batch" and s["parent"] == 0)

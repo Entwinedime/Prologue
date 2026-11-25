@@ -1,10 +1,11 @@
-"""Bind native SGLang shard geometry to the available Ascend devices."""
+"""Bind native SGLang shard geometry to the available devices."""
 
 from pathlib import Path
 
 from prologue.host.acquisition.capture import NativeAttempt
 from prologue.host.acquisition.rules import LocalAcquisition
 from prologue.host.runtime.docker import DockerImage
+from prologue.integrations.bindings import device_runtime
 from prologue.integrations.frameworks.sglang.acquisition.device_samples import CostSamples
 from prologue.integrations.frameworks.sglang.acquisition.host_cost_samples import HostCostSamples
 from prologue.integrations.frameworks.sglang.acquisition.local_attention import LocalAttention
@@ -20,16 +21,18 @@ from prologue.integrations.frameworks.sglang.acquisition.local_work import (
     LocalHostWork,
     LocalPeerWork,
 )
-from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangAscendPlacement
+from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangPlacement
 from prologue.integrations.frameworks.sglang.acquisition.sampling import SGLangSampling
 from prologue.integrations.frameworks.sglang.acquisition.worker_capture import WorkerCapture
 from prologue.integrations.frameworks.sglang.shared.attention import AttentionCatalog
-from prologue.integrations.platforms.ascend.runtime.export import AscendExport
 
 
-class SGLangAscendLaunch(SGLangAscendPlacement):
-    export_profile = staticmethod(AscendExport.command)
+class SGLangLaunch(SGLangPlacement):
     sampling_input = staticmethod(AttentionCatalog.runner)
+
+    @staticmethod
+    def export_profile(rank, output):
+        return device_runtime().export.command(rank, output)
 
     @staticmethod
     def interpret(rank, trace, output, *, evidence):
@@ -117,4 +120,4 @@ class SGLangAscendLaunch(SGLangAscendPlacement):
                              ("--host-timing", host_timing), ("--service-reference", service_reference)):
             if active:
                 worker.append(flag)
-        return NativeAttempt(arguments, inputs, runtime, worker, mounts, self.platform_runtime, limit)
+        return NativeAttempt(arguments, inputs, runtime, worker, mounts, self.platform_runtime(), limit)

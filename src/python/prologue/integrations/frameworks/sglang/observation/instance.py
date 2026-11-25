@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from prologue.common.io import write_json
+from prologue.integrations.bindings import device_runtime, platform_domain
 from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
 from prologue.integrations.frameworks.sglang.observation.submissions import EngineSubmissions
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
@@ -168,7 +169,7 @@ class NativeServingInstance:
         os.environ["PROLOGUE_NATIVE_RUNTIME_DIR"] = str(self.output / "runtime")
         os.environ["SGLANG_PLUGINS"] = "prologue"
         if self.ep > 1:
-            os.environ.update(DEEP_USE_ALLTOALL_MODE="1", DEEPEP_HCCL_BUFFSIZE="1024", HCCL_BUFFSIZE="1024")
+            os.environ.update(device_runtime().expert_environment)
 
         if self.local_shards:
             from prologue.integrations.frameworks.sglang.observation.local.shard_engine import (
@@ -183,7 +184,7 @@ class NativeServingInstance:
         )
         if mode != "null":
             options.update(
-                disaggregation_mode=mode, disaggregation_transfer_backend="ascend",
+                disaggregation_mode=mode, disaggregation_transfer_backend=platform_domain().pd_transfer,
                 disaggregation_bootstrap_port=bootstrap["port"],
                 disaggregation_decode_enable_radix_cache=mode == "decode" and self.configuration["prefix_cache"],
             )

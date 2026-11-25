@@ -11,6 +11,7 @@ from typing import Any
 import torch
 from sglang.srt.model_executor.forward_batch_info import PPProxyTensors
 
+from prologue.integrations.bindings import platform_domain
 from prologue.integrations.frameworks.sglang.observation.module_layout import LayerCommunication
 
 
@@ -220,12 +221,12 @@ class ModelScopes:
             for name, tensor in inputs:
                 rule = self.shape(spec, name, tensor, output=False)
                 call.port(name, "input", owner.tensors.observe(tensor, rule), use="device"
-                    if tensor.device.type == "npu" else "host")
+                    if tensor.device.type == platform_domain().device_type else "host")
             result = original(*args, **kwargs)
             if cache is not None:
                 cache.ports(call, "output")
             for name, tensor in tensor_ports(result, "result"):
                 rule = self.shape(spec, name, tensor, output=True)
                 call.port(name, "output", owner.tensors.observe(tensor, rule), use="device"
-                    if tensor.device.type == "npu" else "host")
+                    if tensor.device.type == platform_domain().device_type else "host")
             return result

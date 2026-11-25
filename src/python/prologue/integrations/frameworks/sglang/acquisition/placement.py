@@ -5,15 +5,18 @@ from pathlib import Path
 from prologue.host.acquisition.capture import NativeAttempt
 from prologue.host.acquisition.rules import EvidenceGap
 from prologue.host.runtime.docker import DockerImage
+from prologue.integrations.bindings import platform_backend
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
 from prologue.integrations.frameworks.sglang.shared.configuration import CaptureInput
-from prologue.integrations.platforms.ascend.host.deployment import AscendDeployment
 
 
-class SGLangAscendPlacement:
-    platform_runtime = AscendDeployment
+class SGLangPlacement:
     domain = WorkerDomain
     image_revision = staticmethod(WorkerDomain.image_revision)
+
+    @staticmethod
+    def platform_runtime():
+        return platform_backend().deployment
 
     def __init__(self, job, deployment):
         self.job = job
@@ -22,7 +25,7 @@ class SGLangAscendPlacement:
         self.local_shards = self.platform.single_device and self.serving.worker_count > 1
 
     def placement(self, deployment):
-        return AscendDeployment(deployment, self.serving.worker_count, len(self.serving.instances) > 1)
+        return platform_backend().deployment(deployment, self.serving.worker_count, len(self.serving.instances) > 1)
 
     def require_recorded_placement(self, deployment):
         if self.placement(deployment).environment != self.platform.environment:
@@ -49,7 +52,7 @@ class SGLangAscendPlacement:
         host_timing=False,
         **evidence,
     ):
-        platform = AscendDeployment({"acquisition_mode": deployment.get("acquisition_mode", "full"),
+        platform = platform_backend().deployment({"acquisition_mode": deployment.get("acquisition_mode", "full"),
                                      "physical_devices": cards}, len(cards), False)
         image = DockerImage.inspect(arguments.source_image)
         upstream = cls.domain.image_revision(image)
@@ -64,11 +67,11 @@ class SGLangAscendPlacement:
                 raise ValueError("local sample output must be outside the native model directory")
             mounts = ["--mount", f"type=bind,src={path},dst={Path(model).absolute()},readonly"]
         options = platform.options(latency_only=not runtime_trace, host_timing=host_timing)
-        return NativeAttempt(arguments, inputs, options, [worker], mounts, cls.platform_runtime, limit)
+        return NativeAttempt(arguments, inputs, options, [worker], mounts, cls.platform_runtime(), limit)
 
     @staticmethod
     def check_local_placement(query, deployment):
-        platform = AscendDeployment(deployment, 1, False)
+        platform = platform_backend().deployment(deployment, 1, False)
         operand = query.get("features", {}).get("transport") if query.get("work") == "collective" else None
         if operand and len(operand["required"]) > 1 and (
             platform.single_device or max(operand["required"]) >= len(deployment["physical_devices"])

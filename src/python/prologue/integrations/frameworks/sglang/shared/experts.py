@@ -3,6 +3,7 @@
 from collections import Counter
 
 from prologue.common.workload.expert_routes import ExpertRoutes
+from prologue.integrations.bindings import platform_domain
 
 
 class ExpertBatch:
@@ -11,10 +12,10 @@ class ExpertBatch:
         self.size = size
         self.rank = rank
         if size == 1 and backend == "none":
-            self.layout = "ascend_standard"
+            self.layout = f"{platform_domain().name}_standard"
             self.compute_rows = "expert_input_tokens"
         elif size > 1 and (backend, mode) == ("deepep", "normal"):
-            self.layout = "ascend_deepep_normal_alltoall"
+            self.layout = f"{platform_domain().name}_deepep_normal_alltoall"
             self.compute_rows = "expert_received_tokens"
         else:
             raise ValueError("unsupported native expert boundary layout")

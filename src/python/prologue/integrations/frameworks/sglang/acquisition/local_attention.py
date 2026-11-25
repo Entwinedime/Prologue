@@ -5,15 +5,15 @@ from math import prod
 
 from prologue.common.cost import ServiceSamples
 from prologue.host.acquisition.rules import EvidenceGap
+from prologue.integrations.bindings import RuleName, platform_backend, platform_domain
 from prologue.integrations.frameworks.sglang.acquisition.local_base import LocalRule
-from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangAscendPlacement
+from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangPlacement
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
 from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
-from prologue.integrations.platforms.ascend.host.deployment import AscendDeployment
 
 
 class LocalAttention(LocalRule):
-    name = "sglang.ascend.decode_attention"
+    name = RuleName("decode_attention")
 
     def __init__(self, sampling_sources):
         self.sampling_sources = sampling_sources
@@ -24,10 +24,15 @@ class LocalAttention(LocalRule):
             return False
         definition, domain = query["definition"], query["domain"]
         parallel = domain["parallel"]
-        return (domain["framework"] == "sglang" and "torch_npu" in domain and not domain["expert_layers"]
-                and domain["implementation"]["disaggregation_mode"] == "null"
-                and parallel["logical_tp"] == parallel["logical_pp"] == parallel["logical_ep"] == 1
-                and definition.get("role") == "attention" and not definition["children"])
+        return (
+            domain["framework"] == "sglang"
+            and platform_domain().runtime_domain_key in domain
+            and not domain["expert_layers"]
+            and domain["implementation"]["disaggregation_mode"] == "null"
+            and parallel["logical_tp"] == parallel["logical_pp"] == parallel["logical_ep"] == 1
+            and definition.get("role") == "attention"
+            and not definition["children"]
+        )
 
     @staticmethod
     def session_key(query, deployment):
@@ -61,10 +66,10 @@ class LocalAttention(LocalRule):
         if selected is None:
             raise EvidenceGap("missing_qualified_attention_cut", contexts=sorted(contexts))
         recording, runner, cut = selected
-        platform = AscendDeployment(deployment, 1, False)
+        platform = platform_backend().deployment(deployment, 1, False)
         revision = domain["implementation"]["framework_revision"]
         job = {"runner": runner, "site": cut["site"], "contexts": [list(batch) for batch in sorted(contexts)]}
-        return SGLangAscendPlacement.local_attempt(arguments, limit, deployment, platform.devices, revision, job,
+        return SGLangPlacement.local_attempt(arguments, limit, deployment, platform.devices, revision, job,
                                                 "--local-attention", runtime_trace=False, model=runner["model"]["path"],
                                                 template_recording=recording, cut=cut, domain=domain)
 
@@ -86,9 +91,15 @@ class LocalAttention(LocalRule):
         domain, cut = inputs["domain"], inputs["cut"]
         record = json.loads((recording.source / recording.manifest["measurements"]).read_bytes())
         native = domain["implementation"]
-        same_worker = (record["rank"] == WorkerDomain.rank(domain) and record["load_format"] == native["load_format"]
-                       and record["model"] == native["model"]
-                       and all(record["runtime"][key] == domain[key] for key in ("torch", "torch_npu", "device")))
+        same_worker = (
+            record["rank"] == WorkerDomain.rank(domain)
+            and record["load_format"] == native["load_format"]
+            and record["model"] == native["model"]
+            and all(
+                record["runtime"][key] == domain[key]
+                for key in ("torch", platform_domain().runtime_domain_key, "device")
+            )
+        )
         samples, measured, answers = ServiceSamples(domain, [cut["definition"]]), {}, []
         published = set()
         for q in queries:

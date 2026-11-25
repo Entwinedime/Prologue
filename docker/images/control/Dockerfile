@@ -8,7 +8,7 @@ RUN python3 -m pip uninstall -y torch-npu flash-attn-npu prologue-collection
 
 WORKDIR /opt/prologue/control
 COPY src/python/prologue/__init__.py ./prologue/
-COPY src/python/prologue/integrations/__init__.py ./prologue/integrations/
+COPY src/python/prologue/integrations/__init__.py src/python/prologue/integrations/bindings.py ./prologue/integrations/
 COPY src/python/prologue/integrations/frameworks/__init__.py ./prologue/integrations/frameworks/
 COPY src/python/prologue/integrations/frameworks/sglang/__init__.py ./prologue/integrations/frameworks/sglang/
 COPY src/python/prologue/integrations/runtimes/__init__.py ./prologue/integrations/runtimes/

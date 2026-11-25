@@ -8,13 +8,14 @@ from prologue.host.acquisition.recording import PublishedCapture
 from prologue.host.acquisition.rules import EvidenceGap
 from prologue.host.performance.requirements import CostRequirements
 from prologue.host.runtime.docker import DockerImage
+from prologue.integrations.bindings import RuleName, platform_domain
 from prologue.integrations.frameworks.sglang.acquisition.device_samples import CostSamples
 from prologue.integrations.frameworks.sglang.acquisition.host_cost_samples import HostCostSamples
 from prologue.integrations.frameworks.sglang.acquisition.local_attention import LocalAttention
 from prologue.integrations.frameworks.sglang.acquisition.local_base import LocalRule
 from prologue.integrations.frameworks.sglang.acquisition.local_copy import LocalCopies
 from prologue.integrations.frameworks.sglang.acquisition.local_scheduler import LocalSchedulerBatch, LocalWorkerBinding
-from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangAscendPlacement
+from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangPlacement
 from prologue.integrations.frameworks.sglang.acquisition.worker_capture import WorkerCapture
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
 
@@ -44,7 +45,7 @@ class LocalSchedulerWork(LocalRule):
 
 
 class LocalDeviceWork(LocalSchedulerWork):
-    name = "sglang.ascend.scheduler_device_service"
+    name = RuleName("scheduler_device_service")
 
     @staticmethod
     def matches(query):
@@ -55,7 +56,7 @@ class LocalDeviceWork(LocalSchedulerWork):
     @staticmethod
     def prepare(queries, deployment, arguments, limit):
         job, devices, revision = LocalSchedulerBatch.work_job(queries, deployment)
-        return SGLangAscendPlacement.local_attempt(arguments, limit, deployment, devices, revision, job,
+        return SGLangPlacement.local_attempt(arguments, limit, deployment, devices, revision, job,
                                                  "--local-worker", runtime_trace=True, model=job["model"]["path"])
 
     def qualify(self, queries, recording, timeout=None):
@@ -65,7 +66,7 @@ class LocalDeviceWork(LocalSchedulerWork):
 
 
 class LocalPeerWork(LocalSchedulerWork):
-    name = "sglang.ascend.peer_service"
+    name = RuleName("peer_service")
 
     @staticmethod
     def matches(query):
@@ -87,7 +88,7 @@ class LocalPeerWork(LocalSchedulerWork):
 
         # A duration after rendezvous uses a simultaneously observed arrival from every required peer.
         job["batch"]["peer_ranks"] = peers
-        return SGLangAscendPlacement.local_attempt(arguments, limit, deployment, devices, revision, job,
+        return SGLangPlacement.local_attempt(arguments, limit, deployment, devices, revision, job,
                                                  "--local-worker", runtime_trace=True, model=job["model"]["path"])
 
     def qualify(self, queries, recording, timeout=None):
@@ -107,7 +108,7 @@ class LocalPeerWork(LocalSchedulerWork):
 
 
 class LocalHostWork(LocalSchedulerWork):
-    name = "sglang.ascend.scheduler_host_service"
+    name = RuleName("scheduler_host_service")
 
     def __init__(self, arguments):
         super().__init__(arguments)
@@ -116,7 +117,9 @@ class LocalHostWork(LocalSchedulerWork):
     @staticmethod
     def matches(query):
         return (
-            query.get("work") == "host" and query["domain"]["framework"] == "sglang" and "torch_npu" in query["domain"]
+            query.get("work") == "host"
+            and query["domain"]["framework"] == "sglang"
+            and platform_domain().runtime_domain_key in query["domain"]
         )
 
     def sources(self, deployment, rank):
@@ -150,7 +153,7 @@ class LocalHostWork(LocalSchedulerWork):
             points = {point for _, point in requirements.observe_graph("source", catalog)}
             if needed <= points:
                 self.selected_catalog = source.attempt_id, rank, catalog
-                return SGLangAscendPlacement.local_attempt(
+                return SGLangPlacement.local_attempt(
                     arguments,
                     limit,
                     deployment,
@@ -166,7 +169,7 @@ class LocalHostWork(LocalSchedulerWork):
 
         # A portable library has no raw profiles. Recreate only the live cut and time it in a separate worker.
         job, devices, revision = LocalSchedulerBatch.work_job(queries, deployment)
-        return SGLangAscendPlacement.local_attempt(
+        return SGLangPlacement.local_attempt(
             arguments,
             limit,
             deployment,

@@ -111,7 +111,7 @@ void WorkerBindings::bind(TemplateFrame & frame, const std::string & instance, n
         communication->required = communication->members;
         const auto & body = library_.definitions.at(frame.definition);
 
-        // The staged Ascend operand uses the native peer stream order for its bound route.
+        // The staged device operand uses the native peer stream order for its bound route.
         communication->ordered_service = std::ranges::any_of(body.work, [&](const auto & interval) {
             const auto & lane = body.resources.at(interval.resource);
             return interval.kind == WorkKind::Collective && lane.kind == ResourceKind::Service && lane.role == "peer_transport";

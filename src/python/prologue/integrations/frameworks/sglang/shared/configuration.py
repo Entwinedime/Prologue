@@ -6,10 +6,10 @@ import re
 from dataclasses import dataclass
 
 from prologue.common.workload.expert_routes import ExpertRoutes
+from prologue.integrations.bindings import platform_domain
 
 
 class NativeConfiguration:
-    accelerator_device = "npu"
 
     @staticmethod
     def upstream_revision(value: str | None) -> str:
@@ -96,7 +96,7 @@ class NativeConfiguration:
         options = {
             "model_path": model["path"],
             "dtype": model["dtype"],
-            "device": self.accelerator_device,
+            "device": platform_domain().device_type,
             "tp_size": self.tp,
             "pp_size": self.pp,
             "attention_backend": values["attention_backend"],

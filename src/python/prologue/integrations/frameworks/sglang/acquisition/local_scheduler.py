@@ -7,21 +7,20 @@ from tempfile import TemporaryDirectory
 
 from prologue.common.io import write_json
 from prologue.host.acquisition.rules import EvidenceGap, missing_root
+from prologue.integrations.bindings import RuleName, device_runtime, platform_backend, platform_domain
 from prologue.integrations.frameworks.sglang.acquisition.batch_calibration import BatchCalibration
-from prologue.integrations.frameworks.sglang.acquisition.batch_readback import BatchReadback
+from prologue.integrations.frameworks.sglang.acquisition.batch_readback import BatchReadback, scheduler_batch_rule
 from prologue.integrations.frameworks.sglang.acquisition.local_base import LocalRule
-from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangAscendPlacement
+from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangPlacement
 from prologue.integrations.frameworks.sglang.acquisition.worker_capture import WorkerCapture
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
 from prologue.integrations.frameworks.sglang.shared.attention import AttentionCatalog
 from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
 from prologue.integrations.frameworks.sglang.shared.ingress import BatchOperands
-from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
-from prologue.integrations.platforms.ascend.host.deployment import AscendDeployment
 
 
 class LocalWorkerBinding(LocalRule):
-    name = "sglang.ascend.worker_initialization"
+    name = RuleName("worker_initialization")
 
     @staticmethod
     def session_key(query, deployment):
@@ -35,7 +34,7 @@ class LocalWorkerBinding(LocalRule):
         if structures.keys() != {"null"} or len(query["instances"]) != 1:
             return False
         structure = structures["null"]
-        return (structure["attention_backend"] == "ascend"
+        return (structure["attention_backend"] in platform_domain().strided_attention
                 and structure["pp"] == structure["ep"] == 1
                 and "expert_layout" not in query["instances"][0]["readback"]["implementation"])
 
@@ -57,10 +56,10 @@ class LocalWorkerBinding(LocalRule):
 
         model = first["domain"]["model"]
         job = {"model": model, "configuration": configuration.values}
-        placement = AscendDeployment(deployment, structure["tp"], False)
+        placement = platform_backend().deployment(deployment, structure["tp"], False)
         if structure["tp"] > 1:
             job["single_device"] = placement.single_device
-        return SGLangAscendPlacement.local_attempt(arguments, limit, deployment, placement.devices, None, job,
+        return SGLangPlacement.local_attempt(arguments, limit, deployment, placement.devices, None, job,
                                                  "--local-worker", runtime_trace=True, model=model["path"])
 
     @staticmethod
@@ -121,7 +120,7 @@ class LocalWorkerBinding(LocalRule):
 
 
 class LocalSchedulerBatch(LocalRule):
-    name = BatchReadback.rule
+    name = scheduler_batch_rule
 
     def __init__(self, arguments):
         self.arguments = arguments
@@ -138,10 +137,15 @@ class LocalSchedulerBatch(LocalRule):
             return False
         domain = query["domain"]
         parallel, impl = domain["parallel"], domain["implementation"]
-        return (domain["framework"] == "sglang" and "torch_npu" in domain and not domain["expert_layers"]
-                and parallel["logical_pp"] == parallel["logical_ep"] == 1
-                and impl["disaggregation_mode"] == "null" and impl["cache"]["disabled"]
-                and not any(impl["scheduling"].values()))
+        return (
+            domain["framework"] == "sglang"
+            and platform_domain().runtime_domain_key in domain
+            and not domain["expert_layers"]
+            and parallel["logical_pp"] == parallel["logical_ep"] == 1
+            and impl["disaggregation_mode"] == "null"
+            and impl["cache"]["disabled"]
+            and not any(impl["scheduling"].values())
+        )
 
     @staticmethod
     def session_key(query, deployment):
@@ -209,7 +213,7 @@ class LocalSchedulerBatch(LocalRule):
         }
         if queues is not None:
             job["batch"]["waiting"] = [m["id"] for m in queues["waiting"]]
-        placement = AscendDeployment(deployment, configuration.tp, False)
+        placement = platform_backend().deployment(deployment, configuration.tp, False)
         if configuration.tp > 1:
             job["single_device"] = placement.single_device
             job["batch"]["rank"] = WorkerDomain.rank(domain)
@@ -228,7 +232,7 @@ class LocalSchedulerBatch(LocalRule):
         calibration = BatchCalibration.cuts(job, queries[0]["parameters"].get("sequence_capacity"))
         if calibration:
             job["calibration"] = calibration
-        return SGLangAscendPlacement.local_attempt(
+        return SGLangPlacement.local_attempt(
             arguments,
             limit,
             deployment,
@@ -284,8 +288,15 @@ class LocalSchedulerBatch(LocalRule):
             if asset == "structure/model.json" and phase == "decode" and job["configuration"]["tp"] == 1:
                 evidence, catalog = worker.catalog(modeling, root)
                 runner = {key: job[key] for key in ("model", "configuration")}
-                sampling = AttentionCatalog.from_catalog(worker.source, worker.source / "sdk/trace.json",
-                                                      worker.rank, catalog, evidence, runner, ScopedTasks.source)
+                sampling = AttentionCatalog.from_catalog(
+                    worker.source,
+                    worker.source / "sdk/trace.json",
+                    worker.rank,
+                    catalog,
+                    evidence,
+                    runner,
+                    device_runtime().scoped_tasks.source,
+                )
                 if sampling["cuts"]:
                     facts = facts | {"sampling": sampling}
             else:

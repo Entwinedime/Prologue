@@ -8,14 +8,13 @@ from time import monotonic_ns
 import torch
 
 from prologue.common.io import write_json
+from prologue.integrations.bindings import device_runtime, platform_domain
 from prologue.integrations.frameworks.sglang.observation.call_scopes import NativeCallObservation
 from prologue.integrations.frameworks.sglang.observation.flow_scopes import FlowScopes
 from prologue.integrations.frameworks.sglang.observation.local.worker_output import publish_capture, publish_facts
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.shared.disaggregated_calls import DisaggregatedCalls
 from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
-from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
-from prologue.integrations.platforms.ascend.runtime.markers import AscendMarkers
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,12 +37,21 @@ class ReceiverPools:
         impl = domain["implementation"]
         page = cap["page_size"]
         size = cap["kv_pages"] * page
-        settings = ServerArgs(model_path=impl["model"]["_name_or_path"], dtype=impl["dtype"].removeprefix("torch."),
-                              device="npu", tp_size=domain["parallel"]["logical_tp"], page_size=page,
-                              attention_backend=impl["attention_backend"], load_format=impl["load_format"],
-                              skip_tokenizer_init=True,
-                              disaggregation_mode="decode", disaggregation_transfer_backend="ascend",
-                              disable_overlap_schedule=True, disable_cuda_graph=True, disable_radix_cache=True)
+        settings = ServerArgs(
+            model_path=impl["model"]["_name_or_path"],
+            dtype=impl["dtype"].removeprefix("torch."),
+            device=platform_domain().device_type,
+            tp_size=domain["parallel"]["logical_tp"],
+            page_size=page,
+            attention_backend=impl["attention_backend"],
+            load_format=impl["load_format"],
+            skip_tokenizer_init=True,
+            disaggregation_mode="decode",
+            disaggregation_transfer_backend=platform_domain().pd_transfer,
+            disable_overlap_schedule=True,
+            disable_cuda_graph=True,
+            disable_radix_cache=True,
+        )
         set_global_server_args_for_scheduler(settings)
         self.model = ModelConfig.from_server_args(settings)
         model = json.loads(self.model.hf_config.to_json_string(use_diff=False))
@@ -56,15 +64,19 @@ class ReceiverPools:
         dtype = getattr(torch, layout.dtype.removeprefix("torch."))
         width = dtype.itemsize * layout.head_num
         self.kv = NPUMHATokenToKVPool(size, page, dtype, layout.head_num, layout.key_token_bytes // width,
-                                      layout.end_layer - layout.start_layer, "npu", False,
+                                      layout.end_layer - layout.start_layer, platform_domain().device_type, False,
                                       v_head_dim=layout.value_token_bytes // width,
                                       start_layer=layout.start_layer, end_layer=layout.end_layer)
         if MhaKvLayout.from_pool(self.kv) != layout:
             raise ValueError("allocated KV layout differs from the requested receiver")
-        self.allocator = NPUPagedTokenToKVPoolAllocator(size, page, torch.int64, "npu", self.kv, False)
+        self.allocator = NPUPagedTokenToKVPoolAllocator(
+            size, page, torch.int64, platform_domain().device_type, self.kv, False
+        )
 
         # The batch is already admitted. Preparation only sees the native table's total row count.
-        self.slots = DecodeReqToTokenPool(cap["slot_capacity"], cap["sequence_capacity"], "npu", False, 0)
+        self.slots = DecodeReqToTokenPool(
+            cap["slot_capacity"], cap["sequence_capacity"], platform_domain().device_type, False, 0
+        )
         self.cache = ChunkCache(CacheInitParams(True, self.slots, self.allocator, page))
 
         # Bind the production reservation operation without starting its transport queue or a remote scheduler.
@@ -117,19 +129,19 @@ class PrebuiltRunner:
         from sglang.srt.managers.schedule_batch import ScheduleBatch
 
         batches = [(members, *pools.batch(members)) for members in self.job["batches"]]
-        markers = AscendMarkers(detailed_timing=False)
+        markers = device_runtime().markers(detailed_timing=False)
         owner = NativeCallObservation(markers, "decode")
         owner.active = True
         owner.parallel = {**self.job["domain"]["parallel"], "rank": self.rank}
         owner.aliases = {m["id"]: m["id"] for members, _, _ in batches for m in members}
         cuts = FlowScopes(owner)
         markers.synchronize()
-        with ScopedTasks.profile(self.output, self.rank), markers.window():
+        with device_runtime().scoped_tasks.profile(self.output, self.rank), markers.window():
             for _, batch, _ in batches:
                 DisaggregatedCalls(cuts).prepare(ScheduleBatch.prepare_for_prebuilt, batch)
 
         # The final fence and KV reads belong to qualification, outside the captured asynchronous calls.
-        finished = torch.npu.Event()
+        finished = device_runtime().api.Event()
         finished.record()
         finished.synchronize()
         environment = {**self.job["domain"], **markers.environment(), "parallel": owner.parallel}
@@ -155,12 +167,12 @@ class PrebuiltRunner:
         from sglang.srt.managers.schedule_batch import ScheduleBatch
 
         started = monotonic_ns()
-        torch.npu.set_device(0)
+        device_runtime().api.set_device(0)
         pools = ReceiverPools(self.job)
         initialized = monotonic_ns()
         warmup, _ = pools.batch(self.job["batches"][0])
         ScheduleBatch.prepare_for_prebuilt(warmup)
-        AscendMarkers.synchronize()
+        device_runtime().markers.synchronize()
         pools.allocator.clear()
         pools.slots.clear()
         warmed = monotonic_ns()

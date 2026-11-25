@@ -6,8 +6,8 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
+from prologue.common.interfaces import Deployment
 from prologue.common.io import read_json, write_json
-from prologue.host.acquisition.adapters import PlatformRuntimeAdapter
 from prologue.host.acquisition.options import CaptureOptions
 from prologue.host.runtime.docker import OwnedContainers
 from prologue.host.runtime.limits import AllowanceExhausted, OperationLimit, Usage
@@ -35,7 +35,7 @@ class NativeAttempt:
         options,
         worker_options,
         mounts,
-        runtime: type[PlatformRuntimeAdapter],
+        runtime: type[Deployment],
         limit=None,
     ):
         self.entrypoint = runtime.capture_entrypoint()

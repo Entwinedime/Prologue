@@ -4,6 +4,7 @@ import inspect
 from contextlib import contextmanager
 from functools import partial
 
+from prologue.integrations.bindings import platform_domain
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 
 
@@ -43,7 +44,7 @@ class TensorTransfers:
         arguments.apply_defaults()
         values = arguments.arguments
         tensor = values["tensor"]
-        if tensor.device.type != "npu":
+        if tensor.device.type != platform_domain().device_type:
             return original(*args, **kwargs)
         if self.current.get() != 0:
             raise ValueError("pipeline tensor transfer must expose its own action boundary")

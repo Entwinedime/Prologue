@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from prologue.integrations.frameworks.sglang.acquisition.cost_reuse import BatchHostReuse
 from prologue.integrations.frameworks.sglang.acquisition.device_samples import CostSamples
 from prologue.integrations.frameworks.sglang.acquisition.host_cost_samples import HostCostSamples
-from prologue.integrations.frameworks.sglang.acquisition.launch import SGLangAscendLaunch
+from prologue.integrations.frameworks.sglang.acquisition.launch import SGLangLaunch
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import SGLangTask
 from prologue.integrations.frameworks.sglang.shared.configuration import CaptureInput
 
@@ -23,7 +23,7 @@ class Adapters:
 class AdapterRegistry:
     default = ("sglang", "ascend")
     bindings = {
-        default: Adapters(SGLangTask, CaptureInput, SGLangAscendLaunch, CostSamples, HostCostSamples, BatchHostReuse)
+        default: Adapters(SGLangTask, CaptureInput, SGLangLaunch, CostSamples, HostCostSamples, BatchHostReuse)
     }
 
     @classmethod

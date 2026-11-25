@@ -49,7 +49,7 @@ class NativeWorkers:
         if source["kind"] != "source" or configuration["kind"] != "configure":
             raise ValueError("Native control requires template metadata and core configuration first")
         runtime = {
-            "framework_revision": NativeConfiguration.upstream_revision(os.environ.get("PROLOGUE_SGLANG_REVISION")),
+            "framework_revision": NativeConfiguration.upstream_revision(os.environ.get("PROLOGUE_FRAMEWORK_REVISION")),
             "torch": str(torch.__version__),
         }
         for instance in source["instances"]:

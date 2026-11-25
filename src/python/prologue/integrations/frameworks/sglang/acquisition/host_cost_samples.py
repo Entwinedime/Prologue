@@ -6,10 +6,9 @@ from prologue.common.cost import ServiceSamples, WorkCatalog
 from prologue.common.io import read_json, read_jsonl, write_json
 from prologue.common.observation.workers import CapturedWorkers
 from prologue.host.acquisition.recording import PublishedCapture
+from prologue.integrations.bindings import platform_backend
 from prologue.integrations.frameworks.sglang.acquisition.host_scopes import NativeHostCalls
-from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangAscendPlacement
-from prologue.integrations.platforms.ascend.analysis.host_alignment import AscendHostAlignment, ThreadService
-from prologue.integrations.platforms.ascend.analysis.trace import AscendTrace
+from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangPlacement
 from prologue.integrations.runtimes.pytorch.shared.protocol_work import CpuProtocolWork
 
 
@@ -53,7 +52,9 @@ class HostCostSamples:
 
     def collectives(self, records, rank, cold):
         channels = defaultdict(lambda: defaultdict(list))
-        by_thread = {actor: ThreadService.by_thread(windows.values()) for actor, windows in cold.items()}
+        by_thread = {
+            actor: platform_backend().thread_service.by_thread(windows.values()) for actor, windows in cold.items()
+        }
         for actor, record in records.items():
             for scope in record["scopes"]:
                 group = scope.get("group")
@@ -70,8 +71,12 @@ class HostCostSamples:
                 continue
             local = members.index(rank)
             for participants in zip(*(actors[actor] for actor in members), strict=True):
-                if any(ThreadService.within(by_thread[actor].get(scope["thread"], ()), *scope["raw_interval"])
-                       for actor, scope in zip(members, participants, strict=True)):
+                if any(
+                    platform_backend().thread_service.within(
+                        by_thread[actor].get(scope["thread"], ()), *scope["raw_interval"]
+                    )
+                    for actor, scope in zip(members, participants, strict=True)
+                ):
                     continue
                 if len({NativeHostCalls.identity(scope) for scope in participants}) != 1:
                     self.qualification["collective_operands"] += 1
@@ -127,7 +132,7 @@ class HostCostSamples:
         inputs = ("model", "instances", "workload", "observe_all_workers")
         if any(source["job"][field] != host["job"][field] for field in inputs):
             raise ValueError("host cost capture changes the measured native workload or configuration")
-        SGLangAscendPlacement(source["job"], source["deployment"]).require_recorded_placement(host["deployment"])
+        SGLangPlacement(source["job"], source["deployment"]).require_recorded_placement(host["deployment"])
         source_root, host_root = source_recording.source, host_recording.source
         catalog = WorkCatalog(self.arguments.graph, self.arguments.work_identities)
         graph = catalog.graph
@@ -173,9 +178,9 @@ class HostCostSamples:
         queues = read_json(directory / timing["queues"])
         if queues["clock"] != "monotonic_raw_ns" or queues["unpaired"]:
             raise ValueError("native CPU timing requires paired queue evidence on the RAW clock")
-        profile, = (source_root / "native" / f"rank-{rank}").glob("*_ascend_pt")
-        trace = AscendTrace(profile, source_root / "runtime", original, trace_path)
-        alignment = AscendHostAlignment(
+        profile, = (source_root / "native" / f"rank-{rank}").glob(platform_backend().profile_glob)
+        trace = platform_backend().trace(profile, source_root / "runtime", original, trace_path)
+        alignment = platform_backend().host_alignment(
             trace,
             original["scopes"],
             probe["scopes"],

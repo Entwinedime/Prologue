@@ -3,10 +3,10 @@
 from time import monotonic_ns
 
 from prologue.common.io import write_json
+from prologue.integrations.bindings import device_runtime
 from prologue.integrations.frameworks.sglang.observation.local.attention_observation import DecodeAttentionObservation
 from prologue.integrations.frameworks.sglang.observation.local.worker_output import publish_capture
 from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
-from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
 
 
 class AttentionReturned(Exception):
@@ -175,7 +175,7 @@ class AttentionRunner:
 
         # SDK postprocessing starts after the measured worker has released its process group.
         exporting = monotonic_ns()
-        ScopedTasks.export_calls(self.output, observer.rank, record["calls"])
+        device_runtime().scoped_tasks.export_calls(self.output, observer.rank, record["calls"])
         write_json(self.output / "attention.json", record)
         publish_capture(
             self.output,

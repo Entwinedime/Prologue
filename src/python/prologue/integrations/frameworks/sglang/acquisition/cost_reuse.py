@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from prologue.common.cost import cost_identity
 from prologue.host.performance.requirements import WorkPoint
+from prologue.integrations.bindings import platform_domain
 
 
 class BatchHostReuse:
@@ -13,9 +14,12 @@ class BatchHostReuse:
         implementation = dict(domain["implementation"])
         implementation.pop("disaggregation_mode")
         if implementation["load_format"] == "dummy":
-            implementation["model"] = {key: value for key, value in implementation["model"].items()
-                                       if key != "_name_or_path"}
-        return cost_identity([domain["device"], domain["torch"], domain["torch_npu"], implementation])
+            implementation["model"] = {
+                key: value for key, value in implementation["model"].items() if key != "_name_or_path"
+            }
+        return cost_identity(
+            [domain["device"], domain["torch"], domain[platform_domain().runtime_domain_key], implementation]
+        )
 
     @staticmethod
     def local(definition, interval):

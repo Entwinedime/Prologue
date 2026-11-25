@@ -21,7 +21,7 @@ class SGLangObservation(NativeModelObservation):
         from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
 
         self.description = description
-        self.framework_revision = NativeConfiguration.upstream_revision(os.environ.get("PROLOGUE_SGLANG_REVISION"))
+        self.framework_revision = NativeConfiguration.upstream_revision(os.environ.get("PROLOGUE_FRAMEWORK_REVISION"))
         self.directory = Path(description["output"])
         self.kv_pools = self.directory / "kv-pools"
         self.window = ObservationWindow(self.directory, description)

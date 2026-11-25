@@ -1,4 +1,4 @@
-"""Keep native layer weights on the host when several logical workers share one Ascend device."""
+"""Keep native layer weights on the host when several logical workers share one device."""
 
 from collections import defaultdict
 from functools import partial, update_wrapper
@@ -8,6 +8,7 @@ import torch
 import torch.distributed as distributed
 
 from prologue.common.io import write_json
+from prologue.integrations.bindings import device_runtime, platform_domain
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 
 
@@ -22,9 +23,9 @@ class LayerWeights:
             if not to_device:
 
                 # Kernels on other native streams can still be reading this layer after forward returns.
-                torch.npu.synchronize()
+                device_runtime().api.synchronize()
             for tensor, backing in self.storage:
-                torch.ops.prologue_ascend.move_weight_(tensor, backing, to_device)
+                device_runtime().move_weight(tensor, backing, to_device)
 
     def forward(self, original, *args, **kwargs):
         self.move(True)
@@ -45,7 +46,11 @@ class ShardWeights:
 
     def load(self, original, *args, **kwargs):
         model = original(*args, **kwargs)
-        weights = {t.untyped_storage()._cdata: t for t in model.parameters() if t.device.type == "npu" and t.numel()}
+        weights = {
+            t.untyped_storage()._cdata: t
+            for t in model.parameters()
+            if t.device.type == platform_domain().device_type and t.numel()
+        }
         footprint = sum(t.untyped_storage().nbytes() for t in weights.values())
         if footprint <= self.share:
             return model
@@ -69,7 +74,7 @@ class ShardWeights:
                 if owner in layers:
                     groups[owner].append(tensor)
 
-        torch.ops.load_library("/opt/prologue/lib/libprologue_ascend_weights.so")
+        device_runtime().load_weight_bridge()
         parked = 0
         for name, tensors in groups.items():
             residence = LayerWeights(tensors, self.auxiliary)

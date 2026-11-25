@@ -1,4 +1,4 @@
-"""Extract measured services from SGLang/Ascend production and local batch recordings."""
+"""Extract measured services from native production and local batch recordings."""
 
 import json
 from collections import Counter
@@ -11,15 +11,13 @@ from prologue.common.observation.workers import CapturedWorkers
 from prologue.host.acquisition.recording import PublishedCapture
 from prologue.host.performance.fitting import FittedCosts
 from prologue.host.performance.requirements import CostRequirements
+from prologue.integrations.bindings import platform_backend
 from prologue.integrations.frameworks.sglang.acquisition.batch_readback import BatchReadback
 from prologue.integrations.frameworks.sglang.acquisition.local_copy import LocalCopies
 from prologue.integrations.frameworks.sglang.acquisition.local_embedding import LocalEmbedding
 from prologue.integrations.frameworks.sglang.acquisition.pd_samples import PdNotificationSamples
 from prologue.integrations.frameworks.sglang.acquisition.worker_capture import WorkerCapture
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
-from prologue.integrations.platforms.ascend.analysis.services import ObservedServices
-from prologue.integrations.platforms.ascend.host.collectives import CollectiveServices
-from prologue.integrations.platforms.ascend.host.transport_profile import AscendTransportProfile
 
 
 class CostSamples:
@@ -56,7 +54,7 @@ class CostSamples:
         if self.peer_measurements:
             self.facts.update((rank, self.read_facts(rank)) for rank in observed if rank not in self.facts)
         if collective:
-            self.collectives = CollectiveServices(self.facts, self.worker_sources(), ranks)
+            self.collectives = platform_backend().collectives(self.facts, self.worker_sources(), ranks)
         if pd_protocol:
             protocol = {rank: body["measurements"]["pd_protocol"] for rank, body in self.facts.items()}
             self.notifications = PdNotificationSamples(protocol)
@@ -151,7 +149,7 @@ class CostSamples:
 
     @classmethod
     def worker_table(cls, facts, catalog):
-        services = ObservedServices(catalog.graph, facts, {}, physical_peers=False)
+        services = platform_backend().observed_services(catalog.graph, facts, {}, physical_peers=False)
         samples, absent = cls.local_samples(catalog, services)
         return samples.document(absent)
 
@@ -186,10 +184,10 @@ class CostSamples:
         peers = {actor: WorkerCapture.observed_facts(source, actor, traces[actor]) for actor, source in sources.items()}
         local = peers[rank]
         catalog = WorkerCapture.project_work(local, model, directory)
-        clocks = CollectiveServices(peers, sources, [rank])
-        services = ObservedServices(catalog.graph, local, clocks.samples[rank], physical_peers=True)
+        clocks = platform_backend().collectives(peers, sources, [rank])
+        services = platform_backend().observed_services(catalog.graph, local, clocks.samples[rank], physical_peers=True)
         origin = {"native_recording": recording.attempt_id, "rank": rank}
-        profile = AscendTransportProfile(sources, peers, traces[rank], origin,
+        profile = platform_backend().transport_profile(sources, peers, traces[rank], origin,
                                          recording.inputs["image"], recording.inputs["deployment"])
         samples, absent = profile.samples(catalog, services)
         report = samples.document(absent) | {"transport_profile": profile.qualification}
@@ -201,12 +199,14 @@ class CostSamples:
         observation = {"production": str(self.production), "rank": rank}
         facts = self.facts[rank] if self.joint else self.read_facts(rank)
         collective_services = self.collectives.samples[rank] if self.collectives is not None else {}
-        services = ObservedServices(catalog.graph, facts, collective_services, physical_peers=self.joint)
+        services = platform_backend().observed_services(
+            catalog.graph, facts, collective_services, physical_peers=self.joint
+        )
         notifications = list(self.notifications.intervals(rank)) if self.notifications is not None else []
         if transport_only:
             if not self.peer_measurements:
                 raise ValueError("a transport profile requires a joint physical observation of the peer group")
-            profile = AscendTransportProfile(
+            profile = platform_backend().transport_profile(
                 self.worker_sources(),
                 self.facts,
                 self.work / f"{rank}-sdk/trace.json",

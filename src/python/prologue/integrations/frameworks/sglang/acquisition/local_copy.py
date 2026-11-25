@@ -5,23 +5,25 @@ from collections import defaultdict
 
 from prologue.common.cost import ServiceSamples, cost_features, cost_identity
 from prologue.host.acquisition.rules import EvidenceGap
+from prologue.integrations.bindings import RuleName, device_runtime, platform_domain
 from prologue.integrations.frameworks.sglang.acquisition.local_base import LocalRule
-from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangAscendPlacement
+from prologue.integrations.frameworks.sglang.acquisition.placement import SGLangPlacement
 from prologue.integrations.frameworks.sglang.acquisition.worker_templates import WorkerDomain
-from prologue.integrations.platforms.ascend.runtime.copy_sampling import TensorCopySamples
 
 
 class LocalCopies(LocalRule):
-    name = "ascend.synchronous_tensor_copy"
-    runtime_fields = ("device", "torch", "torch_npu")
+    name = RuleName("synchronous_tensor_copy", platform_only=True)
+    @staticmethod
+    def runtime_fields():
+        return ("device", "torch", platform_domain().runtime_domain_key)
 
     @staticmethod
     def operand(definition, interval, transport):
         work = definition["work"][interval]
         copy = work.get("copy")
-        if work["kind"] != "transfer" or not copy or copy["caller"] not in TensorCopySamples.directions:
+        if work["kind"] != "transfer" or not copy or copy["caller"] not in device_runtime().copy_sampler.directions:
             return None
-        service = TensorCopySamples.service(copy["caller"])
+        service = device_runtime().copy_sampler.service(copy["caller"])
         resource = definition["resources"][work["resource"]]
         if (transport != service or any(copy[key] != service[key] for key in ("implementation", "direction"))
                 or [resource["kind"], resource["role"]] != service["resource"]):
@@ -31,7 +33,7 @@ class LocalCopies(LocalRule):
     @classmethod
     def matches(cls, query):
         return (query.get("work") == "transfer" and query["domain"]["framework"] == "sglang"
-                and "torch_npu" in query["domain"]
+                and platform_domain().runtime_domain_key in query["domain"]
                 and cls.operand(query["definition"], query["interval"], query["features"].get("transport")) is not None)
 
     @classmethod
@@ -57,7 +59,7 @@ class LocalCopies(LocalRule):
     def session_key(cls, query, deployment):
         domain = query["domain"]
         card = cls.physical_card(domain, deployment)
-        return card, domain["implementation"]["framework_revision"], {k: domain[k] for k in cls.runtime_fields}
+        return card, domain["implementation"]["framework_revision"], {k: domain[k] for k in cls.runtime_fields()}
 
     @classmethod
     def prepare(cls, queries, deployment, arguments, limit):
@@ -70,7 +72,7 @@ class LocalCopies(LocalRule):
             rank = WorkerDomain.rank(domain)
             caller, dtype, width, size = cls.point(query)
             operands[caller, dtype, width][size].add(rank)
-        return SGLangAscendPlacement.local_attempt(
+        return SGLangPlacement.local_attempt(
             arguments,
             limit,
             deployment,
@@ -87,7 +89,8 @@ class LocalCopies(LocalRule):
         if (
             manifest["completion"] != "successful_synchronous_acl_return"
             or any(manifest["runtime"][key] != value for key, value in job["runtime"].items())
-            or manifest["services"] != {op["caller"]: TensorCopySamples.service(op["caller"]) for op in job["operands"]}
+            or manifest["services"]
+            != {op["caller"]: device_runtime().copy_sampler.service(op["caller"]) for op in job["operands"]}
         ):
             raise ValueError("native copy observation has different runtime, completion or service ownership")
         measured = json.loads((recording.source / manifest["measurements"]).read_bytes())
@@ -108,7 +111,7 @@ class LocalCopies(LocalRule):
                 continue
             unmatched += row["unmatched_calls"]
             for duration in row["observations_ns"]:
-                samples.add_external(TensorCopySamples.service(row["caller"]), "transfer",
+                samples.add_external(device_runtime().copy_sampler.service(row["caller"]), "transfer",
                                      cost_features({"transfer.bytes": row["bytes"]}), duration)
         return samples.document({"unmatched_calls": unmatched, "unverified_operands": unverified})
 
@@ -125,7 +128,7 @@ class LocalCopies(LocalRule):
             domain = query["domain"]
             rank = WorkerDomain.rank(domain)
             if (domain["implementation"]["framework_revision"] != inputs["framework_revision"]
-                    or any(domain[field] != recording.manifest["runtime"][field] for field in cls.runtime_fields)):
+                    or any(domain[field] != recording.manifest["runtime"][field] for field in cls.runtime_fields())):
                 answers.append({"status": "untriggered", "missing": "target_runtime"})
                 continue
 

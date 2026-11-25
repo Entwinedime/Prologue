@@ -10,6 +10,7 @@ from sglang.srt.distributed import parallel_state
 from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
 from prologue.common.io import write_json
+from prologue.integrations.bindings import device_runtime, platform_domain
 from prologue.integrations.frameworks.sglang.observation.call_scopes import NativeCallObservation
 from prologue.integrations.frameworks.sglang.observation.communications import NativeCommunications
 from prologue.integrations.frameworks.sglang.observation.local.shard_transport import ShardTransport
@@ -20,8 +21,6 @@ from prologue.integrations.frameworks.sglang.observation.local.worker_output imp
 )
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 from prologue.integrations.frameworks.sglang.shared.groups import ParallelGroups, WorkerRoles
-from prologue.integrations.platforms.ascend.analysis.scoped_tasks import ScopedTasks
-from prologue.integrations.platforms.ascend.runtime.markers import AscendMarkers
 
 
 class EmbeddingReady(Exception):
@@ -44,10 +43,18 @@ class EmbeddingReady(Exception):
         from sglang.srt.server_args import ServerArgs, set_global_server_args_for_scheduler
 
         impl = domain["implementation"]
-        args = ServerArgs(model_path=impl["model"]["_name_or_path"], dtype=impl["dtype"].removeprefix("torch."),
-                          device="npu", tp_size=domain["parallel"]["logical_tp"], page_size=impl["page_size"],
-                          attention_backend=impl["attention_backend"], load_format=impl["load_format"],
-                          skip_tokenizer_init=True, disable_cuda_graph=True, disable_overlap_schedule=True)
+        args = ServerArgs(
+            model_path=impl["model"]["_name_or_path"],
+            dtype=impl["dtype"].removeprefix("torch."),
+            device=platform_domain().device_type,
+            tp_size=domain["parallel"]["logical_tp"],
+            page_size=impl["page_size"],
+            attention_backend=impl["attention_backend"],
+            load_format=impl["load_format"],
+            skip_tokenizer_init=True,
+            disable_cuda_graph=True,
+            disable_overlap_schedule=True,
+        )
         set_global_server_args_for_scheduler(args)
         config = ModelConfig.from_server_args(args)
         if (
@@ -59,7 +66,7 @@ class EmbeddingReady(Exception):
 
         with loader.set_default_torch_dtype(config.dtype):
             try:
-                with torch.device("npu"):
+                with torch.device(platform_domain().device_type):
                     loader._initialize_model(config, LoadConfig(load_format=args.load_format))
             except EmbeddingReady as ready:
                 site, shard = ready.args
@@ -88,14 +95,16 @@ class ShardRows:
         for position in range(count):
             start, end = self.ranges[position % shard.tp_size]
             ids.append(start + position % (end - start))
-        self.ids = torch.tensor(ids, device="npu", dtype=torch.int64)
+        self.ids = torch.tensor(ids, device=platform_domain().device_type, dtype=torch.int64)
 
         # Obtain expected values from the owning weight rows, independently of the embedding forward and its transport.
         start, end = self.ranges[rank]
         local = torch.zeros(count, shard.weight.shape[1], dtype=torch.float32)
         positions = [i for i, token in enumerate(ids) if start <= token < end]
         if positions:
-            rows = torch.tensor([ids[i] - start for i in positions], device="npu", dtype=torch.int64)
+            rows = torch.tensor(
+                [ids[i] - start for i in positions], device=platform_domain().device_type, dtype=torch.int64
+            )
             local[positions] = shard.weight.index_select(0, rows).cpu().float()
         contributions = [torch.empty_like(local) for _ in self.ranges]
         distributed.all_gather(contributions, local, group=cpu_group)
@@ -119,7 +128,7 @@ class EmbeddingRunner:
         job, output = self.job, self.output
         domain = job["domain"]
         role = domain["worker_roles"][str(rank)]
-        markers = AscendMarkers(detailed_timing=False)
+        markers = device_runtime().markers(detailed_timing=False)
         owner = NativeCallObservation(markers, "null")
         owner.description = {"rank_offset": 0, "pp_size": 1}
         owner.parallel, owner.worker_roles = role["parallel"], domain["worker_roles"]
@@ -153,7 +162,7 @@ class EmbeddingRunner:
             owner.active = rank in observed
             with ExitStack() as stack:
                 if owner.active:
-                    stack.enter_context(ScopedTasks.profile(output, rank))
+                    stack.enter_context(device_runtime().scoped_tasks.profile(output, rank))
                     stack.enter_context(markers.window())
                     stack.enter_context(owner.tensors)
                 result = lookup()
@@ -176,7 +185,9 @@ class EmbeddingRunner:
         if staged:
             ShardTransport.world(world, rank, rendezvous)
         else:
-            parallel_state.init_distributed_environment(world, rank, rendezvous, local_rank=device, backend="hccl")
+            parallel_state.init_distributed_environment(
+                world, rank, rendezvous, local_rank=device, backend=platform_domain().collective_backend
+            )
         try:
             parallel_state.initialize_model_parallel(tensor_model_parallel_size=world)
             self.observe(rank)

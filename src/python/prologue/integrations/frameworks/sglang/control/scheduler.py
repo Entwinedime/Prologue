@@ -17,6 +17,7 @@ from sglang.srt.server_args import PortArgs, ServerArgs
 from torch.utils.weak import WeakIdKeyDictionary
 
 from prologue.common.workload.expert_routes import ExpertRoutes
+from prologue.integrations.bindings import platform_domain
 from prologue.integrations.frameworks.sglang.control.flow import FlowExecution
 from prologue.integrations.frameworks.sglang.control.prefix_cache import PrefixCache
 from prologue.integrations.frameworks.sglang.control.requests import NativeRequestReceiver, RequestInput
@@ -24,7 +25,6 @@ from prologue.integrations.frameworks.sglang.control.resources import Allocation
 from prologue.integrations.frameworks.sglang.control.runner import MetadataRunner
 from prologue.integrations.frameworks.sglang.control.signals import PipelineSignals
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
-from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
 from prologue.integrations.frameworks.sglang.shared.experts import ExpertBatch
 from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI, PipelineMessages
 from prologue.integrations.frameworks.sglang.shared.state_calls import RequestStateCalls
@@ -142,7 +142,7 @@ class NativeScheduler(Scheduler):
             self.pd.install_calls()
 
         if source["pp"] > 1:
-            self.pipeline_messages = PipelineMessages(self.calls, wire_device=NativeConfiguration.accelerator_device)
+            self.pipeline_messages = PipelineMessages(self.calls, wire_device=platform_domain().device_type)
             self.signals.install()
 
     def handle_generate_request(self, request):

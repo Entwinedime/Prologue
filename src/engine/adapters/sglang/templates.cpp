@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <map>
 #include <optional>
+#include <ranges>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -297,7 +298,19 @@ TemplateLibrary NativeTemplates::compile(const TemplateDeclarations & source) {
 
     // All candidate libraries belong to one initialized model/layout; PD mode and capacity remain caller-owned.
     library.local_domain = nlohmann::json::object();
-    for (const auto field : { "framework", "device", "torch", "torch_npu" }) library.local_domain[field] = environment.at(field);
+    for (const auto field : { "framework", "device", "torch" }) library.local_domain[field] = environment.at(field);
+
+    // A declared key is authoritative. Existing recordings declare their runtime by a single versioned extension.
+    const auto declared_key = environment.value("runtime_domain_key", std::string());
+    const auto & fields = environment.get_ref<const nlohmann::json::object_t &>();
+    auto extensions = fields | std::views::filter([&declared_key](const auto & field) {
+        return (declared_key.empty() ? field.first.starts_with("torch_") : field.first == declared_key)
+            && field.second.is_string();
+    });
+    if (std::ranges::distance(extensions) != 1) throw std::invalid_argument("expected one accelerator runtime version");
+    const auto & [key, version] = *extensions.begin();
+    library.local_domain[key] = version;
+
     const auto & implementation = environment.at("implementation");
     for (const auto field : { "model", "dtype", "load_format", "framework_revision" }) library.local_domain[field] = implementation.at(field);
     library.local_domain["expert_layout"] = implementation.value("expert_layout", nlohmann::json());

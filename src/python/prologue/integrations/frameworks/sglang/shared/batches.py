@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from prologue.integrations.bindings import platform_domain
+
 
 class BatchTensors:
     @staticmethod
@@ -111,10 +113,10 @@ class BatchTensors:
 
     @staticmethod
     def attention_layout(backend, parameters, members):
-        if backend != "ascend":
+        if backend not in platform_domain().strided_attention:
             return {}
 
-        # Ascend indexes a dense [batch, longest] table, then takes every page_size-th column.
+        # This backend indexes a dense [batch, longest] table, then takes every page_size-th column.
         longest = max((member["context_tokens"] + member["new_tokens"] for member in members), default=0)
         page = parameters["page_size"]
         strided = page > 1 and longest > 1 and (parameters["model_members"] > 1 or longest > page)
