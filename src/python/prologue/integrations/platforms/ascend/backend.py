@@ -22,14 +22,14 @@ class Component:
 
 class AscendDeviceRuntime:
     domain = PlatformDomain("ascend", "npu", "torch_npu", "hccl", ("ascend",), "ascend", 200)
-    markers = Component(".runtime.markers", "AscendMarkers")
-    profiling = Component(".runtime.markers", "AscendProfiling")
-    host_profile = Component(".runtime.host_profile", "AscendHostProfile")
-    specializations = Component(".runtime.host_profile", "AscendSpecializations")
-    export = Component(".runtime.export", "AscendExport")
-    copy_sampler = Component(".runtime.copy_sampling", "TensorCopySamples")
-    scoped_tasks = Component(".analysis.scoped_tasks", "ScopedTasks")
-    tensor_layouts = Component(".analysis.scoped_tasks", "tensor_layouts")
+    markers = Component(".runtime.profiling", "AscendMarkers")
+    profiling = Component(".runtime.profiling", "AscendProfiling")
+    host_profile = Component(".runtime.profiling", "AscendHostProfile")
+    specializations = Component(".runtime.profiling", "AscendSpecializations")
+    export = Component(".runtime.sampling", "AscendExport")
+    copy_sampler = Component(".runtime.sampling", "TensorCopySamples")
+    scoped_tasks = Component(".analysis.commands", "ScopedTasks")
+    tensor_layouts = Component(".analysis.commands", "tensor_layouts")
     observation = Component(".analysis.observation", "AscendObservation")
     expert_environment = {"DEEP_USE_ALLTOALL_MODE": "1", "DEEPEP_HCCL_BUFFSIZE": "1024", "HCCL_BUFFSIZE": "1024"}
 
@@ -66,16 +66,16 @@ class AscendDeviceRuntime:
 
 class AscendPlatformBackend:
     deployment = Component(".host.deployment", "AscendDeployment")
-    host_alignment = Component(".analysis.host_alignment", "AscendHostAlignment")
-    collectives = Component(".host.collectives", "CollectiveServices")
-    transport_profile = Component(".host.transport_profile", "AscendTransportProfile")
-    observed_services = Component(".analysis.services", "ObservedServices")
+    host_alignment = Component(".host.services", "AscendHostAlignment")
+    collectives = Component(".host.services", "CollectiveServices")
+    transport_profile = Component(".host.services", "AscendTransportProfile")
+    observed_services = Component(".host.services", "ObservedServices")
     trace = Component(".analysis.trace", "AscendTrace")
-    interval = Component(".analysis.trace", "Interval")
-    thread_intervals = Component(".analysis.trace", "ThreadIntervals")
+    interval = Component(".trace_store", "Interval")
+    thread_intervals = Component(".trace_store", "ThreadIntervals")
     recording = Component(".reference.recording", "SdkRecording")
-    reference_evidence = Component(".reference.reference", "NativeEffectEvidence")
-    stream_effects = Component(".reference.stream_effects", "StreamEffects")
+    reference_evidence = Component(".reference.checks", "NativeEffectEvidence")
+    stream_effects = Component(".reference.checks", "StreamEffects")
     image_tag = "ubuntu22.04"
     profile_glob = "*_ascend_pt"
 

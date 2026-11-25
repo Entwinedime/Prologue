@@ -1,28 +1,220 @@
-"""Index raw evidence and comparison coordinates for an independent native reference."""
+"""Read the native recording and index its graph coordinates for independent comparison."""
 
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from functools import cached_property
 
 from prologue.integrations.platforms.ascend.trace_store import (
     EVENT_WAITS,
     STREAM_WAITS,
-    AscendClock,
-    HostCounter,
     Interval,
+    RawTraceIndex,
     ThreadIntervals,
+    device_streams,
     event_records,
-    native_interval,
-    runtime_rows,
-    sdk_intervals,
     sdk_rows,
     task_flips,
 )
 
-from .queue_evidence import QueueEvidence
-from .reference_streams import SdkStreams
+
+@dataclass(frozen=True, slots=True)
+class OmittedRecord:
+    thread: int
+    order: int
+    posted_ns: int
+    completed_device_ns: int
 
 
-class SdkRecording:
+@dataclass(frozen=True, slots=True)
+class DeviceRelease:
+    submitted: int
+    previous: int | None
+    preceding_window_ns: tuple[int | None, int] | None
+    first_command: bool
+    submitted_at_completion: bool
+    completion: int | None
+    omitted: tuple[OmittedRecord, ...]
+
+
+class SdkStreams:
+    fields = ("connection_id", "Batch Id", "Task Id", "Subtask Id")
+    boundaries = frozenset({"EVENT_RECORD", "EVENT_WAIT", "PROFILING_ENABLE", "PROFILING_DISABLE"})
+
+    def __init__(self, rows, clock, flips):
+        self.clock = clock
+        self.records = {}
+        self.connections = defaultdict(list)
+        self.counts = Counter()
+        self.logical_gaps = {}
+        self.logical_slots = {}
+        self.observer_payload = set()
+        for stream, tasks in device_streams(rows, clock, flips).items():
+            self.counts[stream] = len(tasks)
+            for order, row in enumerate(tasks):
+                identity = stream, order
+                self.records[identity] = row
+                self.connections[row["args"]["connection_id"]].append(identity)
+
+    @classmethod
+    def key(cls, args):
+        return tuple(args[name] for name in cls.fields)
+
+    def event(self, connection):
+        identity, = self.connections[connection]
+        if self.records[identity]["args"]["Task Type"] != "EVENT_RECORD":
+            raise ValueError("native event has a different SDK task kind")
+        return identity
+
+    def span(self, identity):
+        stream, occurrence = identity
+        position = occurrence + bisect_right(self.logical_gaps.get(stream, ()), occurrence)
+        return 2 * position, 2 * position + 1
+
+    def task(self, stream, order):
+        slot = order // 2
+        logical = self.logical_slots.get(stream, ())
+        index = bisect_left(logical, slot)
+        if index < len(logical) and logical[index] == slot:
+            return None
+        return self.records[stream, slot - index]
+
+    def omitted_records(self, stream, ordinal, coordinates, queues, observer_joins):
+        records = []
+        resource = f"stream/{stream}"
+
+        # Elided waits add logical slots. Physical order still follows consecutive SDK records.
+        for previous in range(ordinal - 1, -1, -1):
+            identity = stream, previous
+            _, end = self.span(identity)
+            retained = coordinates.get((resource, end))
+            if retained is not None and retained not in observer_joins:
+                return retained, tuple(reversed(records))
+
+            # Excluded observation work can still occupy the physical stream before modeled work.
+            task = self.records[identity]
+            args = task["args"]
+            if (args["Task Type"] != "EVENT_RECORD" and identity not in self.observer_payload
+                    or args["connection_id"] not in queues.apis):
+                break
+            completed = self.clock.interval(task)[1]
+            if not self.clock.begin_ns <= completed <= self.clock.end_ns:
+                break
+            try:
+                post = queues.release(args)
+            except ValueError:
+                break
+            records.append(OmittedRecord(post.thread, post.begin, post.record["begin_raw_ns"], completed))
+        return None, ()
+
+    def release_evidence(self, graph, launches, queues, calibration, observer_joins):
+        coordinates = {
+            (graph["resources"][event["resource"]]["identity"], point["order"]): index
+            for index, (event, point) in enumerate(zip(graph["events"], graph["evidence"]["events"], strict=True))
+        }
+        releases = {}
+        for identity, (post, order) in launches.items():
+            stream, ordinal = identity
+            resource = f"stream/{stream}"
+            recorded = coordinates[resource, order]
+            target, completion = recorded, None
+            kind = self.records[identity]["args"]["Task Type"]
+            if kind in {"EVENT_RECORD", "EVENT_WAIT"}:
+                begin, end = self.span(identity)
+
+                # A signal can keep only its completion, or retain both physical command boundaries.
+                target = coordinates.get((resource, begin), recorded)
+                returned = coordinates.get((resource, end))
+                if returned != target:
+                    completion = returned
+            submitted = coordinates[f"thread/{post.thread}", post.begin]
+            preceding = stream, ordinal - 1
+            prior = self.records.get(preceding)
+            previous, seen, omitted = None, None, ()
+            if prior is not None:
+                previous = coordinates.get((f"stream/{stream}", self.span(preceding)[1]))
+                completed = self.clock.interval(prior)[1]
+                if completed < self.clock.begin_ns:
+
+                    # An earlier device tick finished by the first snapshot's RAW return.
+                    seen = None, self.clock.samples[0]["end_raw_ns"]
+                elif completed <= self.clock.end_ns:
+                    seen = self.clock.bounds(completed)
+                    entered = post.record["begin_raw_ns"]
+                    if seen[1] > entered:
+
+                        # Retained causal edges tighten the same measured clock range.
+                        seen = calibration.point_window(calibration.point(completed, True))
+                        if seen[1] > entered and (previous is None or previous in observer_joins):
+                            previous, omitted = self.omitted_records(
+                                stream, ordinal, coordinates, queues, observer_joins
+                            )
+            releases[target] = DeviceRelease(submitted, previous, seen, ordinal == 0, recorded == completion,
+                                             completion, omitted)
+        return releases
+
+    def inspect_coordinates(self, facts, apis, commands):
+        logical = defaultdict(dict)
+        for effect in facts["native_effects"]:
+            for command in effect["commands"]:
+                if command["sdk"] is not None:
+                    continue
+                begin, end = command["begin"], command["end"]
+                stream = int(facts["resources"][effect["resource"]]["identity"].split("/")[1])
+                if begin % 2 or end != begin + 1 or begin // 2 in logical[stream]:
+                    raise ValueError("elided native waits repeat or change a stream command slot")
+                logical[stream][begin // 2] = apis[effect["connection"]]
+
+        positions = {stream: sorted(calls) for stream, calls in logical.items()}
+        for stream, slots in positions.items():
+            before, after = [], []
+            for (peer, order), row in self.records.items():
+                if peer != stream:
+                    continue
+                api = apis.get(row["args"]["connection_id"])
+                if api is not None:
+                    before.append((api.end, order + 1))
+                    after.append((api.begin, order))
+            before.sort()
+            after.sort()
+            lower, upper = [0], [self.counts[stream]] * (len(after) + 1)
+            for _, order in before:
+                lower.append(max(lower[-1], order))
+            for index in range(len(after) - 1, -1, -1):
+                upper[index] = min(upper[index + 1], after[index][1])
+            ends, starts = [time for time, _ in before], [time for time, _ in after]
+
+            # A zero-submission wait occupies a slot only at the unique gap proved by native API ordering.
+            for index, slot in enumerate(slots):
+                api = logical[stream][slot]
+                left = lower[bisect_right(ends, api.begin)]
+                right = upper[bisect_left(starts, api.end)]
+                if slot - index != left or left != right:
+                    raise ValueError("elided native wait changes or lacks its unique raw SDK position")
+
+        self.logical_gaps = {
+            stream: [slot - index for index, slot in enumerate(slots)] for stream, slots in positions.items()
+        }
+        self.logical_slots = positions
+        for identity, span in commands.items():
+            if span != self.span(identity):
+                raise ValueError("native command changes its actual SDK occurrence coordinate")
+
+        checked = 0
+        for point in facts["measurements"]["coordinates"]:
+            resource = facts["resources"][point["resource"]]
+            if resource["kind"] != "stream":
+                continue
+            stream, order = int(resource["identity"].split("/")[1]), point["order"]
+            task = self.task(stream, order)
+            measured = None if task is None else self.clock.interval(task)[order % 2]
+            if point["time_ns"] != measured:
+                raise ValueError("device boundary changes or loses its original SDK measurement")
+            checked += measured is not None
+        return checked
+
+
+class SdkRecording(RawTraceIndex):
     waits = STREAM_WAITS
 
     def __init__(self, capture, rank, native, facts, sdk):
@@ -30,103 +222,20 @@ class SdkRecording:
         self.logical_coordinates = {}
         self.observer_joins = set()
         profile, = (capture / "native" / f"rank-{rank}").glob("*_ascend_pt")
-        counter = HostCounter(profile)
-        device, = profile.glob("PROF_*/device_*")
-        self.clock = AscendClock(device, native["device_clock"])
-        flips = task_flips(profile)
         rows = sdk_rows(sdk)
+        flips = task_flips(profile)
+        super().__init__(profile, capture / "runtime", native, rows, flips)
         self.sdk = SdkStreams(rows, self.clock, flips)
-        self.index_sdk(rows, counter)
-        self.index_markers(native)
-        self.index_runtime(capture, native, facts, rows, flips)
-        self.index_graph(facts)
-
-    def index_sdk(self, rows, counter):
-        self.apis = {}
-        self.enqueues = {}
-        self.dequeue_ids = {}
-        self.host_measurements = {}
-        dequeues = []
-        for interval in sdk_intervals(rows, counter):
-            row = interval.record
-            args = row.get("args", {})
-
-            # Reconstruct the reference from raw SDK counter coordinates.
-            for position in (interval.begin, interval.end):
-                self.host_measurements[f"thread/{interval.thread}", position] = counter.timestamp(position)
-            if row.get("cat") in {"enqueue", "dequeue"}:
-                if row["cat"] == "enqueue":
-                    self.enqueues[args["correlation_id"]] = interval
-                else:
-                    dequeues.append(interval)
-                    self.dequeue_ids[args["correlation_id"]] = interval
-            elif "Thread Id" in args and "connection_id" in args:
-                self.require(args["connection_id"] not in self.apis, "raw SDK repeats an API connection")
-                self.apis[args["connection_id"]] = interval
-
-        self.api_ranges = ThreadIntervals(list(self.apis.values()))
-        self.dequeues = ThreadIntervals(dequeues)
-        self.enqueue_ranges = ThreadIntervals(list(self.enqueues.values()))
-
-    def index_markers(self, native):
-        scopes, excluded, windows = [], [], []
-        self.host_records = {}
-        self.points = {}
-        signals = {index for index, point in enumerate(native["points"]) if point["side"] == "signal"}
-        for row in native["host_observation"]["intervals"]:
-            interval = native_interval(row)
-            name = row["name"]
-            if name == "prologue.window":
-                windows.append(interval)
-            elif name.startswith("prologue.scope/"):
-                scopes.append(interval)
-                identity = int(name.split("/")[1])
-                self.require(identity not in self.host_records, "raw recording repeats a host scope")
-                self.host_records[identity] = row
-            elif name.startswith("prologue.point/"):
-                identity = int(name.split("/")[1])
-                self.require(identity not in self.points, "raw recording repeats a device point")
-                self.points[identity] = interval
-                if identity not in signals:
-                    excluded.append(interval)
-            elif name in {"prologue.observer", "prologue.auxiliary"}:
-                excluded.append(interval)
-        self.window, = windows
-        for scope in native["scopes"]:
-            if "service" in scope:
-                self.require(scope["id"] not in self.host_records, "native service has competing host records")
-                self.host_records[scope["id"]] = {**scope["host_interval"], "thread": scope["thread"]}
-        self.require(
-            set(self.host_records) == set(range(1, len(native["scopes"]))), "raw host scope observations are incomplete"
-        )
-        self.scopes, self.excluded = ThreadIntervals(scopes), ThreadIntervals(excluded)
-
-    def index_runtime(self, capture, native, facts, rows, flips):
-        process = native["host_observation"]["process"]
-        self.runtime = list(runtime_rows(capture / "runtime", process))
-        self.runtime_records = {(row["thread"], row["begin_counter"]): row for row in self.runtime}
+        self.runtime_records = {(interval.thread, interval.begin): interval.record for interval in self.runtime}
         self.require(len(self.runtime_records) == len(self.runtime), "raw runtime repeats an API interval identity")
         self.source_scopes = {origin: index for index, scope in enumerate(facts["scopes"])
                               for origin in scope["bindings"]["source_scopes"]}
-        self.closed_scopes = set()
-        for scope in native["scopes"]:
-            if "service" in scope or scope["parent"] in self.closed_scopes:
-                self.closed_scopes.add(scope["id"])
-
-        # Decode driver postings directly from the recording, before checking any projected edges.
-        calls = (native_interval(row) for row in self.runtime if row["api"].startswith("halSq"))
-        self.queues = QueueEvidence(calls, self.apis, rows, flips)
-
-        # Actual RAW samples override SDK reconstruction at their own coordinates, including service threads.
-        services = [{**scope["host_interval"], "thread": scope["thread"]}
-                    for scope in native["scopes"] if "service" in scope]
         self.queries = {query["scope"]: {**query, "thread": native["scopes"][query["scope"]]["thread"]}
                         for query in native["state_queries"]}
         self.queried_points = {row["point"] for row in self.queries.values() if row["kind"] == "event"}
-        for row in [*native["host_observation"]["intervals"], *services, *self.runtime, *self.queries.values()]:
-            for side in ("begin", "end"):
-                for resource in (f"thread/{row['thread']}", f"service/{row['thread']}"):
-                    self.host_measurements[resource, row[f"{side}_counter"]] = row[f"{side}_raw_ns"]
+        for query in self.queries.values():
+            self.native_interval(query)
+        self.index_graph(facts)
 
     def index_graph(self, facts):
 
@@ -156,29 +265,15 @@ class SdkRecording:
         if not condition:
             raise ValueError(message)
 
-    def origin(self, api):
-        dequeue = self.dequeues.enclosing(api)
-        return self.enqueues[dequeue.record["args"]["correlation_id"]] if dequeue else api
-
     def owner(self, api):
         origin = self.origin(api)
-        scope = self.scopes.enclosing(origin)
-        if scope is None or self.excluded.enclosing(origin) is not None:
+        scope = self.marker_ranges.enclosing(origin)
+        if scope is None or self.excluded_ranges.enclosing(origin) is not None:
             return None
         return int(scope.record["name"].split("/")[1])
 
-    def native_api(self, interval):
-        matches = [
-            api for api in self.api_ranges.inside(interval) if api.record["args"]["id"] == interval.record["api"]
-        ]
-        self.require(len(matches) == 1, "raw stream operation lacks one SDK API")
-        return matches[0]
-
     def point_connection(self, point):
-        enqueue, = self.enqueue_ranges.inside(self.points[point])
-        dequeue = self.dequeue_ids[enqueue.record["args"]["correlation_id"]]
-        api, = [api for api in self.api_ranges.inside(dequeue) if api.record["args"]["id"] == "aclrtRecordEvent"]
-        return api.record["args"]["connection_id"]
+        return self.point_api(point).record["args"]["connection_id"]
 
     def check_device_end(self, graph, event, connection):
         identity = self.sdk.event(connection)
@@ -200,7 +295,7 @@ class SdkRecording:
             for scope in self.native["scopes"]
         }
         work, waits = {}, defaultdict(list)
-        for interval, producer in event_records(map(native_interval, self.runtime), EVENT_WAITS):
+        for interval, producer in event_records(self.runtime, EVENT_WAITS):
             if interval.end <= self.window.begin or self.window.end <= interval.begin:
                 continue
             api = self.native_api(interval)

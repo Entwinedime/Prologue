@@ -1,4 +1,4 @@
-"""Bind declared physical resources to one native Ascend capture container."""
+"""Allocate physical Ascend devices for a native capture."""
 
 from pathlib import Path
 

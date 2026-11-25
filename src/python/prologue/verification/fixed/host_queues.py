@@ -12,7 +12,7 @@ class HostQueueEvidence:
     def __init__(self, source, activity):
         self.source, self.activity = source, activity
         recorded = {"eventfd_read": [], "eventfd_write": []}
-        for row in source.runtime:
+        for row in source.runtime_records.values():
             if row["api"] in recorded:
                 recorded[row["api"]].append(
                     platform_evidence().interval(row["begin_raw_ns"], row["end_raw_ns"], row["fd"], row)
@@ -23,7 +23,7 @@ class HostQueueEvidence:
             platform_evidence().thread_intervals(records) for records in recorded.values()
         )
         self.takes, self.completions = defaultdict(list), defaultdict(list)
-        for correlation, command in source.dequeue_ids.items():
+        for correlation, command in source.dequeue.items():
             self.takes[command.thread].append(command)
             if source.window.begin <= command.begin <= command.end <= source.window.end:
                 self.completions[command.thread].append((self.stamp(command, "end"), correlation))
@@ -58,10 +58,10 @@ class HostQueueEvidence:
         return None
 
     def stamp(self, command, side):
-        return self.source.host_measurements[f"thread/{command.thread}", getattr(command, side)]
+        return self.source.host_times[f"thread/{command.thread}", getattr(command, side)]
 
     def unowned_enqueue(self, correlation):
-        command = self.source.enqueues[correlation]
+        command = self.source.enqueue[correlation]
         if self.source.owner(command) is None:
             return command.thread, self.stamp(command, "begin")
         return None
@@ -78,7 +78,7 @@ class HostQueueEvidence:
 
         # The writer is inside the exact enqueue whose command the worker takes after the read.
         correlation = take.record["args"]["correlation_id"]
-        if producer is self.source.enqueues[correlation]:
+        if producer is self.source.enqueue[correlation]:
             return take, producer
 
     def observe(self):
@@ -87,7 +87,7 @@ class HostQueueEvidence:
             interval = self.source.interval(read.record)
             if not (self.source.window.begin <= interval.begin < interval.end <= self.source.window.end):
                 continue
-            if self.source.excluded.enclosing(interval) is not None:
+            if self.source.excluded_ranges.enclosing(interval) is not None:
                 continue
 
             reader = interval.thread
@@ -132,9 +132,9 @@ class HostQueueEvidence:
                 counts["unpaired_queue_completions"] += 1
                 continue
             finish, correlation = commands[index]
-            take = self.source.dequeue_ids[correlation]
-            enqueue = self.source.enqueues[correlation]
-            if self.source.excluded.enclosing(enqueue) is not None:
+            take = self.source.dequeue[correlation]
+            enqueue = self.source.enqueue[correlation]
+            if self.source.excluded_ranges.enclosing(enqueue) is not None:
                 counts["observer_producers"] += 1
                 continue
             counts["dequeue_mark_before_wait"] += finish < read.begin
@@ -170,7 +170,7 @@ class HostQueueEvidence:
         for takes in self.takes.values():
             for previous, take in pairwise([None, *takes]):
                 correlation = take.record["args"]["correlation_id"]
-                post = self.source.enqueues[correlation]
+                post = self.source.enqueue[correlation]
                 finish = self.stamp(take, "begin")
                 if previous is not None and post.begin < previous.end and correlation not in arrivals:
 

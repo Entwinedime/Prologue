@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import struct
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal
+from functools import cached_property
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -213,19 +215,11 @@ def sdk_rows(path):
     return [row for row in json.loads(path.read_bytes(), parse_float=Decimal) if row.get("ph") == "X"]
 
 
-def sdk_intervals(rows, host, device=None):
+def sdk_host_intervals(rows, counter):
     for row in rows:
         args = row.get("args", {})
-        if row.get("cat") not in {"enqueue", "dequeue"} and "connection_id" not in args:
-            continue
-        if "Task Type" not in args:
-            yield Interval.read(row, host)
-        elif device is not None:
-            yield Interval.read(row, device)
-
-
-def runtime_rows(directory, process):
-    return read_jsonl(directory / f"{process}.jsonl")
+        if "Task Type" not in args and (row.get("cat") in {"enqueue", "dequeue"} or "connection_id" in args):
+            yield Interval.read(row, counter)
 
 
 def native_interval(row):
@@ -246,8 +240,18 @@ def event_records(intervals, waits):
             yield native, records.get(row["event"]) if "event" in row else None
 
 
-def device_tasks(rows):
-    return [row["args"] for row in rows if "Task Type" in row.get("args", {})]
+def device_streams(rows, clock, flips):
+    streams = defaultdict(list)
+    for row in rows:
+        args = row.get("args", {})
+        if "Task Type" in args and not queue_marker(args, flips):
+            streams[int(args["Physic Stream Id"])].append(row)
+
+    # A stream can reuse task numbers after a flip. Order by calibrated time, then the SDK's physical identity.
+    for tasks in streams.values():
+        tasks.sort(key=lambda row: (clock.interval(row)[0], *(row["args"][key]
+                                    for key in ("Batch Id", "Task Id", "Subtask Id"))))
+    return streams
 
 
 def physical_slots(tasks, flips):
@@ -267,3 +271,254 @@ def physical_slots(tasks, flips):
                 positions[owner].append(index)
         indexed[stream] = ordered, positions
     return indexed
+
+
+class QueueSlots:
+    """Prove release from one recording. Memoized groups depend only on its physical slots and driver posts."""
+
+    def __init__(self, runtime, apis, rows, flips):
+        self.apis, self.flips = apis, flips
+        self.tasks = [row["args"] for row in rows if "Task Type" in row.get("args", {})]
+        self.submissions = list(driver_submissions(runtime))
+        by_caller, self.issued, self.post_index = defaultdict(list), defaultdict(list), {}
+        for stream, post in self.submissions:
+            by_caller[post.thread, stream].append(post)
+            if post.record["tasks"]:
+                self.post_index[id(post)] = len(self.issued[stream])
+                self.issued[stream].append(post)
+        self.by_caller = {key: ([p.begin for p in posts], posts) for key, posts in by_caller.items()}
+        self.resolved = {}
+
+    def inside(self, api, stream):
+        starts, posts = self.by_caller.get((api.thread, stream), ((), []))
+        contained = posts[bisect_left(starts, api.begin):bisect_right(starts, api.end)]
+        if any(post.end > api.end for post in contained):
+            raise ValueError("driver post escapes its recorded API interval")
+        return contained
+
+    @cached_property
+    def slots(self):
+        return physical_slots(self.tasks, self.flips)
+
+    def posts(self, connection, stream):
+        return [post for post in self.inside(self.apis[connection], stream) if post.record["tasks"]]
+
+    def successive_posts(self, posts):
+        return all(self.post_index[id(right)] == self.post_index[id(left)] + 1 and left.end <= right.begin
+                   for left, right in pairwise(posts))
+
+    @staticmethod
+    def consecutive(slots):
+        return all(
+            (batch == following and successor == task + 1) or (following == batch + 1 and owners == {None})
+            for ((batch, task), _), ((following, successor), owners) in pairwise(slots)
+        )
+
+    def neighbor(self, stream, position, post, side):
+        issued = self.issued[stream]
+        index = self.post_index[id(post)] + side
+        slots, owners = self.slots[stream]
+        if not 0 <= index < len(issued) or not 0 <= position < len(slots):
+            return False
+        tag = slots[position][1]
+        if len(tag) != 1:
+            return False
+        connection, = tag
+        if connection not in self.apis:
+            return False
+        group = self.posts(connection, stream)
+        boundary = -1 if side < 0 else 0
+        neighbor = issued[index]
+        if not group or group[boundary] is not neighbor:
+            return False
+        if not self.successive_posts([neighbor, post] if side < 0 else [post, neighbor]):
+            return False
+        if len(group) == 1:
+            return True
+        tagged = owners[connection]
+        block = slots[tagged[0]:tagged[-1] + 1]
+        return (position == tagged[boundary] and len(block) == sum(p.record["tasks"] for p in group)
+                and all(tags == tag for _, tags in block) and self.consecutive(block) and self.successive_posts(group))
+
+    def prove_group(self, connection, stream, posts):
+
+        # Each candidate interval consumes exactly the recorded SQE count, including proven batch flips.
+        slots, by_owner = self.slots[stream]
+        tagged = by_owner[connection]
+        width = sum(post.record["tasks"] for post in posts)
+        starts = []
+        if posts and tagged and self.successive_posts(posts):
+            for start in range(max(0, tagged[-1] - width + 1), min(tagged[0], len(slots) - width) + 1):
+                end = start + width
+                block = slots[start:end]
+                if any(tags not in ({connection}, {None}) for _, tags in block) or not self.consecutive(block):
+                    continue
+                if width != len(tagged) and not (
+                    self.neighbor(stream, start - 1, posts[0], -1)
+                    and self.neighbor(stream, end, posts[-1], 1)
+                    and self.consecutive(slots[start - 1:end + 1])
+                ):
+                    continue
+                starts.append(start)
+        if len(starts) != 1:
+            raise ValueError(
+                f"driver evidence cannot identify one release on stream {stream} for connection {connection}"
+            )
+
+        cursor, = starts
+        releases = {}
+        for post in posts:
+            end = cursor + post.record["tasks"]
+            for slot, tags in slots[cursor:end]:
+                if connection in tags:
+                    releases[slot] = post
+            cursor = end
+        return releases
+
+    def release(self, task):
+        stream, connection = int(task["Physic Stream Id"]), task["connection_id"]
+        key = stream, connection
+        if key not in self.resolved:
+            posts = self.posts(connection, stream)
+            if len(posts) == 1:
+                return posts[0]
+            self.resolved[key] = self.prove_group(connection, stream, posts)
+        return self.resolved[key][int(task["Batch Id"]), int(task["Task Id"])]
+
+
+class RawTraceIndex:
+    """Index the SDK and native recorder independently for each projection or reference reader."""
+
+    def __init__(self, profile, runtime, raw, rows, flips):
+        self.cann, = profile.glob("PROF_*")
+        device, = self.cann.glob("device_*")
+        self.clock = AscendClock(device, raw["device_clock"])
+        self.host_times = {}
+        self.apis = {}
+        counter = HostCounter(profile)
+        queues = {"enqueue": [], "dequeue": []}
+        for interval in sdk_host_intervals(rows, counter):
+            row = interval.record
+            for position in (interval.begin, interval.end):
+                self.host_times[f"thread/{interval.thread}", position] = counter.timestamp(position)
+            category = row.get("cat")
+            if category in queues:
+                queues[category].append(interval)
+            elif "Thread Id" in row.get("args", {}) and "connection_id" in row["args"]:
+                key = row["args"]["connection_id"]
+                if key in self.apis:
+                    raise ValueError(f"duplicate native API connection: {key}")
+                self.apis[key] = interval
+        self.enqueue = self.queue_index(queues["enqueue"])
+        self.dequeue = self.queue_index(queues["dequeue"])
+        self.enqueue_ranges = ThreadIntervals(queues["enqueue"])
+        self.dequeue_ranges = ThreadIntervals(queues["dequeue"])
+        self.api_ranges = ThreadIntervals(list(self.apis.values()))
+
+        # Native samples override the SDK clock conversion at their own counter coordinates.
+        markers, windows = raw["host_observation"], []
+        self.signals = {i for i, point in enumerate(raw["points"]) if point["side"] == "signal"}
+        self.scopes, self.points, self.excluded = {}, {}, []
+        for row in markers["intervals"]:
+            interval = self.native_interval(row)
+            name = row["name"]
+            if name == "prologue.window":
+                windows.append(interval)
+            elif name.startswith(("prologue.scope/", "prologue.point/")):
+                prefix, number = name.split("/")
+                identity = int(number)
+                index = self.scopes if prefix == "prologue.scope" else self.points
+                if identity in index:
+                    raise ValueError(f"duplicate native marker: {name}")
+                index[identity] = interval
+                if index is self.points and identity not in self.signals:
+                    self.excluded.append(interval)
+            elif name in {"prologue.observer", "prologue.auxiliary"}:
+                self.excluded.append(interval)
+        if len(windows) != 1:
+            raise ValueError("native recording requires one closed observation window")
+        self.window, = windows
+
+        # A closed service contributes its own host interval, outside the physical marker owner index.
+        self.marker_ranges = ThreadIntervals(list(self.scopes.values()))
+        self.closed_scopes = set()
+        for scope in raw["scopes"]:
+            identity = scope["id"]
+            if "service" in scope:
+                if identity in self.scopes:
+                    raise ValueError(f"service has two competing host observations: {identity}")
+                self.scopes[identity] = self.native_interval({
+                    **scope["host_interval"], "thread": scope["thread"], "name": f"prologue.scope/{identity}",
+                })
+            if "service" in scope or scope["parent"] in self.closed_scopes:
+                self.closed_scopes.add(identity)
+        if set(self.scopes) != set(range(1, len(raw["scopes"]))):
+            raise ValueError("native scope metadata and recorded CPU markers differ")
+        self.scope_ranges = ThreadIntervals(list(self.scopes.values()))
+        self.excluded_ranges = ThreadIntervals(self.excluded)
+
+        self.runtime = []
+        for row in read_jsonl(runtime / f"{markers['process']}.jsonl"):
+            if row["result"] != 0:
+                raise RuntimeError(f"native runtime call failed: {row['api']} ({row['result']})")
+            self.runtime.append(self.native_interval(row))
+        self.runtime_ranges = ThreadIntervals(self.runtime)
+        self.queues = QueueSlots(self.runtime, self.apis, rows, flips)
+
+    def native_interval(self, record: dict) -> Interval:
+        thread = record["thread"]
+        for side in ("begin", "end"):
+            for resource in (f"thread/{thread}", f"service/{thread}"):
+                self.host_times[resource, record[f"{side}_counter"]] = record[f"{side}_raw_ns"]
+        return native_interval(record)
+
+    @staticmethod
+    def queue_index(intervals: list[Interval]) -> dict[int, Interval]:
+        result = {}
+        for interval in intervals:
+            correlation = interval.record["args"]["correlation_id"]
+            if correlation in result:
+                raise ValueError(f"duplicate native queue correlation: {correlation}")
+            result[correlation] = interval
+        return result
+
+    def origin(self, api: Interval) -> Interval:
+        dequeue = self.dequeue_ranges.enclosing(api)
+        if dequeue is None:
+            return api
+        return self.enqueue[dequeue.record["args"]["correlation_id"]]
+
+    def native_api(self, native: Interval) -> Interval:
+        calls = [api for api in self.api_ranges.inside(native) if api.record["args"]["id"] == native.record["api"]]
+        if len(calls) != 1:
+            raise ValueError(f"native call does not identify one profiler API: {native.record['api']}")
+        return calls[0]
+
+    def reserved_host_intervals(self, repeated_host_waits):
+        for interval in self.runtime:
+            call = interval.record
+            identity = call["thread"], call["begin_counter"]
+            if identity in repeated_host_waits:
+                continue
+            if call["api"] in HOST_WAITS or (call["api"] == "aclrtMemcpy" and call["bytes"]):
+                yield call["thread"], call["begin_raw_ns"], call["end_raw_ns"]
+
+    def point_api(self, identity):
+        marker = self.points[identity]
+        queues = self.enqueue_ranges.inside(marker)
+        if len(queues) != 1:
+            raise ValueError(f"device point {identity} does not have one native enqueue")
+        dequeue = self.dequeue[queues[0].record["args"]["correlation_id"]]
+        calls = [api for api in self.api_ranges.inside(dequeue) if api.record["args"]["id"] == "aclrtRecordEvent"]
+        if len(calls) != 1:
+            raise ValueError(f"device point {identity} does not identify one record API")
+        return calls[0]
+
+    def host_interval(self, interval):
+        resource = f"thread/{interval.thread}"
+        return interval.thread, self.host_times[resource, interval.begin], self.host_times[resource, interval.end]
+
+    def dequeued_intervals(self):
+        for identity, dequeue in self.dequeue.items():
+            observer_owned = self.excluded_ranges.enclosing(self.enqueue[identity]) is not None
+            yield self.host_interval(dequeue), observer_owned
