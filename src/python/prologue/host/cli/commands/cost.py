@@ -68,7 +68,7 @@ def missing_kind(args):
 
 
 def extract_device(args):
-    args.adapters.samples.export(options(DeviceSampleOptions, args))
+    args.adapters.device_samples(options(DeviceSampleOptions, args))
 
 
 def extract_batch(args):
@@ -79,7 +79,7 @@ def extract_batch(args):
 
 
 def extract_host(args):
-    args.adapters.host_samples(options(HostSampleOptions, args)).run()
+    args.adapters.host_samples(options(HostSampleOptions, args))
 
 
 def fit_costs(args):
@@ -90,4 +90,4 @@ def acquire_costs(args):
     adapters = args.adapters
     profiles = TransportSamples(args.transport_samples)
     CostAcquisition(options(CostAcquisitionOptions, args), adapters.native, adapters.reuse.match,
-                    transport_samples=profiles, sample_adapter=adapters.native).run()
+                    transport_samples=profiles, sample_adapter=adapters).run()

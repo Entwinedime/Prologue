@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 
 from prologue.common.cost import cost_features, cost_identity
 from prologue.common.io import write_json
+from prologue.host.performance.fitting import FittedCosts
 from prologue.host.performance.registry import service_models
 
 
@@ -196,3 +197,24 @@ class CostRequirements:
                     point = WorkPoint.at(domain, identity, work["interval"], {**row, "phase": work["phase"]})
                     reasons[point] = row["reason"]
         return reasons
+
+
+class MeasuredWork:
+    """Qualify an interval by direct observation, or by a fitted physical peer operand."""
+
+    def __init__(self, table):
+        self.table = table
+        self.exact = None if "transport_profile" in table else set(
+            CostRequirements().samples("probe", table, basis="native_measurement")
+        )
+
+    def uncovered(self, queries, model, directory):
+        demand = CostRequirements()
+        points = [demand.gap("query", query) for query in queries]
+        if self.exact is not None:
+            return {i: "requested_work_interval_was_not_measured" for i, p in enumerate(points) if p not in self.exact}
+
+        # A staged collective and its physical sample can use different local graph definitions.
+        domains = FittedCosts({"physical": self.table}, []).domains
+        _, missing, _ = demand.check(model, domains, directory)
+        return {i: missing[p] for i, p in enumerate(points) if p in missing}

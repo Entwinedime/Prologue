@@ -10,7 +10,7 @@ from prologue.common.io import content_id, read_json, write_json
 from prologue.host.libraries.release import asset_path
 from prologue.host.libraries.templates import TemplatePublication
 from prologue.host.performance.fitting import FittedCosts
-from prologue.host.performance.requirements import CostRequirements
+from prologue.host.performance.requirements import CostRequirements, MeasuredWork
 
 
 class NativeRecording(Protocol):
@@ -19,6 +19,8 @@ class NativeRecording(Protocol):
     inputs: dict
     source: Path
     manifest: dict
+
+    def qualified_receipt(self) -> dict: ...
 
 
 class EvidenceQualifier(Protocol):
@@ -39,13 +41,9 @@ class LocalLibraryIncrement:
     ):
         self.recording = recording
         self.session = recording.directory.parent
-        self.receipt = read_json(self.session / "result.json")
+        self.receipt = receipt = recording.qualified_receipt()
         self.qualifier, self.model, self.cost_source = qualifier, model, cost_source
         self.measured = measured
-        native, receipt = self.recording, self.receipt
-        if (receipt["status"] not in {"qualified", "incomplete"} or receipt["native_recording"] != native.attempt_id
-                or receipt["rule"] != native.inputs["rule"] or receipt["queries"] != native.inputs["queries"]):
-            raise ValueError("local publication requires the qualified receipt for this native attempt")
         acquired = dict(zip(receipt["queries"], receipt["answers"], strict=True))
 
         self.direct = []
@@ -63,7 +61,7 @@ class LocalLibraryIncrement:
                 for related in answer.get("support", ()):
                     self.support[related].add(key)
             elif "work" in query:
-                name = cost_source.product(native, query)
+                name = cost_source.product(recording, query)
                 if name is None:
                     raise ValueError("the local recording has no measurement for this work or its required peers")
                 self.derived.add(name)
@@ -74,7 +72,7 @@ class LocalLibraryIncrement:
             raise ValueError("local publication requires an original query")
 
         self.identities = {
-            name: content_id([native.attempt_id, name]) for name in self.questions.keys() | self.support.keys()
+            name: content_id([recording.attempt_id, name]) for name in self.questions.keys() | self.support.keys()
         }
 
     def applied(self, receipts):
@@ -116,10 +114,8 @@ class LocalLibraryIncrement:
                     or product["acquisition_rule"] != self.receipt["rule"]
                 ):
                     raise ValueError("local product belongs to a different native measurement")
-                if "samples" in product:
-                    costs[name] = product
-                else:
-                    structure[name] = product
+                destination = costs if "samples" in product else structure
+                destination[name] = product
             if structure:
                 native = self.recording
                 update = TemplatePublication(candidate / "templates", scratch, self.model, native.attempt_id,
@@ -159,19 +155,13 @@ class LocalLibraryIncrement:
             identity = self.identities[name]
 
             # Native work binds its exact interval. A peer profile binds a measured physical operand across graph forms.
-            native_intervals = name in self.derived and "transport_profile" not in product
-            measured = (
-                set(CostRequirements().samples(identity, product, basis="native_measurement"))
-                if native_intervals
-                else None
-            )
-            if name in self.derived and "transport_profile" in product:
-                if self.cost_source.uncovered(list(self.questions[name].values()), product, self.model, scratch):
+            queries = self.questions[name].values()
+            if name in self.derived and MeasuredWork(product).uncovered(queries, self.model, scratch):
+                if "transport_profile" in product:
                     raise ValueError("the physical calibration does not cover the requested collective operand")
-            for query in self.questions[name].values():
-                point = demand.gap(identity, query)
-                if measured is not None and point not in measured:
-                    raise ValueError("the native measurement does not contain the requested work and features")
+                raise ValueError("the native measurement does not contain the requested work and features")
+            for query in queries:
+                demand.gap(identity, query)
 
             # One physical measurement can answer an original query and later requests for the same worker.
             digest = content_id(product)
@@ -186,10 +176,8 @@ class LocalLibraryIncrement:
         if len(sources) != len(previous["sources"]):
             fitted = FittedCosts({path: read_json(directory / path) for path in sources}, previous["reused"]).document()
         covered = demand.query(self.model, fitted["domains"], scratch, nullcontext, None)
-        for name in products:
-            for query in self.questions[name].values():
-                point = demand.gap(self.identities[name], query)
-                if covered[point][0] != "covered":
-                    raise ValueError(f"fitted publication cannot answer original cost query: {covered[point][0]}")
+        for status, _ in covered.values():
+            if status != "covered":
+                raise ValueError(f"fitted publication cannot answer original cost query: {status}")
         if fitted is not previous:
             write_json(directory / "costs.json", fitted)

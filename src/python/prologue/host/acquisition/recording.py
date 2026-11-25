@@ -42,6 +42,13 @@ class PublishedCapture:
                 or any(publication[key] != value for key, value in self.manifest.items())):
             raise ValueError("published observation differs from its native recording")
 
+    def qualified_receipt(self, receipt=None):
+        receipt = read_json(self.directory.parent / "result.json") if receipt is None else receipt
+        if (receipt["status"] not in {"qualified", "incomplete"} or receipt["native_recording"] != self.attempt_id
+                or receipt["rule"] != self.inputs["rule"] or receipt["queries"] != self.inputs["queries"]):
+            raise ValueError("qualified session does not own the native recording, rule and queries")
+        return receipt
+
 
 class SourceProductions:
     """Read the source jobs and their published captures and libraries."""

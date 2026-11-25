@@ -11,7 +11,7 @@ from prologue.host.acquisition.rules import EvidenceGap
 from prologue.host.libraries.increment import LocalLibraryIncrement
 from prologue.host.libraries.release import LibraryRelease, asset_path
 from prologue.host.libraries.store import LibraryStore
-from prologue.host.performance.requirements import CostRequirements
+from prologue.host.performance.requirements import CostRequirements, MeasuredWork
 from prologue.host.runtime.docker import DockerImage, ModelingProcess
 from prologue.host.runtime.limits import AllowanceExhausted
 
@@ -31,6 +31,10 @@ class Replenishment:
         self.failed = {}
         self.measured = {}
         self.unresolved_services = {}
+
+    def model(self, seconds):
+        options = self.qualification
+        return ModelingProcess(options.binary, options.modeling_image, min(seconds, options.timeout))
 
     def open(self):
         release = self.store.open()
@@ -105,7 +109,7 @@ class Replenishment:
             q for q, answer in zip(queries, receipt["answers"], strict=True) if answer["status"] == "qualified"
         ]
         with self.budget.processing() as seconds:
-            model = ModelingProcess(args.binary, args.modeling_image, min(seconds, args.timeout))
+            model = self.model(seconds)
             increment = LocalLibraryIncrement(
                 PublishedCapture(native), qualified, acquisition, model, self.source_costs
             )
@@ -134,35 +138,20 @@ class Replenishment:
             for product, keys in products.items():
                 source = native.attempt_id, product
                 previous = self.measured.get(source)
-                if (
-                    previous
-                    and "transport_profile" not in previous[0]
-                    and all(points[key] not in previous[1] for key in keys)
-                ):
+                if previous and previous.exact is not None and previous.exact.isdisjoint(points[key] for key in keys):
                     continue
                 with self.budget.processing() as seconds:
-                    model = ModelingProcess(
-                        self.qualification.binary,
-                        self.qualification.modeling_image,
-                        min(seconds, self.qualification.timeout),
-                    )
+                    model = self.model(seconds)
                     group = [queries[key] for key in keys]
-                    if source not in self.measured:
+                    if previous is None:
                         table = self.source_costs.extract(directory, native, group, model, self.sessions)
-                        sampled = set(requirements.samples(source, table, basis="native_measurement"))
-                        self.measured[source] = table, sampled
-                    table, sampled = self.measured[source]
-                    if "transport_profile" in table:
-
-                        # Both ranks use the same physical posts, even when they have different local definitions.
-                        missing = self.source_costs.uncovered(group, table, model, self.sessions)
-                        qualified = [q for index, q in enumerate(group) if index not in missing]
-                    else:
-                        qualified = [queries[key] for key in keys if points[key] in sampled]
+                        previous = self.measured[source] = MeasuredWork(table)
+                    missing = previous.uncovered(group, model, self.sessions)
+                    qualified = [query for i, query in enumerate(group) if i not in missing]
                     if qualified:
                         qualifier = self.rules(release, self.qualification)
                         increment = LocalLibraryIncrement(
-                            native, qualified, qualifier, model, self.source_costs, measured=table
+                            native, qualified, qualifier, model, self.source_costs, measured=previous.table
                         )
                         return self.store.publish(increment, self.budget.before_commit, expected=release)
         return None
@@ -184,9 +173,7 @@ class Replenishment:
         if not demand.points:
             return {}
         with self.budget.processing() as seconds:
-            model = ModelingProcess(
-                self.qualification.binary, self.qualification.modeling_image, min(seconds, self.qualification.timeout)
-            )
+            model = self.model(seconds)
             domains = read_json(release.costs)["domains"]
             _, missing, _ = demand.check(model, domains, self.sessions)
         queries = [demand.work_query(point) for point in missing]
