@@ -137,3 +137,13 @@
 **验证**　逐行核验 `pytorch/{capture,control,shared}.py` 确认逻辑高度紧致无水分；核验 [budget.json](../../../data/topology-extensibility-slimming/m3/r06/budget.json)（卡 4 单卡 TP2 实采 130.1s、后处理 42.9s、峰值 56.7 MB、双 rank 10,762/10,726 事件全过）与 [offline-comparison.json](../../../data/topology-extensibility-slimming/m3/r06/offline-comparison.json)（TP1/TP2/PD 12 份产物及四目标预测、678 样本拟合与 `b500cbe` 逐字节一致）；核验修改后文档无跨层引用与断链。
 
 **结论与限制**　R06 裁决通过。Codex 可立即将工作区 R06 业务改动提交并进入 R07，完成 R07 压缩、真机实采与多拓扑回归后停在 M3/M4 边界交由 AGY 审查。
+
+## 2026-11-25　R07 重构、真机回归与 M3 交接
+
+**范围**　R06 按裁决提交为 `4c207bd`。R07 覆盖 Ascend 在线采集、原始索引、投影、独立核验、主机服务与镜像安装。来源和仿真模板使用不同的原生录制，四目标预测沿用原冻结库。
+
+**改动**　`2b5978c` 将原始 SDK、运行时、时钟和 `TS_TASK_FLIP` 队列槽位证明归到 `trace_store.py`。投影持有自己的图状态，核验器独立建立原始索引并判断作用域。分析、核验、在线运行时、宿主分别保留 3、2、2、2 个业务模块。相对 M2，分析 −777、核验 −248、运行时 −17、宿主 +246、Ascend 包根 +445，Ascend 合计 −351 非空行。PyTorch −36、公共包 −11、其余业务 Python −2，全阶段净减 400 行。R07 首次实测在第 43 个动作发现包搬迁改变了 `HostReads.invoke` 的持久化身份。`5f33571` 让该适配器动作明确声明原有身份，结构采集和轻量 CPU 采集共同使用。[源码统计](../../../data/topology-extensibility-slimming/m3/r07/source-measurements.json)
+
+**验证**　官方入口在物理卡 4 上完成两轮结构与轻量 CPU 采集，按“初始化/预热/有效观测”计秒依次为初次结构 26.1/44.4/3.9、初次 CPU 24.7/44.4/1.5、最终结构 26.5/45.2/3.9、最终 CPU 24.8/44.7/1.4。累计卡时 459.8/600 秒，全部后处理 133.2/420 秒。两轮 SDK 导出分别为 10.74 和 10.74 MiB。真机目录最终保留 92.51 MiB 文件，目录采样峰值 92.86 MiB，上限 6 GiB。首轮输入预检在启动前终止，后处理首次求解缺少 SciPy，改用带求解器的 CPU 容器重用原录制。各次均计入账本。最终镜像来源核验通过，实测时间下 107 个动作完整匹配，提取 165 个设备样本和 591 个 CPU 样本。两个镜像的 100/60 个实装模块 SHA-256 与源码相符，两个探针全部 48/12 个导出符号可加载。四种安装方式读取同一份成本模型定义，均有 5 域 16 子命令。[真机账本](../../../data/topology-extensibility-slimming/m3/r07/budget.json) · [安装与探针](../../../data/topology-extensibility-slimming/m3/r07/installation.json)
+
+**结论与限制**　M3 完成。TP1、TP2、TP8、PD、三段 PP 的 Host/Transport 共 17 个 rank 录制，63 份解释、来源报告与成本产物逐字节匹配 `b500cbe`。TP8 和三段 PP 的历史图两版核验均拒绝，分别从同一原录制重新投影后，双方核验均通过，另有 15 份图和报告逐字节一致。单卡 TP1 单独提取对端传输时，两版均拒绝。冻结库的四个 TP1 目标共 211,290 条轨迹、16 次 token 发布、四份请求时延，库检查、678 样本拟合、成本点与 43,276 项工作成本均与基线一致，其中 15,223 项在两版均无已绑定的耗时。新实采覆盖单卡 TP1，其他拓扑使用留存录制。停在 M3/M4 边界。[多拓扑对照](../../../data/topology-extensibility-slimming/m3/r07/offline-comparison.json) · [预测与拟合](../../../data/topology-extensibility-slimming/m3/r07/regression.json) · [阶段汇总](../../../data/topology-extensibility-slimming/m3/acceptance.json)
