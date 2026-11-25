@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 
 
 def main() -> None:

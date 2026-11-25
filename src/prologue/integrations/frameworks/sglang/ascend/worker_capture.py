@@ -2,7 +2,7 @@
 
 import json
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.observation.source_scopes import SGLangSourceScopes
 from prologue.integrations.platforms.ascend.observation import AscendObservation
 from prologue.libraries import asset_path

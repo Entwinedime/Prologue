@@ -8,12 +8,12 @@ import time
 from contextlib import ExitStack
 from uuid import uuid4
 
-from prologue.artifacts import content_id, write_json
+from prologue.runtime.io import content_id, write_json
 from prologue.integrations.frameworks.sglang.configuration import ServingInput
 from prologue.integrations.frameworks.sglang.ingress import BatchOperands
 from prologue.integrations.frameworks.sglang.worker_templates import SGLangTask, WorkerDomain
-from prologue.integrations.runtimes.docker import OwnedContainers
-from prologue.workflow.limits import OperationLimit
+from prologue.runtime.docker import DockerImage, OwnedContainers
+from prologue.runtime.limits import OperationLimit
 from prologue.workflow.options import PredictionOptions
 
 
@@ -86,9 +86,7 @@ class PredictionProcess:
             timing_option = [option, path]
         binary = args.binary.resolve(strict=True)
         descriptions = {
-            role: json.loads(subprocess.check_output(
-                ["docker", "image", "inspect", image], text=True, timeout=max(0, deadline - time.monotonic()),
-            ))[0]
+            role: DockerImage.inspect(image, timeout=max(0, deadline - time.monotonic()))
             for role, image in (("modeling", args.modeling_image), ("control", args.control_image))
         }
         WorkerDomain.require_control(descriptions["control"], self.task.workers)

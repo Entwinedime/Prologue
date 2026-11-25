@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from prologue.acquisition.observation.workers import ProfileWindow
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
 
 

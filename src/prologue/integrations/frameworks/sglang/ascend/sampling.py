@@ -8,7 +8,7 @@ from prologue.acquisition.options import HostSampleOptions
 
 from prologue.acquisition.recording import PublishedCapture
 from prologue.acquisition.rules import EvidenceGap, LocalAcquisition
-from prologue.artifacts import content_id, write_json
+from prologue.runtime.io import content_id, write_json
 from prologue.integrations.frameworks.sglang.ascend.attention_cuts import AttentionCuts
 from prologue.integrations.frameworks.sglang.ascend.host_samples import HostCostSamples
 from prologue.integrations.frameworks.sglang.ascend.local_attention import LocalAttention

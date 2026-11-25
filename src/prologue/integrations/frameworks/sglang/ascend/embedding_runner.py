@@ -9,7 +9,7 @@ import torch.distributed as distributed
 from sglang.srt.distributed import parallel_state
 from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.ascend.shard_transport import ShardTransport
 from prologue.integrations.frameworks.sglang.groups import ParallelGroups
 from prologue.integrations.frameworks.sglang.observation.call_scopes import NativeCallObservation

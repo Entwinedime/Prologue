@@ -7,8 +7,8 @@ from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from prologue.artifacts import write_json
-from prologue.integrations.runtimes.docker import ModelingProcess
+from prologue.runtime.io import write_json
+from prologue.runtime.docker import ModelingProcess
 from prologue.performance.requirements import CostRequirements
 
 from .fixed_reference import FixedReference

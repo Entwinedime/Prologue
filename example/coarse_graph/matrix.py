@@ -1,7 +1,6 @@
 """Run bounded structure and performance comparisons on a frozen matrix."""
 
 import argparse
-import fcntl
 import hashlib
 import json
 import re
@@ -12,10 +11,11 @@ from pathlib import Path
 from prologue.acquisition.recording import PublishedCapture
 from prologue.integrations.frameworks.sglang.worker_templates import SGLangTask
 from prologue.libraries import LibraryRelease
-from prologue.artifacts import write_json
-from prologue.integrations.runtimes.docker import OwnedContainers
+from prologue.runtime.io import write_json
+from prologue.runtime.docker import OwnedContainers
 from prologue.verification.reference import ReferenceRecording
-from prologue.workflow.limits import OperationLimit
+from prologue.runtime.limits import OperationLimit
+from prologue.runtime.workspace import file_lock
 
 from run import TaskCommands
 
@@ -55,8 +55,7 @@ class MatrixRun:
             return record["exit_code"]
 
         # All investigation stages share one reservation owner; terminal failures never trigger retries.
-        with (self.logs / ".budget.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with file_lock(self.logs / ".budget.lock", blocking=True):
             previous = [json.loads(p.read_text()) for p in self.logs.rglob("*.step.json")]
             unavailable = [category for category, amount in charges.items()
                            if sum(row["charges"].get(category, 0) for row in previous) + amount > self.budget[category]]
@@ -321,8 +320,7 @@ class MatrixRun:
         report = "comparisons" if phase == "compare" else phase
         output = self.results / f"{report}.json"
         with ExitStack() as contexts:
-            lock = contexts.enter_context((self.steps / f".{phase}.lock").open("a"))
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            contexts.enter_context(file_lock(self.steps / f".{phase}.lock"))
             results = {}
             for name in {"sources", "targets", report}:
                 path = self.results / f"{name}.json"
@@ -336,8 +334,7 @@ class MatrixRun:
             if needs_native:
 
                 # Only actual collection occupies the cards; explicit observation reuse stays in the CPU lane.
-                native = contexts.enter_context((self.logs / ".native.lock").open("a"))
-                fcntl.flock(native, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                contexts.enter_context(file_lock(self.logs / ".native.lock"))
             for domain in domains:
                 for case in [domain] if phase == "sources" else domain["targets"]:
                     try:

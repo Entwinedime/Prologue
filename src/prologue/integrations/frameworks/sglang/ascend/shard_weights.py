@@ -7,7 +7,7 @@ from itertools import chain
 import torch
 import torch.distributed as distributed
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 
 

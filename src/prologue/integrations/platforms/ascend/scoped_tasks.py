@@ -6,7 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.integrations.platforms.ascend.clock import HostCounter
 from prologue.integrations.platforms.ascend.commands import StreamCommands
 from prologue.integrations.platforms.ascend.export import AscendExport

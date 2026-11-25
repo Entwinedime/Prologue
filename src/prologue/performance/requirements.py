@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.performance.models import ModelBindings
 
 

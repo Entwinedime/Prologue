@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
-from prologue.artifacts import content_id, write_json
+from prologue.runtime.io import content_id, write_json
 
 
 def asset_path(directory, name):

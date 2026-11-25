@@ -9,8 +9,8 @@ from time import monotonic_ns
 
 from prologue.app.prediction import PredictionProcess
 from prologue.workflow.options import PredictionOptions
-from prologue.artifacts import write_json
-from prologue.integrations.runtimes.docker import ModelingProcess
+from prologue.runtime.io import write_json
+from prologue.runtime.docker import ModelingProcess
 from prologue.libraries import LibraryRelease
 
 from .compare_actions import ActionComparison

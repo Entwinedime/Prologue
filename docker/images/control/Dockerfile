@@ -7,7 +7,7 @@ ENV LD_PRELOAD=""
 RUN python3 -m pip uninstall -y torch-npu flash-attn-npu prologue-collection
 
 WORKDIR /opt/prologue/control
-COPY src/prologue/artifacts.py prologue/
+COPY src/prologue/runtime/io.py prologue/runtime/
 COPY src/prologue/app/control_worker.py prologue/app/
 COPY src/prologue/serving/control_peer.py prologue/serving/
 COPY src/prologue/contracts/workload prologue/contracts/workload/

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from prologue.runtime.docker import DockerImage
 from prologue.acquisition.capture import NativeAttempt
 from prologue.integrations.frameworks.sglang.ascend.attention_cuts import AttentionCuts
 from prologue.integrations.frameworks.sglang.configuration import CaptureInput
@@ -62,7 +63,7 @@ class SGLangAscendLaunch:
 
         platform = AscendDeployment({"acquisition_mode": deployment.get("acquisition_mode", "full"),
                                      "physical_devices": cards}, len(cards), False)
-        image = NativeAttempt.image(arguments.source_image)
+        image = DockerImage.inspect(arguments.source_image)
         upstream = cls.domain.image_revision(image)
         if revision is not None and upstream != revision:
             raise EvidenceGap("framework_revision_mismatch", required=revision, image=image["Id"])
@@ -136,7 +137,7 @@ class SGLangAscendLaunch:
             raise ValueError("capture output must not write inside the model directory")
         destination = str(Path(self.serving.model["path"]).absolute())
         mounts = ["--mount", f"type=bind,src={model},dst={destination},readonly"]
-        image = NativeAttempt.image(arguments.source_image)
+        image = DockerImage.inspect(arguments.source_image)
         inputs = {
             "job": self.job, "deployment": self.platform.source, "image": image["Id"],
             "framework_revision": self.domain.image_revision(image), "model_path": str(model),

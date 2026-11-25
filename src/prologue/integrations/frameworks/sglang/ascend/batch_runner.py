@@ -8,7 +8,7 @@ from sglang.srt.managers.io_struct import BatchTokenIDOutput, sock_recv
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.utils.common import DynamicGradMode
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from prologue.integrations.frameworks.sglang.observation.communications import NativeCommunications

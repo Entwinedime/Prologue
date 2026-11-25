@@ -1,13 +1,12 @@
 """Recover one prediction or publish its metrics and first concrete evidence gap."""
 
-import json
 import subprocess
 import time
 from dataclasses import replace
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import read_json, write_json
 from prologue.serving.latency import RequestLatency
-from prologue.workflow.limits import AllowanceExhausted
+from prologue.runtime.limits import AllowanceExhausted
 
 
 class ExplorationTarget:
@@ -20,14 +19,14 @@ class ExplorationTarget:
     def predict(self, predictor, options, release, limit, basis):
         outcome = self.root / "outcome.json"
         if outcome.is_file():
-            row = json.loads(outcome.read_bytes())
+            row = read_json(outcome)
             if row["basis"] == basis:
                 return row
         input_path = self.root / "input.json"
         if not input_path.is_file():
             write_json(input_path, self.source, indent=2, replace=False)
         journal = self.root / "attempt.json"
-        previous = json.loads(journal.read_bytes()) if journal.is_file() else None
+        previous = read_json(journal) if journal.is_file() else None
         result, evidence, elapsed = None, None, None
         if previous:
             output = self.root / "attempts" / str(previous["number"])
@@ -60,7 +59,7 @@ class ExplorationTarget:
     def evidence(self, predictor, output):
         result = output / "result.json"
         if result.is_file():
-            metrics = RequestLatency.predicted(json.loads(result.read_bytes()), self.source["workload"]["requests"]).report()
+            metrics = RequestLatency.predicted(read_json(result), self.source["workload"]["requests"]).report()
             write_json(output / "request-latency.json", metrics.pop("requests"))
             return {"status": "predicted", **metrics}, result
         if gap := predictor.gap(output, self.source):

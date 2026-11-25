@@ -1,29 +1,24 @@
 """Capture one native job with cumulative accounting and explicit invocation-by-invocation retries."""
 
-import fcntl
 import json
 import math
 import subprocess
-import time
 from pathlib import Path
 from uuid import uuid4
 
 from prologue.acquisition.adapters import PlatformRuntimeAdapter
 from prologue.acquisition.options import CaptureOptions
-from prologue.artifacts import write_json
-from prologue.integrations.runtimes.docker import OwnedContainers
-from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
+from prologue.runtime.docker import OwnedContainers
+from prologue.runtime.io import read_json, write_json
+from prologue.runtime.limits import AllowanceExhausted, OperationLimit, Usage
+from prologue.runtime.workspace import TaskWorkspace, file_lock
 
 
 class NativeAttempt:
     @staticmethod
-    def image(name):
-        return json.loads(subprocess.check_output(["docker", "image", "inspect", name], text=True))[0]
-
-    @staticmethod
     def attempts(directory):
         state = directory / "execution.json"
-        return json.loads(state.read_text())["attempts"] if state.is_file() else []
+        return read_json(state)["attempts"] if state.is_file() else []
 
     @classmethod
     def usage(cls, directory):
@@ -33,7 +28,16 @@ class NativeAttempt:
     def charges(attempts):
         return Usage(sum(row["charged_ns"] for row in attempts), len(attempts))
 
-    def __init__(self, arguments: CaptureOptions, inputs, options, worker_options, mounts, runtime: type[PlatformRuntimeAdapter], limit=None):
+    def __init__(
+        self,
+        arguments: CaptureOptions,
+        inputs,
+        options,
+        worker_options,
+        mounts,
+        runtime: type[PlatformRuntimeAdapter],
+        limit=None,
+    ):
         self.entrypoint = runtime.capture_entrypoint()
         self.arguments, self.inputs = arguments, inputs
         self.options, self.worker_options, self.mounts = options, worker_options, mounts
@@ -50,22 +54,15 @@ class NativeAttempt:
         write_json(self.output / "execution.json", self.state, indent=2)
 
     def prepare(self) -> None:
-        path = self.output / "execution.json"
-        if path.exists():
-            self.state = json.loads(path.read_text())
-            job = json.loads((self.output / "input.json").read_text())
-            if self.state["inputs"] != self.inputs or job != self.inputs["job"]:
-                raise ValueError("capture inputs, deployment or image changed; use a new task directory")
-            return
-        job = self.output / "input.json"
-        if any(path.name not in {".lock", job.name} for path in self.output.iterdir()):
-            raise ValueError("new capture task requires an empty directory")
-        self.state = {"inputs": self.inputs, "attempts": []}
-        if not job.exists():
-            write_json(job, self.inputs["job"], indent=2, replace=False)
-        elif json.loads(job.read_bytes()) != self.inputs["job"]:
-            raise ValueError("interrupted capture preparation belongs to a different job")
-        self.save()
+        with TaskWorkspace(self.output).initialize("execution.json") as draft:
+            if draft is not None:
+                self.state = {"inputs": self.inputs, "attempts": []}
+                write_json(draft / "input.json", self.inputs["job"], indent=2, replace=False)
+                write_json(draft / "execution.json", self.state, indent=2)
+                return
+        self.state = read_json(self.output / "execution.json")
+        if self.state["inputs"] != self.inputs or read_json(self.output / "input.json") != self.inputs["job"]:
+            raise ValueError("capture inputs, deployment or image changed; use a new task directory")
 
     @staticmethod
     def recover(directory, state):
@@ -89,9 +86,8 @@ class NativeAttempt:
     def recover_pending(cls, directory):
         if not (attempts := cls.attempts(directory)) or attempts[-1]["status"] != "running":
             return
-        with (directory / ".lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            state = json.loads((directory / "execution.json").read_bytes())
+        with file_lock(directory / ".lock"):
+            state = read_json(directory / "execution.json")
             if state["attempts"][-1]["status"] == "running":
                 cls.recover(directory, state)
 
@@ -111,36 +107,31 @@ class NativeAttempt:
         ]
         attempt = {
             "number": number, "container": container, "command": command, "timeout_ns": allowance_ns,
-            "charged_ns": allowance_ns, "elapsed_ns": None, "exit_code": None, "status": "running", "error": None,
+            "charged_ns": 0, "elapsed_ns": None, "exit_code": None, "status": "running", "error": None,
         }
 
         # Reserve before launch; the container's own deadline also survives a killed coordinator.
         self.state["attempts"].append(attempt)
-        self.save()
-        started_ns = time.monotonic_ns()
-        try:
-            output.mkdir(parents=True)
-            with (output / "capture.log").open("x") as log:
-                attempt["exit_code"] = self.operation_limit.run(command, log, allowance_ns / 1_000_000_000)
-            self.save()
-            if attempt["exit_code"]:
-                raise subprocess.CalledProcessError(attempt["exit_code"], command)
-        except BaseException as error:
-            attempt["error"] = f"{type(error).__name__}: {error}"
-            raise
-        finally:
-            OwnedContainers([container]).close()
-            attempt["elapsed_ns"] = time.monotonic_ns() - started_ns
-            attempt["charged_ns"] = attempt["elapsed_ns"]
-            attempt["status"] = "exited" if attempt["exit_code"] == 0 else "failed"
-            if self.operation_limit.sample() is not None:
-                attempt["sampled_collection_peak_bytes"] = self.operation_limit.sampled_peak_bytes
-            self.save()
+        with TaskWorkspace.reserve(attempt, "charged_ns", allowance_ns, self.save, elapsed_field="elapsed_ns",
+                                   settled=lambda: attempt["status"] != "running"):
+            try:
+                output.mkdir(parents=True)
+                with (output / "capture.log").open("x") as log:
+                    attempt["exit_code"] = self.operation_limit.run(command, log, allowance_ns / 1_000_000_000)
+                self.save()
+                if attempt["exit_code"]:
+                    raise subprocess.CalledProcessError(attempt["exit_code"], command)
+            except BaseException as error:
+                attempt["error"] = f"{type(error).__name__}: {error}"
+                raise
+            finally:
+                OwnedContainers([container]).close()
+                attempt["status"] = "exited" if attempt["exit_code"] == 0 else "failed"
+                if self.operation_limit.sample() is not None:
+                    attempt["sampled_collection_peak_bytes"] = self.operation_limit.sampled_peak_bytes
 
     def run(self) -> None:
-        self.output.mkdir(parents=True, exist_ok=True)
-        with (self.output / ".lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with file_lock(self.output / ".lock"):
             self.prepare()
             attempts = self.state["attempts"]
             if attempts and attempts[-1]["status"] == "running":
@@ -154,7 +145,7 @@ class NativeAttempt:
 
             # Publish from the successful attempt even if the coordinator stopped after the worker exited.
             source = self.output / "attempts" / str(attempts[-1]["number"]) / "source"
-            capture = json.loads((source / "capture.json").read_text())
+            capture = read_json(source / "capture.json")
             write_json(self.output / "result.json", {
                 "source": str(source.relative_to(self.output)), **capture,
                 "native_charged_ns": sum(attempt["charged_ns"] for attempt in attempts), "attempts": len(attempts),

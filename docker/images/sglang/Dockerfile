@@ -44,7 +44,7 @@ COPY --chmod=755 src/prologue/integrations/platforms/ascend/capture.sh /opt/prol
 # Package the native worker and its actual dependencies, independently of the coordinator and control backend.
 WORKDIR /opt/prologue/collector
 COPY pyproject.toml .
-COPY src/prologue/artifacts.py src/prologue/
+COPY src/prologue/runtime/io.py src/prologue/runtime/
 COPY src/prologue/app/capture_worker.py src/prologue/app/sglang_plugin.py src/prologue/app/
 COPY src/prologue/contracts/workload src/prologue/contracts/workload/
 COPY src/prologue/acquisition/observation src/prologue/acquisition/observation/

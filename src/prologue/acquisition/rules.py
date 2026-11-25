@@ -1,18 +1,17 @@
 """Run one local native session and answer its original evidence queries."""
 
-import fcntl
-import json
 import subprocess
 from dataclasses import replace
 from contextlib import nullcontext
 from typing import Protocol
 
+from prologue.runtime.workspace import TaskWorkspace, file_lock
 from prologue.acquisition.options import LocalAcquisitionOptions
 from prologue.acquisition.capture import NativeAttempt
 from prologue.acquisition.recording import PublishedCapture
-from prologue.artifacts import content_id, write_json
+from prologue.runtime.io import content_id, read_json, write_json
 from prologue.performance.requirements import require_work_interval
-from prologue.workflow.limits import AllowanceExhausted, OperationLimit
+from prologue.runtime.limits import AllowanceExhausted, OperationLimit
 
 
 class EvidenceGap(Exception):
@@ -60,9 +59,7 @@ class LocalAcquisition:
         if not queries:
             raise ValueError("local acquisition needs at least one evidence query")
         root = arguments.output.resolve()
-        root.mkdir(parents=True, exist_ok=True)
-        with (root / ".lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with file_lock(root / ".lock"):
             return self.observe(arguments, queries, deployment, root, limit, processing)
 
     @staticmethod
@@ -101,17 +98,15 @@ class LocalAcquisition:
         if self.release_id is not None:
             request["release"] = self.release_id
         state = root / "request.json"
-        if state.exists():
-            if json.loads(state.read_bytes()) != request:
+        with TaskWorkspace(root).initialize(state.name) as draft:
+            if draft is not None:
+                write_json(draft / state.name, request, replace=False)
+            elif read_json(state) != request:
                 raise ValueError("local session belongs to different queries, placement or image")
-        else:
-            if any(path.name != ".lock" for path in root.iterdir()):
-                raise ValueError("new local session requires an empty output directory")
-            write_json(state, request, replace=False)
 
         result = root / "result.json"
         if result.exists():
-            receipt = json.loads(result.read_bytes())
+            receipt = read_json(result)
             assets = (root / row["asset"] for row in receipt.get("answers", ()) if "asset" in row)
             if receipt["status"] not in {"allowance_exhausted", "native_failed", "untriggered"} and all(path.is_file() for path in assets):
                 return receipt
@@ -161,7 +156,7 @@ class LocalAcquisition:
             receipt.update(status="native_failed", detail=detail, attempt=attempts[-1]["number"])
 
         state = native / "execution.json"
-        execution = json.loads(state.read_bytes()) if state.is_file() else {}
+        execution = read_json(state) if state.is_file() else {}
         attempts = execution.get("attempts", [])
         usage = NativeAttempt.charges(attempts)
         retained = limit.sample()

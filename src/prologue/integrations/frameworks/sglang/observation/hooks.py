@@ -9,7 +9,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.configuration import NativeConfiguration
 from prologue.integrations.frameworks.sglang.observation.model_calls import NativeModelObservation
 from prologue.integrations.frameworks.sglang.pipeline import PipelineABI

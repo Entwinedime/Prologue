@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from prologue.runtime.docker import DockerImage
 from prologue.acquisition.capture import NativeAttempt
 from prologue.acquisition.recording import PublishedCapture
 from prologue.acquisition.rules import EvidenceGap
@@ -15,7 +16,7 @@ from prologue.integrations.frameworks.sglang.ascend.local_copy import LocalCopie
 from prologue.integrations.frameworks.sglang.ascend.local_scheduler import LocalSchedulerBatch, LocalWorkerBinding
 from prologue.integrations.frameworks.sglang.ascend.worker_capture import WorkerCapture
 from prologue.integrations.frameworks.sglang.worker_templates import WorkerDomain
-from prologue.integrations.runtimes.docker import ModelingProcess
+from prologue.runtime.docker import ModelingProcess
 from prologue.performance.requirements import CostRequirements
 
 
@@ -134,7 +135,7 @@ class LocalHostWork(LocalSchedulerWork):
     def prepare(self, queries, deployment, arguments, limit):
         requirements = CostRequirements()
         needed = {requirements.gap("query", q) for q in queries}
-        image = NativeAttempt.image(arguments.source_image)["Id"]
+        image = DockerImage.id(arguments.source_image)
         model = self.model(arguments.preparation_seconds)
         rank = WorkerDomain.rank(queries[0]["domain"])
         for worker in self.sources(deployment, rank):

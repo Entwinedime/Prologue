@@ -2,10 +2,29 @@
 
 import json
 import os
+import shutil
 import tempfile
+from collections.abc import Iterator
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+
+
+def read_json(path: Path) -> Any:
+    return json.loads(path.read_bytes())
+
+
+def read_jsonl(path: Path) -> Iterator[Any]:
+    with path.open("rb") as stream:
+        for line in stream:
+            yield json.loads(line)
+
+
+def discard_path(path: Path) -> None:
+    if not path.is_symlink() and path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
 
 
 def content_id(value: Any) -> str:

@@ -17,7 +17,7 @@ include-package-data = false
 [tool.setuptools.packages.find]
 where = ["src"]
 include = [
-    "prologue", "prologue.app", "prologue.contracts.workload", "prologue.acquisition.observation", "prologue.performance",
+    "prologue", "prologue.runtime", "prologue.app", "prologue.contracts.workload", "prologue.acquisition.observation", "prologue.performance",
     "prologue.integrations.frameworks.sglang", "prologue.integrations.frameworks.sglang.observation",
     "prologue.integrations.frameworks.sglang.ascend",
     "prologue.integrations.platforms.ascend", "prologue.integrations.runtimes.pytorch",

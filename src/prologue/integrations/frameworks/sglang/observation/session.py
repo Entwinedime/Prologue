@@ -12,7 +12,7 @@ from pathlib import Path
 
 from prologue.integrations.frameworks.sglang.configuration import CaptureInput, NativeConfiguration
 from prologue.integrations.frameworks.sglang.observation.instance import NativeServingInstance
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 
 
 class ArrivalClock:

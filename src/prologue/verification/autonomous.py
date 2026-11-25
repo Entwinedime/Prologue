@@ -8,7 +8,7 @@ from subprocess import TimeoutExpired
 from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.app.prediction import PredictionProcess
 from prologue.workflow.options import PredictionOptions
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.libraries import LibraryRelease
 
 from .latency_metrics import LatencyComparison, NativeLatencyMetrics

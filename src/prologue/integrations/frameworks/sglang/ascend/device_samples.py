@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 
 from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.acquisition.recording import PublishedCapture
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.acquisition.pd_samples import PdNotificationSamples
 from prologue.integrations.frameworks.sglang.ascend.local_copy import LocalCopies
 from prologue.integrations.frameworks.sglang.ascend.local_embedding import LocalEmbedding

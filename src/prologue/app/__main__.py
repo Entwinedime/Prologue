@@ -142,7 +142,7 @@ def main() -> None:
         from prologue.acquisition.library_increment import LocalLibraryIncrement
         from prologue.acquisition.library_store import LibraryStore
         from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples
-        from prologue.integrations.runtimes.docker import ModelingProcess
+        from prologue.runtime.docker import ModelingProcess
 
         model = ModelingProcess(arguments.binary, arguments.modeling_image, arguments.timeout)
         acquisition = SGLangAscendLaunch.local_acquisition(None, parsed(QualificationOptions, arguments))
@@ -160,9 +160,9 @@ def main() -> None:
 
         CostSamples.export(parsed(DeviceSampleOptions, arguments))
     elif arguments.command == "batch-cost-samples":
-        from prologue.artifacts import write_json
+        from prologue.runtime.io import write_json
         from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples
-        from prologue.integrations.runtimes.docker import ModelingProcess
+        from prologue.runtime.docker import ModelingProcess
 
         model = ModelingProcess(arguments.binary, arguments.modeling_image, arguments.timeout)
         arguments.output.parent.mkdir(parents=True, exist_ok=True)

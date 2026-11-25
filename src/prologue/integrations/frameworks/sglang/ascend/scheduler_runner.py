@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic_ns
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.configuration import NativeConfiguration
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes

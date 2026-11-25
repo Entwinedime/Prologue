@@ -1,31 +1,28 @@
 """Acquire missing work coordinates from existing evidence or a bounded native measurement."""
 
-import fcntl
-import filecmp
-import json
 import math
-import shutil
 import subprocess
 import time
 from contextlib import contextmanager
-from prologue.acquisition.adapters import CostSampleAdapter
-from prologue.acquisition.options import CostAcquisitionOptions, DeviceSampleOptions, LocalAcquisitionOptions, ProductionOptions
 
+from prologue.acquisition.adapters import CostSampleAdapter
 from prologue.acquisition.capture import NativeAttempt
 from prologue.acquisition.fitting import FitCosts
+from prologue.acquisition.options import (
+    CostAcquisitionOptions,
+    DeviceSampleOptions,
+    LocalAcquisitionOptions,
+    ProductionOptions,
+)
 from prologue.acquisition.production import CaptureProduction
-from prologue.acquisition.publication import SourceProductions
-from prologue.acquisition.recording import PublishedCapture
+from prologue.acquisition.recording import PublishedCapture, SourceProductions
 from prologue.acquisition.rules import EvidenceGap
-from prologue.artifacts import write_json
-from prologue.integrations.runtimes.docker import ModelingCommand, OwnedContainers
 from prologue.performance.requirements import CostRequirements
 from prologue.performance.samples import WorkCatalog
-from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage, retained_bytes
-
-
-def read(path):
-    return json.loads(path.read_text())
+from prologue.runtime.docker import DockerImage, ModelingCommand, OwnedContainers
+from prologue.runtime.io import discard_path, read_json, write_json
+from prologue.runtime.limits import AllowanceExhausted, OperationLimit, Usage, retained_bytes
+from prologue.runtime.workspace import BinarySnapshot, TaskWorkspace, file_lock
 
 
 class CostSource:
@@ -33,9 +30,9 @@ class CostSource:
         self.production, self.output = production, output
         self.deployment = deployment
         self.recording = PublishedCapture(capture, job)
-        if read(production / "production.json")["inputs"]["capture_path"] != str(self.recording.source):
+        if read_json(production / "production.json")["inputs"]["capture_path"] != str(self.recording.source):
             raise ValueError("training production belongs to a different native observation")
-        self.ranks = read(production / "result.json")["observed_roles"]
+        self.ranks = read_json(production / "result.json")["observed_roles"]
         self.projection = production
 
     def identities(self, rank):
@@ -43,12 +40,20 @@ class CostSource:
 
     @staticmethod
     def release_intermediates(output):
-        CaptureProduction.discard(output / "work")
+        discard_path(output / "work")
         CaptureProduction.retire_projection(output / "projection")
 
 
 class CostAcquisition:
-    def __init__(self, args: CostAcquisitionOptions, place, reuse_samples, *, transport_samples, sample_adapter: type[CostSampleAdapter]):
+    def __init__(
+        self,
+        args: CostAcquisitionOptions,
+        place,
+        reuse_samples,
+        *,
+        transport_samples,
+        sample_adapter: type[CostSampleAdapter],
+    ):
         self.sample_adapter = sample_adapter
         self.args = args
         self.place = place
@@ -65,7 +70,7 @@ class CostAcquisition:
                             int(args.postprocessing_budget_seconds * 1e9))
         self.limit = OperationLimit(self.output, args.storage_bytes)
         self.images = {
-            role: NativeAttempt.image(image)["Id"]
+            role: DockerImage.id(image)
             for role, image in (("source", args.source_image), ("modeling", args.modeling_image))
         }
 
@@ -73,12 +78,14 @@ class CostAcquisition:
         self.collections = collections
         self.sources = {}
         self.demand = CostRequirements()
-        self.samples = {path: read(path) for path in dict.fromkeys(path.resolve(strict=True) for path in args.samples)}
+        self.samples = {
+            path: read_json(path) for path in dict.fromkeys(path.resolve(strict=True) for path in args.samples)
+        }
         if any("transport_profile" in source for source in self.samples.values()):
             raise ValueError("select physical peer service profiles with --transport-samples")
         self.samples.update(transport_samples.sources)
         self.transport_samples = transport_samples.selection
-        self.gaps = {path.resolve(strict=True): read(path) for path in args.gap}
+        self.gaps = {path.resolve(strict=True): read_json(path) for path in args.gap}
         self.graphs = {graph.resolve(strict=True): identities.resolve(strict=True) for graph, identities in args.demand}
         self.inputs = {
             "collections": [str(path) for path in collections], "images": self.images,
@@ -108,23 +115,21 @@ class CostAcquisition:
         write_json(self.output / "execution.json", self.state, indent=2)
 
     def prepare(self):
-        executable = self.output / "prologue"
-        state_path = self.output / "execution.json"
-        if state_path.exists():
-            self.state = read(state_path)
-            if self.state["inputs"] != self.inputs or not filecmp.cmp(self.binary, executable, shallow=False):
-                raise ValueError("cost acquisition inputs or executable changed")
-            if self.state["container"] is not None:
-                OwnedContainers([self.state["container"]]).close()
-                self.state["container"] = None
-                self.save()
-            return
-        if any(path.name != ".lock" for path in self.output.iterdir()):
-            raise ValueError("new cost acquisition requires an empty directory")
-        shutil.copyfile(self.binary, executable)
-        executable.chmod(0o500)
-        self.state = {"inputs": self.inputs, "postprocessing_ns": 0, "container": None}
-        self.save()
+        snapshot = BinarySnapshot(self.binary)
+        with TaskWorkspace(self.output).initialize("execution.json") as draft:
+            if draft is not None:
+                snapshot.copy_to(draft / "prologue")
+                self.state = {"inputs": self.inputs, "postprocessing_ns": 0, "container": None}
+                write_json(draft / "execution.json", self.state, indent=2)
+                return
+        self.state = read_json(self.output / "execution.json")
+        if self.state["inputs"] != self.inputs:
+            raise ValueError("cost acquisition inputs changed")
+        snapshot.check(self.output / "prologue")
+        if self.state["container"] is not None:
+            OwnedContainers([self.state["container"]]).close()
+            self.state["container"] = None
+            self.save()
 
     @contextmanager
     def processing(self, container=None):
@@ -133,21 +138,19 @@ class CostAcquisition:
         if remaining <= 0:
             raise AllowanceExhausted("cost postprocessing allowance exhausted")
 
-        # Reserve before launch so interruption cannot make unfinished work free.
-        self.state.update(postprocessing_ns=spent + remaining, container=container)
-        self.save()
-        started = time.monotonic_ns()
-        try:
-            self.limit.check()
-            yield remaining / 1e9
-            self.limit.check()
-            if time.monotonic_ns() - started > remaining:
-                raise AllowanceExhausted("cost postprocessing allowance exhausted")
-        finally:
-            if container is not None:
-                OwnedContainers([container]).close()
-            self.state.update(postprocessing_ns=spent + time.monotonic_ns() - started, container=None)
-            self.save()
+        self.state["container"] = container
+        with TaskWorkspace.reserve(self.state, "postprocessing_ns", remaining, self.save,
+                                   settled=lambda: self.state["container"] is None) as deadline:
+            try:
+                self.limit.check()
+                yield remaining / 1e9
+                self.limit.check()
+                if time.monotonic_ns() > deadline:
+                    raise AllowanceExhausted("cost postprocessing allowance exhausted")
+            finally:
+                if container is not None:
+                    OwnedContainers([container]).close()
+                self.state["container"] = None
 
     def command(self, output, command):
         if output.is_file():
@@ -204,7 +207,7 @@ class CostAcquisition:
             with self.processing():
                 if rank in needed:
                     path = needed[rank]
-                    self.samples[path] = read(path)
+                    self.samples[path] = read_json(path)
 
                 catalog = WorkCatalog(work / f"{rank}-graph.json", source.identities(rank))
                 owner = f"{source.recording.source / 'capture.json'}#rank={rank}"
@@ -226,7 +229,7 @@ class CostAcquisition:
     @classmethod
     def spending(cls, directory):
         state = directory / "execution.json"
-        processing = Usage(processing_ns=read(state)["postprocessing_ns"]) if state.is_file() else Usage()
+        processing = Usage(processing_ns=read_json(state)["postprocessing_ns"]) if state.is_file() else Usage()
         native = (NativeAttempt.usage(path.parent) for path in directory.glob("sources/*/*/execution.json"))
         return Usage.total((processing, cls.projection_usage(directory), *native))
 
@@ -313,9 +316,7 @@ class CostAcquisition:
         }
 
     def run(self):
-        self.output.mkdir(parents=True, exist_ok=True)
-        with (self.output / ".lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with file_lock(self.output / ".lock"):
             self.prepare()
             result = self.output / "costs.json"
             try:

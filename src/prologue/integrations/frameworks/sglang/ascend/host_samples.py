@@ -5,7 +5,7 @@ from collections import Counter, defaultdict
 
 from prologue.acquisition.observation.workers import CapturedWorkers
 from prologue.acquisition.recording import PublishedCapture
-from prologue.artifacts import write_json
+from prologue.runtime.io import read_json, read_jsonl, write_json
 from prologue.integrations.frameworks.sglang.acquisition.host_scopes import NativeHostCalls
 from prologue.integrations.frameworks.sglang.ascend.launch import SGLangAscendLaunch
 from prologue.integrations.platforms.ascend.host_alignment import AscendHostAlignment, ThreadService
@@ -19,10 +19,6 @@ class HostCostSamples:
         self.arguments = arguments
         self.qualification = Counter()
 
-    @staticmethod
-    def read(path):
-        return json.loads(path.read_text())
-
     @classmethod
     def local(cls, original, timed, catalog):
         inputs = ("image", "physical_devices", "framework_revision")
@@ -31,15 +27,10 @@ class HostCostSamples:
             raise ValueError("independent CPU probe changed the qualified native cut or its placement")
         probe = timed.read("host")
         rank = original.rank
-        raw = cls.read(original.source / f"rank-{rank}.json")
+        raw = read_json(original.source / f"rank-{rank}.json")
         if raw["environment"] != probe["environment"] or probe["rank"] != rank or probe["clock"] != "monotonic_raw_ns":
             raise ValueError("local CPU probe differs from the observed native worker or clock")
         return cls().measure(catalog, {rank: probe}, rank, raw, original.source, original.source / "sdk/trace.json", timed.source)
-
-    @staticmethod
-    def records(path):
-        with path.open() as source:
-            return [json.loads(line) for line in source]
 
     @staticmethod
     def supports(work, resource):
@@ -96,14 +87,14 @@ class HostCostSamples:
 
     @classmethod
     def external_work(cls, capture):
-        instances = cls.read(capture / "capture.json")["instances"]
+        instances = read_json(capture / "capture.json")["instances"]
         workers = CapturedWorkers(instances)
         demands = {}
         for instance in instances:
             participants = instance["native_participants"]
             for window in workers.windows[instance["id"]]:
                 directory = window.protocol_directory(capture)
-                records = {rank: cls.read(directory / f"rank-{rank}.json") for rank in participants}
+                records = {rank: read_json(directory / f"rank-{rank}.json") for rank in participants}
                 for rank in window.observed:
                     demands[rank] = [(identity, "host", features)
                                      for identity, features, _, _ in CpuProtocolWork.local(records[rank])]
@@ -144,9 +135,9 @@ class HostCostSamples:
                      if rank in candidate["native_participants"])
         paths = {int(actor): host_root / relative for actor, relative in instance["host_samples"].items()}
         path = paths[rank]
-        records = {actor: self.read(measurement) for actor, measurement in paths.items()}
-        facts = self.read(self.arguments.facts)
-        original = self.read(source_root / f"rank-{rank}.json")
+        records = {actor: read_json(measurement) for actor, measurement in paths.items()}
+        facts = read_json(self.arguments.facts)
+        original = read_json(source_root / f"rank-{rank}.json")
         if (facts["measurements"]["window_ns"] != catalog.window
                 or facts["environment"] != graph["environment"] or original["environment"] != graph["environment"]):
             raise ValueError("host measurement uses a graph from a different native capture")
@@ -172,14 +163,14 @@ class HostCostSamples:
         # A host-only window runs all CPU ranks together even when device shards share a card.
         collectives = self.collectives(records, rank, cold)
         timing = probe["timing"]
-        queues = self.read(directory / timing["queues"])
+        queues = read_json(directory / timing["queues"])
         if queues["clock"] != "monotonic_raw_ns" or queues["unpaired"]:
             raise ValueError("native CPU timing requires paired queue evidence on the RAW clock")
         profile, = (source_root / "native" / f"rank-{rank}").glob("*_ascend_pt")
         trace = AscendTrace(profile, source_root / "runtime", original, trace_path)
         alignment = AscendHostAlignment(
-            trace, original["scopes"], probe["scopes"], queues["commands"], self.records(directory / timing["runtime"]),
-            self.records(directory / timing["activity"]), probe["auxiliary_intervals"], cold[rank].values(),
+            trace, original["scopes"], probe["scopes"], queues["commands"], list(read_jsonl(directory / timing["runtime"])),
+            list(read_jsonl(directory / timing["activity"])), probe["auxiliary_intervals"], cold[rank].values(),
         )
         exact = alignment.cuts(pairs, original["state_queries"])
         local = alignment.cuts(local_pairs, original["state_queries"], strict_runtime=True) if local_pairs else None

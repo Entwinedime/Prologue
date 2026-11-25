@@ -1,20 +1,20 @@
 """Resolve concrete prediction gaps within the caller's placement and cumulative allowances."""
 
-import json
 from collections import defaultdict
 
-from prologue.acquisition.allowances import AcquisitionBudget
+from prologue.acquisition.budget import AcquisitionBudget
+from prologue.runtime.docker import DockerImage
 from prologue.acquisition.capture import NativeAttempt
 from prologue.acquisition.library_increment import LocalLibraryIncrement
 from prologue.acquisition.library_store import LibraryStore
 from prologue.acquisition.options import LocalAcquisitionOptions, QualificationOptions, ReplenishmentOptions
 from prologue.acquisition.recording import PublishedCapture
 from prologue.acquisition.rules import EvidenceGap
-from prologue.artifacts import content_id, write_json
-from prologue.integrations.runtimes.docker import ModelingProcess
+from prologue.runtime.io import read_json, content_id, write_json
+from prologue.runtime.docker import ModelingProcess
 from prologue.libraries import LibraryRelease, asset_path
 from prologue.performance.requirements import CostRequirements
-from prologue.workflow.limits import AllowanceExhausted
+from prologue.runtime.limits import AllowanceExhausted
 
 
 class Replenishment:
@@ -24,8 +24,8 @@ class Replenishment:
         if (self.store.root / "release.json").exists():
             raise ValueError("on-demand acquisition needs a library store, not an immutable release")
         self.sessions = self.root / "acquisition/sessions"
-        self.deployment = json.loads(args.deployment.read_bytes())
-        self.source_image = NativeAttempt.image(args.source_image)["Id"]
+        self.deployment = read_json(args.deployment)
+        self.source_image = DockerImage.id(args.source_image)
         self.budget = AcquisitionBudget(self.root, self.store, args)
         self.qualification = QualificationOptions(timeout=args.timeout, modeling_image=task.runtime["modeling_image"],
                                                   binary=task.root / "inputs/prologue")
@@ -45,7 +45,7 @@ class Replenishment:
         origin = str(release.directory.relative_to(self.store.root)) if release.identity else None
         pending = {}
         for path in sorted(self.sessions.glob("*/demand.json")):
-            original = json.loads(path.read_bytes())
+            original = read_json(path)
             keys = {content_id(q) for q in original["queries"]}
             began = (path.parent / "session/native/execution.json").is_file()
             if (began or original["origin"] == origin) and keys.intersection(queries) - answers.keys():
@@ -108,7 +108,7 @@ class Replenishment:
         if not points:
             return None
         for path in sorted(self.sessions.glob("*/session/result.json")):
-            receipt = json.loads(path.read_bytes())
+            receipt = read_json(path)
             if receipt["status"] not in {"qualified", "incomplete"}:
                 continue
             directory = path.parent
@@ -145,11 +145,11 @@ class Replenishment:
     def required_services(self, release):
         demand = CostRequirements()
         for path in self.sessions.glob("*/session/result.json"):
-            receipt = json.loads(path.read_bytes())
+            receipt = read_json(path)
             if receipt["status"] not in {"qualified", "incomplete"}:
                 continue
             for asset, points in receipt.get("required_work", {}).items():
-                source = json.loads(asset_path(path.parent, asset).read_bytes())
+                source = read_json(asset_path(path.parent, asset))
                 if content_id(source) != receipt["assets"][asset]:
                     raise ValueError("required work refers to a changed native sample table")
                 for index, interval, features in points:
@@ -160,7 +160,7 @@ class Replenishment:
             return {}
         with self.budget.processing() as seconds:
             model = ModelingProcess(self.qualification.binary, self.qualification.modeling_image, min(seconds, self.qualification.timeout))
-            domains = json.loads(release.costs.read_bytes())["domains"]
+            domains = read_json(release.costs)["domains"]
             _, missing, _ = demand.check(model, domains, self.sessions)
         queries = [demand.work_query(point) for point in missing]
         return {content_id(query): query for query in queries}
@@ -169,7 +169,7 @@ class Replenishment:
         queries, users = {}, defaultdict(list)
         for target in targets:
             if target["status"] in {"template_gap", "cost_gap"}:
-                query = json.loads((self.root / target["evidence"]).read_bytes())
+                query = read_json((self.root / target["evidence"]))
                 key = content_id(query)
                 queries[key] = query
                 users[key].append(target)
@@ -191,7 +191,7 @@ class Replenishment:
             return None
         answers = dict(self.failed)
         if current.identity:
-            for product in json.loads((current.directory / "evidence.json").read_bytes()).values():
+            for product in read_json((current.directory / "evidence.json")).values():
                 if product["deployment"] == self.deployment:
                     for key in queries.keys() & set(product["queries"]):
                         answers[key] = {"status": "published_evidence_did_not_resolve_query", "product": product["product"]}

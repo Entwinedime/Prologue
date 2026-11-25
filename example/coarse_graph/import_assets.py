@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from prologue.acquisition.publication import SourceProductions
+from prologue.acquisition.recording import SourceProductions
 from prologue.acquisition.recording import PublishedCapture
 from prologue.libraries import LibraryRelease, asset_path
 

@@ -7,8 +7,8 @@ from contextlib import nullcontext
 from statistics import median
 
 from prologue.acquisition.options import FitCostsOptions
-from prologue.artifacts import write_json
-from prologue.integrations.runtimes.docker import ModelingProcess
+from prologue.runtime.io import read_json, write_json
+from prologue.runtime.docker import ModelingProcess
 from prologue.performance.fitting import FittedCosts
 from prologue.performance.requirements import CostRequirements
 from prologue.performance.samples import ServiceSamples
@@ -65,10 +65,6 @@ class FitCosts:
         return fitted, counts, missing, estimates
 
     @staticmethod
-    def read(path):
-        return json.loads(path.read_text())
-
-    @staticmethod
     def assess(source, estimates):
         counts, errors = defaultdict(Counter), defaultdict(list)
         for row, (status, estimate) in zip(source["samples"], estimates, strict=True):
@@ -84,17 +80,17 @@ class FitCosts:
         }
 
     def run(self):
-        sources = {path.resolve(strict=True): self.read(path) for path in self.arguments.samples}
+        sources = {path.resolve(strict=True): read_json(path) for path in self.arguments.samples}
         demand = CostRequirements()
         for graph_path, identities_path in self.arguments.demand:
             demand.graph(str(graph_path.resolve()), WorkCatalog(graph_path, identities_path))
         for path in self.arguments.gap:
-            demand.gap(str(path.resolve()), self.read(path))
+            demand.gap(str(path.resolve()), read_json(path))
 
         checks = CostRequirements()
         check_sources = []
         for path in self.arguments.check:
-            source = self.read(path)
+            source = read_json(path)
             name = str(path.resolve())
             check_sources.append((name, source, checks.samples(name, source, basis="held_out_samples")))
 

@@ -1,9 +1,21 @@
 """Run bounded modeling commands and clean up only their owned containers."""
 
+import json
 import math
 import subprocess
 import time
 from uuid import uuid4
+
+
+class DockerImage:
+    @staticmethod
+    def inspect(name: str, *, timeout: float | None = None) -> dict:
+        result = subprocess.check_output(["docker", "image", "inspect", name], timeout=timeout)
+        return json.loads(result)[0]
+
+    @classmethod
+    def id(cls, name: str) -> str:
+        return cls.inspect(name)["Id"]
 
 
 class OwnedContainers:
@@ -54,7 +66,7 @@ class ModelingProcess:
         if not math.isfinite(allowance) or allowance <= 0:
             raise ValueError("modeling needs a positive finite allowance")
         self.binary = binary.resolve(strict=True)
-        self.image = subprocess.check_output(["docker", "image", "inspect", "--format", "{{.Id}}", image], text=True).strip()
+        self.image = DockerImage.id(image)
         self.deadline = time.monotonic() + allowance
 
     def run_model(self, operation, output, *inputs, options=()):

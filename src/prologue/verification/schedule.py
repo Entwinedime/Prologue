@@ -6,7 +6,7 @@ from collections import defaultdict
 from itertools import zip_longest
 from pathlib import Path
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 
 from .actions import ActionIdentity
 from .context_values import ContextValues

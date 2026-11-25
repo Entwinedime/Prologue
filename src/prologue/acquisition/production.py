@@ -1,26 +1,22 @@
 """Project a closed native capture, optionally compiling representative templates."""
 
-import fcntl
-import filecmp
-import json
-import shutil
 import subprocess
-import time
 from uuid import uuid4
 
 from prologue.acquisition.adapters import ProductionAdapter
-from prologue.acquisition.options import ProductionOptions
 from prologue.acquisition.observation.workers import CapturedWorkers
-from prologue.artifacts import write_json
-from prologue.integrations.runtimes.docker import OwnedContainers
-from prologue.workflow.limits import AllowanceExhausted, OperationLimit, Usage
+from prologue.acquisition.options import ProductionOptions
+from prologue.runtime.docker import DockerImage, OwnedContainers
+from prologue.runtime.io import discard_path, read_json, write_json
+from prologue.runtime.limits import AllowanceExhausted, OperationLimit, Usage
+from prologue.runtime.workspace import BinarySnapshot, TaskWorkspace, file_lock
 
 
 class CaptureProduction:
     @staticmethod
     def usage(directory):
         state = directory / "production.json"
-        return Usage(processing_ns=json.loads(state.read_text())["spent_ns"]) if state.is_file() else Usage()
+        return Usage(processing_ns=read_json(state)["spent_ns"]) if state.is_file() else Usage()
 
     def __init__(self, arguments: ProductionOptions, recording, adapter: type[ProductionAdapter], limit=None) -> None:
         self.arguments, self.adapter = arguments, adapter
@@ -38,12 +34,14 @@ class CaptureProduction:
             raise ValueError("source production requires a detailed native recording")
         capture = recording.manifest
         self.ranks = CapturedWorkers(capture["instances"]).observed
-        self.sampling_input = adapter.sampling_input(recording.inputs["job"]) if arguments.product == "templates" else None
+        self.sampling_input = (
+            adapter.sampling_input(recording.inputs["job"]) if arguments.product == "templates" else None
+        )
         if not self.ranks:
             raise ValueError("source production requires at least one profiled worker")
         images = {}
         for role, image in (("source", arguments.source_image), ("modeling", arguments.modeling_image)):
-            images[role] = json.loads(subprocess.check_output(["docker", "image", "inspect", image], text=True))[0]
+            images[role] = DockerImage.inspect(image)
         if adapter.image_revision(images["source"]) != capture["framework_revision"]:
             raise ValueError("source postprocessing image differs from the captured framework revision")
         self.inputs = {"capture_path": str(self.capture), "capture": capture, "native_image": recording.inputs["image"],
@@ -53,24 +51,17 @@ class CaptureProduction:
     def publish_state(self) -> None:
         write_json(self.output / "production.json", self.state, indent=2)
 
-    @staticmethod
-    def discard(path) -> None:
-        if not path.is_symlink() and path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink(missing_ok=True)
-
     @classmethod
     def release_work(cls, output, graph_ranks=()):
         work = output / "work"
         if not graph_ranks:
-            cls.discard(work)
+            discard_path(work)
             return
 
         published = {f"{rank}-graph.json" for rank in graph_ranks}
         for path in work.iterdir():
             if path.name not in published:
-                cls.discard(path)
+                discard_path(path)
 
     @classmethod
     def retire_projection(cls, output):
@@ -79,40 +70,35 @@ class CaptureProduction:
         if output.is_dir():
             for path in output.iterdir():
                 if path.name not in {"production.json", ".lock"}:
-                    cls.discard(path)
+                    discard_path(path)
 
     def prepare(self) -> None:
-        state = self.output / "production.json"
-        executable = self.output / "inputs/prologue"
-        if state.exists():
-            self.state = json.loads(state.read_text())
-            if self.state["inputs"] != self.inputs or not filecmp.cmp(self.binary, executable, shallow=False):
-                raise ValueError("production inputs changed; create a new output instead of resuming different assets")
-            if self.state["running"] is not None:
+        snapshot = BinarySnapshot(self.binary)
+        with TaskWorkspace(self.output).initialize("production.json") as draft:
+            if draft is not None:
+                for name in ("inputs", "work", "logs"):
+                    (draft / name).mkdir()
+                snapshot.copy_to(draft / "inputs/prologue")
+                if self.arguments.product == "templates":
+                    templates = [f"/production/work/{rank}-templates.json" for rank in self.ranks]
+                    write_json(draft / "inputs/templates.json", templates)
+                if self.sampling_input:
+                    write_json(draft / "inputs/sampling.json", self.sampling_input)
+                self.state = {"inputs": self.inputs, "spent_ns": 0, "attempts": 0,
+                              "completed": [], "running": None, "error": None}
+                write_json(draft / "production.json", self.state, indent=2)
+                return
+        self.state = read_json(self.output / "production.json")
+        if self.state["inputs"] != self.inputs:
+            raise ValueError("production inputs changed; use a new output directory")
+        snapshot.check(self.output / "inputs/prologue")
+        if running := self.state["running"]:
 
-                # A killed client may leave its container alive; recover only the recorded invocation.
-                running = self.state["running"]
-                OwnedContainers([running["container"]]).close()
-                self.discard(self.output / running["output"])
-                self.state["running"] = None
-                self.state["error"] = "interrupted operation charged its reserved remaining budget"
-                self.publish_state()
-            return
-
-        if any(path.name != ".lock" for path in self.output.iterdir()):
-            raise ValueError("new production requires an empty directory")
-
-        for name in ("inputs", "work", "logs"):
-            (self.output / name).mkdir()
-        shutil.copyfile(self.binary, executable)
-        executable.chmod(0o500)
-        if self.arguments.product == "templates":
-            write_json(self.output / "inputs/templates.json", [f"/production/work/{rank}-templates.json" for rank in self.ranks])
-        if self.sampling_input:
-            write_json(self.output / "inputs/sampling.json", self.sampling_input)
-        self.state = {"inputs": self.inputs, "spent_ns": 0, "attempts": 0,
-                      "completed": [], "running": None, "error": None}
-        self.publish_state()
+            # Only the unfinished step's container and output belong to recovery.
+            OwnedContainers([running["container"]]).close()
+            discard_path(self.output / running["output"])
+            self.state.update(running=None, error="interrupted operation charged its reserved remaining budget")
+            self.publish_state()
 
     def step(self, name: str, output: str, image: str, command: list[str]) -> None:
         if name in self.state["completed"]:
@@ -130,45 +116,55 @@ class CaptureProduction:
         log = self.output / "logs" / f"{self.state['attempts']:03d}-{name}.log"
 
         # Reserve before starting: hard interruption cannot reset the cumulative allowance on resume.
-        previous_ns = self.state["spent_ns"]
-        self.state["spent_ns"] = self.limit_ns
         self.state["running"] = {"container": container, "step": name, "output": output}
         self.state["error"] = None
-        self.publish_state()
-        started_ns = time.monotonic_ns()
-        try:
-            with log.open("x") as stream:
+        with TaskWorkspace.reserve(self.state, "spent_ns", remaining_ns, self.publish_state,
+                                   settled=lambda: self.state["running"] is None):
+            try:
+                with log.open("x") as stream:
 
-                # The cumulative reservation also bounds the container after coordinator interruption.
-                command = [
-                    "docker", "run", "--rm", "--init", "--runtime", "runc" if image == "modeling" else self.adapter.platform_runtime.source_docker_runtime(),
-                    "--network", "none", "--name", container,
-                    "--entrypoint", "/usr/bin/timeout", "-e", "LD_PRELOAD=",
-                    "--mount", f"type=bind,src={self.capture},dst=/source,readonly",
-                    "--mount", f"type=bind,src={self.output},dst=/production",
-                    self.inputs["images"][image], "--signal=KILL", f"{remaining_ns / 1_000_000_000}s", *command,
-                ]
-                code = self.operation_limit.run(command, stream, remaining_ns / 1_000_000_000)
-                if code:
-                    raise subprocess.CalledProcessError(code, command)
-            if not (self.output / output).exists():
-                raise FileNotFoundError(f"production command did not publish {output}")
-            self.state["completed"].append(name)
-        except BaseException as error:
-            self.state["error"] = f"{name}: {type(error).__name__}: {error}"
-            raise
-        finally:
-            OwnedContainers([container]).close()
-            if name not in self.state["completed"]:
-                self.discard(self.output / output)
-            self.state["spent_ns"] = previous_ns + time.monotonic_ns() - started_ns
-            self.state["running"] = None
-            self.publish_state()
+                    # The cumulative reservation also bounds the container after coordinator interruption.
+                    command = [
+                        "docker",
+                        "run",
+                        "--rm",
+                        "--init",
+                        "--runtime",
+                        "runc" if image == "modeling" else self.adapter.platform_runtime.source_docker_runtime(),
+                        "--network",
+                        "none",
+                        "--name",
+                        container,
+                        "--entrypoint",
+                        "/usr/bin/timeout",
+                        "-e",
+                        "LD_PRELOAD=",
+                        "--mount",
+                        f"type=bind,src={self.capture},dst=/source,readonly",
+                        "--mount",
+                        f"type=bind,src={self.output},dst=/production",
+                        self.inputs["images"][image],
+                        "--signal=KILL",
+                        f"{remaining_ns / 1_000_000_000}s",
+                        *command,
+                    ]
+                    code = self.operation_limit.run(command, stream, remaining_ns / 1_000_000_000)
+                    if code:
+                        raise subprocess.CalledProcessError(code, command)
+                if not (self.output / output).exists():
+                    raise FileNotFoundError(f"production command did not publish {output}")
+                self.state["completed"].append(name)
+            except BaseException as error:
+                self.state["error"] = f"{name}: {type(error).__name__}: {error}"
+                raise
+            finally:
+                OwnedContainers([container]).close()
+                if name not in self.state["completed"]:
+                    discard_path(self.output / output)
+                self.state["running"] = None
 
     def run(self) -> None:
-        self.output.mkdir(parents=True, exist_ok=True)
-        with (self.output / ".lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with file_lock(self.output / ".lock"):
             self.prepare()
             if (self.output / "result.json").is_file():
                 return
@@ -177,11 +173,20 @@ class CaptureProduction:
             evidence = self.arguments.keep_intermediates or self.sampling_input is not None
             pending = [] if "link-templates" in self.state["completed"] else self.ranks
             for rank in pending:
-                facts, graph, template = (f"work/{rank}-facts.json", f"work/{rank}-graph.json", f"work/{rank}-templates.json")
+                facts, graph, template = (
+                    f"work/{rank}-facts.json",
+                    f"work/{rank}-graph.json",
+                    f"work/{rank}-templates.json",
+                )
                 exported = f"work/{rank}-sdk"
                 terminal = f"{rank}-templates" if templates else f"{rank}-project"
                 if terminal not in self.state["completed"]:
-                    self.step(f"{rank}-export", exported, "source", self.adapter.export_profile(rank, f"/production/{exported}"))
+                    self.step(
+                        f"{rank}-export",
+                        exported,
+                        "source",
+                        self.adapter.export_profile(rank, f"/production/{exported}"),
+                    )
                     command = self.adapter.interpret(rank, f"/production/{exported}/trace.json", f"/production/{facts}",
                                                      evidence=evidence)
                     self.step(f"{rank}-interpret", facts, "source", command)
@@ -195,26 +200,53 @@ class CaptureProduction:
                     ])
                 if self.sampling_input:
                     identities = f"work/{rank}-identities.json"
-                    self.step(f"{rank}-work", identities, "modeling", [
-                        "/production/inputs/prologue", "work-identities", f"/production/{graph}", f"/production/{identities}",
-                    ])
+                    self.step(
+                        f"{rank}-work",
+                        identities,
+                        "modeling",
+                        [
+                            "/production/inputs/prologue",
+                            "work-identities",
+                            f"/production/{graph}",
+                            f"/production/{identities}",
+                        ],
+                    )
                     cuts = f"sampling/{rank}.json"
                     command = self.adapter.sampling_cuts(rank, f"/production/{identities}", f"/production/{cuts}")
                     self.step(f"{rank}-cuts", cuts, "source", command)
 
             # Observed target graphs remain valid independently of source-template selection and transformation rules.
             if templates:
-                self.step("link-templates", "assets", "modeling", [
-                    "/production/inputs/prologue", "link-templates", "/production/inputs/templates.json", "/production/assets",
-                ])
+                self.step(
+                    "link-templates",
+                    "assets",
+                    "modeling",
+                    [
+                        "/production/inputs/prologue",
+                        "link-templates",
+                        "/production/inputs/templates.json",
+                        "/production/assets",
+                    ],
+                )
             if not self.arguments.keep_intermediates:
                 self.release_work(self.output, () if templates else self.ranks)
 
             # Publish only when every observed worker has its requested product; graphs cannot be consumed as templates.
-            write_json(self.output / "result.json", {
-                self.arguments.product: [f"assets/{rank}.json" if templates else f"work/{rank}-graph.json" for rank in self.ranks],
-                **({"sampling": {str(rank): f"sampling/{rank}.json" for rank in self.ranks}} if self.sampling_input else {}),
-                "observed_roles": self.ranks, "postprocessing_ns": self.state["spent_ns"],
-                "qualification": "compiled_source_templates" if templates else "observed_coarse_graphs",
-            }, indent=2)
+            write_json(
+                self.output / "result.json",
+                {
+                    self.arguments.product: [
+                        f"assets/{rank}.json" if templates else f"work/{rank}-graph.json" for rank in self.ranks
+                    ],
+                    **(
+                        {"sampling": {str(rank): f"sampling/{rank}.json" for rank in self.ranks}}
+                        if self.sampling_input
+                        else {}
+                    ),
+                    "observed_roles": self.ranks,
+                    "postprocessing_ns": self.state["spent_ns"],
+                    "qualification": "compiled_source_templates" if templates else "observed_coarse_graphs",
+                },
+                indent=2,
+            )
         print(f"Created {self.output / 'result.json'}")

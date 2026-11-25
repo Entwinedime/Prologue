@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from statistics import mean
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import read_json, write_json
 from prologue.serving.latency import RequestLatency, percentile95
 
 from .publications import publication_marks
@@ -15,7 +15,7 @@ from .reference import RecordedSubmissions, ReferenceRecording
 class NativeLatencyMetrics:
     @classmethod
     def from_source(cls, source):
-        instances = cls.read(source / "capture.json")["instances"]
+        instances = read_json(source / "capture.json")["instances"]
         return cls(source, instances, ReferenceRecording.sessions(source, instances))
 
     def __init__(self, source, instances, sessions):
@@ -40,7 +40,7 @@ class NativeLatencyMetrics:
 
     def read_instance(self, instance, delivery):
         if "latency" in instance:
-            measurements = self.read(self.source / instance["latency"])
+            measurements = read_json(self.source / instance["latency"])
             if measurements["clock"] != delivery.clock:
                 raise ValueError("native latency and delivery clocks differ")
             rows = {row["id"]: row for row in measurements["requests"]}
@@ -53,16 +53,12 @@ class NativeLatencyMetrics:
             basis = "detailed_scheduler_send_bracket_end"
         return {"delivery": delivery, "rows": rows, "specializations": specializations, "basis": basis}
 
-    @staticmethod
-    def read(path):
-        return json.loads(path.read_text())
-
     def detailed_boundaries(self, instance, delivery):
         rows = {name: {} for name in delivery.requests}
         receiver = publisher = None
         loads = [] if set(instance["observed_roles"]) == set(instance["native_participants"]) else None
         for rank in instance["observed_roles"]:
-            raw = self.read(self.source / f"rank-{rank}.json")
+            raw = read_json(self.source / f"rank-{rank}.json")
             if loads is not None:
                 if raw.get("specialization_loads") is None:
                     loads = None
@@ -171,7 +167,7 @@ class LatencyComparison:
     def __init__(self, native, prediction):
         self.native = native
         self.path = prediction
-        self.result = NativeLatencyMetrics.read(prediction)
+        self.result = read_json(prediction)
 
     def report(self):
         result = self.result

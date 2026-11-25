@@ -1,13 +1,13 @@
 """Publish both libraries together while readers keep their selected release."""
 
-import fcntl
 import json
 import os
 from pathlib import Path
 from shutil import copytree, ignore_patterns, rmtree
 from uuid import uuid4
 
-from prologue.artifacts import write_json
+from prologue.runtime.workspace import file_lock
+from prologue.runtime.io import write_json
 from prologue.libraries import LibraryRelease, asset_path
 from prologue.performance.fitting import FittedCosts
 
@@ -32,8 +32,7 @@ class LibraryStore:
 
     def open(self):
         if (self.root / ".pending.json").is_file():
-            with (self.root / ".library.lock").open("a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            with file_lock(self.root / ".library.lock", blocking=True):
                 self.recover(LibraryRelease(self.root))
         return LibraryRelease(self.root)
 
@@ -41,8 +40,7 @@ class LibraryStore:
         self.root.mkdir(parents=True, exist_ok=True)
         if (self.root / "release.json").exists():
             raise ValueError("a fixed release is immutable; publish increments to a library store")
-        with (self.root / ".library.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with file_lock(self.root / ".library.lock", blocking=True):
             before = LibraryRelease(self.root)
             self.recover(before)
 

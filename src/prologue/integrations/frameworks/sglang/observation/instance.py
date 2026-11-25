@@ -13,7 +13,7 @@ from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
 from prologue.integrations.frameworks.sglang.observation.submissions import EngineSubmissions
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 
 
 class NativeServingInstance:

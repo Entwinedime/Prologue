@@ -7,22 +7,18 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from prologue.acquisition.recording import PublishedCapture
-from prologue.artifacts import content_id, write_json
+from prologue.runtime.io import read_json, content_id, write_json
 from prologue.libraries import asset_path
 from prologue.performance.fitting import FittedCosts
 from prologue.performance.requirements import CostRequirements
 from prologue.templates.publication import TemplatePublication
 
 
-def read(path):
-    return json.loads(path.read_bytes())
-
-
 class LocalLibraryIncrement:
     def __init__(self, session, queries, acquisition, model, cost_source, *, measured=None):
         self.session = session.resolve(strict=True)
         self.recording = PublishedCapture(self.session / "native")
-        self.receipt = read(self.session / "result.json")
+        self.receipt = read_json(self.session / "result.json")
         self.acquisition, self.model, self.cost_source = acquisition, model, cost_source
         self.measured = measured
         native, receipt = self.recording, self.receipt
@@ -68,7 +64,7 @@ class LocalLibraryIncrement:
         if self.direct:
             if "assets" in self.receipt:
                 for name in sorted(self.identities.keys() - self.derived):
-                    product = read(asset_path(self.session, name))
+                    product = read_json(asset_path(self.session, name))
                     if content_id(product) != self.receipt["assets"][name]:
                         raise ValueError(f"local product changed after qualification: {name}")
                     products[name] = product
@@ -123,10 +119,10 @@ class LocalLibraryIncrement:
                     receipts[identity]["supports"] = sorted(related)
 
     def costs(self, directory, scratch, receipts, products):
-        previous = read(directory / "costs.json")
+        previous = read_json(directory / "costs.json")
         sources = dict.fromkeys(previous["sources"])
         measured_tables = {
-            content_id(read(directory / path))
+            content_id(read_json(directory / path))
             for path, origins in zip(sources, previous["sample_recordings"], strict=True)
             if self.recording.attempt_id in origins
         }
@@ -156,7 +152,7 @@ class LocalLibraryIncrement:
         # Source indices stay stable across releases, including any qualified cross-role donor references.
         fitted = previous
         if len(sources) != len(previous["sources"]):
-            fitted = FittedCosts({path: read(directory / path) for path in sources}, previous["reused"]).document()
+            fitted = FittedCosts({path: read_json(directory / path) for path in sources}, previous["reused"]).document()
         covered = demand.query(self.model, fitted["domains"], scratch, nullcontext, None)
         for name in products:
             for query in self.questions[name].values():

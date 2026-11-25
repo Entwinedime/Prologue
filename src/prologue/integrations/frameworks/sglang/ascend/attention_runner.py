@@ -2,7 +2,7 @@
 
 from time import monotonic_ns
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.ascend.attention_observation import DecodeAttentionObservation
 from prologue.integrations.frameworks.sglang.configuration import NativeConfiguration
 from prologue.integrations.platforms.ascend.scoped_tasks import ScopedTasks

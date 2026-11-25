@@ -2,7 +2,7 @@
 
 import json
 
-from prologue.artifacts import content_id, write_json
+from prologue.runtime.io import content_id, write_json
 from prologue.libraries import TemplateCatalog
 
 

@@ -4,7 +4,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
 from prologue.integrations.frameworks.sglang.observation.content import NativeContent
 from prologue.integrations.frameworks.sglang.observation.host_samples import NativeHostSamples

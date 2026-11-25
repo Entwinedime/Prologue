@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import torch
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.disaggregated_calls import DisaggregatedCalls
 from prologue.integrations.frameworks.sglang.kv_layout import MhaKvLayout

@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 
 
 class ObservationWindow:

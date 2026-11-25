@@ -5,7 +5,7 @@ from collections import defaultdict
 from threading import get_native_id
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.integrations.platforms.ascend.host_profile import AscendRuntimeTiming
 from prologue.integrations.platforms.ascend.services import SynchronousCopy
 

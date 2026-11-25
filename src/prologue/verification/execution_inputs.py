@@ -5,7 +5,7 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from prologue.artifacts import write_json
+from prologue.runtime.io import read_json, write_json
 
 from .actions import ActionIdentity
 from .context_values import ContextValues
@@ -29,10 +29,6 @@ class NativeInputs:
         self.realization = None
 
     @staticmethod
-    def read(path):
-        return json.loads(path.read_text())
-
-    @staticmethod
     def window(begin, end, origin):
         if begin > end or end < origin:
             raise ValueError("native condition has a reversed or pre-workload interval")
@@ -48,7 +44,7 @@ class NativeInputs:
         graph, evidence = source.graph, source.graph["evidence"]
         if evidence["clock"] != "monotonic_raw_ns":
             raise ValueError("native input conditions require the common RAW clock")
-        layouts = None if self.layouts is None else self.read(self.layouts / f"{rank}-layouts.json")
+        layouts = None if self.layouts is None else read_json(self.layouts / f"{rank}-layouts.json")
         if layouts is not None and set(layouts) != {str(index) for index in identities}:
             raise ValueError("timing layouts and independently observed action scopes differ")
         if layouts is not None and sum(len(layout["identity"][-1]) for layout in layouts.values()) != len(graph["work"]):

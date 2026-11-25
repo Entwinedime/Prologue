@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from prologue.acquisition.rules import EvidenceGap, missing_root
-from prologue.artifacts import write_json
+from prologue.runtime.io import write_json
 from prologue.integrations.frameworks.sglang.ascend.attention_cuts import AttentionCuts
 from prologue.integrations.frameworks.sglang.ascend.batch_calibration import BatchCalibration
 from prologue.integrations.frameworks.sglang.ascend.launch import SGLangAscendLaunch
@@ -15,7 +15,7 @@ from prologue.integrations.frameworks.sglang.configuration import NativeConfigur
 from prologue.integrations.frameworks.sglang.ingress import BatchOperands
 from prologue.integrations.frameworks.sglang.worker_templates import WorkerDomain
 from prologue.integrations.platforms.ascend.deployment import AscendDeployment
-from prologue.integrations.runtimes.docker import ModelingProcess
+from prologue.runtime.docker import ModelingProcess
 
 
 class LocalWorkerBinding:
