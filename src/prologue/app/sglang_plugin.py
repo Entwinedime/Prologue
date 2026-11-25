@@ -15,7 +15,7 @@ def install() -> None:
     device_api = "torch.npu"
     shard_transport = None
     if description["local_shards"]:
-        from prologue.integrations.frameworks.sglang.ascend.shard_transport import ShardTransport
+        from prologue.integrations.frameworks.sglang.observation.local.shard_transport import ShardTransport
 
         shard_transport = ShardTransport
 
@@ -27,7 +27,7 @@ def install() -> None:
         if description["host_timing"]:
             timing = NativeTiming(description, host_profile=AscendHostProfile)
         elif "attention_sites" in description:
-            from prologue.integrations.frameworks.sglang.ascend.attention_observation import DecodeAttentionObservation
+            from prologue.integrations.frameworks.sglang.observation.local.attention_observation import DecodeAttentionObservation
 
             timing = NativeTiming(description, attention=DecodeAttentionObservation)
         else:

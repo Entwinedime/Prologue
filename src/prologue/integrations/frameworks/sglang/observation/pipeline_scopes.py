@@ -1,9 +1,8 @@
 """Observe native pipeline actions; the framework keeps microbatch rotation and event ownership."""
 
-from prologue.integrations.frameworks.sglang.batches import BatchTensors
-from prologue.integrations.frameworks.sglang.pipeline import PipelineABI, PipelineMessages
-
 from prologue.integrations.frameworks.sglang.observation.transfers import HostTransfers, NativeTransfers
+from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
+from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI, PipelineMessages
 from prologue.integrations.runtimes.pytorch.signals import NativeSignals
 
 
@@ -20,7 +19,9 @@ class PipelineCuts:
         streams = PipelineABI.streams(self.calls.scheduler, stream, other)
         work = self.messages.work()
         work["context"]["streams"] = streams
-        with self.site_scope("stream_wait", original, work=work, bindings={"streams": streams}, device=True, stream=stream):
+        with self.site_scope(
+            "stream_wait", original, work=work, bindings={"streams": streams}, device=True, stream=stream
+        ):
             return original(stream, other)
 
     def install(self, device_api):
@@ -57,12 +58,20 @@ class PipelineScopes(PipelineCuts):
         if not owner.active:
             return original(scheduler, mb_id, pp_proxy_tensors, mb_metadata, last_rank_comm_queue)
 
-        with owner.model_call("launch", original, scheduler.cur_batch, stream=scheduler.forward_stream) as call, self.signals.observe():
+        with (
+            owner.model_call("launch", original, scheduler.cur_batch, stream=scheduler.forward_stream) as call,
+            self.signals.observe(),
+        ):
             if pp_proxy_tensors is not None:
                 for name, tensor in PipelineABI.proxy_tensors(pp_proxy_tensors).items():
 
                     # Launch forwards handles before its stream wait; the model body owns the actual device read.
-                    call.port(f"proxy.{name}", "input", owner.tensors.observe(tensor, owner.modules.proxy_shape(tensor)), use="metadata")
+                    call.port(
+                        f"proxy.{name}",
+                        "input",
+                        owner.tensors.observe(tensor, owner.modules.proxy_shape(tensor)),
+                        use="metadata",
+                    )
             result, event = original(scheduler, mb_id, pp_proxy_tensors, mb_metadata, last_rank_comm_queue)
             self.signals.publish(call, event, "completion")
             owner.result_outputs(call, result)
@@ -74,8 +83,18 @@ class PipelineScopes(PipelineCuts):
             return original(scheduler, batch, mb_metadata, pp_outputs)
         work = owner.batch_work(batch)
         parameters = BatchTensors.parameters(batch, sum(member["new_tokens"] for member in work["members"]))
-        with owner.request_state.members(batch), owner.call("output_prepare", original, parameters=parameters, work=work, device=True, stream=scheduler.copy_stream) as call:
-            call.port("next_token_ids", "input", owner.tensors.observe(pp_outputs["next_token_ids"], ["members"]), use="device")
+        with (
+            owner.request_state.members(batch),
+            owner.call(
+                "output_prepare", original, parameters=parameters, work=work, device=True, stream=scheduler.copy_stream
+            ) as call,
+        ):
+            call.port(
+                "next_token_ids",
+                "input",
+                owner.tensors.observe(pp_outputs["next_token_ids"], ["members"]),
+                use="device",
+            )
             result = original(scheduler, batch, mb_metadata, pp_outputs)
             owner.result_outputs(call, result)
             return result
@@ -86,7 +105,10 @@ class PipelineScopes(PipelineCuts):
             return original(scheduler, batch, mb_metadata)
         work = owner.batch_work(batch)
         parameters = BatchTensors.parameters(batch, sum(member["new_tokens"] for member in work["members"]))
-        with owner.call("output_skip", original, parameters=parameters, work=work, device=True) as call, self.signals.observe():
+        with (
+            owner.call("output_skip", original, parameters=parameters, work=work, device=True) as call,
+            self.signals.observe(),
+        ):
             outputs, result, event = original(scheduler, batch, mb_metadata)
             owner.result_outputs(call, result)
             self.signals.publish(call, event, "completion")

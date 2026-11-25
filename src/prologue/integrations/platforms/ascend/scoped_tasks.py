@@ -14,6 +14,15 @@ from prologue.integrations.platforms.ascend.trace import AscendTrace, Interval, 
 from prologue.runtime.io import write_json
 
 
+def tensor_layouts(environment):
+    if not environment["device"].startswith("Ascend"):
+        return set()
+    layouts = {"positions"}
+    if environment["implementation"]["attention_backend"] == "ascend":
+        layouts.add("packed_value")
+    return layouts
+
+
 class ScopedTasks:
     @staticmethod
     def profile(root, rank):

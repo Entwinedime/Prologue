@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial, update_wrapper
 
+from prologue.integrations.frameworks.sglang.shared.resources import PoolCoordinates
+
 
 @dataclass
 class IndexValues:
@@ -13,7 +15,7 @@ class IndexValues:
     offset: int
 
     def document(self):
-        return [int(value) - self.offset for value in self.tensor.tolist()]
+        return [PoolCoordinates.logical(int(value), self.offset) for value in self.tensor.tolist()]
 
 
 class NativeResourceHistory:
@@ -51,12 +53,15 @@ class NativeResourceHistory:
 
     def begin(self):
         self.initial = {
-            "page_size": self.page_size, "page_capacity": self.allocator.size // self.page_size,
-            "free_slots": [int(slot) - 1 for slot in self.slots.free_slots],
+            "page_size": self.page_size,
+            "page_capacity": self.allocator.size // self.page_size,
+            "free_slots": [PoolCoordinates.logical(int(slot)) for slot in self.slots.free_slots],
             "free_pages": self.indices(self.allocator.free_pages, 1),
             "released_pages": self.indices(self.allocator.release_pages, 1),
             "available": self.available(),
-            "state_slots": {field: {"capacity": pool.size, "free": list(pool.free_slots)} for field, pool in self.fields.items()},
+            "state_slots": {
+                field: {"capacity": pool.size, "free": list(pool.free_slots)} for field, pool in self.fields.items()
+            },
         }
 
     def bind_field(self, field, allocator):
@@ -66,7 +71,9 @@ class NativeResourceHistory:
         allocator.available_size = update_wrapper(partial(self.read_capacity, operation, 1, original), original)
         for name, operation in (("alloc", "allocate"), ("free", "release")):
             original = getattr(allocator, name)
-            setattr(allocator, name, update_wrapper(partial(self.state_operation, field, operation, original), original))
+            setattr(
+                allocator, name, update_wrapper(partial(self.state_operation, field, operation, original), original)
+            )
 
     def state_operation(self, field, operation, original, *args):
         if not self.enabled:
@@ -84,9 +91,14 @@ class NativeResourceHistory:
 
     def state_binding(self, field, request, slot):
         if self.enabled:
-            self.state_events.append({
-                "field": field, "operation": "bind", "request": self.observation.content.aliases[request.rid], "slot": slot,
-            })
+            self.state_events.append(
+                {
+                    "field": field,
+                    "operation": "bind",
+                    "request": self.observation.content.aliases[request.rid],
+                    "slot": slot,
+                }
+            )
 
     def batch(self, scope, batch):
         if not self.enabled:
@@ -94,10 +106,12 @@ class NativeResourceHistory:
 
         # Read the table consumed by attention, including cached prefixes, rather than replaying allocator results.
         with self.observation.tensors.metadata():
-            for req, slot, length in zip(batch.reqs, batch.req_pool_indices_cpu.tolist(), batch.seq_lens_cpu.tolist(), strict=True):
+            for req, slot, length in zip(
+                batch.reqs, batch.req_pool_indices_cpu.tolist(), batch.seq_lens_cpu.tolist(), strict=True
+            ):
                 self.bindings.append({
                     "scope": scope, "request": self.observation.content.aliases[req.rid],
-                    "slot": int(slot) - 1, "begin": 0,
+                    "slot": PoolCoordinates.logical(int(slot)), "begin": 0,
                     "indices": self.indices(self.slots.req_to_token[slot, :length], self.page_size),
                 })
 
@@ -147,7 +161,7 @@ class NativeResourceHistory:
         requests = [self.observation.content.aliases[req.rid] for req in reqs]
         with self.event({"kind": "slots", "requests": requests}) as record:
             result = original(reqs)
-        record["result"] = None if result is None else [int(slot) - 1 for slot in result]
+        record["result"] = None if result is None else [PoolCoordinates.logical(int(slot)) for slot in result]
         return result
 
     def release_slot(self, original, req):
@@ -155,7 +169,7 @@ class NativeResourceHistory:
             return original(req)
         operation = {
             "kind": "release_request", "request": self.observation.content.aliases[req.rid],
-            "slot": int(req.req_pool_idx) - 1,
+            "slot": PoolCoordinates.logical(int(req.req_pool_idx)),
         }
         with self.event(operation):
             return original(req)
@@ -184,7 +198,10 @@ class NativeResourceHistory:
         operation = {"kind": "prefix", "operation": "match", "key_tokens": list(params.key.raw_token_ids())}
         with self.event(operation) as record:
             result = original(params)
-        record["result"] = {"node": self.node(result.last_device_node), "indices": self.indices(result.device_indices, self.page_size)}
+        record["result"] = {
+            "node": self.node(result.last_device_node),
+            "indices": self.indices(result.device_indices, self.page_size),
+        }
         return result
 
     def insert(self, original, params):

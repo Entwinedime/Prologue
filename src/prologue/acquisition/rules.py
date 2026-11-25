@@ -57,11 +57,20 @@ class LocalAcquisition:
             raise EvidenceGap("conflicting_rules", rules=[rule.name for rule in matches])
         return matches[0]
 
-    def run(self, arguments, queries, deployment, limit=None, processing=nullcontext):
+    def run(self, arguments, queries, deployment, limit=None, processing=nullcontext, *, available_queries=None):
         if not queries:
             raise ValueError("local acquisition needs at least one evidence query")
         root = arguments.output.resolve()
         with file_lock(root / ".lock"):
+            request = root / "request.json"
+            if available_queries is not None and request.is_file():
+
+                # A fit can shrink current demand while a previously claimed native session is still recoverable.
+                available = {content_id(query): query for query in available_queries}
+                keys = read_json(request)["queries"]
+                if not available.keys() >= set(keys):
+                    raise ValueError("the training source no longer supplies the original local queries")
+                queries = [available[key] for key in keys]
             return self.observe(arguments, queries, deployment, root, limit, processing)
 
     @staticmethod

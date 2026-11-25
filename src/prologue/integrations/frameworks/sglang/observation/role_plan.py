@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from prologue.integrations.frameworks.sglang.observation.module_layout import ModuleStructure
-from prologue.integrations.frameworks.sglang.groups import ParallelGroups
-from prologue.integrations.frameworks.sglang.kv_layout import MhaKvLayout
+from prologue.integrations.frameworks.sglang.shared.groups import ParallelGroups
+from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
 
 
 class NativeWorkerLayout:
@@ -30,9 +30,13 @@ class NativeWorkerLayout:
         }
         args = runner.server_args
         self.implementation = {
-            "framework_revision": revision, "model": runner.model_config.hf_config.to_dict(),
-            "dtype": str(runner.model_config.dtype), "attention_backend": args.attention_backend,
-            "page_size": args.page_size, "load_format": args.load_format, "disaggregation_mode": args.disaggregation_mode,
+            "framework_revision": revision,
+            "model": runner.model_config.hf_config.to_dict(),
+            "dtype": str(runner.model_config.dtype),
+            "attention_backend": args.attention_backend,
+            "page_size": args.page_size,
+            "load_format": args.load_format,
+            "disaggregation_mode": args.disaggregation_mode,
         }
 
     def pools(self, pools, server_args):
@@ -83,7 +87,10 @@ class WorkerRolePlan:
                 parallel["tp_rank"] == 0,
                 parallel["pp_rank"] == 0,
                 parallel["pp_rank"] + 1 == parallel["logical_pp"],
-                [(name, group["role"], len(group["members"]), group["members"][0] == identity) for name, group in facts["groups"].items()],
+                [
+                    (name, group["role"], len(group["members"]), group["members"][0] == identity)
+                    for name, group in facts["groups"].items()
+                ],
                 layout,
                 ModuleStructure.read(model, layers, {}),
             ),

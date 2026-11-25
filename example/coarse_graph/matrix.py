@@ -11,7 +11,7 @@ from pathlib import Path
 from run import TaskCommands
 
 from prologue.acquisition.recording import PublishedCapture
-from prologue.integrations.frameworks.sglang.worker_templates import SGLangTask
+from prologue.integrations.frameworks.sglang.acquisition.worker_templates import SGLangTask
 from prologue.libraries.release import LibraryRelease
 from prologue.runtime.docker import OwnedContainers
 from prologue.runtime.io import write_json

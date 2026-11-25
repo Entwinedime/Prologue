@@ -10,9 +10,9 @@ from functools import partial
 from typing import Any
 
 from prologue.acquisition.observation.parameters import ScopeParameters
-from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
 from prologue.integrations.frameworks.sglang.observation.module_scopes import tensor_ports
-from prologue.integrations.runtimes.pytorch.layouts import GatherLayout
+from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
+from prologue.integrations.runtimes.pytorch.boundaries import GatherLayout
 
 
 @dataclass
@@ -90,7 +90,9 @@ class DeviceCollectiveCuts:
             root_rank = distributed.get_global_rank(group, arguments.arguments["group_src"])
         operand = None
         if original.__name__ == "all_gather_into_tensor":
-            operand = CollectiveOperand(None, arguments.arguments["input_tensor"], output=arguments.arguments["output_tensor"])
+            operand = CollectiveOperand(
+                None, arguments.arguments["input_tensor"], output=arguments.arguments["output_tensor"]
+            )
         with self.outer():
             return self.scopes.observe_exchange(
                 original, "communication", group, root_rank, operand, partial(original, *args, **kwargs),
@@ -111,12 +113,25 @@ class DeviceCollectiveCuts:
         from sglang.srt.distributed.parallel_state import GroupCoordinator
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
-        for name in ("all_reduce", "quant_all_reduce", "all_gather", "all_gather_into_tensor", "reduce_scatter", "reduce_scatter_tensor", "all_to_all_single", "broadcast"):
+        for name in (
+            "all_reduce",
+            "quant_all_reduce",
+            "all_gather",
+            "all_gather_into_tensor",
+            "reduce_scatter",
+            "reduce_scatter_tensor",
+            "all_to_all_single",
+            "broadcast",
+        ):
             target = f"sglang.srt.distributed.parallel_state.GroupCoordinator.{name}"
-            HookRegistry.register(target, partial(self.invoke, inspect.signature(getattr(GroupCoordinator, name))), HookType.AROUND)
+            HookRegistry.register(
+                target, partial(self.invoke, inspect.signature(getattr(GroupCoordinator, name))), HookType.AROUND
+            )
         for name in ("all_gather_into_tensor", "all_gather", "all_reduce", "broadcast"):
             target = f"torch.distributed.{name}"
-            HookRegistry.register(target, partial(self.distributed, inspect.signature(getattr(distributed, name))), HookType.AROUND)
+            HookRegistry.register(
+                target, partial(self.distributed, inspect.signature(getattr(distributed, name))), HookType.AROUND
+            )
         if expert_exchange is not None:
             for name in ("dispatch", "combine"):
                 target = f"sglang.srt.layers.moe.token_dispatcher.deepep.DeepEPDispatcher.{name}"
@@ -179,25 +194,38 @@ class NativeCommunications:
             relations = {} if standalone else dict(zip(shape, parent_shape, strict=True))
 
         suffix, use = ("", "device") if standalone else (".layout", "metadata")
-        with self.exchange(original, group, root_rank=root_rank, role=role, parameters=parameters, arguments=relations) as call:
+        with self.exchange(
+            original, group, root_rank=root_rank, role=role, parameters=parameters, arguments=relations
+        ) as call:
             with owner.tensors.metadata():
                 implementation = operand.implementation()
                 if implementation is not None:
                     call.record["bindings"]["local_implementation"] = implementation
                 call.record["guards"] = [GatherLayout.guard(tuple(tensor.shape), shape, dim, peers)]
-                call.port(f"input{suffix}", "input", {**owner.tensors.observe(tensor, None), "shape_rule": shape}, use=use)
+                call.port(
+                    f"input{suffix}", "input", {**owner.tensors.observe(tensor, None), "shape_rule": shape}, use=use
+                )
                 if standalone:
-                    call.record["bindings"]["collective"] = PipelineABI.gather_condition(tensor, dim, call.record["bindings"]["collective_group"])
+                    call.record["bindings"]["collective"] = PipelineABI.gather_condition(
+                        tensor, dim, call.record["bindings"]["collective_group"]
+                    )
             result = run()
             output_shape = list(shape)
             output_shape[dim] = ["mul", peers, shape[dim]]
-            call.port(f"output{suffix}", "output", {**owner.tensors.observe(result, None), "shape_rule": output_shape}, use=use)
+            call.port(
+                f"output{suffix}",
+                "output",
+                {**owner.tensors.observe(result, None), "shape_rule": output_shape},
+                use=use,
+            )
 
             # Local axis names belong to this call; later callers see the producer's enclosing expressions.
             with owner.tensors.metadata():
                 parent_output = list(parent_shape)
                 parent_output[dim] = ["mul", peers, parent_shape[dim]]
-                owner.tensors.declare_shape(result, parent_output, scope=call.identity if standalone else call.record["parent"])
+                owner.tensors.declare_shape(
+                    result, parent_output, scope=call.identity if standalone else call.record["parent"]
+                )
             return result
 
     def buffer_exchange(self, original, group, operand, run):
@@ -251,7 +279,8 @@ class NativeCommunications:
             result = run()
             with tensors.metadata():
 
-                # A native reduction can write its aliased result below PyTorch dispatch. Publish that change exactly once.
+                # A native reduction can write its aliased result below PyTorch dispatch. Publish that change exactly
+                # once.
                 if tensors.storage(result) is storage and storage.version == source["version"]:
                     tensors.written(result)
 
@@ -315,7 +344,9 @@ class NativeCommunications:
         for pending in self.pending_reductions:
             call, *_ = pending
             parent = scopes[call.record["parent"]]
-            self.bind_returned_reduction(pending, (port.get("tensor") for port in parent["ports"] if port["direction"] == "output"))
+            self.bind_returned_reduction(
+                pending, (port.get("tensor") for port in parent["ports"] if port["direction"] == "output")
+            )
         self.pending_reductions.clear()
 
     @contextmanager
@@ -353,7 +384,8 @@ class NativeCommunications:
 
         from sglang.srt.distributed.parallel_state import get_tp_group
 
-        # SGLang supplies this process group to DeepEP; dispatch/combine include their local preparation and completion waits.
+        # SGLang supplies this process group to DeepEP; dispatch/combine include their local preparation and
+        # completion waits.
         group = get_tp_group()
         implementation = dispatcher._get_impl()
         if implementation.group is not group.device_group:
@@ -362,7 +394,8 @@ class NativeCommunications:
         dispatch = original.__name__ == "dispatch"
         tensor = bound.arguments["hidden_states"] if dispatch else bound.arguments["combine_input"].hidden_states
 
-        # The layout all-gather owns its own rendezvous inside dispatch; the enclosing call owns AllToAllV and local work.
+        # The layout all-gather owns its own rendezvous inside dispatch; the enclosing call owns AllToAllV and local
+        # work.
         with self.exchange(original, implementation.group) as call:
             handle = None if dispatch else implementation.handle
             rows = "expert_input_tokens" if dispatch else "expert_received_tokens"
@@ -392,4 +425,6 @@ class NativeCommunications:
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
         self.cuts.install(self.experts)
-        HookRegistry.register("sglang.srt.layers.linear.RowParallelLinear.forward", self.row_projection, HookType.AROUND)
+        HookRegistry.register(
+            "sglang.srt.layers.linear.RowParallelLinear.forward", self.row_projection, HookType.AROUND
+        )

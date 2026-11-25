@@ -8,7 +8,7 @@ from pathlib import Path
 
 from prologue.contracts.workload import WorkloadContent
 from prologue.contracts.workload.expert_routes import ExpertRoutes
-from prologue.integrations.frameworks.sglang.configuration import CaptureInput
+from prologue.integrations.frameworks.sglang.shared.configuration import CaptureInput
 from prologue.runtime.io import write_json
 
 

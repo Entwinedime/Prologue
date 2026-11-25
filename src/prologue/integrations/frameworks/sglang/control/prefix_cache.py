@@ -1,7 +1,6 @@
 """Native request bookkeeping over the core's content index and page ownership."""
 
 import torch
-from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from sglang.srt.mem_cache.base_prefix_cache import (
     DecLockRefResult,
     EvictResult,
@@ -11,6 +10,9 @@ from sglang.srt.mem_cache.base_prefix_cache import (
 )
 from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.mem_cache.registry import default_radix_cache_factory
+
+from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
+from prologue.integrations.frameworks.sglang.shared.resources import PoolCoordinates
 
 
 class PrefixCache(RadixCache):
@@ -78,7 +80,7 @@ class PrefixCache(RadixCache):
             return InsertResult(prefix_len=0)
         tokens = self.key_tokens(params.key)
         indices = params.value[: len(tokens)]
-        pages = (indices[:: self.page_size] // self.page_size - 1).tolist()
+        pages = PoolCoordinates.page(indices[:: self.page_size], self.page_size).tolist()
         result = self.peer.call("prefix", operation="insert", tokens=tokens, pages=pages)
         self.record_split(*result["split"])
         return InsertResult(prefix_len=result["existing_tokens"], last_device_node=result["node"])
@@ -106,7 +108,12 @@ class PrefixCache(RadixCache):
     def cache_unfinished_req(self, req, chunked=False):
         super().cache_unfinished_req(req, chunked=chunked)
         if not self.disable:
-            self.peer.call("bind_prefix", request=RequestSubmissions.index(req.rid), node=req.last_node, tokens=len(req.prefix_indices))
+            self.peer.call(
+                "bind_prefix",
+                request=RequestSubmissions.index(req.rid),
+                node=req.last_node,
+                tokens=len(req.prefix_indices),
+            )
 
     def evictable_size(self):
         return 0 if self.disable else self.peer.call("capacity", resource="evictable_tokens")

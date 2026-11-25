@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from itertools import islice
 from pathlib import Path
 
-from prologue.integrations.frameworks.sglang.configuration import ServingInput
+from prologue.integrations.frameworks.sglang.shared.configuration import ServingInput
 from prologue.runtime.io import write_json
 
 

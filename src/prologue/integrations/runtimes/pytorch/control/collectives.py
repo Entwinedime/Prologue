@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.distributed as distributed
 
-from prologue.integrations.runtimes.pytorch.control.metadata import MetadataWork
+from prologue.integrations.runtimes.pytorch.control.cpu import MetadataWork
 
 
 class CpuCollectives:

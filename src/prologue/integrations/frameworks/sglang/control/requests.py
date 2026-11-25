@@ -3,14 +3,16 @@
 import sys
 
 import zmq
-from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
-from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
-from prologue.contracts.workload.routing import RoutedContent
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.managers.io_struct import BatchTokenizedGenerateReqInput
 
+from prologue.contracts.workload.routing import RoutedContent
+from prologue.integrations.frameworks.sglang.shared.cache_keys import RoutedCacheKeys
+from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
+from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 
-class RequestInput:
+
+class RequestInput(RoutedCacheKeys):
     def __init__(
         self, peer, vocab_size: int, workload: dict, routes, mode: str, expert_layers: set[int]
     ) -> None:
@@ -24,17 +26,13 @@ class RequestInput:
         self.in_flow = False
         self.submissions = RequestSubmissions(workload)
         self.submissions.content.check_vocabulary(vocab_size)
-        self.routing = RoutedContent(self.submissions.content, routes["assignments"], expert_layers) if routes is not None else None
+        self.routing = (
+            RoutedContent(self.submissions.content, routes["assignments"], expert_layers)
+            if routes is not None
+            else None
+        )
         if self.routing is not None:
-            from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
-            HookRegistry.register("sglang.srt.mem_cache.radix_cache.RadixKey.__init__", self.cache_key, HookType.AROUND)
-
-    def cache_key(self, original, key, token_ids, extra_key=None, is_bigram=False, limit=None):
-        if extra_key is not None:
-            token_ids = self.routing.key(extra_key, token_ids if limit is None else token_ids[:limit])
-            extra_key = None
-        original(key, token_ids, extra_key, is_bigram, limit)
+            self.install_cache_keys()
 
     def recv_pyobj(self, flags):
         if self.arrivals is None:
@@ -58,8 +56,11 @@ class RequestInput:
     def tokenize(self, index):
         request = self.submissions.requests[index]
         return self.submissions.tokenized(
-            self.submissions.native_id(self.submissions.observed, index), self.submissions.content.prompt(request["id"]),
-            self.submissions.sampling(index), self.vocab_size, self.mode,
+            self.submissions.native_id(self.submissions.observed, index),
+            self.submissions.content.prompt(request["id"]),
+            self.submissions.sampling(index),
+            self.vocab_size,
+            self.mode,
             extra_key=request["id"] if self.routing is not None else None,
             room=index + 1 if self.mode != DisaggregationMode.NULL else None,
         )

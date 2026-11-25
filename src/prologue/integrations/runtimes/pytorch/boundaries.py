@@ -48,7 +48,11 @@ class TensorBoundaries(TorchDispatchMode):
 
     @contextmanager
     def auxiliary(self) -> Iterator[None]:
-        with self.capture.runtime.scope("prologue.auxiliary"), torch._C.DisableTorchFunction(), _disable_current_modes():
+        with (
+            self.capture.runtime.scope("prologue.auxiliary"),
+            torch._C.DisableTorchFunction(),
+            _disable_current_modes(),
+        ):
             yield
 
     def storage(self, tensor: torch.Tensor, region: str | None = None) -> StorageBoundary:
@@ -125,9 +129,15 @@ class TensorBoundaries(TorchDispatchMode):
                 self.tensors[tensor] = previous
             storage.exposed = True
             result = {
-                "value": f"{self.namespace}value/{previous[1]}", "storage": f"{self.namespace}storage/{storage.identity}",
-                "version": storage.version, "dtype": str(tensor.dtype), "shape": list(tensor.shape),
-                "device": tensor.device.type, "writer": storage.writer, "allocation": storage.allocation, "buffer": storage.buffer,
+                "value": f"{self.namespace}value/{previous[1]}",
+                "storage": f"{self.namespace}storage/{storage.identity}",
+                "version": storage.version,
+                "dtype": str(tensor.dtype),
+                "shape": list(tensor.shape),
+                "device": tensor.device.type,
+                "writer": storage.writer,
+                "allocation": storage.allocation,
+                "buffer": storage.buffer,
             }
             if shape is not None:
                 self.declare_shape(tensor, shape)
@@ -164,7 +174,8 @@ class TensorBoundaries(TorchDispatchMode):
             for tensor in mutated:
                 self.written(tensor)
 
-            # torch.tensor materializes storage before dispatching lift_fresh; its aliased argument is still newly created.
+            # torch.tensor materializes storage before dispatching lift_fresh; its aliased argument is still newly
+            # created.
             fresh = operation is torch.ops.aten.lift_fresh.default
             for tensor in _pytree.tree_leaves(result):
                 if isinstance(tensor, torch.Tensor):
@@ -194,3 +205,20 @@ class TensorUpload(TorchFunctionMode):
                 raise ValueError("a declared tensor upload has multiple native operands")
             self.operand = self.boundaries.local_copy(args[0], [self.parameter], "torch.Tensor.to", "host_to_device")
         return result
+
+
+class GatherLayout:
+    @staticmethod
+    def guard(shape: tuple[int, ...], rule: list[Any], dim: int, peers: int) -> list[Any]:
+        dim %= len(shape)
+        gathered = torch.empty((peers, *shape), device="meta")
+        output_shape = (*shape[:dim], peers * shape[dim], *shape[dim + 1:])
+        result = gathered.movedim(0, dim).reshape(output_shape)
+        copied = result.untyped_storage()._cdata != gathered.untyped_storage()._cdata
+
+        # Merging the moved group axis with the gathered axis needs a copy only when both strides matter.
+        predicate = [
+            "and", ["lt", 1, peers], ["lt", 1, ["mul", 1, *rule[:dim]]],
+            ["lt", 1, rule[dim]], ["lt", 0, ["mul", 1, *rule]],
+        ]
+        return predicate if copied else ["eq", predicate, 0]

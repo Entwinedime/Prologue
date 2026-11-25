@@ -3,7 +3,8 @@
 import json
 from collections import Counter, defaultdict
 
-from prologue.integrations.frameworks.sglang.observation.source_scopes import SGLangSourceScopes
+from prologue.integrations.frameworks.sglang.shared.source_layout import SourceLayout
+from prologue.integrations.platforms.ascend.scoped_tasks import tensor_layouts
 
 
 class QueryResults:
@@ -202,7 +203,7 @@ class ActionScopes:
     def validate_source(self, raw, rank):
         if raw["environment"]["parallel"]["rank"] != rank or self.graph["environment"] != raw["environment"]:
             raise ValueError("graph and recording belong to different worker environments")
-        raw = {**raw, "scopes": SGLangSourceScopes(raw["environment"]).lower(raw["scopes"])}
+        raw = {**raw, "scopes": SourceLayout(raw["environment"], tensor_layouts).lower(raw["scopes"])}
         self.source_ids = {}
         for index, scope in enumerate(self.graph["scopes"]):
             origins = scope["bindings"]["source_scopes"]

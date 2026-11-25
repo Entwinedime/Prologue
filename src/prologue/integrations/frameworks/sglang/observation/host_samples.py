@@ -7,16 +7,16 @@ from inspect import signature
 from threading import get_native_id
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 
-from prologue.integrations.frameworks.sglang.batches import BatchTensors
-from prologue.integrations.frameworks.sglang.groups import ParallelGroups
-from prologue.integrations.frameworks.sglang.metadata_transfers import MetadataTransfers
-from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
-from prologue.integrations.frameworks.sglang.state_calls import RequestStateCalls
 from prologue.integrations.frameworks.sglang.observation.communications import DeviceCollectiveCuts
 from prologue.integrations.frameworks.sglang.observation.flow_scopes import ServingCuts
 from prologue.integrations.frameworks.sglang.observation.kv_scopes import NativeKvScopes
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 from prologue.integrations.frameworks.sglang.observation.pipeline_scopes import HostPipelineScopes
+from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
+from prologue.integrations.frameworks.sglang.shared.groups import ParallelGroups
+from prologue.integrations.frameworks.sglang.shared.metadata_transfers import MetadataTransfers
+from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
+from prologue.integrations.frameworks.sglang.shared.state_calls import RequestStateCalls
 from prologue.integrations.runtimes.pytorch.protocol import CpuProtocol
 
 
@@ -28,7 +28,9 @@ class NativeHostSamples(ServingCuts):
         self.enabled = False
         self.request_state = RequestStateCalls(observe=False)
         self.parent = ContextVar("timed_host_scope", default=0)
-        self.scopes = [{"id": 0, "parent": None, "role": "window", "site": "", "implementation": "", "work": {}, "bindings": {}}]
+        self.scopes = [
+            {"id": 0, "parent": None, "role": "window", "site": "", "implementation": "", "work": {}, "bindings": {}}
+        ]
         self.auxiliary_intervals = []
         self.host_profile = host_profile
         self.profile = None
@@ -62,7 +64,9 @@ class NativeHostSamples(ServingCuts):
             interval["end_raw_ns"] = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
 
     @contextmanager
-    def scope(self, role, site, implementation, *, work=None, condition=None, parameters=None, bindings=None, dimensions=None):
+    def scope(
+        self, role, site, implementation, *, work=None, condition=None, parameters=None, bindings=None, dimensions=None
+    ):
         occurrence = {
             "id": len(self.scopes), "parent": self.parent.get(), "role": role, "site": site,
             "implementation": implementation, "work": {} if work is None else dict(work),
@@ -161,13 +165,17 @@ class NativeHostSamples(ServingCuts):
             implementation = f"{type(module).__module__}.{type(module).__qualname__}"
             forward = module.forward
             body_signature = signature(forward) if role == "model_body" else None
-            module.forward = update_wrapper(partial(self.module, role, site, implementation, body_signature, forward), forward)
+            module.forward = update_wrapper(
+                partial(self.module, role, site, implementation, body_signature, forward), forward
+            )
 
     def observe_expert_layers(self, experts):
         for site, module in experts.items():
             implementation = f"{type(module).__module__}.{type(module).__qualname__}"
             forward = module.forward
-            module.forward = update_wrapper(partial(self.module, "experts", site, implementation, None, forward), forward)
+            module.forward = update_wrapper(
+                partial(self.module, "experts", site, implementation, None, forward), forward
+            )
             compute = module.run_moe_core
             module.run_moe_core = update_wrapper(
                 partial(self.module, "expert_compute", compute.__qualname__,
@@ -228,7 +236,9 @@ class NativeHostSamples(ServingCuts):
         if self.protocol is not None:
             for target, hook in self.protocol.hooks():
                 HookRegistry.register(target, hook, HookType.AROUND)
-        HookRegistry.register("sglang.srt.model_executor.model_runner.ModelRunner.load_model", self.load_model, HookType.AROUND)
+        HookRegistry.register(
+            "sglang.srt.model_executor.model_runner.ModelRunner.load_model", self.load_model, HookType.AROUND
+        )
         ModelScopes.install_batch_hooks(self)
         self.communications.install(self.observe_expert_exchange if self.ep_size > 1 else None)
         if self.mode != "null":

@@ -212,7 +212,7 @@ def main() -> None:
         command.add_argument("--modeling-image", default="prologue-modeling:ubuntu24.04")
     arguments = parser.parse_args()
     if arguments.command in {"capture", "produce", "acquire-costs", "acquire-local", "publish-local"}:
-        from prologue.integrations.frameworks.sglang.ascend.launch import SGLangAscendLaunch
+        from prologue.integrations.frameworks.sglang.acquisition.launch import SGLangAscendLaunch
     if arguments.command in {"fit-costs", "acquire-costs"}:
         from prologue.integrations.frameworks.sglang.acquisition.cost_reuse import BatchHostReuse
     if arguments.command == "produce":
@@ -233,7 +233,7 @@ def main() -> None:
         raise SystemExit(0 if result["status"] == "qualified" else 1)
     elif arguments.command == "publish-local":
         from prologue.acquisition.recording import PublishedCapture
-        from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples
+        from prologue.integrations.frameworks.sglang.acquisition.device_samples import CostSamples
         from prologue.libraries.increment import LocalLibraryIncrement
         from prologue.libraries.store import LibraryStore
         from prologue.runtime.docker import ModelingProcess
@@ -259,11 +259,11 @@ def main() -> None:
             service_reference=arguments.service_reference,
         ).run()
     elif arguments.command == "cost-samples":
-        from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples
+        from prologue.integrations.frameworks.sglang.acquisition.device_samples import CostSamples
 
         CostSamples.export(parsed(DeviceSampleOptions, arguments))
     elif arguments.command == "batch-cost-samples":
-        from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples
+        from prologue.integrations.frameworks.sglang.acquisition.device_samples import CostSamples
         from prologue.runtime.docker import ModelingProcess
         from prologue.runtime.io import write_json
 
@@ -273,7 +273,7 @@ def main() -> None:
             arguments.output, CostSamples.batch(arguments.session, model, arguments.output.parent), replace=False
         )
     elif arguments.command == "host-cost-samples":
-        from prologue.integrations.frameworks.sglang.ascend.host_samples import HostCostSamples
+        from prologue.integrations.frameworks.sglang.acquisition.host_cost_samples import HostCostSamples
 
         HostCostSamples(parsed(HostSampleOptions, arguments)).run()
     elif arguments.command == "fit-costs":
@@ -295,8 +295,8 @@ def main() -> None:
         acquisition = None
         if arguments.deployment:
             from prologue.acquisition.replenishment import Replenishment
-            from prologue.integrations.frameworks.sglang.ascend.device_samples import CostSamples
-            from prologue.integrations.frameworks.sglang.ascend.launch import SGLangAscendLaunch
+            from prologue.integrations.frameworks.sglang.acquisition.device_samples import CostSamples
+            from prologue.integrations.frameworks.sglang.acquisition.launch import SGLangAscendLaunch
 
             acquisition = Replenishment(
                 task, parsed(ReplenishmentOptions, arguments), SGLangAscendLaunch.local_acquisition, CostSamples

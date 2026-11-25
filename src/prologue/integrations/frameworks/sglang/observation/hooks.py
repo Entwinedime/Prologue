@@ -9,9 +9,9 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from prologue.integrations.frameworks.sglang.configuration import NativeConfiguration
 from prologue.integrations.frameworks.sglang.observation.model_calls import NativeModelObservation
-from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
+from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
+from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 from prologue.runtime.io import write_json
 
 
@@ -92,7 +92,7 @@ class SGLangObservation(NativeModelObservation):
     def plan_roles(self):
         peers = None
         if self.description["mode"] != "null":
-            from prologue.integrations.frameworks.sglang.kv_peers import PdPeerBindings
+            from prologue.integrations.frameworks.sglang.shared.kv_peers import PdPeerBindings
 
             workers = {}
             for path in self.kv_pools.glob("*.json"):
@@ -233,12 +233,12 @@ class SGLangObservation(NativeModelObservation):
     def install(self, device_api, shard_transport) -> None:
         from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
-        from prologue.integrations.frameworks.sglang.metadata_transfers import MetadataTransfers
         from prologue.integrations.frameworks.sglang.observation.communications import NativeCommunications
         from prologue.integrations.frameworks.sglang.observation.flow_scopes import FlowScopes
         from prologue.integrations.frameworks.sglang.observation.kv_scopes import NativeKvScopes
         from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
         from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
+        from prologue.integrations.frameworks.sglang.shared.metadata_transfers import MetadataTransfers
 
         receiver = "sglang.srt.managers.scheduler_components.request_receiver.SchedulerRequestReceiver"
         targets = {

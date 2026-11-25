@@ -10,8 +10,8 @@ from contextlib import contextmanager
 from multiprocessing.connection import wait
 from pathlib import Path
 
-from prologue.integrations.frameworks.sglang.configuration import CaptureInput, NativeConfiguration
 from prologue.integrations.frameworks.sglang.observation.instance import NativeServingInstance
+from prologue.integrations.frameworks.sglang.shared.configuration import CaptureInput, NativeConfiguration
 from prologue.runtime.io import write_json
 
 

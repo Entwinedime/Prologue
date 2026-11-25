@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from weakref import WeakValueDictionary
 
-from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
+from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 
 
 @dataclass

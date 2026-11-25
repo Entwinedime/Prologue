@@ -5,9 +5,9 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Any
 
-from prologue.integrations.frameworks.sglang.batches import BatchTensors
 from prologue.integrations.frameworks.sglang.observation.call_scopes import NativeCallObservation
-from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
+from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
+from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 
 
 class NativeModelObservation(NativeCallObservation):
@@ -37,7 +37,9 @@ class NativeModelObservation(NativeCallObservation):
             if parent["role"] == "launch":
 
                 # PP launch and its run_batch child share the same declared batch ABI.
-                call.record["arguments"] = {name: name for name in call.record["parameters"] if name not in call.record["constants"]}
+                call.record["arguments"] = {
+                    name: name for name in call.record["parameters"] if name not in call.record["constants"]
+                }
             result = original(scheduler, batch, *args, **kwargs)
             self.result_outputs(call, result)
             return result
@@ -54,7 +56,9 @@ class NativeModelObservation(NativeCallObservation):
     def logits_port(self, call, direction, logits):
 
         # The runner hands the sampler one unpadded vocabulary row per admitted request.
-        call.port("next_token_logits", direction, self.tensors.observe(logits, ["members", logits.shape[1]]), use="device")
+        call.port(
+            "next_token_logits", direction, self.tensors.observe(logits, ["members", logits.shape[1]]), use="device"
+        )
 
     def token_output(self, call, tokens):
         use = "host" if tokens.device.type == "cpu" else "device"

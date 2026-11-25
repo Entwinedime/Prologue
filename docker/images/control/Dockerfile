@@ -11,7 +11,7 @@ COPY src/prologue/runtime/io.py prologue/runtime/
 COPY src/prologue/app/control_worker.py prologue/app/
 COPY src/prologue/serving/control_peer.py prologue/serving/
 COPY src/prologue/contracts/workload prologue/contracts/workload/
-COPY src/prologue/integrations/frameworks/sglang/*.py prologue/integrations/frameworks/sglang/
+COPY src/prologue/integrations/frameworks/sglang/shared prologue/integrations/frameworks/sglang/shared/
 COPY src/prologue/integrations/frameworks/sglang/control prologue/integrations/frameworks/sglang/control/
 COPY src/prologue/integrations/runtimes/pytorch/protocol_work.py prologue/integrations/runtimes/pytorch/
 COPY src/prologue/integrations/runtimes/pytorch/control prologue/integrations/runtimes/pytorch/control/

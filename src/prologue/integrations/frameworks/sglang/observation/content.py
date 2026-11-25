@@ -3,11 +3,13 @@
 from contextlib import nullcontext
 
 import torch
+
 from prologue.contracts.workload import WorkloadContent
 from prologue.contracts.workload.routing import RoutedContent
+from prologue.integrations.frameworks.sglang.shared.cache_keys import RoutedCacheKeys
 
 
-class NativeContent:
+class NativeContent(RoutedCacheKeys):
     def __init__(self, description, auxiliary=nullcontext) -> None:
         source = description["content"]
         self.content = WorkloadContent(source["requests"], source["prefixes"])
@@ -42,16 +44,14 @@ class NativeContent:
         if req.rid in self.execution_aliases:
             req.extra_key = self.execution_aliases[req.rid]
 
-    def cache_key(self, original, key, token_ids, extra_key=None, is_bigram=False, limit=None):
-        if extra_key is not None:
-            token_ids = self.routing.key(extra_key, token_ids if limit is None else token_ids[:limit])
-            extra_key = None
-        original(key, token_ids, extra_key, is_bigram, limit)
-
     def run_batch(self, original, scheduler, batch, *args, **kwargs):
         previous = self.tokens
         aliases = self.execution_aliases
-        self.tokens = [self.content.output_token(aliases[req.rid]) for req in batch.reqs] if batch.reqs and batch.reqs[0].rid in aliases else None
+        self.tokens = (
+            [self.content.output_token(aliases[req.rid]) for req in batch.reqs]
+            if batch.reqs and batch.reqs[0].rid in aliases
+            else None
+        )
         try:
             return original(scheduler, batch, *args, **kwargs)
         finally:
@@ -73,4 +73,4 @@ class NativeContent:
         HookRegistry.register("sglang.srt.model_executor.model_runner.ModelRunner.sample", self.sample, HookType.AROUND)
         if self.route_assignments is not None:
             HookRegistry.register("sglang.srt.managers.schedule_batch.Req.__init__", self.request, HookType.AROUND)
-            HookRegistry.register("sglang.srt.mem_cache.radix_cache.RadixKey.__init__", self.cache_key, HookType.AROUND)
+            self.install_cache_keys()

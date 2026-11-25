@@ -8,7 +8,7 @@ RUN [[ "$SGLANG_REVISION" =~ ^[0-9a-f]{40}$ ]]
 ENV PROLOGUE_SGLANG_REVISION=${SGLANG_REVISION}
 LABEL org.prologue.sglang.revision=${SGLANG_REVISION}
 
-COPY src/prologue/integrations/frameworks/sglang/ascend/install.sh /opt/prologue/install-sglang.sh
+COPY docker/images/sglang/install_sglang.sh /opt/prologue/install-sglang.sh
 COPY third_party/sglang /opt/prologue/sglang
 
 RUN bash /opt/prologue/install-sglang.sh /opt/prologue/sglang && rm /opt/prologue/install-sglang.sh
@@ -49,12 +49,7 @@ COPY src/prologue/app/capture_worker.py src/prologue/app/sglang_plugin.py src/pr
 COPY src/prologue/contracts/workload src/prologue/contracts/workload/
 COPY src/prologue/acquisition/observation src/prologue/acquisition/observation/
 COPY src/prologue/performance/samples.py src/prologue/performance/
-COPY src/prologue/integrations/frameworks/sglang/*.py src/prologue/integrations/frameworks/sglang/
-COPY src/prologue/integrations/frameworks/sglang/ascend/attention_cuts.py \
-    src/prologue/integrations/frameworks/sglang/ascend/attention_observation.py \
-    src/prologue/integrations/frameworks/sglang/ascend/*_runner.py \
-    src/prologue/integrations/frameworks/sglang/ascend/shard_weights.py \
-    src/prologue/integrations/frameworks/sglang/ascend/shard_transport.py src/prologue/integrations/frameworks/sglang/ascend/
+COPY src/prologue/integrations/frameworks/sglang/shared src/prologue/integrations/frameworks/sglang/shared/
 COPY src/prologue/integrations/frameworks/sglang/observation src/prologue/integrations/frameworks/sglang/observation/
 COPY src/prologue/integrations/platforms/ascend/*.py src/prologue/integrations/platforms/ascend/
 COPY src/prologue/integrations/runtimes/pytorch/*.py src/prologue/integrations/runtimes/pytorch/

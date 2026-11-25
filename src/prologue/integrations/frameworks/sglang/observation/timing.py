@@ -9,7 +9,7 @@ from prologue.integrations.frameworks.sglang.observation.host_samples import Nat
 from prologue.integrations.frameworks.sglang.observation.module_scopes import ModelScopes
 from prologue.integrations.frameworks.sglang.observation.native_routes import NativeExpertRoutes
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
-from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
+from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 from prologue.runtime.io import write_json
 
 

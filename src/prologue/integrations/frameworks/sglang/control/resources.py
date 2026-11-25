@@ -3,10 +3,12 @@
 from contextlib import contextmanager
 
 import torch
-from prologue.integrations.frameworks.sglang.allocation import AllocationABI
-from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
-from prologue.integrations.frameworks.sglang.kv_layout import MhaKvLayout
 from sglang.srt.mem_cache.allocator.base import BaseTokenToKVPoolAllocator
+
+from prologue.integrations.frameworks.sglang.shared.allocation import AllocationABI
+from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
+from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
+from prologue.integrations.frameworks.sglang.shared.resources import PoolCoordinates
 
 
 class AllocationDemand:
@@ -49,7 +51,9 @@ class AllocationDemand:
         slots = queue.req_to_token_pool
 
         # Native preallocation assigns req.prefix_indices after allocating; use its call argument for slot binding.
-        slots.prefix_bindings[RequestSubmissions.index(req.rid)] = {"node": req.last_node, "tokens": prefix_len} if prefix_len else None
+        slots.prefix_bindings[RequestSubmissions.index(req.rid)] = (
+            {"node": req.last_node, "tokens": prefix_len} if prefix_len else None
+        )
         try:
             with self.demand(queue.token_to_kv_pool_allocator, [req], [tokens]):
                 return original(queue, req, prefix_indices, prefix_len, total_prefix_len)
@@ -75,7 +79,7 @@ class RequestSlots:
 
     @property
     def free_slots(self):
-        return [slot + 1 for slot in self.peer.call("free_slots")]
+        return [PoolCoordinates.native(slot) for slot in self.peer.call("free_slots")]
 
     def alloc(self, reqs):
         members = []
@@ -92,7 +96,7 @@ class RequestSlots:
             members.append(member)
         bindings = self.peer.call("slots", members=members)
         for req, binding in zip(reqs, bindings, strict=True):
-            req.req_pool_idx = binding["slot"] + 1
+            req.req_pool_idx = PoolCoordinates.native(binding["slot"])
         return [req.req_pool_idx for req in reqs]
 
     def write(self, indices, values):
@@ -189,7 +193,7 @@ class PageAllocator:
         return torch.tensor(indices, dtype=dtype)
 
     def page_indices(self, pages):
-        starts = (torch.tensor(pages, dtype=torch.int64) + 1) * self.page_size
+        starts = PoolCoordinates.native(torch.tensor(pages, dtype=torch.int64)) * self.page_size
         return (starts[:, None] + torch.arange(self.page_size, dtype=torch.int64)).flatten()
 
     def alloc(self, need_size):
@@ -203,7 +207,7 @@ class PageAllocator:
         # The declared NPU allocator returns int32 from its paged entry points, unlike alloc().
         bindings = self.reserve()
         result = self.indices(bindings, torch.int32)
-        pages = [page + 1 for binding in bindings for page in binding["new_pages"]]
+        pages = [PoolCoordinates.native(page) for binding in bindings for page in binding["new_pages"]]
         if self._prologue_allocation.extend_branch(len(pages)) == "extend_naive":
 
             # Replay only index computation over core-owned pages; the helper never allocates or frees them.
@@ -220,6 +224,6 @@ class PageAllocator:
         if not self.is_not_in_free_group:
             self.free_group.append(indices)
             return
-        pages = torch.unique(indices // self.page_size - 1).tolist()
+        pages = torch.unique(PoolCoordinates.page(indices, self.page_size)).tolist()
         destination_empty = self.peer.call("release_pages", pages=pages)
         return destination_empty, len(pages)

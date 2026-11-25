@@ -6,8 +6,8 @@ import asyncio
 import time
 from typing import Any
 
-from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
+from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
 
 
 class EngineSubmissions:
@@ -101,7 +101,9 @@ class EngineSubmissions:
 
     def check_responses(self, prefix: str, rows: list[dict], indices: list[int]) -> None:
         expected = {
-            self.ingress.native_id(prefix, index): 1 if self.mode == "prefill" else self.ingress.requests[index]["output_tokens"]
+            self.ingress.native_id(prefix, index): 1
+            if self.mode == "prefill"
+            else self.ingress.requests[index]["output_tokens"]
             for index in indices
         }
         tokens = {

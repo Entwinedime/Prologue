@@ -5,20 +5,6 @@ from functools import partial
 from pathlib import Path
 
 import torch
-from prologue.integrations.frameworks.sglang.batches import BatchTensors
-from prologue.integrations.frameworks.sglang.configuration import NativeConfiguration
-from prologue.integrations.frameworks.sglang.experts import ExpertBatch
-from prologue.integrations.frameworks.sglang.pipeline import PipelineABI, PipelineMessages
-from prologue.integrations.frameworks.sglang.state_calls import RequestStateCalls
-from prologue.integrations.frameworks.sglang.control.batches import BatchNames
-from prologue.integrations.frameworks.sglang.control.prefix_cache import PrefixCache
-from prologue.integrations.frameworks.sglang.control.requests import NativeRequestReceiver, RequestInput
-from prologue.integrations.frameworks.sglang.control.flow import FlowExecution
-from prologue.integrations.frameworks.sglang.control.resources import AllocationDemand
-from prologue.integrations.frameworks.sglang.control.runner import MetadataRunner
-from prologue.integrations.frameworks.sglang.control.signals import PipelineSignals
-from prologue.integrations.runtimes.pytorch.control.tensors import TensorValues
-from prologue.contracts.workload.expert_routes import ExpertRoutes
 from sglang.srt.entrypoints.engine import _compute_parallelism_ranks
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers import scheduler as scheduler_module
@@ -28,6 +14,21 @@ from sglang.srt.mem_cache.registry import register_radix_cache_backend
 from sglang.srt.model_executor import model_runner
 from sglang.srt.model_executor.forward_batch_info import PPProxyTensors
 from sglang.srt.server_args import PortArgs, ServerArgs
+from torch.utils.weak import WeakIdKeyDictionary
+
+from prologue.contracts.workload.expert_routes import ExpertRoutes
+from prologue.integrations.frameworks.sglang.control.flow import FlowExecution
+from prologue.integrations.frameworks.sglang.control.prefix_cache import PrefixCache
+from prologue.integrations.frameworks.sglang.control.requests import NativeRequestReceiver, RequestInput
+from prologue.integrations.frameworks.sglang.control.resources import AllocationDemand
+from prologue.integrations.frameworks.sglang.control.runner import MetadataRunner
+from prologue.integrations.frameworks.sglang.control.signals import PipelineSignals
+from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
+from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
+from prologue.integrations.frameworks.sglang.shared.experts import ExpertBatch
+from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI, PipelineMessages
+from prologue.integrations.frameworks.sglang.shared.state_calls import RequestStateCalls
+from prologue.integrations.runtimes.pytorch.control.tensors import TensorValues
 
 
 class NativeScheduler(Scheduler):
@@ -156,12 +157,32 @@ class NativeScheduler(Scheduler):
         members = BatchTensors.members(batch)
         for member in members:
             member["id"] = self.request_input.request_id(member["id"])
-        work = {**self.batch_names.describe(batch), "phase": BatchTensors.phase(batch), "rank": self.graph_rank, "members": members}
+        work = {
+            **self.batch_names.describe(batch),
+            "phase": BatchTensors.phase(batch),
+            "rank": self.graph_rank,
+            "members": members,
+        }
         work["context"] = {"members": self.calls.progress(batch.reqs)}
         return BatchTensors.parameters(batch, sum(member["new_tokens"] for member in members)), work
 
-    def action(self, name, parameters, work, outputs=(), *, condition=None, tensor_inputs=None, tensor_outputs=None, allocations=None):
-        condition = {"phase": work.get("phase", "idle"), "state_accesses": RequestStateCalls.condition(work), **(condition or {})}
+    def action(
+        self,
+        name,
+        parameters,
+        work,
+        outputs=(),
+        *,
+        condition=None,
+        tensor_inputs=None,
+        tensor_outputs=None,
+        allocations=None,
+    ):
+        condition = {
+            "phase": work.get("phase", "idle"),
+            "state_accesses": RequestStateCalls.condition(work),
+            **(condition or {}),
+        }
 
         # Child calls can create batches before their parent resumes; liveness belongs to submission time.
         work["live_batches"] = self.batch_names.live()
@@ -173,7 +194,9 @@ class NativeScheduler(Scheduler):
         work["live_values"] = self.values.live()
 
         # Native decisions and resource calls have run; execution must complete this return before native continues.
-        returned = self.peer.call("action", action=name, condition=condition, parameters=parameters, work=work, outputs=list(outputs))
+        returned = self.peer.call(
+            "action", action=name, condition=condition, parameters=parameters, work=work, outputs=list(outputs)
+        )
         self.values.publish(tensor_outputs or {}, returned["values"])
         return returned
 
@@ -206,18 +229,29 @@ class NativeScheduler(Scheduler):
         # The native launch owns run_batch and its recorded completion; submit the parent graph once.
         self.launching = True
         try:
-            with self.signals.producing(), self.request_state.members(self.cur_batch), self.request_state.record() as accesses:
+            with (
+                self.signals.producing(),
+                self.request_state.members(self.cur_batch),
+                self.request_state.record() as accesses,
+            ):
                 result, event = super()._pp_launch_batch(mb_id, pp_proxy_tensors, mb_metadata, last_rank_comm_queue)
         finally:
             self.launching = False
         work["signals"] = {"completion": event._prologue_signal.identity}
         work["observation_context"] = {"pipeline": event._prologue_signal.context["pipeline"]}
         self.bind_state(work, accesses)
-        inputs = {} if pp_proxy_tensors is None else {f"proxy.{name}": tensor for name, tensor in PipelineABI.proxy_tensors(pp_proxy_tensors).items()}
+        inputs = (
+            {}
+            if pp_proxy_tensors is None
+            else {f"proxy.{name}": tensor for name, tensor in PipelineABI.proxy_tensors(pp_proxy_tensors).items()}
+        )
         if result.pp_hidden_states_proxy_tensors is None:
             outputs = {"next_token_ids": result.next_token_ids}
         else:
-            outputs = {f"proxy.{name}": tensor for name, tensor in PipelineABI.proxy_tensors(result.pp_hidden_states_proxy_tensors).items()}
+            outputs = {
+                f"proxy.{name}": tensor
+                for name, tensor in PipelineABI.proxy_tensors(result.pp_hidden_states_proxy_tensors).items()
+            }
         self.action("launch", parameters, work, tensor_inputs=inputs, tensor_outputs=outputs)
         return result, event
 
@@ -260,7 +294,10 @@ class NativeScheduler(Scheduler):
     def model_result(self, batch, **kwargs):
         if not self.pp_group.is_last_rank:
             parameters, work = self.model_work(batch)
-            condition = {"phase": work["phase"], "state_accesses": RequestStateCalls.condition(self.request_state.accesses.get().members)}
+            condition = {
+                "phase": work["phase"],
+                "state_accesses": RequestStateCalls.condition(self.request_state.accesses.get().members),
+            }
             outputs = self.peer.call("describe", action="launch", condition=condition, parameters=parameters)
             tensors = {
                 name.removeprefix("proxy."): torch.empty(
@@ -295,3 +332,20 @@ class NativeScheduler(Scheduler):
             self.calls.drained()
         super().on_idle()
         self.request_receiver.idle_reported = idle
+
+
+class BatchNames:
+    """Name native batch objects without keeping completed batches alive."""
+
+    def __init__(self) -> None:
+        self.names = WeakIdKeyDictionary()
+        self.sequence = 0
+
+    def describe(self, batch):
+        if batch is not None and batch not in self.names:
+            self.names[batch] = self.sequence
+            self.sequence += 1
+        return {"batch": self.names[batch] if batch is not None else None}
+
+    def live(self):
+        return list(self.names.values())

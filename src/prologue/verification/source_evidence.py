@@ -8,7 +8,7 @@ from heapq import heappop, heappush
 from pathlib import Path
 
 from prologue.acquisition.recording import PublishedCapture
-from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
+from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 from prologue.integrations.platforms.ascend.reference import NativeEffectEvidence
 from prologue.libraries.release import LibraryRelease, asset_path
 

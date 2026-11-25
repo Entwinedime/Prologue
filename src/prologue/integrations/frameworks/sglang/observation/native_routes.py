@@ -6,9 +6,10 @@ from contextlib import nullcontext
 from typing import Any
 
 import torch
-from prologue.integrations.frameworks.sglang.batches import BatchTensors
-from prologue.integrations.frameworks.sglang.experts import ExpertBatch
+
 from prologue.contracts.workload.expert_routes import ExpertRoutes
+from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
+from prologue.integrations.frameworks.sglang.shared.experts import ExpertBatch
 
 
 class NativeExpertRoutes:
@@ -32,9 +33,13 @@ class NativeExpertRoutes:
         if any(module.moe_ep_size != self.size for module in experts.values()):
             raise ValueError("injected routes must match the native expert group")
 
-        self.conditions = ExpertRoutes(self.source, self.input["requests"], layers, model_layers, get_parallel().attn_tp_size - 1)
+        self.conditions = ExpertRoutes(
+            self.source, self.input["requests"], layers, model_layers, get_parallel().attn_tp_size - 1
+        )
         args = get_global_server_args()
-        self.geometry = ExpertBatch(self.conditions, self.size, get_moe_ep_group().rank_in_group, args.moe_a2a_backend, args.deepep_mode)
+        self.geometry = ExpertBatch(
+            self.conditions, self.size, get_moe_ep_group().rank_in_group, args.moe_a2a_backend, args.deepep_mode
+        )
 
         # A module pre-hook runs before the observation wrapper snapshots the expert's input ports.
         for module in experts.values():
@@ -71,7 +76,9 @@ class NativeExpertRoutes:
         # DeepEP partitions padded tokens; a local expert group retains the entire token vector.
         with self.auxiliary():
             group = get_moe_ep_group()
-            rows = self.conditions.batch_rows(self.members, experts.layer_id, result.topk_ids.shape[0] * group.world_size)
+            rows = self.conditions.batch_rows(
+                self.members, experts.layer_id, result.topk_ids.shape[0] * group.world_size
+            )
 
             selected = torch.tensor(rows, dtype=result.topk_ids.dtype, device="cpu").tensor_split(group.world_size)[
                 group.rank_in_group

@@ -53,6 +53,9 @@ class AscendDeployment:
             self.environment["ASCEND_MF_STORE_URL"] = source["store_url"]
             self.environment["ASCEND_MF_TRANSFER_PROTOCOL"] = protocol
 
+    def card(self, logical_rank):
+        return self.devices[0 if self.single_device else logical_rank]
+
     def options(self, *, detailed_timing=False, host_timing=False, latency_only=False) -> list[str]:
         arguments = ["--runtime", self.source_docker_runtime(), "--ipc", "host", "--network", self.network]
         if not self.single_device:

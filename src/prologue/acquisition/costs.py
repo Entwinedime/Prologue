@@ -229,7 +229,8 @@ class CostAcquisition:
     def spending(cls, directory):
         state = directory / "execution.json"
         processing = Usage(processing_ns=read_json(state)["postprocessing_ns"]) if state.is_file() else Usage()
-        native = (NativeAttempt.usage(path.parent) for path in directory.glob("sources/*/*/execution.json"))
+        journals = (*directory.glob("sources/*/*/execution.json"), *directory.glob("sources/*/*/native/execution.json"))
+        native = (NativeAttempt.usage(path.parent) for path in journals)
         return Usage.total((processing, cls.projection_usage(directory), *native))
 
     def measure(self, recipe, output, requested, allowance_ns):
@@ -238,7 +239,7 @@ class CostAcquisition:
             attempt_limit=1, source_image=self.images["source"], binary=self.output / "prologue",
             modeling_image=self.images["modeling"],
         )
-        recipe.collect(arguments, requested, self.limit)
+        recipe.collect(arguments, requested, self.limit, self.processing)
         self.samples.update(recipe.samples(output, self))
 
     def fit(self):
@@ -270,7 +271,9 @@ class CostAcquisition:
             applicable = {recipe: points for recipe, points in applicable.items() if points}
             if not applicable:
                 break
-            attempts = {recipe: NativeAttempt.attempts(candidates[recipe]) for recipe in applicable}
+            attempts = {
+                recipe: NativeAttempt.attempts(candidates[recipe] / recipe.native_directory) for recipe in applicable
+            }
             recipe = max(applicable, key=lambda candidate: (bool(attempts[candidate]), len(applicable[candidate])))
             output, requested, previous = candidates.pop(recipe), applicable[recipe], attempts[recipe]
             spent = self.spending(self.output)
@@ -290,7 +293,7 @@ class CostAcquisition:
                 row.update(gap.report)
                 continue
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError):
-                failed = NativeAttempt.attempts(output)
+                failed = NativeAttempt.attempts(output / recipe.native_directory)
                 if not failed or failed[-1]["status"] != "failed":
                     raise
                 self.limit.check()

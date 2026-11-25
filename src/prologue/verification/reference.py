@@ -3,7 +3,7 @@
 import json
 
 from prologue.acquisition.recording import PublishedCapture
-from prologue.integrations.frameworks.sglang.configuration import CaptureInput, ServingInput
+from prologue.integrations.frameworks.sglang.shared.configuration import CaptureInput, ServingInput
 
 
 class RecordedSubmissions:

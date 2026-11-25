@@ -8,9 +8,9 @@ import time
 from contextlib import ExitStack
 from uuid import uuid4
 
-from prologue.integrations.frameworks.sglang.configuration import ServingInput
-from prologue.integrations.frameworks.sglang.ingress import BatchOperands
-from prologue.integrations.frameworks.sglang.worker_templates import SGLangTask, WorkerDomain
+from prologue.integrations.frameworks.sglang.shared.configuration import ServingInput
+from prologue.integrations.frameworks.sglang.shared.ingress import BatchOperands
+from prologue.integrations.frameworks.sglang.acquisition.worker_templates import SGLangTask, WorkerDomain
 from prologue.runtime.docker import DockerImage, OwnedContainers
 from prologue.runtime.io import content_id, write_json
 from prologue.runtime.limits import OperationLimit

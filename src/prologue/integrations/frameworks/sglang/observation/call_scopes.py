@@ -4,7 +4,7 @@ from contextlib import ExitStack, contextmanager
 from typing import Any
 
 from prologue.acquisition.observation.capture import SemanticCapture
-from prologue.integrations.frameworks.sglang.state_calls import RequestStateCalls
+from prologue.integrations.frameworks.sglang.shared.state_calls import RequestStateCalls
 from prologue.integrations.runtimes.pytorch.boundaries import TensorBoundaries
 
 

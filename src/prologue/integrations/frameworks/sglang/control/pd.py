@@ -4,15 +4,16 @@ from collections import defaultdict
 from functools import partial
 from threading import Lock
 
-from prologue.integrations.frameworks.sglang.clocks import DecisionClocks
-from prologue.integrations.frameworks.sglang.control.kv_transfer import MetadataRows, PdTopology
-from prologue.integrations.frameworks.sglang.control.resources import StateSlots
-from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from sglang.srt.disaggregation.base import BaseKVManager, KVArgs, KVPoll
 from sglang.srt.disaggregation.common.conn import CommonKVManager, CommonKVReceiver
 from sglang.srt.disaggregation.mooncake.conn import MooncakeKVReceiver, MooncakeKVSender
 from sglang.srt.disaggregation.utils import KVClassType
 from sglang.srt.environ import envs
+
+from prologue.integrations.frameworks.sglang.control.kv_transfer import MetadataRows, PdTopology
+from prologue.integrations.frameworks.sglang.control.resources import StateSlots
+from prologue.integrations.frameworks.sglang.shared.clocks import DecisionClocks
+from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
 
 
 class NativePdBackend:
@@ -28,7 +29,9 @@ class NativePdBackend:
         self.failures = {}
 
     def exchange(self, deliveries=(), *, completion=None):
-        for packet in self.scheduler.peer.exchange("messages", {"deliveries": list(deliveries), "completion": completion}):
+        for packet in self.scheduler.peer.exchange(
+            "messages", {"deliveries": list(deliveries), "completion": completion}
+        ):
             source, value = packet["source"], packet["value"]
             if source not in self.topology.peers and source != self.local:
                 raise ValueError("PD message came from a worker outside its native transfer topology")
@@ -69,7 +72,11 @@ class NativePdBackend:
 
     @staticmethod
     def reservation_receipt(publisher, request, recipient):
-        return {"group": recipient, "name": "kv_reservation_received", "work": {"request": request, "publisher": publisher}}
+        return {
+            "group": recipient,
+            "name": "kv_reservation_received",
+            "work": {"request": request, "publisher": publisher},
+        }
 
     def waiting(self):
         transports = (*self.senders.values(), *self.receivers.values())
@@ -114,7 +121,9 @@ class NativePdBackend:
         self.scheduler.calls.resources.bind_field("metadata", self.scheduler.req_to_metadata_buffer_idx_allocator)
 
         # Serving hooks must join the graph wrappers before the registry patches their shared targets.
-        HookRegistry.register("sglang.srt.disaggregation.utils.MetadataBuffers.set_buf", self.bind_metadata, HookType.AROUND)
+        HookRegistry.register(
+            "sglang.srt.disaggregation.utils.MetadataBuffers.set_buf", self.bind_metadata, HookType.AROUND
+        )
         for name in ("poll_and_all_reduce", "poll_and_all_reduce_attn_cp_tp_group"):
             HookRegistry.register(f"sglang.srt.disaggregation.utils.{name}", self.group_poll, HookType.AROUND)
 
@@ -258,7 +267,8 @@ class NativeKvSender(NativeKvPolling, MooncakeKVSender):
         }
         parameters = {"transfer_pages": len(kv_indices), "transfer_tokens": end - begin, "last_chunk": int(last)}
 
-        # Register before the call returns: background publication can finish while its enclosing CPU work is still running.
+        # Register before the call returns: background publication can finish while its enclosing CPU work is still
+        # running.
         if last:
             backend.exchange(packets, completion={
                 "request": RequestSubmissions.index(req.rid),
@@ -316,9 +326,15 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
             for index, (peer, target) in enumerate(backend.topology.peers.items()):
                 signal = backend.reservation_signal(scheduler.group, request, target["group"])
                 self.signals.add(signal)
-                packet = {"target": peer, "value": {
-                    "kind": "reservation", "room": self.bootstrap_room, "pages": pages, "prefix": decode_prefix_len or 0,
-                }}
+                packet = {
+                    "target": peer,
+                    "value": {
+                        "kind": "reservation",
+                        "room": self.bootstrap_room,
+                        "pages": pages,
+                        "prefix": decode_prefix_len or 0,
+                    },
+                }
                 backend.exchange([packet], completion={
                     "request": RequestSubmissions.index(self._prologue_request.rid),
                     "notification": backend.reservation_receipt(scheduler.group, request, target["group"]),
@@ -326,13 +342,24 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
                 })
                 if scheduler.group == target["publishers"][0]:
 
-                    # The destination consumes reservations in delivery order and enters readiness after the whole group.
-                    backend.exchange([{"target": peer, "value": {"kind": "reservation_visible", "room": self.bootstrap_room}}], completion={
-                        "request": RequestSubmissions.index(self._prologue_request.rid),
-                        "notification": {"group": target["group"], "name": "kv_ready", "work": {"request": request}},
-                        "signals": [], "after": [backend.reservation_receipt(publisher, request, target["group"])
-                                                  for publisher in target["publishers"]],
-                    })
+                    # The destination consumes reservations in delivery order and enters readiness after the whole
+                    # group.
+                    backend.exchange(
+                        [{"target": peer, "value": {"kind": "reservation_visible", "room": self.bootstrap_room}}],
+                        completion={
+                            "request": RequestSubmissions.index(self._prologue_request.rid),
+                            "notification": {
+                                "group": target["group"],
+                                "name": "kv_ready",
+                                "work": {"request": request},
+                            },
+                            "signals": [],
+                            "after": [
+                                backend.reservation_receipt(publisher, request, target["group"])
+                                for publisher in target["publishers"]
+                            ],
+                        },
+                    )
 
                 publication = calls.request_work(self._prologue_request)
                 publication["context"]["reservation_peer"] = index
@@ -345,17 +372,25 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
         request = work["context"]["request"]["id"]
         self.backend.exchange(
             [{"target": self.backend.local, "value": {"kind": "receiver_visible", "room": self.bootstrap_room}}],
-            completion={"request": RequestSubmissions.index(self._prologue_request.rid),
-                        "notification": {"group": scheduler.group, "name": "kv_success", "work": {"request": request}}, "signals": [], "after": [
-                {"group": peer["group"], "name": "kv_success", "work": {"request": request}}
-                for peer in self.backend.topology.peers.values()
-            ]},
+            completion={
+                "request": RequestSubmissions.index(self._prologue_request.rid),
+                "notification": {"group": scheduler.group, "name": "kv_success", "work": {"request": request}},
+                "signals": [],
+                "after": [
+                    {"group": peer["group"], "name": "kv_success", "work": {"request": request}}
+                    for peer in self.backend.topology.peers.values()
+                ],
+            },
         )
 
     def _poll(self):
         if self.backend.failed(self.bootstrap_room):
             self.kv_mgr.update_status(self.bootstrap_room, KVPoll.Failed)
-        if self.conclude_state is None and self.aux_index is not None and self.kv_mgr.check_status(self.bootstrap_room) != KVPoll.Failed:
+        if (
+            self.conclude_state is None
+            and self.aux_index is not None
+            and self.kv_mgr.check_status(self.bootstrap_room) != KVPoll.Failed
+        ):
             acknowledgements = []
             for source, packet in self.pending.items():
 
@@ -364,7 +399,9 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
                     raise ValueError("native PD producers disagree on the first-token metadata")
                 self.metadata = packet["metadata"]
                 self.finished.add(source)
-                acknowledgements.append({"target": source, "value": {"kind": "consumed", "publication": packet["publication"]}})
+                acknowledgements.append(
+                    {"target": source, "value": {"kind": "consumed", "publication": packet["publication"]}}
+                )
             self.pending.clear()
             if acknowledgements:
                 self.backend.exchange(acknowledgements)

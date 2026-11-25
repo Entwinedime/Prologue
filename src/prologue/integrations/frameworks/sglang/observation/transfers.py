@@ -4,7 +4,7 @@ import inspect
 from contextlib import contextmanager
 from functools import partial
 
-from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
+from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 
 
 class TransferWork:
@@ -79,7 +79,9 @@ class TensorTransfers:
 
         for name in ("isend", "irecv"):
             HookRegistry.register(
-                f"torch.distributed.{name}", partial(self.invoke, inspect.signature(getattr(distributed, name))), HookType.AROUND,
+                f"torch.distributed.{name}",
+                partial(self.invoke, inspect.signature(getattr(distributed, name))),
+                HookType.AROUND,
             )
 
 
@@ -109,7 +111,9 @@ class NativeTransfers(TensorTransfers):
 
     @contextmanager
     def consume(self, role, implementation, work, producer):
-        with self.observation.capture.call(role, "Work.wait", implementation, parameters={}, work=work, device=True) as call:
+        with self.observation.capture.call(
+            role, "Work.wait", implementation, parameters={}, work=work, device=True
+        ) as call:
             call.work_signal("completion", "input", producer)
             yield
 

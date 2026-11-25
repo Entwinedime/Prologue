@@ -2,16 +2,16 @@
 
 from contextlib import contextmanager, nullcontext
 
-from prologue.integrations.frameworks.sglang.allocation import AllocationABI
-from prologue.integrations.frameworks.sglang.batches import BatchTensors
-from prologue.integrations.frameworks.sglang.calls import CallSegments
-from prologue.integrations.frameworks.sglang.clocks import DecisionClocks
-from prologue.integrations.frameworks.sglang.disaggregated_calls import DisaggregatedCalls
-from prologue.integrations.frameworks.sglang.host_reads import HostReads
-from prologue.integrations.frameworks.sglang.metadata_collectives import MetadataCollectives
 from prologue.integrations.frameworks.sglang.observation.receiver_table import ReceiverTableCopies
-from prologue.integrations.frameworks.sglang.resources import ResourceCalls
-from prologue.integrations.frameworks.sglang.selection import BatchSelection
+from prologue.integrations.frameworks.sglang.shared.allocation import AllocationABI
+from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
+from prologue.integrations.frameworks.sglang.shared.calls import CallSegments
+from prologue.integrations.frameworks.sglang.shared.clocks import DecisionClocks
+from prologue.integrations.frameworks.sglang.shared.disaggregated_calls import DisaggregatedCalls
+from prologue.integrations.frameworks.sglang.shared.host_reads import HostReads
+from prologue.integrations.frameworks.sglang.shared.metadata_collectives import MetadataCollectives
+from prologue.integrations.frameworks.sglang.shared.resources import ResourceCalls
+from prologue.integrations.frameworks.sglang.shared.selection import BatchSelection
 from prologue.integrations.runtimes.pytorch.boundaries import TensorUpload
 
 
@@ -52,7 +52,9 @@ class ServingCuts(CallSegments):
             return original(scheduler, batch, output)
         work = self.batch_work(batch)
         parameters = BatchTensors.parameters(batch, sum(member["new_tokens"] for member in work["members"]))
-        with self.call("result", original, parameters=parameters, work=work, host_inputs=HostReads.result_inputs(output)) as frame:
+        with self.call(
+            "result", original, parameters=parameters, work=work, host_inputs=HostReads.result_inputs(output)
+        ) as frame:
             result = original(scheduler, batch, output)
 
             # A nested prebuilt result already publishes its own completion boundary.
@@ -158,7 +160,9 @@ class FlowScopes(ServingCuts):
         descriptor = owner.worker_roles[str(owner.parallel["rank"])]["groups"][role]
         members = descriptor["members"]
         root = collective["root"]
-        values, outputs = MetadataCollectives.snapshot(arguments, root) if owner.resource_history is not None else (None, None)
+        values, outputs = (
+            MetadataCollectives.snapshot(arguments, root) if owner.resource_history is not None else (None, None)
+        )
         with owner.call(boundary.operation, original, parameters=boundary.parameters, work=boundary.work) as call:
             call.record["bindings"].update(action=True, condition=boundary.condition, collective_group=role)
             call.record["communication"] = {
@@ -220,7 +224,9 @@ class FlowScopes(ServingCuts):
     @contextmanager
     def fragment(self, frame):
         owner = self.observation
-        with owner.call("segment", frame.original, device=not frame.host_only and frame.operation != "kv_enqueue") as call:
+        with owner.call(
+            "segment", frame.original, device=not frame.host_only and frame.operation != "kv_enqueue"
+        ) as call:
             call.record["guards"] = list(frame.guards)
             for name, (tensor, shape) in frame.tensor_inputs.items():
                 call.port(name, "input", owner.tensors.observe(tensor, shape), use="device")

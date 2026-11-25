@@ -5,7 +5,7 @@ from collections import defaultdict
 from itertools import pairwise
 from pathlib import Path
 
-from prologue.integrations.frameworks.sglang.kv_layout import KvBufferAddresses, MhaKvLayout
+from prologue.integrations.frameworks.sglang.shared.kv_layout import KvBufferAddresses, MhaKvLayout
 
 
 class NativeKvFacts:
@@ -41,7 +41,9 @@ class NativeKvFacts:
             if buffers["reservations"][str(transfer["room"])] != {"request": member["id"], "index": index}:
                 raise ValueError("native metadata transfer differs from its endpoint's request reservation")
             addresses = []
-            for pointer, length, width in zip(buffers["pointers"], buffers["lengths"], buffers["row_bytes"], strict=True):
+            for pointer, length, width in zip(
+                buffers["pointers"], buffers["lengths"], buffers["row_bytes"], strict=True
+            ):
                 if width <= 0 or length % width or not 0 <= index < length // width:
                     raise ValueError("native metadata row lies outside its registered buffer")
                 addresses.append(pointer + index * width)
@@ -89,7 +91,9 @@ class NativeKvFacts:
             return self.metadata_accesses(scope, parent, remote)
         member, = parent["work"]["members"]
         chunk = parent["native_kv_chunk"]
-        if transfer["source_pages"] != chunk["source_pages"] or len(transfer["source_pages"]) != len(transfer["target_pages"]):
+        if transfer["source_pages"] != chunk["source_pages"] or len(transfer["source_pages"]) != len(
+            transfer["target_pages"]
+        ):
             raise ValueError("native transport changed the enqueued chunk's page extent")
         if transfer["source_pages"] and not transfer["blocks"]:
             raise ValueError("nonempty native KV transfer has no observed address blocks")
@@ -215,7 +219,10 @@ class NativeKvFacts:
 
     def protocol_timings(self):
         recording = self.recording
-        if recording["environment"]["implementation"]["disaggregation_mode"] == "null" or recording["kv_session"] is None:
+        if (
+            recording["environment"]["implementation"]["disaggregation_mode"] == "null"
+            or recording["kv_session"] is None
+        ):
             return None
 
         reservations, transfers = [], []

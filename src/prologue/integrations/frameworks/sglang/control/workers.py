@@ -12,7 +12,8 @@ from tempfile import TemporaryDirectory
 
 import torch
 import torch.multiprocessing as multiprocessing
-from prologue.integrations.frameworks.sglang.configuration import NativeConfiguration
+
+from prologue.integrations.frameworks.sglang.shared.configuration import NativeConfiguration
 from prologue.integrations.runtimes.pytorch.control.collectives import CollectiveCalls, CpuCollectives
 from prologue.integrations.runtimes.pytorch.control.cpu import CpuDeclarations
 from prologue.integrations.runtimes.pytorch.control.point_to_point import CpuPointToPoint, PointToPointCalls
@@ -61,7 +62,9 @@ class NativeWorkers:
             for instance in source["instances"]:
                 configured = configurations[instance["id"]]
                 settings = {
-                    **configured["settings"], "observe": configuration["observe"], "clock_epoch_ns": configuration["clock_epoch_ns"],
+                    **configured["settings"],
+                    "observe": configuration["observe"],
+                    "clock_epoch_ns": configuration["clock_epoch_ns"],
                 }
 
                 model = Path(directory, f"instance-{len(workers)}")
@@ -112,11 +115,12 @@ class NativeWorkers:
                 connection.close()
         CpuDeclarations.install(kernel_python)
 
-        from prologue.integrations.frameworks.sglang.control.scheduler import NativeScheduler
-        from prologue.integrations.frameworks.sglang.metadata_collectives import MetadataCollectives
-        from prologue.integrations.frameworks.sglang.metadata_transfers import MetadataTransfers
         from sglang.srt.distributed import parallel_state
         from sglang.srt.plugins.hook_registry import HookRegistry
+
+        from prologue.integrations.frameworks.sglang.control.scheduler import NativeScheduler
+        from prologue.integrations.frameworks.sglang.shared.metadata_collectives import MetadataCollectives
+        from prologue.integrations.frameworks.sglang.shared.metadata_transfers import MetadataTransfers
 
         peer = WorkerPeer(connections[index])
         try:
@@ -177,11 +181,24 @@ class NativeCalls:
         self.initialized = False
         self.next_rank = 0
         if observe:
-            self.ready.append(WorkerCall("observe", {
-                "kind": "protocol", "group": self.membership[0]["id"],
-                "record": {"phase": "scope", "backend": "gloo", "operations": ["send", "recv", "isend", "irecv"],
-                           "participants": [{"rank": rank, "group": group["id"]} for rank, group in self.membership.items()]},
-            }, ()))
+            self.ready.append(
+                WorkerCall(
+                    "observe",
+                    {
+                        "kind": "protocol",
+                        "group": self.membership[0]["id"],
+                        "record": {
+                            "phase": "scope",
+                            "backend": "gloo",
+                            "operations": ["send", "recv", "isend", "irecv"],
+                            "participants": [
+                                {"rank": rank, "group": group["id"]} for rank, group in self.membership.items()
+                            ],
+                        },
+                    },
+                    (),
+                )
+            )
 
     def receive_worker(self, channel, rank, operation, message) -> None:
         group = self.membership[rank]
@@ -194,9 +211,14 @@ class NativeCalls:
             if message["completion"] is not None:
 
                 # Keep the caller free to run; only publication waits for the core's actual completion events.
-                self.ready.append(WorkerCall(
-                    "delivery", {**message["completion"], "kind": "completion_notice", "group": group["id"]}, (), deliveries,
-                ))
+                self.ready.append(
+                    WorkerCall(
+                        "delivery",
+                        {**message["completion"], "kind": "completion_notice", "group": group["id"]},
+                        (),
+                        deliveries,
+                    )
+                )
             else:
                 self.deliver(deliveries)
             channel.send(self.messages[rank])
@@ -243,7 +265,9 @@ class NativeCalls:
         if not deliveries:
             return
         for packet in deliveries:
-            self.messages[packet["target"]].append({"source": packet["source"], "value": packet["value"], "completion": completion})
+            self.messages[packet["target"]].append(
+                {"source": packet["source"], "value": packet["value"], "completion": completion}
+            )
 
         # Publish the wakeup after queuing metadata; a receiver must never miss that change while parking.
         source = self.membership[deliveries[0]["source"]]["id"]
@@ -362,7 +386,13 @@ class NativeCalls:
                     try:
                         self.receive_core()
                     except EOFError:
-                        if self.awaiting or self.startup or self.ready or self.collectives.pending or self.transfers.pending:
+                        if (
+                            self.awaiting
+                            or self.startup
+                            or self.ready
+                            or self.collectives.pending
+                            or self.transfers.pending
+                        ):
                             raise
                         core_open = False
                         self.polled = False

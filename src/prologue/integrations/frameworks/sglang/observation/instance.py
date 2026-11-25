@@ -8,11 +8,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from prologue.integrations.frameworks.sglang.configuration import CaptureInput, InstanceConfiguration
-from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
 from prologue.integrations.frameworks.sglang.observation.profiles import NativeProfiles
 from prologue.integrations.frameworks.sglang.observation.submissions import EngineSubmissions
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
+from prologue.integrations.frameworks.sglang.shared.configuration import CaptureInput, InstanceConfiguration
+from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
 from prologue.runtime.io import write_json
 
 
@@ -171,7 +171,9 @@ class NativeServingInstance:
             os.environ.update(DEEP_USE_ALLTOALL_MODE="1", DEEPEP_HCCL_BUFFSIZE="1024", HCCL_BUFFSIZE="1024")
 
         if self.local_shards:
-            from prologue.integrations.frameworks.sglang.shard_engine import SingleDeviceEngine as Engine
+            from prologue.integrations.frameworks.sglang.observation.local.shard_engine import (
+                SingleDeviceEngine as Engine,
+            )
         else:
             from sglang.srt.entrypoints.engine import Engine
 

@@ -1,8 +1,9 @@
 """Keep native PP dictionary transport while submitting device transfers to the core."""
 
 import torch
-from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
-from prologue.integrations.frameworks.sglang.groups import ParallelGroups
+
+from prologue.integrations.frameworks.sglang.shared.groups import ParallelGroups
+from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
 from prologue.integrations.runtimes.pytorch.control.point_to_point import CpuPointToPoint
 
 
@@ -63,10 +64,15 @@ class PipelineTransfers(CpuPointToPoint):
         condition = {"collective": PipelineABI.gather_condition(input_, dim, self.groups.name(group.device_group))}
         parameters = PipelineABI.tensor_parameters(input_)
         layouts = self.scheduler.peer.call(
-            "describe", action="gather", condition={"phase": "idle", "state_accesses": [], **condition}, parameters=parameters,
+            "describe",
+            action="gather",
+            condition={"phase": "idle", "state_accesses": [], **condition},
+            parameters=parameters,
         )
         layout = layouts["output"]
-        result = torch.empty(layout["shape"], dtype=getattr(torch, layout["dtype"].removeprefix("torch.")), device="meta")
+        result = torch.empty(
+            layout["shape"], dtype=getattr(torch, layout["dtype"].removeprefix("torch.")), device="meta"
+        )
 
         # The template owns gather geometry; native recv_tensor_dict keeps its final reshape and message lifecycle.
         self.scheduler.action(
@@ -111,5 +117,9 @@ class PipelineTransfers(CpuPointToPoint):
             "sglang.srt.managers.scheduler.Scheduler._pp_send_dict_to_next_stage", self.send_dict, HookType.AROUND,
         )
         for name in ("_pp_pd_send_consensus_bootstrapped_ids", "_pp_pd_send_consensus_release_ids"):
-            HookRegistry.register("sglang.srt.managers.scheduler.Scheduler." + name, self.send_consensus, HookType.AROUND)
-        HookRegistry.register("sglang.srt.distributed.parallel_state.GroupCoordinator.all_gather", self.gather, HookType.AROUND)
+            HookRegistry.register(
+                "sglang.srt.managers.scheduler.Scheduler." + name, self.send_consensus, HookType.AROUND
+            )
+        HookRegistry.register(
+            "sglang.srt.distributed.parallel_state.GroupCoordinator.all_gather", self.gather, HookType.AROUND
+        )

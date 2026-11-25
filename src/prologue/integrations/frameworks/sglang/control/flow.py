@@ -2,16 +2,16 @@
 
 from contextlib import contextmanager
 
-from prologue.integrations.frameworks.sglang.calls import CallSegments
-from prologue.integrations.frameworks.sglang.clocks import DecisionClocks
-from prologue.integrations.frameworks.sglang.disaggregated_calls import DisaggregatedCalls
-from prologue.integrations.frameworks.sglang.groups import ParallelGroups
-from prologue.integrations.frameworks.sglang.host_reads import HostReads
-from prologue.integrations.frameworks.sglang.ingress import RequestSubmissions
-from prologue.integrations.frameworks.sglang.metadata_collectives import MetadataCollectives
-from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
-from prologue.integrations.frameworks.sglang.resources import ResourceCalls
-from prologue.integrations.frameworks.sglang.selection import BatchSelection
+from prologue.integrations.frameworks.sglang.shared.calls import CallSegments
+from prologue.integrations.frameworks.sglang.shared.clocks import DecisionClocks
+from prologue.integrations.frameworks.sglang.shared.disaggregated_calls import DisaggregatedCalls
+from prologue.integrations.frameworks.sglang.shared.groups import ParallelGroups
+from prologue.integrations.frameworks.sglang.shared.host_reads import HostReads
+from prologue.integrations.frameworks.sglang.shared.ingress import RequestSubmissions
+from prologue.integrations.frameworks.sglang.shared.metadata_collectives import MetadataCollectives
+from prologue.integrations.frameworks.sglang.shared.pipeline import PipelineABI
+from prologue.integrations.frameworks.sglang.shared.resources import ResourceCalls
+from prologue.integrations.frameworks.sglang.shared.selection import BatchSelection
 
 
 class PublishedRequests:
@@ -29,10 +29,14 @@ class PublishedRequests:
                 return
             frame.outputs = [
                 {
-                    "request": RequestSubmissions.index(request), "generated_tokens": tokens,
-                    "finished": reason is not None, "emits_output": True,
+                    "request": RequestSubmissions.index(request),
+                    "generated_tokens": tokens,
+                    "finished": reason is not None,
+                    "emits_output": True,
                 }
-                for request, tokens, reason in zip(output.rids, output.completion_tokens, output.finished_reasons, strict=True)
+                for request, tokens, reason in zip(
+                    output.rids, output.completion_tokens, output.finished_reasons, strict=True
+                )
             ]
 
 
@@ -101,7 +105,9 @@ class FlowExecution(CallSegments):
 
         # Inputs are available at graph entry; consuming a result must not wait for peers' graph returns.
         work = original(**{**arguments, "async_op": True})
-        returned = self.scheduler.action(boundary.operation, boundary.parameters, boundary.work, condition=boundary.condition)
+        returned = self.scheduler.action(
+            boundary.operation, boundary.parameters, boundary.work, condition=boundary.condition
+        )
 
         # Native Work publishes into the tensor at wait; snapshot only when execution tracing requests evidence.
         values, outputs = (
@@ -177,7 +183,13 @@ class FlowExecution(CallSegments):
         tensors = {name: tensor for name, (tensor, _) in frame.tensor_outputs.items()}
         inputs = {name: tensor for name, (tensor, _) in {**frame.tensor_inputs, **frame.metadata_inputs}.items()}
         returned = self.scheduler.action(
-            "segment", frame.parameters, work, outputs, condition=condition, tensor_inputs=inputs, tensor_outputs=tensors,
+            "segment",
+            frame.parameters,
+            work,
+            outputs,
+            condition=condition,
+            tensor_inputs=inputs,
+            tensor_outputs=tensors,
             allocations=frame.tensor_allocations,
         )
         if self.request_state.observe:
@@ -191,7 +203,9 @@ class FlowExecution(CallSegments):
         parameters, work = self.scheduler.description(batch)
         if self.scheduler.ps.pp_size > 1:
             work["observation_context"] = {"pipeline": PipelineABI.control_context(self)}
-        with self.call("result", original, parameters=parameters, work=work, host_inputs=HostReads.result_inputs(result)) as frame:
+        with self.call(
+            "result", original, parameters=parameters, work=work, host_inputs=HostReads.result_inputs(result)
+        ) as frame:
             original(batch, result)
 
             # Prebuilt has its own result boundary, also used directly during native Decode selection.

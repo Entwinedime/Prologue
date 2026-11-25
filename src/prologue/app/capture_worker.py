@@ -68,7 +68,7 @@ def main() -> None:
     if arguments.command == "capture" and arguments.local_host_pair:
         import os
 
-        from prologue.integrations.frameworks.sglang.ascend.scheduler_runner import WorkerProbes
+        from prologue.integrations.frameworks.sglang.observation.local.scheduler_runner import WorkerProbes
 
         WorkerProbes(os.environ["PROLOGUE_SGLANG_REVISION"]).pair(arguments.input, arguments.output)
     elif arguments.command == "capture" and arguments.local_copy:
@@ -82,7 +82,7 @@ def main() -> None:
     elif arguments.command == "capture" and arguments.local_attention:
         import os
 
-        from prologue.integrations.frameworks.sglang.ascend.attention_runner import AttentionRunner
+        from prologue.integrations.frameworks.sglang.observation.local.attention_runner import AttentionRunner
 
         AttentionRunner(json.loads(arguments.input.read_bytes()), arguments.output).run(
             os.environ["PROLOGUE_SGLANG_REVISION"]
@@ -94,7 +94,7 @@ def main() -> None:
 
         job = json.loads(arguments.input.read_bytes())
         if arguments.local_worker and "calibration" in job:
-            from prologue.integrations.frameworks.sglang.ascend.scheduler_runner import WorkerProbes
+            from prologue.integrations.frameworks.sglang.observation.local.scheduler_runner import WorkerProbes
 
             WorkerProbes(os.environ["PROLOGUE_SGLANG_REVISION"]).calibration(job, arguments.output)
             return
@@ -104,11 +104,11 @@ def main() -> None:
         runtime.mkdir(parents=True)
         os.environ["PROLOGUE_NATIVE_RUNTIME_DIR"] = str(runtime)
         if arguments.local_embedding:
-            from prologue.integrations.frameworks.sglang.ascend.embedding_runner import EmbeddingRunner as Runner
+            from prologue.integrations.frameworks.sglang.observation.local.embedding_runner import EmbeddingRunner as Runner
         elif arguments.local_worker or arguments.local_host:
-            from prologue.integrations.frameworks.sglang.ascend.scheduler_runner import SchedulerRunner as Runner
+            from prologue.integrations.frameworks.sglang.observation.local.scheduler_runner import SchedulerRunner as Runner
         else:
-            from prologue.integrations.frameworks.sglang.ascend.prebuilt_runner import PrebuiltRunner as Runner
+            from prologue.integrations.frameworks.sglang.observation.local.prebuilt_runner import PrebuiltRunner as Runner
 
         runner = Runner(job, arguments.output)
         options = {"host_timing": True} if arguments.local_host else {}
@@ -134,34 +134,18 @@ def main() -> None:
             # The workers have exited. Exporting SDK evidence can no longer disturb the observed serving calls.
             ScopedTasks.publish(arguments.output)
     elif arguments.command == "sampling-cuts":
-        from prologue.integrations.frameworks.sglang.ascend.attention_cuts import AttentionCuts
+        from prologue.integrations.frameworks.sglang.observation.local.attention_cuts import publish_cuts
 
-        result = AttentionCuts.extract(arguments.input, arguments.work, arguments.rank, arguments.identities,
-                                       json.loads(arguments.runner.read_bytes()))
-        write_json(arguments.output, result)
+        publish_cuts(arguments.input, arguments.work, arguments.rank, arguments.identities, arguments.runner,
+                     arguments.output)
     elif arguments.command == "export":
         from prologue.integrations.platforms.ascend.export import AscendExport
 
         AscendExport.run(arguments.input, arguments.rank, arguments.output)
     else:
-        from prologue.integrations.frameworks.sglang.observation.kv_facts import NativeKvFacts
-        from prologue.integrations.frameworks.sglang.observation.source_scopes import SGLangSourceScopes
-        from prologue.integrations.frameworks.sglang.pipeline import PipelineABI
-        from prologue.integrations.platforms.ascend.observation import AscendObservation
+        from prologue.integrations.frameworks.sglang.observation.source_scopes import serving_facts
 
-        native = NativeKvFacts(arguments.input, arguments.rank)
-        recording = native.document()
-        recording["scopes"] = SGLangSourceScopes(recording["environment"]).lower(recording["scopes"])
-
-        # Framework closure rules stay separate from runtime interpretation and the common graph projection.
-        observation = AscendObservation(
-            arguments.input, arguments.rank, recording, arguments.trace, evidence=arguments.evidence
-        )
-        observation.name_streams(*PipelineABI.stream_declarations(recording))
-        facts = observation.document()
-        native.connect_metadata(facts)
-        if arguments.evidence and (timing := native.protocol_timings()) is not None:
-            facts["measurements"]["pd_protocol"] = timing
+        facts = serving_facts(arguments.input, arguments.rank, arguments.trace, evidence=arguments.evidence)
         write_json(arguments.output, facts, replace=False)
 
 

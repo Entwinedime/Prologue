@@ -1,7 +1,8 @@
 """Bind observed PD peers using native topology; graph templates own transfer geometry."""
 
 import torch
-from prologue.integrations.frameworks.sglang.kv_peers import PdPeerBindings
+
+from prologue.integrations.frameworks.sglang.shared.kv_peers import PdPeerBindings
 
 
 class PdTopology:
@@ -9,7 +10,11 @@ class PdTopology:
         instances = {source["id"]: source for source, _, _, _ in workers}
         prefill, = [source for source in instances.values() if source["mode"] == "prefill"]
         decode, = [source for source in instances.values() if source["mode"] == "decode"]
-        if len(instances) != 2 or prefill["model_config"] != decode["model_config"] or prefill["dtype"] != decode["dtype"]:
+        if (
+            len(instances) != 2
+            or prefill["model_config"] != decode["model_config"]
+            or prefill["dtype"] != decode["dtype"]
+        ):
             raise ValueError("PD requires one Prefill and one Decode instance of the same model and dtype")
         rows = {
             index: {

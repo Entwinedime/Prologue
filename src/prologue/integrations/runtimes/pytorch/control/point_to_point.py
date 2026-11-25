@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 
 import torch.distributed as distributed
 
+from prologue.integrations.runtimes.pytorch.control.cpu import MetadataWork
 from prologue.integrations.runtimes.pytorch.protocol_work import CpuTransfer
-from prologue.integrations.runtimes.pytorch.control.metadata import MetadataWork
 
 
 class CpuPointToPoint(CpuTransfer):
@@ -21,7 +21,9 @@ class CpuPointToPoint(CpuTransfer):
 
     def post(self, tensor, group, tag, endpoint, group_endpoint, receiving):
         if tensor.device.type != "cpu":
-            raise ValueError("Native metadata transport requires CPU tensors; device transfers belong to graph execution")
+            raise ValueError(
+                "Native metadata transport requires CPU tensors; device transfers belong to graph execution"
+            )
         execution = self.context.get()
         if execution is None:
             raise ValueError("CPU metadata post requires its native protocol context")
