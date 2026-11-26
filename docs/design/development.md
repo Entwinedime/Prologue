@@ -15,7 +15,7 @@
 
 - **显式 Runtime 与无网络纯预测**：CPU 协调器、`modeling`、`control` 与独立验证均显式使用 `runc`，避免继承主机默认加速器 runtime；纯预测保持无设备、无网络，不加载模型权重、采集插件或目标验证数据。真实 NPU 采集及需 SDK 环境的离线导出显式使用 `ascend`；原生采集桥在推理镜像内单独按 C++23 构建，不链入 `prologue_core`。
 - **上游版本一致性**：Docker Compose 配置位于 [`docker/compose/inference.yml`](../../docker/compose/inference.yml)。执行 [`./docker/build_inference.sh`](../../docker/build_inference.sh) 要求 `third_party/sglang` 工作树干净，自动写入 `PROLOGUE_SGLANG_REVISION` 与 `org.prologue.sglang.revision`，先构建 `sglang` 再构建继承它的 `control`。采集清单、后处理、预测与控制端逐级核对真实上游提交与 Torch 版本（不维护内部格式版本号或旧格式回退）。构建代理监听宿主回环时可设 `PROLOGUE_BUILD_NETWORK=host`。
-- **Python 与 C++ 基线**：Python 源码保持 3.10 语法基线（宿主调度需 Python≥3.9，采集/生产/控制等入口需 Python≥3.10 与 Docker CLI）；C++23 关闭编译器扩展。
+- **Python 与 C++ 基线**：Python 源码与宿主/容器入口统一保持 Python≥3.10 语法基线（宿主调度需 Docker CLI）；C++23 关闭编译器扩展。
 
 ### 2. 标准构建命令
 
@@ -46,7 +46,7 @@ docker run --rm --runtime runc --network none \
 
 ### 1. Python 宿主入口
 
-命令格式为 `python3 -m prologue <命令域> <操作>`。安装宿主包后也可使用 `prologue-cli`。宿主运行在 Python 3.10 及以上环境中。开发容器通过 `PYTHONPATH=src` 使用当前源码。框架与平台的具体实现由宿主注册表选择。[宿主装配](../../src/prologue/app/cli.py) · [适配器注册](../../src/prologue/app/registry.py)
+命令格式为 `python3 -m prologue <命令域> <操作>`。安装宿主包后也可使用 `prologue-cli`。宿主运行在 Python 3.10 及以上环境中。开发容器通过 `PYTHONPATH=src/python` 使用当前源码。框架与平台的具体实现由宿主注册表选择。[宿主装配](../../src/python/prologue/host/cli/cli.py) · [适配器注册](../../src/python/prologue/host/registry.py)
 
 | 命令域 | 操作与用途 |
 | --- | --- |
@@ -56,7 +56,7 @@ docker run --rm --runtime runc --network none \
 | `cost` | `extract` 按 `--kind device/transport/batch/host` 选择样本来源，`fit` 拟合模型，`acquire` 在预算内补充成本 |
 | `verify` | `source` 核对来源，`inputs` 提取实测条件，`local-graphs` 核对局部展开。三路正式验证为 `structure`、`fixed-graph`、`autonomous` |
 
-### 2. C++23 核心入口（[`src/prologue/app/main.cpp`](../../src/prologue/app/main.cpp)）与辅助脚本
+### 2. C++23 核心入口（[`src/engine/tools/main.cpp`](../../src/engine/tools/main.cpp)）与辅助脚本
 
 | 程序与子命令 | 职责 |
 | --- | --- |
@@ -71,7 +71,7 @@ docker run --rm --runtime runc --network none \
 | `prologue replay <fixed-execution> <services> <event-times>` | 固定真实图多场景服务时长重算 |
 | `prologue serve <templates-dir> <task> <result> [--trace] [--execution-inputs \| --costs]` | 应用内部核心仿真入口（标准输入输出接控制协议） |
 | `prologue_local_graphs actions \| expand` | 给定真实动作的离线局部构图验证程序 |
-| 容器内诊断入口 | `python3 -m prologue.app.capture_worker capture\|interpret`、`/opt/prologue/export-profile.sh` |
+| 容器内诊断入口 | `python3 -m prologue.workers.capture capture\|interpret\|export\|sampling-cuts`、`python3 -m prologue.workers.control`、`/opt/prologue/export-profile.sh` |
 | 示例与矩阵入口（[`example/coarse_graph/`](../../example/coarse_graph/)） | `run.py`（四目标探索示例）、`prepare_matrix.py`、`matrix.py` |
 
 ## 三、核心工作流操作手册
@@ -100,12 +100,12 @@ python3 -m prologue predict explore --input /data/targets.json --output /data/ex
 - **局部缺项采集（`library acquire`）**：直接接收预测输出的原缺项查询；可共用一次初始化的多个查询合并传入 `--query`。局部会话收据记录实际设备、累计卡时、保留字节及按秒采样的磁盘峰值。
 
 ```bash
-PYTHONPATH=src python3 -m prologue library acquire \
+PYTHONPATH=src/python python3 -m prologue library acquire \
   --query /path/to/gap.json --deployment /path/to/deployment.json \
   --output /path/to/local-session --timeout 60 --budget-seconds 60 --attempt-limit 1
 ```
 
-  SGLang 在 Ascend 上按缺项选择原生入口。
+  宿主按查询和部署选出适用规则，依优先级尝试。在方法明确返回证据缺口时才尝试低优先级候选。同优先级无法唯一选择时停止，候选产物不完整或与查询冲突时按错误处理。会话记录实际获得资格的录制以及各次采集费用。
 
   1. **同步张量搬运**：按模板工作执行同卡张量操作并核对同步 ACL 区间与目标数据；样本经 `cost fit --samples ... --gap ...` 复核。
   2. **稠密 TP1 Decode Attention**：额外传 `--libraries <发布根>`，复用单个 `ModelRunner` 跑 Prefill 写 KV 与指定 Decode attention，回读 K/V 并逐段核对设备任务与计时；支持零新增尝试从原生记录恢复。对照完整服务开销时使用 `capture run --attention-sites <文件>`。
@@ -130,7 +130,7 @@ python3 -m prologue cost extract --kind batch --session /training/local-batch \
 - **从旧训练集合导入发布**：通过宿主 CLI 执行，并按原绝对路径挂载历史采集目录；发布根 `release.json` 固定双库入口与原生来源身份，所有运行时引用指向发布根内文件。
 
 ```bash
-PYTHONPATH=src python3 -m prologue library publish \
+PYTHONPATH=src/python python3 -m prologue library publish \
   --from-collection /path/to/training/collection --costs /path/to/training/costs.json \
   --libraries /path/to/qwen-release
 ```
@@ -138,11 +138,11 @@ PYTHONPATH=src python3 -m prologue library publish \
 ### 3. 原生采集（`capture run`）与离线生产（`capture project`）
 
 ```bash
-PYTHONPATH=src python3 -m prologue capture run \
+PYTHONPATH=src/python python3 -m prologue capture run \
   --input <job.json> --deployment <deployment.json> \
   --output <采集任务目录> --timeout 900 --budget-seconds 1800 --attempt-limit 2
 
-PYTHONPATH=src python3 -m prologue capture project \
+PYTHONPATH=src/python python3 -m prologue capture project \
   --capture <已发布的原生采集任务目录> --output <生产目录> \
   --binary <modeling构建的prologue> --budget-seconds 600
 ```
@@ -171,7 +171,7 @@ python3 -m prologue cost fit --samples /calibration/*.json \
 ### 5. 单目标预测（`predict`）与执行明细排障
 
 ```bash
-PYTHONPATH=src python3 -m prologue predict run \
+PYTHONPATH=src/python python3 -m prologue predict run \
   --libraries /path/to/qwen-release --input <prediction.json> \
   --binary <modeling构建的prologue> --output <新输出目录> --timeout 180
 ```
@@ -198,21 +198,21 @@ PYTHONPATH=src python3 -m prologue predict run \
 
 ```bash
 # 来源证据独立检查（宿主源码，时钟约束求解使用带 SciPy 的无设备环境）
-PYTHONPATH=src python3 -m prologue verify source \
+PYTHONPATH=src/python python3 -m prologue verify source \
   --production <生产目录> --capture <原始采集目录> [--libraries <双库目录>] --output <报告目录>
 
 # 单案例执行结构验证（串联参考核验、受控输入、预测与 compare_actions）
-PYTHONPATH=src python3 -m prologue verify structure \
+PYTHONPATH=src/python python3 -m prologue verify structure \
   --capture <采集目录> --reference <真实图生产目录> --libraries <双库目录> \
   --input <目标输入.json> --binary <prologue> --output <验证目录> --timeout 180
 
 # 单案例自主闭环评分
-PYTHONPATH=src python3 -m prologue verify autonomous \
+PYTHONPATH=src/python python3 -m prologue verify autonomous \
   --capture <轻量采集目录> --libraries <双库目录> --input <目标输入.json> \
   --binary <prologue> --output <验证目录> --timeout 180
 
 # 冻结矩阵抽样与分阶段运行
-PYTHONPATH=src python3 example/coarse_graph/prepare_matrix.py \
+PYTHONPATH=src/python python3 example/coarse_graph/prepare_matrix.py \
   --root <运行根> --specification <覆盖声明.json> --stage <阶段> --seed <冻结种子>
 python3 example/coarse_graph/matrix.py \
   --root <运行根> --matrix <固定矩阵.json> --phase sources|detailed|light|targets|compare|fixed|autonomous
@@ -237,6 +237,6 @@ python3 example/coarse_graph/matrix.py \
 
 ### 日常开发边界与验证纪律
 
-- **目录与依赖红线**：框架/平台差异严格收敛在 `integrations/`，共同核心、观测合同与发布逻辑不导入具体实现；单案例验证归 `src/prologue/verification/`，场景与矩阵编排归 `example/`；`deprecated/` 仅作本地参考，严禁进入 Git、CMake、Python import、安装或 fallback；`third_party/` 保持官方上游干净工作树。
+- **目录与依赖红线**：框架/平台差异严格收敛在 `integrations/`，共同核心、观测合同与发布逻辑不导入具体实现；单案例验证归 `src/python/prologue/verification/`，场景与矩阵编排归 `example/`；`deprecated/` 仅作本地参考，严禁进入 Git、CMake、Python import、安装或 fallback；`third_party/` 保持官方上游干净工作树。
 - **按职责链修改与验证**：从目标公开行为倒推输入、输出与唯一所有者，先确定合并、拆分、重写与旧入口删除范围，集中改完受影响全链并静态复查后，再在 modeling 容器统一编译与运行必要公开入口；优先复用已有原生记录做离线核对。
 - **不新增独立测试脚手架**：不新建独立 test 工程、CTest、fixture 或 mock；评价工具的受控反例留在 `example/`，严禁进入业务分支。

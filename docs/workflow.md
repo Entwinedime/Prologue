@@ -101,3 +101,11 @@ Qwen3-8B 的两个 TP1 容量都完成了单请求与并发请求预测。冷任
 ## 2026-11-26 — 全仓逻辑交互重构、职责内聚拆分与柔性可扩展体系升级窗口开启
 
 从 `cbea08e` 切出新开发分支 `architecture-cohesion-extensibility`，废除硬性文件数指标，采用 **Codex 全窗口端到端自主交付 + 完成后 AGY 一次性终审** 模式推进：① 先做全仓全局逻辑交互与所有权总览分析，明确“统一核心逻辑”与“可插拔扩展策略”的边界；② 拆解过度合并的超大文件，恢复单一职责与清晰分层交互；③ 重构僵硬硬编码链路（优先打通采集规则优先级/自动回退链、容器 `--probe` 注册表与通用切点原语，并同步清理验证/观测/平台层重复状态机与跨层冗余防御）；④ 完成三路验证整理、公开文档同步、双镜像与 C++ Release 构建，在有界单卡预算内通过端到端真机闭环实测及全量离线基线对照后交回 AGY 终审。
+
+## 2026-11-26 — 全仓逻辑交互重构、职责内聚拆分与柔性可扩展体系升级窗口关闭
+
+本窗口（2026-11-26，分支 `architecture-cohesion-extensibility`，源码起点 `cbea08e`，行为对照基线 `b500cbe`）采用只读纲领 `outline.md` + 动态展开 `plan.md` + 每阶段全仓 Bigger-Picture Overview + 全流程零提交终审模式，由 Codex 自主展开并完成 7/7 阶段（Stage 1–6 + Final Stage），经 AGY 独立终审通过与用户确认后分层提交推送并正式关闭，窗口文档原地保留。
+
+主要重构与能力升级：① 落地真正可插拔的柔性扩展体系——新增 `common/components.py` 包内贡献发现机制，将采集规则、容器探针（`sglang/observation/probes/`）与验证结构检查（`verification/structure/checks/`）统一改为零改动目录贡献；`host/acquisition/rules.py` 升级为优先级候选 + `EvidenceGap` 自动回退链 + 只读 `AcquisitionContext` + 分候选预算账本 `LocalSession`，彻底消除固定 9 规则元组与脆弱互斥排除；② 全仓拆解过载巨文件并理顺职责与所有权——> 550 NE 业务 Python 模块由 18 个清零至 0（最大 539 NE），Python 由 150f 合理拆分为 216f（33,294 NE），涵盖 `sglang/{observation,acquisition,control,shared,abi}`、`platforms/ascend/{analysis,reference,host}`、`runtimes/pytorch` 与 `verification/{core,structure,fixed,autonomous}`，并修复固定图坐标交接与空尝试存储峰值聚合两处真实缺陷；③ 协同整理 C++23 仿真引擎 `src/engine/`（统一表达式声明、共享拓扑依赖排序、合并根端口遍历，Release 0 错误/0 告警）；④ 全面重整代码可读性与公开文档——Python 与 C++ 函数体内 > 25 行无空行代码墙由 158 处清零至 0，Python 空行占比由 12.0% 提升至 17.8%，并同步精修 `README.md` 及 5 份静态设计文档。
+
+验证范围与遗留去向：322 份源码与 23 份证据 SHA-256 全部验真，AST 216 模块 0 环 0 缺失、四维边界 0 越层、`ruff` 0 错、活动源码 0 `.pyc`；双镜像（80/47 模块 + 2 探针）与 4 种打包形态、5 域 16 子命令通过；零副作用扩展实证仅增 3 份贡献模块（34L 规则 + 11L 探针 + 11L 检查）即在 NPU #0 实测触发 `scheduler_host_service → paired_scheduler_host_service` 自动回退、增量发布与 3 token 预测；4 次单卡真机尝试累计 453.49s/1,200s、后处理 193.32s/900s、峰值 0.93 GiB/8 GiB，完成 Qwen3-8B TP1 独立全链路（结构 107/107 动作、固定图与自主闭环均通过）；离线对照与 `b500cbe` 一致（四目标 211,290 轨迹、16 token 发布、678 样本拟合、43,276 项固定图成本、PD 5,355 动作 / 825 端口差异、TP2 联合资格通过）。新框架（如 vLLM）、新硬件平台（如 CUDA）实机接入与多角色独立留出 6% MAPE 精度验收作为后续独立窗口目标推进。

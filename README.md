@@ -4,7 +4,7 @@ Prologue predicts LLM serving performance for one model across a set of configur
 
 ## Build
 
-Run these commands from the checkout on an Ascend host with Docker Compose, Docker BuildKit enabled, the Ascend container runtime, access to `/var/run/docker.sock`, and Python 3.9 or newer. Native observation needs the model files and the physical devices specified by its deployment. The offline example uses the control and modeling images, the compiled executable, and a published Qwen3-8B library release.
+Run these commands from the checkout on an Ascend host with Docker Compose, Docker BuildKit enabled, the Ascend container runtime, access to `/var/run/docker.sock`, and Python 3.10 or newer. Native observation needs the model files and the physical devices specified by its deployment. The offline example uses the control and modeling images, the compiled executable, and a published Qwen3-8B library release.
 
 ```bash
 git submodule update --init third_party/sglang
@@ -28,20 +28,20 @@ The example evaluates two Qwen3-8B TP1 configurations against two workloads. Sup
 python3 example/coarse_graph/run.py --libraries /path/to/qwen-release --timeout 180
 ```
 
-The command creates `data/<UTC-timestamp>_exploration/`. Open `summary.md` for the comparison and `result.json` for each target's result or first missing requirement. Use `--input` for a different exploration, `--output` to choose the task directory, and `--details` to retain the expanded graphs and event timeline. Predictions use the published model identity and worker state on CPU. An empty library reports the missing worker binding for each target.
+The command creates `data/<UTC-timestamp>_exploration/`. Open `summary.md` for the comparison and `result.json` for each target's result or first missing requirement. Use `--input` for a different exploration, `--output` to choose the task directory, and `--details` to retain the expanded graphs and event timeline. Predictions use the published model identity and worker state on CPU. An empty library reports the missing worker binding for each target. The host can use that report to select a local acquisition rule, qualify the resulting recording, and publish an incremental release.
 
 To publish from an existing compatible training collection and fitted cost asset, use the host CLI in a container with the repository mounted. Mount any external recording directories at their original absolute paths. The resulting release holds the worker templates, model bounds, samples, and native recording identities needed for reuse.
 
 ```bash
 docker run --rm --runtime runc --network none -v "$PWD:$PWD" -w "$PWD" \
-  -e PYTHONPATH=src --entrypoint python3 prologue-control:ubuntu22.04 \
+  -e PYTHONPATH=src/python --entrypoint python3 prologue-control:ubuntu22.04 \
   -m prologue library publish --from-collection data/training/collection \
   --costs data/training/performance/costs.json --libraries data/libraries/qwen
 ```
 
 ## Command line
 
-Run `PYTHONPATH=src python3 -m prologue --help` to see the five command groups. Installing the host package also provides `prologue-cli`. Each command has its own help.
+Run `PYTHONPATH=src/python python3 -m prologue --help` to see the five command groups. Installing the host package also provides `prologue-cli`. Each command has its own help.
 
 | Group | Commands |
 | --- | --- |

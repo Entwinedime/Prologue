@@ -34,7 +34,7 @@
 
 目录和类应对应原生观察、来源解释、子图生产、模板变换、控制决策、成本查询、事件执行及外围装配。高层表达协作，底层解释具体结构；不能只搬目录而保留跨层耦合。
 
-- C++ 头文件和源文件按职责放在同一目录，例如 `src/prologue/templates/template.hpp` 与 `src/prologue/templates/template.cpp`；不再维护平行的 include/src 目录树。采集侧自有 C++ 代码同样遵循同目录规则。
+- C++ 头文件和源文件按职责放在同一目录，例如 `src/engine/core/graph/graph.hpp` 与 `src/engine/core/graph/graph.cpp`；不再维护平行的 include/src 目录树。采集侧自有 C++ 代码同样遵循同目录规则。
 - C++ 业务代码以 `src` 为 include 根，使用 `prologue/<职责>/<文件>.hpp`；不保留旧路径转发头文件。普通实现放在 `.cpp`，头文件只保留必要声明和模板定义，不因同目录改成全部 header-only。实际交付的文件进入正式 CMake target，不预建空目录或占位类。
 - 依赖向内为应用装配 → adapters → 共同核心；serving闭环只依赖共同控制、展开和执行接口。核心不经直接或传递 include 取得具体框架配置或应用任务对象。
 - 框架、模型、并行和环境差异留在相应 adapters。框架可组合 runtime，runtime 不反向依赖框架；controller/execution/performance 不按框架名、原生函数或 kernel 名增加业务分支。

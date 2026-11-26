@@ -1,15 +1,15 @@
 # 独立验证体系、对照算法与证据资格
 
-Prologue 将结构正确性、局部成本建模与端到端时序精度拆分为**三条相互独立的验证路径**，并配以来源证据核对、局部构图验证与冻结留出矩阵，防止结构误差、时钟不确定性与成本误差相互掩盖。所有单案例验证实现集中在 [`src/prologue/verification/`](../../src/prologue/verification/)，场景编排与矩阵驱动归 [`example/coarse_graph/`](../../example/coarse_graph/)。
+Prologue 将结构正确性、局部成本建模与端到端时序精度拆分为**三条相互独立的验证路径**，并配以来源证据核对、局部构图验证与冻结留出矩阵，防止结构误差、时钟不确定性与成本误差相互掩盖。所有单案例验证实现集中在 [`src/python/prologue/verification/`](../../src/python/prologue/verification/)，场景编排与矩阵驱动归 [`example/coarse_graph/`](../../example/coarse_graph/)。
 
 ```mermaid
 flowchart TB
-    REF["独立原生参考（目标完整物理拓扑）"] --> DET["详细原生观测：capture --service-reference 与 produce --product graphs"]
-    REF --> LGT["轻量无插桩观测：capture --latency-only"]
+    REF["独立原生参考（目标完整物理拓扑）"] --> DET["详细原生观测：capture run --service-reference 与 capture project --product graphs"]
+    REF --> LGT["轻量无插桩观测：capture run --latency-only"]
 
-    DET --> SE["1. 来源证据核对：source_evidence + NativeCase"]
-    SE --> EI["受控执行输入提取：execution_inputs（有理数认证）"]
-    EI --> P_STR["predict --execution-inputs --execution-trace"]
+    DET --> SE["1. 来源证据核对：verify source + NativeCase"]
+    SE --> EI["受控执行输入提取：verify inputs（有理数认证）"]
+    EI --> P_STR["predict run --execution-inputs --execution-trace"]
     P_STR --> CMP["路径 A：执行结构验证（structure / compare_actions）"]
 
     DET --> FG["路径 B：固定图性能验证（fixed_graph · work-costs + replay）"]
@@ -19,7 +19,7 @@ flowchart TB
     LIB --> AUTO
 ```
 
-宿主统一入口为 `python3 -m prologue verify`。证据核对及平台交接在 `verification/core/`。结构、固定真实图和自主预测各有一个子包，共用运行目录、来源隔离检查和原子结果发布。已有执行轨迹可交给 `structure --compare-only`。已有 token 发布可交给 `autonomous --metrics-only`，批次分歧使用 `autonomous --schedule-diff`。这些模式复用正式比较器，各自的 `--help` 列出需要的输入。
+宿主统一入口为 `python3 -m prologue verify`。证据核对及平台交接在 `verification/core/`。结构、固定真实图和自主预测各有一个子包，共用运行目录、来源隔离检查和原子结果发布。已有执行轨迹可交给 `structure --compare-only`。已有 token 发布可交给 `autonomous --metrics-only`，批次分歧使用 `autonomous --schedule-diff`。这些模式复用正式比较器，各自的 `--help` 列出需要的输入。新的结构检查可从 `verification/structure/checks/` 贡献 `ActionCheck`，读取已核验的原生事实与解码后的预测动作；检查返回定位信息或明确的证据缺口，由公共报告器汇总。
 
 ## 一、隔离红线与通用资格原则
 
@@ -34,7 +34,7 @@ flowchart TB
 
 ### 1. 共享 `NativeCase` 阶段与映射核对
 
-- **原生整组独立构建**：来源检查与预测对照共用 [`native_case.py`](../../src/prologue/verification/core/native_case.py) 与 [`contents.py`](../../src/prologue/verification/core/contents.py) 构成的 `NativeCase` 阶段——仅消费原生记录与粗图，建立全 rank 动作身份、注册池、已观察绑定、通信轮次、CPU 消息与 PD 前置关系，**绝不因预测协议错误取消原生图构建**。
+- **原生整组独立构建**：来源检查与预测对照共用 [`native_case.py`](../../src/python/prologue/verification/core/native_case.py) 与 [`graph_contents.py`](../../src/python/prologue/verification/core/graph_contents.py) 构成的 `NativeCase` 阶段——仅消费原生记录与粗图，建立全 rank 动作身份、注册池、已观察绑定、通信轮次、CPU 消息与 PD 前置关系，**绝不因预测协议错误取消原生图构建**。
 - **声明、端口与 SDK 顺序核对**：
   - 先核对生产清单完整覆盖 `observed_roles`，按共同框架 ABI 检查实现、输入、guard、张量端口（集合/用途/几何/存储版本/写入者/分配所有者，含父转交子就绪点；数据依赖不可重分类为布局元数据）与 shape/token 规则语义（允许二元 `add`/`mul`/`eq` 交换操作数，不按观测值认定公式等价）。
   - 从原始主机记录核对调用进入/返回与 CPU/服务区间计数器和 RAW 测量，核对状态访问声明、`Event`/`Work` 完成代次及异步拷贝/stream 等待；返回 `true` 的查询核对观察路径，`false` 不强加等待。
@@ -113,7 +113,7 @@ flowchart TB
 
 ## 五、固定真实执行图性能验证与误差归因（`fixed_graph`）
 
-固定图验证由 `capture --service-reference` 与 `produce --product graphs --keep-intermediates` 取得同次主机活动与实测粗图，经 `prologue work-costs` 与 `prologue replay` 分三步执行：
+固定图验证由 `capture run --service-reference` 与 `capture project --product graphs --keep-intermediates` 取得同次主机活动与实测粗图，经 `prologue work-costs` 与 `prologue replay` 分三步执行：
 
 1. **固定真实执行结构**：保留已发生的批次、工作、实参、角色、到达、初态、因果与资源次序及独立并发；每项真实成本取同次工作中可分离的自身服务，排除观察器活动、设备同步等待与同步搬运（轻量请求时延不能充当内部服务标签）。
 2. **建立实测基线**：用共同时间线 `prologue replay` 沿真实服务时长、依赖与外部条件重算事件时刻。无前驱主机入口由实测释放；工作外独立测得的 CPU 活动、采集器开销与抢占作为各场景共享固定时长；请求输出核对发布端口是否重现同一 rank 发送区间末端并报区间宽度。**只有实测基线在测量与校准误差内重现参考，且有效窗口有特化观测并无新增 Triton 特化加载，才有资格进入成本误差归因。**
