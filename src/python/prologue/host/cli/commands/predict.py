@@ -18,6 +18,7 @@ def register(group):
         timeout(parser)
         modeling(parser)
         control(parser)
+
     paths(single, "output")
     single.add_argument("--execution-trace", action="store_true", help="retain expanded graphs and timeline events")
     single.add_argument("--execution-inputs", type=Path, help="use measured execution conditions")
@@ -44,9 +45,11 @@ def explore(args):
     adapters = args.adapters
     task = ExplorationTask(options(ExplorationOptions, args), adapters.prediction, framework, source)
     acquisition = None
+
     if args.deployment:
         acquisition = Replenishment(task, options(ReplenishmentOptions, args), adapters.native.local_acquisition,
                                     adapters.samples)
     elif any(x is not None for x in (args.card_budget_seconds, args.postprocessing_budget_seconds, args.attempt_limit)):
         args.parser.error("acquisition allowances require --deployment")
+
     return 0 if task.run(acquisition) else 1

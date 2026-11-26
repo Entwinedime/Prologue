@@ -15,6 +15,8 @@ from prologue.host.workflow.options import PredictionOptions
 
 
 class PredictionProcess:
+    """Run the native control peer and the C++ engine under one deadline."""
+
     def __init__(self, arguments: PredictionOptions, release, source, adapter, limit=None) -> None:
         self.arguments = arguments
         self.release = release
@@ -27,6 +29,7 @@ class PredictionProcess:
             raise ValueError(
                 "given_work_ns requires nonnegative signed 64-bit nanoseconds and no measured timing input"
             )
+
         self.source = {key: value for key, value in source.items() if key != "given_work_ns"}
         self.task = adapter(self.source, release.templates)
 
@@ -62,11 +65,13 @@ class PredictionProcess:
         args = self.arguments
         if not math.isfinite(args.timeout) or args.timeout <= 0:
             raise ValueError("Prediction timeout must be positive")
+
         self.limit.check()
         deadline = time.monotonic() + args.timeout
         output = args.output.resolve()
         if output.is_relative_to(self.release.root):
             raise ValueError("prediction output must be outside the published libraries")
+
         output.mkdir(parents=True)
         if self.task.binding is None:
             write_json(output / "template-gap.json", self.task.missing_workers(), replace=False)
@@ -82,6 +87,7 @@ class PredictionProcess:
             path = f"/inputs/{option[2:]}.json"
             timing_mount = ["--mount", f"type=bind,src={timing_asset.resolve(strict=True)},dst={path},readonly"]
             timing_option = [option, path]
+
         binary = args.binary.resolve(strict=True)
         descriptions = {
             role: DockerImage.inspect(image, timeout=max(0, deadline - time.monotonic()))
@@ -99,39 +105,27 @@ class PredictionProcess:
         stem = f"prologue-serve-{uuid4().hex}"
         names = [f"{stem}-core", f"{stem}-control"]
         write_json(output / "containers.json", names, replace=False)
+
         try:
             with task.open("x") as stream:
                 json.dump(document, stream)
                 stream.write("\n")
+
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("Prediction preparation exhausted its time allowance")
 
-            # Both peers run on CPU, under the same deadline. Only the core can read the selected assets.
-            docker = ["docker", "run", "--rm", "--init", "-i", "--runtime", "runc", "--network", "none"]
-            entry = ["--entrypoint", "/usr/bin/timeout"]
-            timeout = ["--signal=KILL", f"{remaining}s"]
-            template_mounts = []
-            for index, source in enumerate(self.task.binding.paths):
-                mount = f"type=bind,src={source},dst=/inputs/templates/{index}.json,readonly"
-                template_mounts.extend(("--mount", mount))
+            commands = self.launch_arguments(
+                binary, output, task, names, images, remaining, definition_mount, timing_mount, timing_option
+            )
 
-            commands = [
-                [*docker, "--name", names[0], *entry,
-                 "--mount", f"type=bind,src={binary},dst=/app/prologue,readonly", *template_mounts, *definition_mount,
-                 "--mount", f"type=bind,src={task},dst=/inputs/task.json,readonly", *timing_mount,
-                 "--mount", f"type=bind,src={output},dst=/output", images["modeling"], *timeout,
-                 "/app/prologue", "serve", "/inputs/templates", "/inputs/task.json", "/output/.result.json",
-                 *(["--trace", "/output/execution.partial.jsonl"] if args.execution_trace else []), *timing_option],
-                [*docker, "--shm-size", "512m", "--name", names[1], *entry, images["control"], *timeout,
-                 *self.task.control_command],
-            ]
             try:
                 self.execute(commands, names, output, deadline)
             except RuntimeError:
                 if self.gap():
                     return False
                 raise
+
             self.limit.check()
 
             # Both endpoints and their owned containers must close before the result becomes consumable.
@@ -142,8 +136,43 @@ class PredictionProcess:
         finally:
             (output / ".result.json").unlink(missing_ok=True)
             task.unlink(missing_ok=True)
+
         print(f"Created {output / 'result.json'}")
         return True
+
+    def launch_arguments(
+        self, binary, output, task, names, images, remaining, definition_mount, timing_mount, timing_option
+    ):
+        # Both peers run on CPU, under the same deadline. Only the core can read the selected assets.
+        docker = ["docker", "run", "--rm", "--init", "-i", "--runtime", "runc", "--network", "none"]
+        entry = ["--entrypoint", "/usr/bin/timeout"]
+        timeout = ["--signal=KILL", f"{remaining}s"]
+        template_mounts = []
+
+        for index, source in enumerate(self.task.binding.paths):
+            mount = f"type=bind,src={source},dst=/inputs/templates/{index}.json,readonly"
+            template_mounts.extend(("--mount", mount))
+
+        core_mounts = [
+            "--mount", f"type=bind,src={binary},dst=/app/prologue,readonly",
+            *template_mounts,
+            *definition_mount,
+            "--mount", f"type=bind,src={task},dst=/inputs/task.json,readonly",
+            *timing_mount,
+            "--mount", f"type=bind,src={output},dst=/output",
+        ]
+
+        trace = ["--trace", "/output/execution.partial.jsonl"] if self.arguments.execution_trace else []
+        core_command = [
+            "/app/prologue", "serve", "/inputs/templates", "/inputs/task.json", "/output/.result.json",
+            *trace, *timing_option,
+        ]
+        core = [*docker, "--name", names[0], *entry, *core_mounts, images["modeling"], *timeout, *core_command]
+        control = [
+            *docker, "--shm-size", "512m", "--name", names[1],
+            *entry, images["control"], *timeout, *self.task.control_command,
+        ]
+        return [core, control]
 
     def execute(self, commands, names, output, deadline) -> None:
         processes = []
@@ -162,6 +191,7 @@ class PredictionProcess:
                     log.write(json.dumps(command) + "\n")
                     log.flush()
                     processes.append(subprocess.Popen(command, stdin=reader, stdout=writer, stderr=log))
+
                 pipes.close()
                 for process, name in zip(processes, names, strict=True):
                     code = self.limit.wait(process, deadline)
@@ -169,7 +199,6 @@ class PredictionProcess:
                         raise RuntimeError(f"{name} exited with {code}; inspect {output}")
 
         finally:
-
             # Docker clients can exit before their containers; remove only this invocation's named resources.
             try:
                 OwnedContainers(names).close()

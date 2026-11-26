@@ -109,13 +109,16 @@ class OperationLimit:
         deadline = time.monotonic() + timeout
         worker = get_context("spawn").Process(target=_sample_in_worker, args=(operation, options, log_path))
         worker.start()
+
         try:
             while worker.exitcode is None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(operation.__qualname__, timeout)
+
                 worker.join(min(remaining, 1) if self.root is not None else remaining)
                 self.check()
+
             if worker.exitcode:
                 raise subprocess.CalledProcessError(worker.exitcode, operation.__qualname__)
         finally:

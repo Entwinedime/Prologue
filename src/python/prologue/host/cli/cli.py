@@ -11,6 +11,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="prologue", description=__doc__, allow_abbrev=False)
     routing(parser)
     groups = parser.add_subparsers(required=True, metavar="DOMAIN")
+
     for name, module in (("predict", predict), ("library", library), ("capture", capture),
                          ("cost", cost), ("verify", verify)):
         group = groups.add_parser(name, help=module.__doc__, description=module.__doc__)
@@ -27,12 +28,15 @@ def main(argv=None):
         args = args.parser.parse_args(remaining, namespace=args)
     elif remaining:
         parser.error("unrecognized arguments: " + " ".join(remaining))
+
     if getattr(args, "portable_library", False) and not any(
         hasattr(args, key) for key in ("framework", "platform", "framework_version")
     ):
         return handler(args)
+
     with AdapterRegistry.command(args) as (selection, args.adapters):
         for field, image in args.adapters.images(selection).items():
             if hasattr(args, field) and getattr(args, field) is None:
                 setattr(args, field, image)
+
         return handler(args)

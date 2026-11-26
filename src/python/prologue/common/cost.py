@@ -42,6 +42,7 @@ class WorkCatalog:
         self.domain, self.definitions = identities["domain"], identities["definitions"]
         self.features = identities["features"]
         self.window = self.graph["evidence"]["window_ns"]
+
         if self.window != identities["window_ns"]:
             raise ValueError("work identities and coarse graph come from different native observations")
         self.positions = {
@@ -49,6 +50,7 @@ class WorkCatalog:
             for start, finish, definition, interval, point in identities["intervals"]
         }
         expected = {(piece["start"], piece["finish"]) for piece in self.graph["work"]}
+
         if (len(expected) != len(self.graph["work"]) or expected != self.positions.keys()
                 or len(self.positions) != len(identities["intervals"])):
             raise ValueError("work identities must cover each coarse graph interval once")
@@ -73,6 +75,7 @@ class ServiceSamples:
         row = self.rows.setdefault(key, {
             "definition": definition, "interval": interval, "features": features, "observations_ns": [],
         })
+
         if copy is not None:
             row["copy"] = {"bytes": copy[0], "direction": copy[1]}
         if collective is not None:
@@ -81,6 +84,7 @@ class ServiceSamples:
             radius = duration_ns.upper_ns - duration_ns.duration_ns
             payload["max_clock_radius_ns"] = max(payload["max_clock_radius_ns"], radius)
             duration_ns = duration_ns.duration_ns
+
         row["observations_ns"].append(duration_ns)
 
     def add_external(self, identity, kind, features, duration_ns, *, collective=None):

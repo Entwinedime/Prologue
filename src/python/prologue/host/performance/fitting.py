@@ -22,6 +22,7 @@ class DomainCosts:
             if key not in self.indices:
                 self.indices[key] = len(self.definitions)
                 self.definitions.append(definition)
+
             indices.append(self.indices[key])
 
         for location, row in rows:
@@ -29,6 +30,7 @@ class DomainCosts:
             features = row["features"]
             operand = features.get("transport")
             external = self.definitions[index].get("external")
+
             if "collective" in row and operand is None and external is None:
                 raise ValueError("a hardware collective sample must identify its peer group and operands")
             if external is not None and operand is not None and operand != external:
@@ -46,6 +48,7 @@ class DomainCosts:
             model = service_models.fit(self.definitions[definition], interval, rows, operand)
             if operand is not None:
                 model["transport"] = operand
+
             destination = accepted if "family" in model else unresolved
             destination.append({"definition": definition, "interval": interval, "phase": phase, **model})
 
@@ -64,6 +67,7 @@ class FittedCosts:
         source_indices = {path: index for index, path in enumerate(self.sources)}
         self.reused = reused
         domains, placements = {}, {}
+
         for index, source in chain(enumerate(sources.values()), ((None, record) for record in reused)):
             if profile := source.get("transport_profile"):
                 target = cost_identity(profile["logical_workers"])
@@ -75,6 +79,7 @@ class FittedCosts:
             if domain not in domains:
                 domains[domain] = DomainCosts(source["domain"])
             domains[domain].add(source["definitions"], self.observations(index, source["samples"], source_indices))
+
         self.domains = [group.document() for group in domains.values()]
 
     @staticmethod
@@ -97,15 +102,18 @@ class FittedCosts:
         if asset is None:
             write_json(directory / "costs.json", FittedCosts({}, []).document(), replace=False)
             return
+
         fitted = json.loads(asset.read_bytes())
         origins = fitted["sample_recordings"]
         names = {}
         (directory / "samples").mkdir(parents=True)
+
         for index, (name, recordings) in enumerate(zip(fitted["sources"], origins, strict=True)):
             if name in names:
                 raise ValueError(f"duplicate training source in fitted cost asset: {name}")
             path = asset.parent / name
             content = path.read_bytes()
+
             if json.loads(content).get("native_recordings", []) != recordings:
                 raise ValueError(f"fitted model and sample disagree about the native recordings: {path}")
             relative = f"samples/{index}.json"
@@ -117,6 +125,7 @@ class FittedCosts:
             for sample in group["samples"]:
                 donor = sample["observation"]
                 donor["source"] = names[donor["source"]]
+
         write_json(directory / "costs.json", {
             "domains": fitted["domains"], "sources": list(names.values()), "sample_recordings": origins,
             "reused": fitted["reused"],

@@ -6,7 +6,7 @@ from prologue.common.io import content_id, read_json, write_json
 from prologue.host.acquisition.budget import AcquisitionBudget
 from prologue.host.acquisition.capture import NativeAttempt
 from prologue.host.acquisition.options import LocalAcquisitionOptions, QualificationOptions, ReplenishmentOptions
-from prologue.host.acquisition.recording import PublishedCapture
+from prologue.host.acquisition.recording import LocalSession, SessionCapture
 from prologue.host.acquisition.rules import EvidenceGap
 from prologue.host.libraries.increment import LocalLibraryIncrement
 from prologue.host.libraries.release import LibraryRelease, asset_path
@@ -17,11 +17,16 @@ from prologue.host.runtime.limits import AllowanceExhausted
 
 
 class Replenishment:
+    """Group predicted gaps by a compatible local session and carry each qualified contribution to the next
+    library release.
+    """
+
     def __init__(self, task, args: ReplenishmentOptions, rules, source_costs):
         self.root, self.rules, self.source_costs = task.root, rules, source_costs
         self.store = LibraryStore(task.release.root)
         if (self.store.root / "release.json").exists():
             raise ValueError("on-demand acquisition needs a library store, not an immutable release")
+
         self.sessions = self.root / "acquisition/sessions"
         self.deployment = read_json(args.deployment)
         self.source_image = DockerImage.id(args.source_image)
@@ -39,18 +44,21 @@ class Replenishment:
     def open(self):
         release = self.store.open()
         self.budget.open()
-        for path in self.sessions.glob("*/session/native/execution.json"):
-            NativeAttempt.recover_pending(path.parent)
+        for directory in self.sessions.glob("*/session"):
+            for path in LocalSession(directory).executions():
+                NativeAttempt.recover_pending(path.parent)
         return release
 
     def groups(self, queries, release, answers):
         acquisition = self.rules(release, self.qualification)
         origin = str(release.directory.relative_to(self.store.root)) if release.identity else None
         pending = {}
+
         for path in sorted(self.sessions.glob("*/demand.json")):
             original = read_json(path)
             keys = {content_id(q) for q in original["queries"]}
-            began = (path.parent / "session/native/execution.json").is_file()
+            began = next(LocalSession(path.parent / "session").executions(), None) is not None
+
             if (began or original["origin"] == origin) and keys.intersection(queries) - answers.keys():
                 pending[path.parent.name] = original
 
@@ -61,25 +69,28 @@ class Replenishment:
             if key in covered or key in answers:
                 continue
             try:
-                rule = acquisition.select(query, self.deployment)
-                compatible[rule.name, content_id(rule.session_key(query, self.deployment))].append(query)
+                compatible[acquisition.session_key(query, self.deployment)].append(query)
             except EvidenceGap as gap:
                 answers[key] = gap.report
+
         for (rule, _), group in compatible.items():
             group.sort(key=content_id)
             key = content_id([rule, origin, [content_id(q) for q in group]])
             pending[key] = {"queries": group, "rule": rule, "origin": origin}
+
         return pending
 
     def measure(self, folder, demand, release):
         directory = folder / "session"
         attempts, card_ns = self.budget.remaining(directory)
         remaining = self.budget.processing_ns - self.budget.state["processing_ns"]
-        native = directory / "native"
+
         if self.budget.limit.storage_bytes == 0:
             raise AllowanceExhausted("acquisition storage allowance exhausted")
-        if remaining <= 0 or ((attempts == 0 or card_ns == 0) and not (native / "execution.json").is_file()):
+        resumed = next(LocalSession(directory).executions(), None) is not None
+        if remaining <= 0 or ((attempts == 0 or card_ns == 0) and not resumed):
             raise AllowanceExhausted("cumulative attempt, card time or postprocessing allowance exhausted")
+
         self.budget.check()
         path = folder / "demand.json"
         if not path.exists():
@@ -102,18 +113,21 @@ class Replenishment:
         acquisition = self.rules(origin, args)
         queries = demand["queries"]
         receipt = acquisition.run(args, queries, self.deployment, self.budget.limit, self.budget.processing)
+
         if receipt["status"] not in {"qualified", "incomplete"}:
             return receipt, None
 
         qualified = [
             q for q, answer in zip(queries, receipt["answers"], strict=True) if answer["status"] == "qualified"
         ]
+
         with self.budget.processing() as seconds:
             model = self.model(seconds)
             increment = LocalLibraryIncrement(
-                PublishedCapture(native), qualified, acquisition, model, self.source_costs
+                SessionCapture(directory, receipt), qualified, acquisition, model, self.source_costs
             )
             published = self.store.publish(increment, self.budget.before_commit, expected=release)
+
         return receipt, published
 
     def reuse_measurements(self, queries, release):
@@ -123,29 +137,34 @@ class Replenishment:
             for key, q in queries.items()
             if q.get("work") in {"device", "transfer", "collective"}
         }
+
         if not points:
             return None
         for path in sorted(self.sessions.glob("*/session/result.json")):
             receipt = read_json(path)
             if receipt["status"] not in {"qualified", "incomplete"}:
                 continue
+
             directory = path.parent
-            native = PublishedCapture(directory / "native")
+            native = SessionCapture(directory, receipt)
             products = defaultdict(list)
             for key in points:
                 if product := self.source_costs.product(native, queries[key]):
                     products[product].append(key)
+
             for product, keys in products.items():
                 source = native.attempt_id, product
                 previous = self.measured.get(source)
                 if previous and previous.exact is not None and previous.exact.isdisjoint(points[key] for key in keys):
                     continue
+
                 with self.budget.processing() as seconds:
                     model = self.model(seconds)
                     group = [queries[key] for key in keys]
                     if previous is None:
                         table = self.source_costs.extract(directory, native, group, model, self.sessions)
                         previous = self.measured[source] = MeasuredWork(table)
+
                     missing = previous.uncovered(group, model, self.sessions)
                     qualified = [query for i, query in enumerate(group) if i not in missing]
                     if qualified:
@@ -153,7 +172,9 @@ class Replenishment:
                         increment = LocalLibraryIncrement(
                             native, qualified, qualifier, model, self.source_costs, measured=previous.table
                         )
+
                         return self.store.publish(increment, self.budget.before_commit, expected=release)
+
         return None
 
     def required_services(self, release):
@@ -162,20 +183,24 @@ class Replenishment:
             receipt = read_json(path)
             if receipt["status"] not in {"qualified", "incomplete"}:
                 continue
+
             for asset, points in receipt.get("required_work", {}).items():
                 source = read_json(asset_path(path.parent, asset))
                 if content_id(source) != receipt["assets"][asset]:
                     raise ValueError("required work refers to a changed native sample table")
+
                 for index, interval, features in points:
                     definition = source["definitions"][index]
                     demand.gap("training", {"domain": source["domain"], "definition": definition, "interval": interval,
                                             "features": features, "work": definition["work"][interval]["kind"]})
+
         if not demand.points:
             return {}
         with self.budget.processing() as seconds:
             model = self.model(seconds)
             domains = read_json(release.costs)["domains"]
             _, missing, _ = demand.check(model, domains, self.sessions)
+
         queries = [demand.work_query(point) for point in missing]
         return {content_id(query): query for query in queries}
 
@@ -194,13 +219,16 @@ class Replenishment:
             return current
         self.unresolved_services = {}
         extra = {}
+
         if all(target["status"] == "predicted" for target in targets):
             try:
                 extra = self.required_services(release)
             except AllowanceExhausted as failure:
                 self.unresolved_services = {"qualification": {"status": "allowance_exhausted", "detail": str(failure)}}
                 return None
+
             queries.update(extra)
+
         if not queries:
             return None
         answers = dict(self.failed)
@@ -218,17 +246,20 @@ class Replenishment:
                 published = self.reuse_measurements(
                     {key: q for key, q in queries.items() if key not in answers}, release
                 )
+
                 if published and published.identity != release.identity:
                     return published
             except AllowanceExhausted as failure:
                 for key in queries.keys() - answers.keys():
                     answers[key] = {"status": "allowance_exhausted", "detail": str(failure)}
+
         pending = self.groups(queries, current, answers)
         while pending:
             key = next(iter(pending))
             demand = pending.pop(key)
             folder = self.sessions / key
             group = demand["queries"]
+
             if not any(content_id(q) in queries and content_id(q) not in answers for q in group):
                 continue
             try:
@@ -243,22 +274,27 @@ class Replenishment:
                 for part in (group[:middle], group[middle:]):
                     pending[content_id([key, [content_id(q) for q in part]])] = {**demand, "queries": part}
                 continue
+
             for i, query in enumerate(group):
                 detail = dict(receipt["answers"][i]) if "answers" in receipt else {"status": receipt["status"]}
                 if "detail" in receipt:
                     detail["detail"] = receipt["detail"]
+
                 if folder.exists():
                     detail["session"] = str(folder.relative_to(self.root))
                 answers[content_id(query)] = detail
                 if receipt["status"] in {"native_failed", "untriggered"}:
                     self.failed[content_id(query)] = detail
+
             if published and published.identity != release.identity:
                 return published
+
         current = LibraryRelease(self.store.root)
         if current.identity != release.identity:
             return current
         for key, rows in users.items():
             for row in rows:
                 row["acquisition"] = answers[key]
+
         self.unresolved_services = {key: answers[key] for key in extra}
         return None

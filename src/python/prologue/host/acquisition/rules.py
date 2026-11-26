@@ -1,27 +1,43 @@
-"""Run one local native session and answer its original evidence queries."""
+"""Resolve and qualify local evidence without giving an acquisition rule ownership of its budget."""
 
 import subprocess
+from collections.abc import Callable, Iterable
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from itertools import groupby
 from typing import Protocol
 
 from prologue.common.io import content_id, read_json, write_json
 from prologue.host.acquisition.capture import NativeAttempt
-from prologue.host.acquisition.options import LocalAcquisitionOptions
-from prologue.host.acquisition.recording import PublishedCapture
+from prologue.host.acquisition.options import LocalAcquisitionOptions, QualificationOptions
+from prologue.host.acquisition.recording import LocalSession, PublishedCapture
 from prologue.host.performance.requirements import require_work_interval
 from prologue.host.runtime.limits import AllowanceExhausted, OperationLimit
 from prologue.host.runtime.workspace import TaskWorkspace, file_lock
 
 
 class EvidenceGap(Exception):
+    """A valid query that this method cannot prove. Invalid evidence is a separate error."""
+
     def __init__(self, status, **details):
         super().__init__(status)
         self.report = {"status": status, **details}
 
 
+@dataclass(frozen=True, slots=True)
+class AcquisitionContext:
+    """Read-only inputs for constructing and independently qualifying a native recipe."""
+
+    options: LocalAcquisitionOptions | QualificationOptions
+    release_id: str | None = None
+    sampling_sources: Callable[[], Iterable[tuple[str, dict]]] | None = None
+
+
 class EvidenceRule(Protocol):
+    """A recipe contributes a match, a compatible batch key, a native job, and its own evidence qualification."""
+
     name: str
+    priority: int
 
     def matches(self, query: dict) -> bool: ...
     def session_key(self, query: dict, deployment: dict): ...
@@ -38,80 +54,188 @@ def missing_root(query):
 
 
 class LocalAcquisition:
-    """Adapters select a cut, prepare a bounded native attempt, and qualify its readback."""
+    """Try applicable methods in priority order and publish evidence from one qualifying recording."""
 
-    def __init__(self, rules: tuple[EvidenceRule, ...], placement_check, template_resources, release_id=None):
-        self.rules = rules
+    def __init__(self, rules: Iterable[EvidenceRule], context: AcquisitionContext, placement_check, template_resources):
+        ordered = sorted(rules, key=lambda rule: (-rule.priority, rule.name))
+        self.rules = {rule.name: rule for rule in ordered}
+        if len(self.rules) != len(ordered):
+            raise ValueError("local acquisition rule names must be unique")
+        if any(name in {".", ".."} or "/" in name or not name for name in self.rules):
+            raise ValueError("local acquisition rule names must be path components")
+
+        self.context = context
         self.placement_check = placement_check
         self.template_resources = template_resources
-        self.release_id = release_id
 
-    def select(self, query, deployment):
+    def matching(self, query, deployment):
         if "work" in query:
             require_work_interval(query)
         self.placement_check(query, deployment)
-        matches = [rule for rule in self.rules if rule.matches(query)]
+
+        matches = [rule for rule in self.rules.values() if rule.matches(query)]
         if not matches:
-            raise EvidenceGap("no_matching_rule")
-        if len(matches) != 1:
-            raise EvidenceGap("conflicting_rules", rules=[rule.name for rule in matches])
-        return matches[0]
+            raise EvidenceGap("no_matching_rule", query=content_id(query))
+        return matches
+
+    @staticmethod
+    def ranked(matches):
+        """Reject ambiguity at the next priority tier only when that tier becomes eligible."""
+
+        for priority, rules in groupby(matches, key=lambda rule: rule.priority):
+            tier = list(rules)
+            if len(tier) != 1:
+                raise EvidenceGap("conflicting_rules", priority=priority, rules=[rule.name for rule in tier])
+            yield tier[0]
+
+    def session_key(self, query, deployment):
+        rule = next(self.ranked(self.matching(query, deployment)))
+        return rule.name, content_id(rule.session_key(query, deployment))
 
     def run(self, arguments, queries, deployment, limit=None, processing=nullcontext, *, available_queries=None):
         if not queries:
             raise ValueError("local acquisition needs at least one evidence query")
-        root = arguments.output.resolve()
-        with file_lock(root / ".lock"):
-            request = root / "request.json"
+
+        session = LocalSession(arguments.output.resolve())
+        with file_lock(session.directory / ".lock"):
+            request = session.directory / "request.json"
             if available_queries is not None and request.is_file():
 
-                # A fit can shrink current demand while a previously claimed native session is still recoverable.
+                # A fit can shrink demand while a claimed native session is still recoverable.
                 available = {content_id(query): query for query in available_queries}
                 keys = read_json(request)["queries"]
                 if not available.keys() >= set(keys):
                     raise ValueError("the training source no longer supplies the original local queries")
+
                 queries = [available[key] for key in keys]
-            return self.observe(arguments, queries, deployment, root, limit, processing)
+
+            return self.observe(arguments, queries, deployment, session, limit, processing)
 
     @staticmethod
-    def recording(rule, queries, keys, deployment, arguments, limit, processing=nullcontext):
+    def recording(rule, queries, keys, deployment, arguments, session, limit, processing):
+        """Charge prior candidates before preparing this attempt. A completed raw recording can be requalified
+        after a process restart.
+        """
+
         directory = arguments.output
         if not (directory / "result.json").is_file():
+            used, cards = session.charges(excluding=directory)
+            remaining_cards = arguments.card_budget_ns
+            if remaining_cards is not None:
+                remaining_cards = max(0, remaining_cards - cards)
+
+            remaining = replace(arguments, attempt_limit=max(0, arguments.attempt_limit - used.attempts),
+                                card_budget_ns=remaining_cards,
+                                budget_seconds=max(0.0, arguments.budget_seconds - used.native_ns / 1e9))
             with processing() as seconds:
-                attempt = rule.prepare(queries, deployment, replace(arguments, preparation_seconds=seconds), limit)
+                attempt = rule.prepare(queries, deployment, replace(remaining, preparation_seconds=seconds), limit)
+
             attempt.inputs.update(rule=rule.name, queries=keys)
-            if arguments.card_budget_ns is not None:
-                attempt.limit_ns = arguments.card_budget_ns // len(attempt.inputs["physical_devices"])
+            if remaining_cards is not None:
+                attempt.limit_ns = remaining_cards // len(attempt.inputs["physical_devices"])
             attempt.run()
-        recording = PublishedCapture(directory)
-        if (recording.inputs["rule"] != rule.name or recording.inputs["queries"] != keys
-                or recording.inputs["deployment"] != deployment):
-            raise ValueError("native recording belongs to different queries, rule or deployment")
-        return recording
+
+        return PublishedCapture(directory, conditions={"rule": rule.name, "queries": keys, "deployment": deployment})
 
     @staticmethod
     def products(rule, queries, recording, timeout=None):
         products, answers = rule.qualify(queries, recording, timeout)
         if len(answers) != len(queries):
             raise ValueError("local rule must answer each original query")
+
         assets = {name for answer in answers if answer["status"] == "qualified"
                   for name in (answer["asset"], *answer.get("support", ()))}
         if assets != products.keys():
             raise ValueError("qualified queries must refer to exactly the delivered local evidence")
+
         sources = [recording.inputs["template_recording"]] if "template_recording" in recording.inputs else []
         for product in products.values():
             product.update(acquisition_rule=rule.name, native_recordings=[*sources, recording.attempt_id])
         return products, answers
 
     def requalify(self, recording, queries):
-        rule, = (rule for rule in self.rules if rule.name == recording.inputs["rule"])
-        return self.products(rule, queries, recording)
+        return self.products(self.rules[recording.inputs["rule"]], queries, recording)
 
-    def observe(self, arguments, queries, deployment, root, limit, processing):
+    def candidates(self, queries, deployment):
+        choices = [self.matching(query, deployment) for query in queries]
+        preferred = {next(self.ranked(group)).name for group in choices}
+        if len(preferred) != 1:
+            raise EvidenceGap("different_sessions_required", rules=sorted(preferred))
+
+        common = set.intersection(*({choice.name for choice in group} for group in choices))
+        return self.ranked(rule for rule in self.rules.values() if rule.name in common)
+
+    def attempt(self, rule, queries, keys, deployment, options, session, limit, processing):
+        limit.check()
+        try:
+            recording = self.recording(rule, queries, keys, deployment, options, session, limit, processing)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            attempts = NativeAttempt.attempts(options.output)
+            if not attempts or attempts[-1]["status"] != "failed":
+                raise
+
+            detail = (
+                "native attempt exceeded its deadline"
+                if isinstance(error, subprocess.TimeoutExpired)
+                else f"native process exited with {error.returncode}"
+            )
+
+            return {"status": "native_failed", "detail": detail, "attempt": attempts[-1]["number"]}
+
+        receipt = {}
+        with processing() as seconds:
+            products, answers = self.products(rule, queries, recording, seconds)
+            for name, product in products.items():
+                if required := product.pop("required_work", ()):
+                    receipt.setdefault("required_work", {})[name] = required
+                write_json(session.directory / name, product)
+
+        status = "untriggered"
+        if products:
+            status = "qualified" if all(answer["status"] == "qualified" for answer in answers) else "incomplete"
+        receipt.update(status=status, answers=answers, native_recording=recording.attempt_id,
+                       image=recording.inputs["image"], physical_devices=recording.inputs["physical_devices"],
+                       assets={name: content_id(product) for name, product in products.items()})
+        limit.check()
+
+        return receipt
+
+    def collect(self, queries, keys, deployment, arguments, session, limit, processing):
+        misses = []
+        try:
+            for index, rule in enumerate(self.candidates(queries, deployment)):
+                native = session.native(rule.name, primary=index == 0)
+                options = replace(arguments, output=native)
+                try:
+                    receipt = self.attempt(rule, queries, keys, deployment, options, session, limit, processing)
+                except EvidenceGap as gap:
+                    misses.append({"rule": rule.name, "priority": rule.priority, **gap.report})
+                    continue
+
+                receipt["rule"] = rule.name
+                if index:
+                    receipt["recording"] = str(native.relative_to(session.directory))
+                break
+            else:
+
+                # Preserve the highest-priority method's explanation when none could reach the requested cut.
+                receipt = dict(misses[0])
+        except EvidenceGap as gap:
+            receipt = gap.report
+        except AllowanceExhausted as error:
+            receipt = {"status": "allowance_exhausted", "detail": str(error)}
+
+        if misses:
+            receipt["fallback"] = misses
+        return receipt
+
+    def observe(self, arguments, queries, deployment, session, limit, processing):
         keys = [content_id(query) for query in queries]
         request = {"queries": keys, "deployment": deployment, "source_image": arguments.source_image}
-        if self.release_id is not None:
-            request["release"] = self.release_id
+        if self.context.release_id is not None:
+            request["release"] = self.context.release_id
+
+        root = session.directory
         state = root / "request.json"
         with TaskWorkspace(root).initialize(state.name) as draft:
             if draft is not None:
@@ -128,73 +252,24 @@ class LocalAcquisition:
             ):
                 return receipt
 
-        native = root / "native"
-        receipt = {}
-        if limit is None:
-            limit = OperationLimit(root, arguments.storage_bytes)
-        try:
-            selected = []
-            for key, query in zip(keys, queries, strict=True):
-                try:
-                    selected.append(self.select(query, deployment))
-                except EvidenceGap as gap:
-                    gap.report["query"] = key
-                    raise
-            rule = selected[0]
-            if any(candidate is not rule for candidate in selected):
-                raise EvidenceGap("different_sessions_required", rules=sorted({r.name for r in selected}))
-            receipt["rule"] = rule.name
-            limit.check()
-
-            # NativeAttempt owns the bounded process, recovery, physical placement receipt and teardown.
-            child = replace(arguments, output=native)
-            recording = self.recording(rule, queries, keys, deployment, child, limit, processing)
-            with processing() as seconds:
-                products, answers = self.products(rule, queries, recording, seconds)
-                for name, product in products.items():
-                    if required := product.pop("required_work", ()):
-                        receipt.setdefault("required_work", {})[name] = required
-                    write_json(root / name, product)
-            status = "untriggered"
-            if products:
-                status = "qualified" if all(answer["status"] == "qualified" for answer in answers) else "incomplete"
-            receipt.update(
-                status=status,
-                answers=answers,
-                native_recording=recording.attempt_id,
-                image=recording.inputs["image"],
-                assets={name: content_id(product) for name, product in products.items()},
-            )
-            limit.check()
-        except EvidenceGap as gap:
-            receipt.update(gap.report)
-        except AllowanceExhausted as error:
-            receipt.update(status="allowance_exhausted", detail=str(error))
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-            attempts = NativeAttempt.attempts(native)
-            if not attempts or attempts[-1]["status"] != "failed":
-                raise
-            detail = (
-                "native attempt exceeded its deadline"
-                if isinstance(error, subprocess.TimeoutExpired)
-                else f"native process exited with {error.returncode}"
-            )
-            receipt.update(status="native_failed", detail=detail, attempt=attempts[-1]["number"])
-
-        state = native / "execution.json"
-        execution = read_json(state) if state.is_file() else {}
-        attempts = execution.get("attempts", [])
-        usage = NativeAttempt.charges(attempts)
+        limit = limit if limit is not None else OperationLimit(root, arguments.storage_bytes)
+        receipt = self.collect(queries, keys, deployment, arguments, session, limit, processing)
+        usage, card_ns = session.charges()
         retained = limit.sample()
         peak = limit.sampled_peak_bytes
-        if attempts:
-            receipt["physical_devices"] = execution["inputs"]["physical_devices"]
 
-            # Offline qualification cannot reconstruct an unmonitored native attempt's peak.
-            peaks = [attempt.get("sampled_collection_peak_bytes") for attempt in attempts]
-            peak = None if None in peaks else max(peak, *peaks)
+        for path in session.executions():
+            execution = read_json(path)
+            if not execution["attempts"]:
+                continue
+
+            receipt.setdefault("physical_devices", execution["inputs"]["physical_devices"])
+
+            # A recovered attempt can lack the storage measurement made by a live supervisor.
+            peaks = [attempt.get("sampled_collection_peak_bytes") for attempt in execution["attempts"]]
+            peak = None if peak is None or None in peaks else max(peak, *peaks)
+
         receipt.update(queries=keys, native_attempts=usage.attempts, native_charged_ns=usage.native_ns,
-                       card_ns=usage.native_ns * len(receipt.get("physical_devices", ())),
-                       storage={"retained_bytes_before_receipt": retained, "sampled_peak_bytes": peak})
+                       card_ns=card_ns, storage={"retained_bytes_before_receipt": retained, "sampled_peak_bytes": peak})
         write_json(result, receipt, indent=2)
         return receipt

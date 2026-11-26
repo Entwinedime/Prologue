@@ -12,6 +12,10 @@ from prologue.host.runtime.workspace import file_lock
 
 
 class LibraryStore:
+    """Publish immutable releases under the store lock and advance the current pointer only after the assets are
+    complete.
+    """
+
     def __init__(self, root):
         self.root = root.resolve()
 
@@ -26,11 +30,13 @@ class LibraryStore:
                 or not all(c in "0123456789abcdef" for c in relative.name)
             ):
                 raise ValueError("invalid pending library release")
+
             candidate = asset_path(self.root, relative)
             if release.directory != candidate and release.identity != pending["base"]:
                 raise ValueError("pending update does not descend from the selected release")
             if candidate.exists() and candidate != release.directory:
                 rmtree(candidate)
+
             journal.unlink()
 
     def open(self):
@@ -43,6 +49,7 @@ class LibraryStore:
         self.root.mkdir(parents=True, exist_ok=True)
         if (self.root / "release.json").exists():
             raise ValueError("a fixed release is immutable; publish increments to a library store")
+
         with file_lock(self.root / ".library.lock", blocking=True):
             before = LibraryRelease(self.root)
             self.recover(before)
@@ -61,6 +68,7 @@ class LibraryStore:
             journal = self.root / ".pending.json"
             write_json(journal, pointer | {"base": before.identity}, replace=False)
             candidate = self.root / pointer["release"]
+
             try:
                 if before.identity:
                     copytree(before.directory, candidate, copy_function=os.link, ignore=ignore_patterns("release.json"))
@@ -74,9 +82,11 @@ class LibraryStore:
                 write_json(candidate / "release.json", {
                     "id": identity, "templates": "templates/index.json", "costs": "performance/costs.json",
                 })
+
                 if before_commit:
                     before_commit(candidate)
                 write_json(self.root / "current.json", pointer)
             finally:
                 self.recover(LibraryRelease(self.root))
+
             return LibraryRelease(self.root)

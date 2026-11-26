@@ -15,6 +15,10 @@ from prologue.host.runtime.workspace import TaskWorkspace, file_lock
 
 
 class NativeAttempt:
+    """Own a single container execution and its durable budget receipt. Later requalification can read the
+    recording without acquiring more device time.
+    """
+
     @staticmethod
     def attempts(directory):
         state = directory / "execution.json"
@@ -43,10 +47,12 @@ class NativeAttempt:
         self.options, self.worker_options, self.mounts = options, worker_options, mounts
         self.output = arguments.output.resolve()
         self.operation_limit = limit if limit is not None else OperationLimit()
+
         if not math.isfinite(arguments.timeout) or arguments.timeout < 1e-9:
             raise ValueError("native timeout must be finite and at least one nanosecond")
         if not math.isfinite(arguments.budget_seconds) or arguments.budget_seconds < 0 or arguments.attempt_limit < 0:
             raise ValueError("native cumulative time and attempt allowances must be nonnegative")
+
         self.limit_ns = int(arguments.budget_seconds * 1_000_000_000)
         self.timeout_ns = int(arguments.timeout * 1_000_000_000)
 
@@ -72,6 +78,7 @@ class NativeAttempt:
             status = json.loads(subprocess.check_output([
                 "docker", "inspect", attempt["container"], "--format", "{{json .State}}",
             ], text=True))
+
             if status["Status"] == "exited":
                 attempt["exit_code"] = status["ExitCode"]
 
@@ -118,6 +125,7 @@ class NativeAttempt:
                 output.mkdir(parents=True)
                 with (output / "capture.log").open("x") as log:
                     attempt["exit_code"] = self.operation_limit.run(command, log, allowance_ns / 1_000_000_000)
+
                 self.save()
                 if attempt["exit_code"]:
                     raise subprocess.CalledProcessError(attempt["exit_code"], command)
@@ -136,6 +144,7 @@ class NativeAttempt:
             attempts = self.state["attempts"]
             if attempts and attempts[-1]["status"] == "running":
                 self.recover(self.output, self.state)
+
             spent_ns = sum(attempt["charged_ns"] for attempt in attempts)
             if not attempts or attempts[-1]["status"] != "exited":
                 if len(attempts) >= self.arguments.attempt_limit or spent_ns >= self.limit_ns:
@@ -150,4 +159,5 @@ class NativeAttempt:
                 "source": str(source.relative_to(self.output)), **capture,
                 "native_charged_ns": sum(attempt["charged_ns"] for attempt in attempts), "attempts": len(attempts),
             }, indent=2)
+
         print(f"Created {self.output / 'result.json'}")

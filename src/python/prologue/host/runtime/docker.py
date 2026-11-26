@@ -66,6 +66,7 @@ class ModelingCommand:
             f"type=bind,src={self.output.parent},dst=/output",
         ]
         paths = []
+
         for index, source in enumerate(self.inputs):
             path = f"/inputs/{index}.json"
             paths.append(path)

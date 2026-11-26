@@ -14,13 +14,16 @@ from prologue.host.performance.requirements import CostRequirements, MeasuredWor
 
 
 class NativeRecording(Protocol):
+    """The publication boundary carries the selected source and its associated capture metadata."""
+
     directory: Path
+    session: Path
     attempt_id: str
     inputs: dict
     source: Path
     manifest: dict
 
-    def qualified_receipt(self) -> dict: ...
+    receipt: dict
 
 
 class EvidenceQualifier(Protocol):
@@ -29,6 +32,10 @@ class EvidenceQualifier(Protocol):
 
 
 class LocalLibraryIncrement:
+    """Compile and fit only the assets attributable to this qualified local session, then publish their release
+    together.
+    """
+
     def __init__(
         self,
         recording: NativeRecording,
@@ -40,8 +47,8 @@ class LocalLibraryIncrement:
         measured=None,
     ):
         self.recording = recording
-        self.session = recording.directory.parent
-        self.receipt = receipt = recording.qualified_receipt()
+        self.session = recording.session
+        self.receipt = receipt = recording.receipt
         self.qualifier, self.model, self.cost_source = qualifier, model, cost_source
         self.measured = measured
         acquired = dict(zip(receipt["queries"], receipt["answers"], strict=True))
@@ -50,12 +57,14 @@ class LocalLibraryIncrement:
         self.derived = set()
         self.questions = defaultdict(dict)
         self.support = defaultdict(set)
+
         for query in queries:
             key = content_id(query)
             if key in acquired:
                 answer = acquired[key]
                 if answer["status"] != "qualified":
                     raise ValueError(f"native session did not answer query {key}")
+
                 name = answer["asset"]
                 self.direct.append(query)
                 for related in answer.get("support", ()):
@@ -64,10 +73,13 @@ class LocalLibraryIncrement:
                 name = cost_source.product(recording, query)
                 if name is None:
                     raise ValueError("the local recording has no measurement for this work or its required peers")
+
                 self.derived.add(name)
             else:
                 raise ValueError(f"structure query {key} does not belong to this native session")
+
             self.questions[name][key] = query
+
         if not self.questions:
             raise ValueError("local publication requires an original query")
 
@@ -88,6 +100,7 @@ class LocalLibraryIncrement:
                     product = read_json(asset_path(self.session, name))
                     if content_id(product) != self.receipt["assets"][name]:
                         raise ValueError(f"local product changed after qualification: {name}")
+
                     products[name] = product
             else:
 
@@ -95,10 +108,12 @@ class LocalLibraryIncrement:
                 products, answers = self.qualifier.requalify(self.recording, self.direct)
                 if any(answer["status"] != "qualified" for answer in answers):
                     raise ValueError("original query failed native requalification")
+
         for name in self.derived:
             queries = list(self.questions[name].values())
             products[name] = self.measured if self.measured is not None else self.cost_source.extract(
                 self.session, self.recording, queries, self.model, scratch)
+
         if products.keys() != self.identities.keys():
             raise ValueError("native products differ from the qualified query receipts")
         return products
@@ -108,21 +123,26 @@ class LocalLibraryIncrement:
             scratch = Path(temporary)
             products = self.products(scratch)
             structure, costs = {}, {}
+
             for name, product in products.items():
                 if (
                     self.recording.attempt_id not in product["native_recordings"]
                     or product["acquisition_rule"] != self.receipt["rule"]
                 ):
                     raise ValueError("local product belongs to a different native measurement")
+
                 destination = costs if "samples" in product else structure
                 destination[name] = product
+
             if structure:
                 native = self.recording
                 update = TemplatePublication(candidate / "templates", scratch, self.model, native.attempt_id,
                                              native.inputs["deployment"], self.qualifier.template_resources)
+
                 for name, facts in structure.items():
                     update.observe(self.identities[name], facts, self.questions[name].values())
                 update.publish()
+
             if costs:
                 self.costs(candidate / "performance", scratch, receipts, costs)
 
@@ -139,6 +159,7 @@ class LocalLibraryIncrement:
                     "physical_devices": self.recording.inputs["physical_devices"],
                     "image": self.recording.inputs["image"],
                 }
+
                 if related:
                     receipts[identity]["supports"] = sorted(related)
 
@@ -151,6 +172,7 @@ class LocalLibraryIncrement:
             if self.recording.attempt_id in origins
         }
         demand = CostRequirements()
+
         for name, product in products.items():
             identity = self.identities[name]
 
@@ -160,6 +182,7 @@ class LocalLibraryIncrement:
                 if "transport_profile" in product:
                     raise ValueError("the physical calibration does not cover the requested collective operand")
                 raise ValueError("the native measurement does not contain the requested work and features")
+
             for query in queries:
                 demand.gap(identity, query)
 
@@ -176,6 +199,7 @@ class LocalLibraryIncrement:
         if len(sources) != len(previous["sources"]):
             fitted = FittedCosts({path: read_json(directory / path) for path in sources}, previous["reused"]).document()
         covered = demand.query(self.model, fitted["domains"], scratch, nullcontext, None)
+
         for status, _ in covered.values():
             if status != "covered":
                 raise ValueError(f"fitted publication cannot answer original cost query: {status}")

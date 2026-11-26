@@ -59,15 +59,18 @@ class ModelBindingRegistry:
         work = definition["work"][interval]
         operand = definition.get("external", transport if work["kind"] == "collective" else None)
         operation = (operand or {}).get("operation", work.get("operation"))
+
         if "copy" in work:
             operation = "local_copy"
         matches = [rule for rule in self.rules if rule.matches(work["kind"], definition.get("role"), operation, axes)]
         if not matches:
             return self.default
+
         highest = max(rule.priority for rule in matches)
         winners = [rule for rule in matches if rule.priority == highest]
         if len(winners) > 1:
             raise ValueError(f"ambiguous service binding rules at priority {highest}: {winners}")
+
         return winners[0]
 
     def choice(self, rule):
@@ -80,10 +83,12 @@ class ModelBindingRegistry:
         data = ServiceMeasurements(rows)
         result = {"points": len(data.points), "ambiguous_payload_points": data.ambiguous,
                   "training_rows": data.training_rows}
+
         if not data.points:
             return result
         if data.radius is not None:
             result["max_sample_clock_radius_ns"] = data.radius
+
         result["bounds"] = bounds(data.points)
         rule = self.select(definition, interval, data.points[0][0], transport)
         backend, parameters = self.choice(rule).fit(data.points, result)
@@ -100,6 +105,7 @@ class ModelBindingRegistry:
             rates = parameters["coefficients"]
             named_rates = {field: rates[key] for key, field in original["rates"].items()}
             parameters = {"startup_ns": parameters["startup_ns"], **named_rates}
+
         return {**result, "family": backend.family, **parameters}
 
     @classmethod
@@ -112,8 +118,10 @@ class ModelBindingRegistry:
             asset = Path("share/prologue/cost_families.json")
             installed = distribution("prologue-collection")
             catalog = installed.locate_file(asset)
+
             if not catalog.is_file():
                 catalog = next(item.locate() for item in installed.files if item.parts[-3:] == asset.parts)
+
         families = json.loads(catalog.read_bytes())
         registry = cls(ModelBackendRegistry(BoundedCurve()))
         registry.published[registry.default] = families[registry.default.family]
@@ -125,6 +133,7 @@ class ModelBindingRegistry:
             rule = BindingRule(family, **spec["rule"], comparison_axis=axes[0])
             registry.register(rule)
             registry.published[rule] = spec
+
         return registry
 
 

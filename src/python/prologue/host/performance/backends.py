@@ -43,10 +43,12 @@ class BoundedCurve(ModelBackend):
             observations = defaultdict(list)
             for axes, ns in points:
                 observations[axes[axis]].append(ns)
+
             knots = [[x, service_ns(median(values))] for x, values in sorted(observations.items())]
             gain = self.gain(knots, observations)
             if gain > best_gain:
                 best_gain, result = gain, {"axis": axis, "knots": knots}
+
         return result
 
     @staticmethod
@@ -98,6 +100,7 @@ class LinearRegression(ModelBackend):
         if not self.axes or not all(self.supports(axes) for axes, _ in points):
             return None
         columns = [[values[axis] for values, _ in points] for axis in sorted(self.axes)]
+
         if any(min(column) <= 0 for column in columns):
             return None
         durations = [ns for _, ns in points]
@@ -105,11 +108,13 @@ class LinearRegression(ModelBackend):
         middle = mean(durations)
         columns = [[x - center for x in col] for col, center in zip(columns, centers, strict=True)]
         target = [ns - middle for ns in durations]
+
         if len(columns) == 1:
             column, = columns
             variance = sum(x * x for x in column)
             if not variance:
                 return None
+
             rates = [self.dot(column, target) / variance]
         else:
             rates = self.solve(columns, target)
@@ -127,6 +132,7 @@ class LinearRegression(ModelBackend):
 
     @classmethod
     def solve(cls, columns, target):
+
         # Modified Gram-Schmidt exposes collinear measured axes before the triangular solve.
         triangular = []
         response = []
@@ -134,12 +140,14 @@ class LinearRegression(ModelBackend):
             norm = sqrt(cls.dot(column, column))
             if not norm:
                 return None
+
             vector = [x / norm for x in column]
             row = []
             for prior in triangular:
                 projection = cls.dot(prior[0], vector)
                 row.append(projection * norm)
                 vector = [x - projection * q for x, q in zip(vector, prior[0], strict=True)]
+
             residual = sqrt(cls.dot(vector, vector))
             if residual <= ulp(1.0) * max(len(column), index + 1):
                 return None

@@ -10,22 +10,29 @@ from typing import Any
 
 
 class WorkloadContent:
+    """Normalize the public workload once before request translation and simulation. Request identity survives
+    preparation of the native token inputs.
+    """
+
     def __init__(self, requests: Sequence[dict], prefixes: Sequence[dict] = ()) -> None:
         self.requests = {request["id"]: request for request in requests}
         if len(self.requests) != len(requests) or any(
             not isinstance(identity, str) or not identity for identity in self.requests
         ):
             raise ValueError("content request IDs must be nonempty strings and unique")
+
         self.prefixes = {}
         children = defaultdict(list)
         for prefix in prefixes:
             if prefix.keys() - {"id", "parent", "tokens"}:
                 raise ValueError("prefix fields are id, parent and tokens")
             identity = prefix["id"]
+
             if not isinstance(identity, str) or not identity or identity in self.prefixes:
                 raise ValueError("prefix IDs must be nonempty strings and unique")
             if type(prefix["tokens"]) is not int or prefix["tokens"] <= 0:
                 raise ValueError("prefix tokens must be a positive integer")
+
             parent = prefix.get("parent")
             if parent is not None and (not isinstance(parent, str) or not parent):
                 raise ValueError("prefix parent must be a nonempty ID")
@@ -42,15 +49,19 @@ class WorkloadContent:
         branches = defaultdict(list)
         for identity, prefix in self.prefixes.items():
             branches[prefix.get("parent")].append((0, identity))
+
         for identity, request in self.requests.items():
             parent = request.get("prefix_id")
             if parent is not None and (not isinstance(parent, str) or parent not in self.prefixes):
                 raise ValueError(f"unknown request prefix: {parent}")
+
             branches[parent].append((1, identity))
+
         for siblings in branches.values():
             for token, (kind, identity) in enumerate(sorted(siblings)):
                 mapping = self.prefix_tokens if kind == 0 else self.private_tokens
                 mapping[identity] = token
+
         self.vocabulary = max((len(siblings) for siblings in branches.values()), default=0)
 
         self.lengths = {None: 0}
@@ -60,6 +71,7 @@ class WorkloadContent:
             prefix = self.prefixes[identity]
             self.lengths[identity] = self.lengths[prefix.get("parent")] + prefix["tokens"]
             pending.extend(children[identity])
+
         if len(self.lengths) != len(self.prefixes) + 1:
             raise ValueError("prefix parent relationships contain a cycle")
         for request in requests:
@@ -74,6 +86,7 @@ class WorkloadContent:
         request = self.requests[identity]
         path = []
         parent = request.get("prefix_id")
+
         while parent is not None:
             prefix = self.prefixes[parent]
             path.append((self.prefix_tokens[parent], prefix["tokens"]))
@@ -83,6 +96,7 @@ class WorkloadContent:
         private = request["prompt_tokens"] - self.lengths[request.get("prefix_id")]
         if private:
             path.append((self.output_token(identity), private))
+
         return path
 
     def prompt(self, identity: str) -> list[int]:
@@ -95,6 +109,8 @@ class WorkloadContent:
 
 
 class ExpertRoutes:
+    """Validate route coordinates against each native layer's declared expert geometry."""
+
     def __init__(self, source, requests, layers, model_layers: int, padding_limit: int) -> None:
         self.layers = {layer["layer"]: layer for layer in layers}
         self.model_layers = model_layers
@@ -112,13 +128,16 @@ class ExpertRoutes:
         tokens = {request["id"]: request["prompt_tokens"] + request["output_tokens"] - 1 for request in requests}
         segments = {name: {} for name in tokens}
         assignments = source["assignments"]
+
         if not isinstance(assignments, list):
             raise ValueError("EP route assignments must be an array")
         for assignment in assignments:
             name = assignment["request"]
             if name not in tokens:
                 raise ValueError(f"EP route refers to an unknown request: {name}")
+
             self.insert(assignment, segments[name], tokens[name], True)
+
         for name, length in tokens.items():
             self.coverage(segments[name], length, name)
         self.assignments = segments
@@ -149,6 +168,7 @@ class ExpertRoutes:
         fields = {"layers", "tokens", "experts"} | ({"request"} if request else set())
         if not isinstance(source, dict) or source.keys() - fields:
             raise ValueError("unsupported EP route assignment fields")
+
         layers = self.interval(source["layers"], self.model_layers, "layers")
         interval = self.interval(source["tokens"], tokens, "tokens")
         experts = source["experts"]
@@ -159,11 +179,13 @@ class ExpertRoutes:
             or len(set(experts)) != len(experts)
         ):
             raise ValueError("route experts must be distinct model expert IDs matching top-k")
+
         for layer, geometry in self.layers.items():
             if not layers[0] <= layer < layers[1]:
                 continue
             if len(experts) != geometry["top_k"] or any(expert >= geometry["experts"] for expert in experts):
                 raise ValueError(f"route experts do not match native layer {layer}")
+
             segments.setdefault(layer, []).append((*interval, experts))
 
     def coverage(self, segments: dict[int, list[tuple[int, int, list[int]]]], tokens: int, context: str) -> None:
@@ -196,6 +218,7 @@ class ExpertRoutes:
             )
             for member in members
         ]
+
         if padded_tokens > tokens:
             ranges.append((self.padding_routes[layer], 0, padded_tokens - tokens))
         for segments, begin, end in ranges:
@@ -244,6 +267,7 @@ class RoutedContent:
             positions = sorted(events)
             active = {}
             segments = []
+
             for begin, end in pairwise(positions):
                 active.update(events[begin])
 
@@ -251,6 +275,7 @@ class RoutedContent:
                 signature = tuple(sorted(active.items()))
                 symbol = signatures.setdefault(signature, len(signatures))
                 segments.append((end, symbol * content.vocabulary))
+
             self.segments[identity] = segments
 
     def key(self, identity: str, tokens) -> array:
@@ -266,5 +291,7 @@ class RoutedContent:
             result.extend(-offset - token - 1 for token in tokens[begin : min(end, len(tokens))])
             if end >= len(tokens):
                 break
+
             begin = end
+
         return result

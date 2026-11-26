@@ -97,16 +97,19 @@ class CostRequirements:
         requests = (self, held_out) if held_out is not None else (self,)
         if not any(request.points for request in requests):
             return {}
+
         with TemporaryDirectory(prefix=".cost-points-", dir=directory) as scratch:
             scratch = Path(scratch)
             points_path, asset_path, result_path = (
                 scratch / name for name in ("points.json", "costs.json", "estimates.json")
             )
+
             with accounting():
                 groups = defaultdict(dict)
                 for request in requests:
                     for point in request.points:
                         groups[point.domain][point] = None
+
                 source_domains = ChainMap(*(request.domains for request in requests))
                 declared = ChainMap(*(request.definitions for request in requests))
 
@@ -121,6 +124,7 @@ class CostRequirements:
                         "domain": source_domains[domain], "definitions": [declared[key] for key in definitions],
                         "points": rows,
                     })
+
                 write_json(points_path, queries)
                 write_json(asset_path, {"domains": domains})
 
@@ -141,8 +145,10 @@ class CostRequirements:
                 status, _ = estimates[point]
                 for target, number in targets.items():
                     counts[target][status] += number
+
                 if status != "covered":
                     missing[point] = status
+
             return counts, missing, estimates if held_out is not None and held_out.points else {}
 
     def report(self, counts, missing, reasons=None):
@@ -164,9 +170,11 @@ class CostRequirements:
             })
             del value["phase"]
             value["targets"] = dict(self.points[point])
+
             if reasons is not None:
                 value["reason"] = reasons[point]
             row["points"].append(value)
+
         return {
             "targets": {
                 target: {"basis": basis, "counts": dict(counts[target])} for target, basis in self.targets.items()

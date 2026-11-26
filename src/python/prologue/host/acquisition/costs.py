@@ -17,7 +17,7 @@ from prologue.host.acquisition.options import (
     ProductionOptions,
 )
 from prologue.host.acquisition.production import CaptureProduction
-from prologue.host.acquisition.recording import PublishedCapture, SourceProductions
+from prologue.host.acquisition.recording import LocalSession, PublishedCapture, SourceProductions
 from prologue.host.acquisition.rules import EvidenceGap
 from prologue.host.performance.requirements import CostRequirements
 from prologue.host.runtime.docker import DockerImage, ModelingCommand, OwnedContainers
@@ -26,6 +26,8 @@ from prologue.host.runtime.workspace import BinarySnapshot, TaskWorkspace, file_
 
 
 class CostSource:
+    """Bind the sample archive and its measurements to the native production that supplied them."""
+
     def __init__(self, production, capture, job, deployment, output):
         self.production, self.output = production, output
         self.deployment = deployment
@@ -45,6 +47,8 @@ class CostSource:
 
 
 class CostAcquisition:
+    """Plan bounded sample acquisition from explicit model gaps and retain the originating evidence for fitting."""
+
     def __init__(
         self,
         args: CostAcquisitionOptions,
@@ -61,11 +65,13 @@ class CostAcquisition:
         self.output = args.output.resolve()
         self.binary = args.binary.resolve(strict=True)
         durations = args.timeout, args.postprocessing_budget_seconds
+
         if any(not math.isfinite(value) or value < 1e-9 for value in durations):
             raise ValueError("cost acquisition needs positive finite time allowances")
         if (not math.isfinite(args.native_budget_seconds) or args.native_budget_seconds < 0
                 or args.attempt_limit < 0 or args.storage_bytes <= 0):
             raise ValueError("cost acquisition needs nonnegative native allowances and positive storage")
+
         self.budget = Usage(int(args.native_budget_seconds * 1e9), args.attempt_limit,
                             int(args.postprocessing_budget_seconds * 1e9))
         self.limit = OperationLimit(self.output, args.storage_bytes)
@@ -79,6 +85,7 @@ class CostAcquisition:
         self.sources = {}
         self.demand = CostRequirements()
         self.samples = dict(args.samples)
+
         if any("transport_profile" in source for source in self.samples.values()):
             raise ValueError("select physical peer service profiles with --transport-samples")
         self.samples.update(transport_samples.sources)
@@ -91,6 +98,7 @@ class CostAcquisition:
             "demand": [[str(graph), str(identities)] for graph, identities in self.graphs.items()],
             "keep_intermediates": args.keep_intermediates,
         }
+
         if self.transport_samples:
             self.inputs["transport_samples"] = self.transport_samples
 
@@ -101,6 +109,7 @@ class CostAcquisition:
             production = path.resolve(strict=True)
             if any(self.output.is_relative_to(root) for root in (collection, production, capture)):
                 raise ValueError("cost acquisition must own an output outside its training sources")
+
             if production not in self.sources:
                 directory = self.output / "sources" / str(len(self.sources))
                 job = bundle.jobs[str(identity)]
@@ -120,10 +129,12 @@ class CostAcquisition:
                 self.state = {"inputs": self.inputs, "postprocessing_ns": 0, "container": None}
                 write_json(draft / "execution.json", self.state, indent=2)
                 return
+
         self.state = read_json(self.output / "execution.json")
         if self.state["inputs"] != self.inputs:
             raise ValueError("cost acquisition inputs changed")
         snapshot.check(self.output / "prologue")
+
         if self.state["container"] is not None:
             OwnedContainers([self.state["container"]]).close()
             self.state["container"] = None
@@ -143,6 +154,7 @@ class CostAcquisition:
                 self.limit.check()
                 yield remaining / 1e9
                 self.limit.check()
+
                 if time.monotonic_ns() > deadline:
                     raise AllowanceExhausted("cost postprocessing allowance exhausted")
             finally:
@@ -180,6 +192,7 @@ class CostAcquisition:
         allowance = self.budget.available_to(CaptureProduction.usage(source.projection), self.spending(self.output))
         if allowance.processing_ns <= 0:
             raise AllowanceExhausted("cost projection allowance exhausted")
+
         CaptureProduction(ProductionOptions(
             output=source.projection, binary=self.output / "prologue", product="graphs",
             budget_seconds=allowance.processing_ns / 1e9, source_image=self.images["source"],
@@ -190,6 +203,7 @@ class CostAcquisition:
         self.project(source)
         work = source.projection / "work"
         needed = {}
+
         for rank in source.ranks:
             self.run_model("work-identities", source.identities(rank), work / f"{rank}-graph.json")
             observation = {"production": str(source.production), "rank": rank}
@@ -227,9 +241,9 @@ class CostAcquisition:
     def spending(cls, directory):
         state = directory / "execution.json"
         processing = Usage(processing_ns=read_json(state)["postprocessing_ns"]) if state.is_file() else Usage()
-        journals = (*directory.glob("sources/*/*/execution.json"), *directory.glob("sources/*/*/native/execution.json"))
-        native = (NativeAttempt.usage(path.parent) for path in journals)
-        return Usage.total((processing, cls.projection_usage(directory), *native))
+        native = (NativeAttempt.usage(path.parent) for path in directory.glob("sources/*/*/execution.json"))
+        local = (LocalSession(path.parent).charges()[0] for path in directory.glob("sources/*/*/request.json"))
+        return Usage.total((processing, cls.projection_usage(directory), *native, *local))
 
     def measure(self, recipe, output, requested, allowance_ns):
         arguments = LocalAcquisitionOptions(
@@ -250,10 +264,12 @@ class CostAcquisition:
 
                 # A training graph locates native cuts. It supplies demand only for a cold, unscoped acquisition.
                 self.inspect(source, CostRequirements() if explicit else self.demand)
+
         with self.processing():
             for graph, identities in self.graphs.items():
                 if str(graph) not in self.demand.targets:
                     self.demand.graph(str(graph), WorkCatalog(graph, identities))
+
             for path, gap in self.gaps.items():
                 self.demand.gap(str(path), gap)
 
@@ -264,18 +280,19 @@ class CostAcquisition:
         observed = set().union(*(recipe.points for recipe in candidates))
         evidence = []
         deferred = set()
+
         while candidates and missing:
             applicable = {recipe: missing.keys() & recipe.points for recipe in candidates if recipe.ready}
             applicable = {recipe: points for recipe, points in applicable.items() if points}
             if not applicable:
                 break
-            attempts = {
-                recipe: NativeAttempt.attempts(candidates[recipe] / recipe.native_directory) for recipe in applicable
-            }
+
+            attempts = {recipe: recipe.native_attempts(candidates[recipe]) for recipe in applicable}
             recipe = max(applicable, key=lambda candidate: (bool(attempts[candidate]), len(applicable[candidate])))
             output, requested, previous = candidates.pop(recipe), applicable[recipe], attempts[recipe]
             spent = self.spending(self.output)
             allowance = max(0, self.budget.native_ns - spent.native_ns)
+
             if not previous and (not allowance or spent.attempts >= self.budget.attempts):
                 deferred.update(*applicable.values())
                 break
@@ -285,18 +302,21 @@ class CostAcquisition:
             if previous and previous[-1]["status"] == "failed":
                 row["status"] = "capture_failed"
                 continue
+
             try:
                 self.measure(recipe, output, requested, allowance + sum(attempt["charged_ns"] for attempt in previous))
             except EvidenceGap as gap:
                 row.update(gap.report)
                 continue
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError):
-                failed = NativeAttempt.attempts(output / recipe.native_directory)
+                failed = recipe.native_attempts(output)
                 if not failed or failed[-1]["status"] != "failed":
                     raise
+
                 self.limit.check()
                 row["status"] = "capture_failed"
                 continue
+
             before = missing
             fitted, counts, missing, _ = self.fit()
             gained = len(before.keys() - missing.keys())
@@ -307,6 +327,7 @@ class CostAcquisition:
                     "no_qualified_measurement" if point in observed else "no_observed_recipe")
             for point in missing
         }
+
         return {
             **fitted.document(),
             "transport_samples": self.transport_samples,
@@ -335,4 +356,5 @@ class CostAcquisition:
                 write_json(self.output / "status.json", {
                     **self.spending(self.output).document(), "retained_bytes": retained_bytes(self.output),
                 }, indent=2)
+
         print(f"Created {result}")

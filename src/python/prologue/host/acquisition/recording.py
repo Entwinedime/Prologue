@@ -1,12 +1,17 @@
 """Read an immutable native task together with the conditions that produced its evidence."""
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from prologue.common.io import read_json
+from prologue.host.acquisition.capture import NativeAttempt
 from prologue.host.libraries.release import LibraryRelease, asset_path
+from prologue.host.runtime.limits import Usage
 
 
 class PublishedCapture:
+    """Read the successful attempt and verify that its immutable inputs own the publication."""
+
     @classmethod
     def from_source(cls, source):
         source = source.resolve(strict=True)
@@ -20,6 +25,7 @@ class PublishedCapture:
         state = read_json(self.directory / "execution.json")
         self.inputs = state["inputs"]
         actual = read_json(self.directory / "input.json")
+
         if self.inputs["job"] != actual or (job is not None and job != actual):
             raise ValueError(f"published capture differs from the planned native input: {self.directory}")
         if conditions and any(self.inputs.get(key) != value for key, value in conditions.items()):
@@ -42,12 +48,49 @@ class PublishedCapture:
                 or any(publication[key] != value for key, value in self.manifest.items())):
             raise ValueError("published observation differs from its native recording")
 
-    def qualified_receipt(self, receipt=None):
-        receipt = read_json(self.directory.parent / "result.json") if receipt is None else receipt
+class SessionCapture(PublishedCapture):
+    """Bind a qualified session receipt to the native attempt that supplied its assets."""
+
+    def __init__(self, session, receipt=None):
+        self.session = session.resolve(strict=True)
+        receipt = read_json(self.session / "result.json") if receipt is None else receipt
+        super().__init__(asset_path(self.session, receipt.get("recording", "native")))
+
         if (receipt["status"] not in {"qualified", "incomplete"} or receipt["native_recording"] != self.attempt_id
                 or receipt["rule"] != self.inputs["rule"] or receipt["queries"] != self.inputs["queries"]):
             raise ValueError("qualified session does not own the native recording, rule and queries")
-        return receipt
+        self.receipt = receipt
+
+
+@dataclass(frozen=True, slots=True)
+class LocalSession:
+    """Locate native attempts and account for failed or superseded candidates as well as the winner."""
+
+    directory: Path
+
+    def native(self, name, primary):
+        parent = self.directory if primary else self.directory / "fallback" / name
+        return parent / "native"
+
+    def executions(self):
+        primary = self.directory / "native/execution.json"
+        if primary.is_file():
+            yield primary
+        yield from sorted(self.directory.glob("fallback/*/native/execution.json"))
+
+    def attempts(self):
+        return (attempt for path in self.executions() for attempt in read_json(path)["attempts"])
+
+    def charges(self, *, excluding=None):
+        charges, card_ns = [], 0
+        for path in self.executions():
+            if path.parent == excluding:
+                continue
+            execution = read_json(path)
+            usage = NativeAttempt.charges(execution["attempts"])
+            charges.append(usage)
+            card_ns += len(execution["inputs"]["physical_devices"]) * usage.native_ns
+        return Usage.total(charges), card_ns
 
 
 class SourceProductions:
@@ -62,6 +105,7 @@ class SourceProductions:
         self.unavailable = publication.get("unavailable", {})
         planned = {str(job["id"]) for job in self.plan["sources"]}
         jobs = [job for job in self.plan["sources"] if str(job["id"]) not in self.unavailable]
+
         if (not len(jobs) == len(publication["productions"]) == len(publication["captures"])
                 or self.jobs.keys() != planned or self.unavailable.keys() - planned):
             raise ValueError("source publication does not match the planned source jobs")
@@ -76,6 +120,7 @@ class SourceProductions:
             directory = directory.resolve(strict=True)
             recording = PublishedCapture(self.captures[job], self.jobs[str(job)])
             inputs = read_json(directory / "production.json")["inputs"]
+
             if Path(inputs["capture_path"]).resolve(strict=True) != recording.source:
                 raise ValueError(f"template production belongs to another native recording: {directory}")
 
@@ -84,6 +129,7 @@ class SourceProductions:
             for rank, name in zip(result["observed_roles"], result["templates"], strict=True):
                 sampling = result.get("sampling", {}).get(str(rank))
                 paths.append((asset_path(directory, name), asset_path(directory, sampling) if sampling else None))
+
             identity = identities[job] = recording.attempt_id
             value = recording.inputs["deployment"], paths
             if observations.setdefault(identity, value) != value:
@@ -98,4 +144,5 @@ class SourceProductions:
             imports = [identities[local["id"]] for local in jobs
                        if any(row["source"] == job["id"] for row in local.get("local_consumers", []))]
             bindings.append({"domain": job["structure"], "workers": identities[job["id"]], "imports": imports})
+
         return LibraryRelease.publish(output, observations, bindings, costs)

@@ -16,10 +16,12 @@ class ServiceMeasurements:
             observations = row["observations_ns"]
             if not observations or any(type(ns) is not int or ns < 0 for ns in observations):
                 raise ValueError("service samples require nonnegative integer nanoseconds")
+
             durations[point].extend(observations)
             origins[point].append(location)
             if "copy" in row:
                 payloads[point].add(("copy", row["copy"]["bytes"], row["copy"]["direction"]))
+
             if "collective" in row:
                 op = row["collective"]
                 payloads[point].add(("collective", op["dtype"], op["algorithm"], op["elements"]))
@@ -55,6 +57,7 @@ class ModelChoice:
         *alternatives, _ = self.candidates(points[0][0])
         if not alternatives:
             return selected
+
         axis = self.comparison_axis
         if axis not in points[0][0]:
             return selected
@@ -64,10 +67,12 @@ class ModelChoice:
         withheld = set(coordinates[1:-1:2])
         if not withheld:
             return selected
+
         training = [(axes, ns) for axes, ns in points if axes[axis] not in withheld]
         ranges = bounds(training)
         checks = [(axes, ns) for axes, ns in points if axes[axis] in withheld
                   and all(low <= axes[key] <= high for key, (low, high) in ranges.items())]
+
         if not checks:
             return selected
 
@@ -79,6 +84,7 @@ class ModelChoice:
             if trial is None or whole is None:
                 excluded[family.family] = "inadmissible_training_fit" if trial is None else "inadmissible_final_fit"
                 continue
+
             error = mean(abs(family.predict(trial, axes) - ns) / max(ns, 1) for axes, ns in checks)
             if not scores or error < min(scores.values()):
                 selected = family, whole
@@ -88,5 +94,6 @@ class ModelChoice:
                      "held_out_points": len(checks), "mean_relative_error": scores}
         if excluded:
             selection["excluded"] = excluded
+
         report["selection"] = selection
         return selected

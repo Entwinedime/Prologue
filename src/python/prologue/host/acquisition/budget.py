@@ -6,7 +6,7 @@ import time
 from contextlib import contextmanager
 
 from prologue.common.io import read_json, write_json
-from prologue.host.acquisition.capture import NativeAttempt
+from prologue.host.acquisition.recording import LocalSession
 from prologue.host.runtime.limits import AllowanceExhausted, OperationLimit, Usage
 from prologue.host.runtime.workspace import TaskWorkspace
 
@@ -20,6 +20,7 @@ class AcquisitionBudget:
             raise ValueError(
                 "on-demand acquisition requires nonnegative card, processing, attempt and storage allowances"
             )
+
         self.cards, self.processing_ns = (int(x * 1e9) for x in seconds)
         self.attempts = arguments.attempt_limit
         self.root, self.store = root, store
@@ -45,19 +46,15 @@ class AcquisitionBudget:
 
     def usage(self):
         native, cards = [], 0
-        for path in self.root.glob("acquisition/sessions/*/session/native/execution.json"):
-            execution = read_json(path)
-            charged = NativeAttempt.charges(execution["attempts"])
-            native.append(charged)
-            cards += len(execution["inputs"]["physical_devices"]) * charged.native_ns
+        for directory in self.root.glob("acquisition/sessions/*/session"):
+            usage, card_ns = LocalSession(directory).charges()
+            native.append(usage)
+            cards += card_ns
         return Usage.total(native), cards
 
     def remaining(self, directory):
         used, card_ns = self.usage()
-        execution = directory / "native/execution.json"
-        current = read_json(execution) if execution.is_file() else None
-        own = NativeAttempt.charges(current["attempts"]) if current else Usage()
-        own_cards = own.native_ns * len(current["inputs"]["physical_devices"]) if current else 0
+        own, own_cards = LocalSession(directory).charges()
 
         # A resumed child receives its own historical charges plus the unused task allowance.
         return own.attempts + max(0, self.attempts - used.attempts), own_cards + max(0, self.cards - card_ns)

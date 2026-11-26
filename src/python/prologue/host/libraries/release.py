@@ -22,6 +22,8 @@ def asset_path(directory, name):
 
 @dataclass(frozen=True, slots=True)
 class BoundTemplates:
+    """Keep the chosen template files and their action layouts together for one prediction."""
+
     paths: list[Path]
     definitions: Path | None
     headers: list[dict]
@@ -31,17 +33,21 @@ class BoundTemplates:
 
 
 class TemplateCatalog:
+    """Resolve worker bindings and compatible reusable templates against the released observation catalog."""
+
     def __init__(self, directory, index):
         self.directory = directory
         self.observations = index["observations"]
         self.body_digests = {}
         self.bindings = {}
+
         for binding in index["bindings"]:
             key = cost_identity(binding["domain"])
             if key in self.bindings:
                 raise ValueError(f"template publication has conflicting worker bindings for {binding['domain']}")
             if {binding["workers"], *binding["imports"], *binding.get("sources", ())} - self.observations.keys():
                 raise ValueError("worker binding refers to an unpublished observation")
+
             self.bindings[key] = binding
 
     @staticmethod
@@ -49,11 +55,13 @@ class TemplateCatalog:
         header = {key: template[key] for key in ("domain", "local_domain", "resources")}
         body = {key: value for key, value in template.items() if key not in header and key != "definitions"}
         references = []
+
         for position, definition in enumerate(template["definitions"]):
             key = content_id(definition)
             path = directory / "definitions" / (key + ".json")
             if not path.exists():
                 write_json(path, definition, replace=False)
+
             references.append({"id": position, "object": key})
 
         # Frames keep their observed positions; equivalent roles point to one immutable definition.
@@ -62,6 +70,7 @@ class TemplateCatalog:
         if sampling is not None:
             shard["sampling"] = str(Path(name).with_suffix("")) + "-sampling.json"
             write_json(directory / shard["sampling"], sampling, replace=False)
+
         return shard
 
     def read_shard(self, shard):
@@ -86,6 +95,7 @@ class TemplateCatalog:
                 recipe = read_json(sampling) if sampling is not None else None
                 shard = cls.write_shard(directory, name, read_json(path), sampling=recipe)
                 shards.append(shard)
+
             records[identity] = {"deployment": deployment, "shards": shards}
 
         document = {"bindings": bindings, "observations": records}
@@ -96,6 +106,7 @@ class TemplateCatalog:
         binding = self.bindings.get(cost_identity(domain))
         if binding is None:
             return None
+
         workers = self.observations[binding["workers"]]
         recordings = tuple(dict.fromkeys((binding["workers"], *binding.get("sources", ()), *binding["imports"])))
 
@@ -130,6 +141,8 @@ class TemplateCatalog:
 
 
 class LibraryRelease:
+    """Pin a single release for the lifetime of a reader so a concurrent publication cannot change its assets."""
+
     @classmethod
     def publish(cls, directory, observations, bindings, costs):
         from prologue.host.performance.fitting import FittedCosts
@@ -148,16 +161,19 @@ class LibraryRelease:
                 "id": uuid4().hex, "templates": "templates/index.json", "costs": "performance/costs.json",
             })
             staged.rename(directory)
+
         return cls(directory)
 
     def __init__(self, directory):
         self.root = directory.resolve()
         self.directory = self.root
         pointer = self.root / "current.json"
+
         if pointer.is_file():
             current = read_json(pointer)["release"]
             self.directory = asset_path(self.root, current)
         manifest = self.directory / "release.json"
+
         if not manifest.exists() and self.directory == self.root and (not self.root.exists() or all(
             path.name in {".library.lock", ".pending.json", "releases"} for path in self.root.iterdir()
         )):
@@ -189,6 +205,7 @@ class LibraryRelease:
         templates = self.templates
         bindings = []
         definitions = set()
+
         for binding in templates.bindings.values():
             selected = templates.select(binding["domain"])
             active = set()
@@ -196,6 +213,7 @@ class LibraryRelease:
                 for definition in read_json(path)["definitions"]:
                     key = definition.get("object")
                     active.add(key if key is not None else content_id(definition))
+
             definitions.update(active)
 
             workers = []
@@ -204,6 +222,7 @@ class LibraryRelease:
                 roles = header["domain"]["worker_roles"]
                 workers.append({"rank": rank, "roles": [role["parallel"] for role in roles.values()
                                                        if role["representative"] == rank]})
+
             bindings.append({"domain": binding["domain"], "workers": workers, "templates": len(active),
                              "recordings": list(selected.recordings)})
 
@@ -221,6 +240,7 @@ class LibraryRelease:
             # Extents describe the collection. Individual models retain their own possibly disjoint coverage.
             coverage.append({"domain": domain["domain"], "models": len(domain["models"]),
                              "families": dict(families), "feature_extents": extents})
+
         return {"release": self.identity, "template_count": len(definitions), "bindings": bindings,
                 "cost_domains": coverage, "sample_tables": len(costs["sample_recordings"]),
                 "cost_recordings": sorted({origin for origins in costs["sample_recordings"] for origin in origins})}

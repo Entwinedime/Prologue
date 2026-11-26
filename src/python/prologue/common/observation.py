@@ -22,6 +22,10 @@ class Parameter:
 
 
 class ScopeParameters:
+    """Separate values supplied to this call from parameters imported through a parent binding. Shared parameter
+    names alone do not establish that inheritance.
+    """
+
     def __init__(self, scopes) -> None:
         self.scopes = scopes
 
@@ -33,6 +37,7 @@ class ScopeParameters:
                 if expression not in ("context_tokens", "new_tokens"):
                     raise ValueError(f"unknown admitted member feature: {expression}")
                 return Parameter(scope, expression, member)
+
             record = self.scopes[scope]
             if expression in record["constants"]:
                 return record["constants"][expression]
@@ -42,7 +47,9 @@ class ScopeParameters:
                 )
             if expression not in record["parameters"]:
                 raise ValueError(f"shape references undeclared parameter: {scope}:{expression}")
+
             return Parameter(scope, expression)
+
         return expression[0], *(self.resolve(value, scope, member) for value in expression[1:])
 
     def bind(self, rule, scope):
@@ -69,6 +76,10 @@ class ScopeParameters:
 
 
 class CapturedCall:
+    """Keep native call declarations and per-invocation evidence together until the recorder emits their shared
+    identity.
+    """
+
     def __init__(self, capture: SemanticCapture, record: dict[str, Any], device: bool, stream: Any) -> None:
         self.capture = capture
         self.record = record
@@ -86,10 +97,12 @@ class CapturedCall:
                 self.native = self.capture.runtime.service_scope(self.record["host_interval"])
             else:
                 self.native = self.capture.runtime.scope(f"prologue.scope/{self.identity}")
+
             self.native.__enter__()
         except BaseException:
             self.capture.current.reset(self.parent)
             raise
+
         return self
 
     def __exit__(self, kind: Any, error: Any, traceback: Any) -> None:
@@ -128,6 +141,7 @@ class CapturedCall:
                 "name": name, "direction": "output", "tensor": tensor, "use": use,
             })
             self.port(name, "input", tensor, use=use)
+
         self.port(name, "output", tensor, use=use)
 
     def signal(self, name: str, direction: str, point: int) -> None:
@@ -176,11 +190,13 @@ class SemanticCapture:
             fixed = dict(enclosing["constants"]) if inherited else {}
         else:
             fixed = dict(constants)
+
         supplied = dict(enclosing["parameters"] if inherited else parameters)
         for name, value in fixed.items():
             if name in supplied and supplied[name] != value:
                 raise ValueError(f"fixed parameter differs from the native call: {site}:{name}")
             supplied[name] = value
+
         relations = {} if arguments is None else dict(arguments)
         if inherited and arguments is None:
             relations = {name: name for name in supplied if name not in fixed}
@@ -197,9 +213,11 @@ class SemanticCapture:
                 "bindings": {} if bindings is None else dict(bindings), "ports": [], "complete": False,
                 "thread": threading.get_native_id(),
             }
+
             if service is not None:
                 record["service"] = service
             self.scopes.append(record)
+
         return CapturedCall(self, record, device, stream)
 
     def document(self, environment: dict[str, Any]) -> dict[str, Any]:
@@ -217,6 +235,7 @@ class DeviceCalibration:
         if len(samples) < 2:
             raise ValueError("device clock requires at least two independent samples")
         self.device_id = samples[0]["device"]
+
         if any(
             sample["device"] != self.device_id or sample["begin_raw_ns"] > sample["end_raw_ns"] for sample in samples
         ) or any(
@@ -224,6 +243,7 @@ class DeviceCalibration:
             for left, right in zip(samples, samples[1:], strict=False)
         ):
             raise ValueError("device clock requires advancing, separated calibration intervals from one device")
+
         self.samples = samples
         self.counters = [sample["counter"] for sample in samples]
         self.midpoints = [(sample["begin_raw_ns"] + sample["end_raw_ns"]) // 2 for sample in samples]
@@ -248,6 +268,7 @@ class DeviceCalibration:
         last = -((start - timestamp - 1) * counts // duration) - 1
         if first != last or not 0 <= first <= counts:
             raise ValueError("device timestamp does not identify one counter inside its sampled clock segment")
+
         return index, begin + first
 
     def bounds(self, timestamp: int) -> tuple[int, int]:
@@ -266,6 +287,7 @@ class DeviceCalibration:
             index, counter = self.counter_at(time)
             first, last = self.counters[index:index + 2]
             part = Fraction(counter - first, last - first)
+
             for knot, weight in ((index, 1 - part), (index + 1, part)):
                 weights[knot] = weights.get(knot, 0) + sign * weight
 
@@ -276,6 +298,7 @@ class DeviceCalibration:
             a, b = weight * sample["begin_raw_ns"], weight * sample["end_raw_ns"]
             lower += min(a, b)
             upper += max(a, b)
+
         return floor(lower), ceil(upper)
 
 
@@ -298,18 +321,21 @@ class ThreadService:
         self.unavailable = self.by_thread(unavailable)
         self.dequeues = self.by_thread(dequeues)
         self.loss = []
+
         for row in rows:
             thread = row["thread"]
             switches = row["switches"]
             if row["lost"] or any(left[0] > right[0] or left[1] == right[1] for left, right in pairwise(switches)):
                 self.loss.append(thread)
                 continue
+
             if not switches:
                 continue
             begin, end = row["window_ns"]
             running = not switches[0][1]
             cursor = begin
             intervals = []
+
             for stamp, next_state in switches:
                 if stamp > end:
                     break
@@ -317,7 +343,9 @@ class ThreadService:
                     if running:
                         intervals.append((cursor, stamp))
                     cursor = stamp
+
                 running = next_state
+
             if running:
                 intervals.append((cursor, end))
             self.activity[thread] = (begin, end, intervals)
@@ -360,17 +388,20 @@ class ThreadService:
         if self.within(self.unavailable.get(thread, ()), begin, end):
             return None
         covered = self.running_intervals(thread, begin, end)
+
         if covered is None:
             return None
         if submission:
 
             # An idle or spinning submission thread between two queue commands performs no modeled work.
             covered = self.intersect(covered, self.within(self.dequeues.get(thread, ()), begin, end))
+
         covered = list(covered)
         occupied = sum(y - x for x, y in covered)
         excluded = sum(
             y - x for x, y in self.intersect(covered, self.within(self.excluded.get(thread, ()), begin, end))
         )
+
         return occupied - excluded
 
 
@@ -395,12 +426,14 @@ class CapturedWorkers:
             owner = instance["id"]
             participants = instance["native_participants"]
             observed = instance["observed_roles"]
+
             if not isinstance(owner, str) or not owner or owner in self.windows or not participants:
                 raise ValueError("a capture needs unique instances with participating workers")
             for rank in participants:
                 if type(rank) is not int or rank < 0 or rank in self.owners:
                     raise ValueError("native participants must be distinct nonnegative integer workers")
                 self.owners[rank] = owner
+
             if (any(type(rank) is not int or rank not in participants for rank in observed)
                     or len(set(observed)) != len(observed)):
                 raise ValueError("observed workers must be distinct participants of their own instance")
@@ -411,13 +444,16 @@ class CapturedWorkers:
             if placement not in {"full", "single_device"}:
                 raise ValueError(f"unknown worker placement: {placement}")
             replays = instance.get("profile_windows")
+
             if replays is None:
                 windows = [ProfileWindow(tuple(observed))] if observed else []
             else:
                 if (any(len(row) != 1 or type(row[0]) is not int for row in replays)
                         or sorted(row[0] for row in replays) != sorted(observed)):
                     raise ValueError("worker replay windows must cover each profiled worker exactly once")
+
                 windows = [ProfileWindow(tuple(row), replay=True) for row in replays]
+
             self.windows[owner] = windows
             if placement != "full" or replays is not None:
                 self.joint_execution = False

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from prologue.common.io import read_json
 from prologue.host.acquisition.options import LocalAcquisitionOptions, QualificationOptions
-from prologue.host.acquisition.recording import PublishedCapture, SourceProductions
+from prologue.host.acquisition.recording import SessionCapture, SourceProductions
 from prologue.host.cli.arguments import command, modeling, native, options, paths, timeout
 from prologue.host.libraries.increment import LocalLibraryIncrement
 from prologue.host.libraries.release import LibraryRelease
@@ -72,7 +72,7 @@ def publish_session(args):
     model = ModelingProcess(args.binary, args.modeling_image, args.timeout)
     acquisition = adapters.native.local_acquisition(None, options(QualificationOptions, args))
     increment = LocalLibraryIncrement(
-        PublishedCapture(args.from_session / "native"),
+        SessionCapture(args.from_session),
         [read_json(q) for q in args.query],
         acquisition,
         model,

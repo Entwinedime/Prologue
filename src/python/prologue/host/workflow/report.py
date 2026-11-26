@@ -22,9 +22,12 @@ class ExplorationReport:
                 for row in rows:
                     if row[metric] is not None:
                         groups[row[metric]].append(row["configuration"])
+
                 metrics[metric] = [{"value": value, "configurations": groups[value]}
                     for value in sorted(groups, reverse=reverse)]
+
             rankings[workload] = metrics
+
         return rankings
 
     def document(self):
@@ -52,20 +55,25 @@ class ExplorationReport:
             "| Configuration | Workload | Status | P95 TTFT (ms) | Mean TPOT (ms) | Tokens/s |",
             "| --- | --- | --- | ---: | ---: | ---: |",
         ]
+
         if "card_ns" in self.usage:
             lines.insert(4, f"Physical devices used {self.usage['card_ns'] / 1e9:.2f} card-seconds. "
                             f"This task added {self.usage['published_bytes']} bytes to the shared libraries.")
+
         if self.unresolved_services:
             lines.insert(4,
                 "Some services declared by this task's measured training cuts still require qualification. See "
                 "`result.json`.",
             )
+
         for row in self.targets:
             values = [row["configuration"], row["workload"], row["status"]]
             for metric, scale in (("p95_ttft_ns", 1e6), ("mean_tpot_ns", 1e6), ("tokens_per_second", 1)):
                 value = row.get(metric)
                 values.append("-" if value is None else f"{value / scale:.3f}")
+
             lines.append("| " + " | ".join(self.cell(value) for value in values) + " |")
+
         lines.extend(("",
             "`result.json` includes each target's evidence, capture usage, and ties in each metric's rankings.", ""))
         for row in self.targets:
@@ -73,4 +81,5 @@ class ExplorationReport:
                 lines.append(
                     f"- {self.cell(row['configuration'])} / {self.cell(row['workload'])}: {self.cell(answer['status'])}"
                 )
+
         return "\n".join(lines)

@@ -13,6 +13,10 @@ from prologue.host.runtime.workspace import BinarySnapshot, TaskWorkspace, file_
 
 
 class CaptureProduction:
+    """Project immutable raw attempts into either reusable templates or comparison graphs. Device exports run
+    against private source copies.
+    """
+
     @staticmethod
     def usage(directory):
         state = directory / "production.json"
@@ -24,6 +28,7 @@ class CaptureProduction:
         self.output = arguments.output.resolve()
         self.capture = recording.source
         self.binary = arguments.binary.resolve(strict=True)
+
         if self.output.is_relative_to(recording.directory):
             raise ValueError("production must not write inside its immutable native task")
         self.limit_ns = int(arguments.budget_seconds * 1_000_000_000)
@@ -37,11 +42,13 @@ class CaptureProduction:
         self.sampling_input = (
             adapter.sampling_input(recording.inputs["job"]) if arguments.product == "templates" else None
         )
+
         if not self.ranks:
             raise ValueError("source production requires at least one profiled worker")
         images = {}
         for role, image in (("source", arguments.source_image), ("modeling", arguments.modeling_image)):
             images[role] = DockerImage.inspect(image)
+
         if adapter.image_revision(images["source"]) != capture["framework_revision"]:
             raise ValueError("source postprocessing image differs from the captured framework revision")
         self.inputs = {"capture_path": str(self.capture), "capture": capture, "native_image": recording.inputs["image"],
@@ -79,19 +86,23 @@ class CaptureProduction:
                 for name in ("inputs", "work", "logs"):
                     (draft / name).mkdir()
                 snapshot.copy_to(draft / "inputs/prologue")
+
                 if self.arguments.product == "templates":
                     templates = [f"/production/work/{rank}-templates.json" for rank in self.ranks]
                     write_json(draft / "inputs/templates.json", templates)
                 if self.sampling_input:
                     write_json(draft / "inputs/sampling.json", self.sampling_input)
+
                 self.state = {"inputs": self.inputs, "spent_ns": 0, "attempts": 0,
                               "completed": [], "running": None, "error": None}
                 write_json(draft / "production.json", self.state, indent=2)
                 return
+
         self.state = read_json(self.output / "production.json")
         if self.state["inputs"] != self.inputs:
             raise ValueError("production inputs changed; use a new output directory")
         snapshot.check(self.output / "inputs/prologue")
+
         if running := self.state["running"]:
 
             # Only the unfinished step's container and output belong to recovery.
@@ -105,11 +116,13 @@ class CaptureProduction:
             if not (self.output / output).exists():
                 raise FileNotFoundError(f"completed production step lost its output: {output}")
             return
+
         remaining_ns = self.limit_ns - self.state["spent_ns"]
         if remaining_ns <= 0:
             self.state["error"] = "cumulative postprocessing budget exhausted; completed steps remain reusable"
             self.publish_state()
             raise AllowanceExhausted(self.state["error"])
+
         self.operation_limit.check()
         container = f"prologue-produce-{uuid4().hex}"
         self.state["attempts"] += 1
@@ -135,22 +148,27 @@ class CaptureProduction:
                         "none",
                         "--name",
                         container,
+
                         "--entrypoint",
                         "/usr/bin/timeout",
                         "-e",
                         "LD_PRELOAD=",
+
                         "--mount",
                         f"type=bind,src={self.capture},dst=/source,readonly",
                         "--mount",
                         f"type=bind,src={self.output},dst=/production",
+
                         self.inputs["images"][image],
                         "--signal=KILL",
                         f"{remaining_ns / 1_000_000_000}s",
                         *command,
                     ]
                     code = self.operation_limit.run(command, stream, remaining_ns / 1_000_000_000)
+
                     if code:
                         raise subprocess.CalledProcessError(code, command)
+
                 if not (self.output / output).exists():
                     raise FileNotFoundError(f"production command did not publish {output}")
                 self.state["completed"].append(name)
@@ -161,7 +179,55 @@ class CaptureProduction:
                 OwnedContainers([container]).close()
                 if name not in self.state["completed"]:
                     discard_path(self.output / output)
+
                 self.state["running"] = None
+
+    def project_rank(self, rank, *, templates, evidence):
+        facts, graph, template = (
+            f"work/{rank}-facts.json",
+            f"work/{rank}-graph.json",
+            f"work/{rank}-templates.json",
+        )
+        exported = f"work/{rank}-sdk"
+        terminal = f"{rank}-templates" if templates else f"{rank}-project"
+
+        if terminal not in self.state["completed"]:
+            self.step(
+                f"{rank}-export",
+                exported,
+                "source",
+                self.adapter.export_profile(rank, f"/production/{exported}"),
+            )
+            command = self.adapter.interpret(rank, f"/production/{exported}/trace.json", f"/production/{facts}",
+                                             evidence=evidence)
+            self.step(f"{rank}-interpret", facts, "source", command)
+
+        self.step(f"{rank}-project", graph, "modeling", [
+            "/production/inputs/prologue", "project", f"/production/{facts}", f"/production/{graph}",
+            *(["--evidence"] if evidence else []),
+        ])
+
+        if templates:
+            self.step(f"{rank}-templates", template, "modeling", [
+                "/production/inputs/prologue", "templates", f"/production/{graph}", f"/production/{template}",
+            ])
+
+        if self.sampling_input:
+            identities = f"work/{rank}-identities.json"
+            self.step(
+                f"{rank}-work",
+                identities,
+                "modeling",
+                [
+                    "/production/inputs/prologue",
+                    "work-identities",
+                    f"/production/{graph}",
+                    f"/production/{identities}",
+                ],
+            )
+            cuts = f"sampling/{rank}.json"
+            command = self.adapter.sampling_cuts(rank, f"/production/{identities}", f"/production/{cuts}")
+            self.step(f"{rank}-cuts", cuts, "source", command)
 
     def run(self) -> None:
         with file_lock(self.output / ".lock"):
@@ -173,47 +239,7 @@ class CaptureProduction:
             evidence = self.arguments.keep_intermediates or self.sampling_input is not None
             pending = [] if "link-templates" in self.state["completed"] else self.ranks
             for rank in pending:
-                facts, graph, template = (
-                    f"work/{rank}-facts.json",
-                    f"work/{rank}-graph.json",
-                    f"work/{rank}-templates.json",
-                )
-                exported = f"work/{rank}-sdk"
-                terminal = f"{rank}-templates" if templates else f"{rank}-project"
-                if terminal not in self.state["completed"]:
-                    self.step(
-                        f"{rank}-export",
-                        exported,
-                        "source",
-                        self.adapter.export_profile(rank, f"/production/{exported}"),
-                    )
-                    command = self.adapter.interpret(rank, f"/production/{exported}/trace.json", f"/production/{facts}",
-                                                     evidence=evidence)
-                    self.step(f"{rank}-interpret", facts, "source", command)
-                self.step(f"{rank}-project", graph, "modeling", [
-                    "/production/inputs/prologue", "project", f"/production/{facts}", f"/production/{graph}",
-                    *(["--evidence"] if evidence else []),
-                ])
-                if templates:
-                    self.step(f"{rank}-templates", template, "modeling", [
-                        "/production/inputs/prologue", "templates", f"/production/{graph}", f"/production/{template}",
-                    ])
-                if self.sampling_input:
-                    identities = f"work/{rank}-identities.json"
-                    self.step(
-                        f"{rank}-work",
-                        identities,
-                        "modeling",
-                        [
-                            "/production/inputs/prologue",
-                            "work-identities",
-                            f"/production/{graph}",
-                            f"/production/{identities}",
-                        ],
-                    )
-                    cuts = f"sampling/{rank}.json"
-                    command = self.adapter.sampling_cuts(rank, f"/production/{identities}", f"/production/{cuts}")
-                    self.step(f"{rank}-cuts", cuts, "source", command)
+                self.project_rank(rank, templates=templates, evidence=evidence)
 
             # Observed target graphs remain valid independently of source-template selection and transformation rules.
             if templates:
@@ -228,6 +254,7 @@ class CaptureProduction:
                         "/production/assets",
                     ],
                 )
+
             if not self.arguments.keep_intermediates:
                 self.release_work(self.output, () if templates else self.ranks)
 
@@ -249,4 +276,5 @@ class CaptureProduction:
                 },
                 indent=2,
             )
+
         print(f"Created {self.output / 'result.json'}")

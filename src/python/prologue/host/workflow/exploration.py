@@ -26,6 +26,7 @@ class ExplorationTask:
         self.adapter = adapter
         self.binary = args.binary.resolve(strict=True)
         self.source = source
+
         if (
             self.source.keys() != {"framework", "model", "configurations", "workloads"}
             or self.source["framework"] != framework
@@ -44,6 +45,7 @@ class ExplorationTask:
             raise ValueError("prediction workers must be positive")
         if any(row.keys() != {"id", "instances"} for row in self.configurations):
             raise ValueError("each configuration needs an id and serving instances")
+
         self.limit = (
             OperationLimit(self.root, args.storage_bytes)
             if args.storage_bytes is not None and not args.deployment
@@ -76,6 +78,7 @@ class ExplorationTask:
         snapshot = BinarySnapshot(self.binary)
         identity = {"input": self.source, "libraries": str(self.release.directory), "release_id": self.release.identity,
                     "images": self.runtime, "binary": snapshot.digest, "details": self.run_options.execution_trace}
+
         if acquisition:
             identity.update(
                 libraries=str(self.release.root),
@@ -90,7 +93,9 @@ class ExplorationTask:
                 inputs.mkdir()
                 snapshot.copy_to(inputs / "prologue")
                 write_json(inputs / manifest.name, identity, indent=2)
+
                 return
+
         if read_json(manifest) != identity:
             raise ValueError("exploration input, release or runtime changed; use a new output directory")
         snapshot.check(directory / "prologue")
@@ -124,6 +129,7 @@ class ExplorationTask:
                 updated = acquisition.advance(rows, self.release) if acquisition else None
                 if updated is None:
                     break
+
                 self.release = updated
 
         usage = (
@@ -131,6 +137,7 @@ class ExplorationTask:
             if acquisition
             else {**Usage().document(), "retained_bytes": retained_bytes(self.root)}
         )
+
         return ExplorationReport(
             rows, self.release.directory, usage, acquisition.unresolved_services if acquisition else {}
         )
@@ -140,10 +147,12 @@ class ExplorationTask:
             self.prepare(acquisition)
             if acquisition:
                 self.release = acquisition.open()
+
             result = self.root / "result.json"
             if acquisition or not result.is_file():
                 report = self.explore(acquisition)
                 (self.root / "summary.md").write_text(report.markdown())
                 write_json(result, report.document(), indent=2)
+
         print(self.root / "summary.md")
         return read_json(result)["status"] == "complete"

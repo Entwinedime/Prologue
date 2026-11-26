@@ -7,7 +7,9 @@ from prologue.host.libraries.release import LibraryRelease
 from prologue.verification.autonomous.autonomous import AutonomousVerification
 from prologue.verification.autonomous.latency_metrics import compare_publications
 from prologue.verification.autonomous.schedule import compare_schedule
-from prologue.verification.core.source import NativeCase, ProductionEvidence
+from prologue.verification.core import RawCaseSource
+from prologue.verification.core.native_case import NativeCase
+from prologue.verification.core.source import ProductionEvidence
 from prologue.verification.fixed.fixed_graph import FixedPerformance
 from prologue.verification.structure.compare_actions import ActionComparison
 from prologue.verification.structure.execution_inputs import NativeInputs
@@ -51,6 +53,7 @@ def structure_mode(parser, args):
     paths(parser, "capture", "output")
     details(parser)
     parser.add_argument("--peer-handoffs", action="store_true", help="check measured single-device handoff ports")
+
     if args.compare_only:
         paths(parser, "graphs", "execution")
         return compare_actions
@@ -59,6 +62,7 @@ def structure_mode(parser, args):
         modeling(parser)
         control(parser)
         timeout(parser)
+
         return verify_structure
 
 
@@ -77,11 +81,12 @@ def autonomous_mode(parser, args):
         control(parser)
         timeout(parser)
         details(parser)
+
         return verify_autonomous
 
 
 def source(args):
-    check = ProductionEvidence(args.production, args.capture, args.output, args.details)
+    check = ProductionEvidence(args.production, RawCaseSource.read(args.capture), args.output, args.details)
     _, document = check.inspect()
     if args.libraries is not None:
         document["published_templates"] = check.published_templates(LibraryRelease(args.libraries))

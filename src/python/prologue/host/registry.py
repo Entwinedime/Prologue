@@ -27,6 +27,8 @@ def choose(label, explicit, observed, available):
 
 
 class AdapterRegistry:
+    """Compose the installed framework and platform using explicit or recorded identities."""
+
     @staticmethod
     @lru_cache
     def adapter(framework):
@@ -48,15 +50,22 @@ class AdapterRegistry:
         source = source or {}
         records = list(domains)
         if release and release.identity:
-            records.extend(shard["header"]["domain"] for row in release.templates.observations.values()
-                           for shard in row["shards"])
+            records.extend(
+                shard["header"]["domain"] for row in release.templates.observations.values() for shard in row["shards"]
+            )
+
         if source.get("framework") and framework and source["framework"] != framework:
             raise ValueError("the explicit framework disagrees with the input")
-        framework = choose("framework", framework or source.get("framework"),
-                           {r["framework"] for r in records if "framework" in r}, installed(frameworks))
+        framework = choose(
+            "framework",
+            framework or source.get("framework"),
+            {r["framework"] for r in records if "framework" in r},
+            installed(frameworks),
+        )
         records = [r for r in records if r.get("framework", framework) == framework]
-        declarations = {name: import_module(f"{platforms.__name__}.{name}.backend").device.domain
-                        for name in installed(platforms)}
+        declarations = {
+            name: import_module(f"{platforms.__name__}.{name}.backend").device.domain for name in installed(platforms)
+        }
 
         def observed_platform(record):
             matches = {name for name, spec in declarations.items() if spec.runtime_domain_key in record}
@@ -64,22 +73,34 @@ class AdapterRegistry:
                 if matches and label not in matches:
                     raise ValueError("recorded runtime key conflicts with its platform declaration")
                 return {label}
+
             return matches
 
         if source.get("platform") and platform and source["platform"] != platform:
             raise ValueError("the explicit platform disagrees with the input")
-        platform = choose("platform", platform or source.get("platform"),
-                          {p for r in records for p in observed_platform(r)}, declarations)
+        tagged = [(record, observed_platform(record)) for record in records]
+        seen_platforms = {name for _, names in tagged for name in names}
+        platform = choose("platform", platform or source.get("platform"), seen_platforms, declarations)
         adapter = cls.adapter(framework)
-        versions = {adapter.revision(v) for r in records if observed_platform(r) in (set(), {platform})
-                    if (v := r.get("framework_revision") or r.get("implementation", {}).get("framework_revision"))}
+        versions = {
+            adapter.revision(revision)
+            for record, names in tagged
+            if not names or names == {platform}
+            if (
+                revision := record.get("framework_revision")
+                or record.get("implementation", {}).get("framework_revision")
+            )
+        }
+
         source_version = source.get("framework_revision")
         explicit = adapter.revision(version) if version else None
         if source_version:
             declared = adapter.revision(source_version)
             if explicit and explicit != declared:
                 raise ValueError("the explicit framework revision disagrees with the input")
+
             explicit = declared
+
         if versions:
             explicit = choose("framework-version", explicit, versions, versions)
         selection = cls.select(framework, platform, explicit)
@@ -91,6 +112,7 @@ class AdapterRegistry:
         args.source = read_json(args.input) if getattr(args, "input", None) else None
         args.release = LibraryRelease(args.libraries) if getattr(args, "libraries", None) else None
         domains = []
+
         if hasattr(args, "samples"):
             samples = dict.fromkeys(path.resolve(strict=True) for path in args.samples)
             args.samples = {path: read_json(path) for path in samples}
@@ -101,11 +123,18 @@ class AdapterRegistry:
             manifest = directory / "production.json"
             if manifest.is_file():
                 domains.append(read_json(manifest)["inputs"]["capture"])
+
         captures = getattr(args, "capture", None)
         for directory in captures if isinstance(captures, list) else [captures] if captures else []:
             manifest = directory / "execution.json"
             if manifest.is_file():
                 domains.append(read_json(manifest)["inputs"])
-        return cls.bind(source=args.source, release=args.release, domains=domains,
-                        framework=getattr(args, "framework", None),
-                        platform=getattr(args, "platform", None), version=getattr(args, "framework_version", None))
+
+        return cls.bind(
+            source=args.source,
+            release=args.release,
+            domains=domains,
+            framework=getattr(args, "framework", None),
+            platform=getattr(args, "platform", None),
+            version=getattr(args, "framework_version", None),
+        )

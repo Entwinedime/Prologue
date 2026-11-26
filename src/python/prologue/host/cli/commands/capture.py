@@ -14,11 +14,13 @@ def register(group):
     paths(capture, "input")
     native(capture)
     observation = capture.add_mutually_exclusive_group()
+
     for flag, description in (("resource-trace", "record resource and input-read evidence"),
                               ("service-reference", "record structure and same-run CPU activity"),
                               ("latency-only", "record scheduler latency without profiling"),
                               ("host-timing", "measure CPU work and queue cuts")):
         observation.add_argument("--" + flag, action="store_true", help=description)
+
     observation.add_argument("--attention-sites", type=Path, help="measure named decode modules")
     project = command(group, "project", "project a completed capture into graphs or templates", project_capture)
     paths(project, "capture", "output")

@@ -6,6 +6,8 @@ from prologue.host.libraries.release import TemplateCatalog
 
 
 class TemplatePublication:
+    """Package compiled outputs alongside the observation identities needed for later source qualification."""
+
     def __init__(self, directory, scratch, model, origin, deployment, template_resources):
         self.directory, self.scratch, self.model = directory, scratch, model
         self.template_resources = template_resources
@@ -21,7 +23,9 @@ class TemplatePublication:
             for worker in facts["participants"]:
                 rank = worker["environment"]["parallel"]["rank"]
                 self.observe(f"{identity}-{rank}", worker, queries)
+
             return
+
         shards = self.observation["shards"]
         shard = next((row for row in shards if row["product"] == identity), None)
         if shard is None:
@@ -46,6 +50,7 @@ class TemplatePublication:
             if query.get("status") != "missing_worker_binding":
                 self.checks.append((query, shard))
                 continue
+
             shard["initialization"] = {key: facts[key] for key in ("initial_state", "capacity", "configured_settings")}
             if self.catalog.select(query["domain"]) is None:
                 self.index["bindings"].append({"domain": query["domain"], "workers": self.origin, "imports": []})
@@ -62,10 +67,12 @@ class TemplatePublication:
         workers = self.observations[binding["workers"]]
         domain = content_id(binding["domain"])
         fragments = self.added
+
         if domain in self.initialized:
             fragments = [
                 (origin, shard) for origin, observation in self.observations.items() for shard in observation["shards"]
             ]
+
         mode = workers["deployment"]["acquisition_mode"]
         fragments = [(origin, shard) for origin, shard in fragments if origin != binding["workers"]
                      and self.observations[origin]["deployment"]["acquisition_mode"] == mode]
@@ -75,6 +82,7 @@ class TemplatePublication:
             inputs = [(origin, shard) for origin, shard in fragments if self.same_worker(primary, shard)]
             if not inputs:
                 continue
+
             current = self.export(primary, "worker")
             for origin, shard in inputs:
                 observed = self.export(shard, "observed")
@@ -82,8 +90,10 @@ class TemplatePublication:
                 self.model.run_model("join-observation", joined, current, observed)
                 joined.replace(current)
                 sources = binding.setdefault("sources", [])
+
                 if origin not in sources:
                     sources.append(origin)
+
             effective[position] = self.catalog.write_shard(
                 self.directory, f"workers/{domain}/{position}.json", read_json(current)
             )
@@ -109,6 +119,7 @@ class TemplatePublication:
             for binding in self.index["bindings"]:
                 if self.origin in binding.get("sources", ()):
                     programs.extend(program for program in binding["compiled"] if self.same_worker(shard, program))
+
             request = self.scratch / "request.json"
             write_json(request, query)
             for index, program in enumerate(programs):
@@ -116,6 +127,7 @@ class TemplatePublication:
                 answer = self.scratch / f"answer-{number}-{index}.json"
                 self.model.run_model("query-template", answer, library, request)
                 selected = read_json(answer)
+
                 if selected["status"] != "covered" or "observation" not in selected:
                     raise ValueError(f"published program does not answer its original template query: {selected}")
 

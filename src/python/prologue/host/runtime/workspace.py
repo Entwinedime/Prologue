@@ -44,12 +44,14 @@ class TaskWorkspace:
         """Under the task lock, expose a draft once and publish its completion marker last."""
         staging = self.root / ".staging"
         ready = staging / "ready"
+
         if ready.exists():
             self._publish(ready, marker)
         if (self.root / marker).exists():
             discard_path(staging)
             yield None
             return
+
         if any(p.name not in {".lock", ".staging"} for p in self.root.iterdir()):
             raise ValueError(f"new task requires an empty directory: {self.root}")
 
@@ -58,6 +60,7 @@ class TaskWorkspace:
         discard_path(draft)
         draft.mkdir(parents=True)
         yield draft
+
         if not (draft / marker).exists():
             raise FileNotFoundError(draft / marker)
         draft.rename(ready)
@@ -93,4 +96,5 @@ class TaskWorkspace:
                 state[field] = previous + elapsed
                 if elapsed_field is not None:
                     state[elapsed_field] = elapsed
+
                 save()

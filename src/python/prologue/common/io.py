@@ -28,11 +28,15 @@ def discard_path(path: Path) -> None:
 
 
 def content_id(value: Any) -> str:
+    """Identify JSON values independently of object-field order and formatting."""
+
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return sha256(encoded.encode()).hexdigest()
 
 
 def write_json(path: Path, value: Any, *, indent: int | None = None, replace: bool = True) -> None:
+    """Publish a complete document or leave the destination at its previous state."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     temporary = Path(name)

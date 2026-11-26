@@ -22,10 +22,12 @@ def register(group):
     acquire = command(
         group, "acquire", "collect and fit missing services within the supplied allowances", acquire_costs
     )
+
     for parser in (fit, acquire):
         paths(parser, "output")
         parser.add_argument("--gap", type=Path, action="append", default=[])
         parser.add_argument("--demand", type=Path, nargs=2, action="append", default=[], metavar=("GRAPH", "WORK"))
+
     modeling(fit, required=False)
     fit.add_argument("--samples", type=Path, nargs="+", required=True)
     fit.add_argument("--check", type=Path, action="append", default=[])
@@ -49,6 +51,7 @@ def extraction(parser, args):
         parser.add_argument("--projection", type=Path)
         for name, value in (("rank", int), ("work-identities", Path), ("output", Path)):
             parser.add_argument("--" + name, type=value, action="append", required=True)
+
         parser.set_defaults(transport_only=args.kind == "transport")
         return extract_device
     elif args.kind == "batch":

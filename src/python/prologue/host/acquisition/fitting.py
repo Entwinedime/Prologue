@@ -25,6 +25,7 @@ class TransportSamples:
             source = json.loads(content)
             if "transport_profile" not in source:
                 raise ValueError(f"expected a physical peer service profile at {path}")
+
             protocol = source["transport_profile"].get("state_transfer_protocol")
             notices = {(row["operation"], row["dependencies"]) for row in source.get("notification_measurements", ())
                        if row["duration_bounds_ns"] is not None}
@@ -33,17 +34,20 @@ class TransportSamples:
                 interval = row["interval"]
                 if "external" in definition and definition["work"] == [{"kind": "collective"}]:
                     continue
+
                 axes = row["features"]["axes"]
                 notification = (
                     definition["work"] == [{"kind": "transfer"}]
                     and axes.keys() == {"parameter.dependencies"}
                     and (definition.get("external", {}).get("operation"), axes["parameter.dependencies"]) in notices
                 )
+
                 if not protocol or not (notification or ServiceSamples.state_transfer(definition, interval)):
                     raise ValueError(f"physical peer profile contains unrelated work at {path}")
                 domain = cost_identity(source["domain"])
                 if protocols.setdefault(domain, protocol) != protocol:
                     raise ValueError(f"physical state transfer protocols differ in one cost domain at {path}")
+
             self.sources[path] = source
             self.selection[str(path)] = hashlib.sha256(content).hexdigest()
 
@@ -73,8 +77,10 @@ class FitCosts:
             kind = source["definitions"][row["definition"]]["work"][row["interval"]]["kind"]
             observations = row["observations_ns"]
             counts[kind][status] += len(observations)
+
             if estimate is not None and (actual := median(observations)) > 0:
                 errors[kind].append(abs(estimate - actual) / actual)
+
         return {
             "counts": counts,
             "median_point_relative_error": {kind: median(values) for kind, values in sorted(errors.items())},
@@ -86,6 +92,7 @@ class FitCosts:
         demand = CostRequirements()
         for graph_path, identities_path in self.arguments.demand:
             demand.graph(str(graph_path.resolve()), WorkCatalog(graph_path, identities_path))
+
         for path in self.arguments.gap:
             demand.gap(str(path.resolve()), read_json(path))
 

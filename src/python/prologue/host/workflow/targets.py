@@ -23,24 +23,28 @@ class ExplorationTarget:
             row = read_json(outcome)
             if row["basis"] == basis:
                 return row
+
         input_path = self.root / "input.json"
         if not input_path.is_file():
             write_json(input_path, self.source, indent=2, replace=False)
         journal = self.root / "attempt.json"
         previous = read_json(journal) if journal.is_file() else None
         result, evidence, elapsed = None, None, None
+
         if previous:
             output = self.root / "attempts" / str(previous["number"])
             PredictionProcess.recover(output)
             if previous["basis"] == basis:
                 process = PredictionProcess(replace(options, output=output), release, self.source, adapter, limit)
                 result, evidence = self.evidence(process)
+
         if result is None:
             number = previous["number"] + 1 if previous else 0
             output = self.root / "attempts" / str(number)
             previous = {"number": number, "basis": basis, "release": release.identity}
             write_json(journal, previous)
             start = time.monotonic_ns()
+
             try:
                 process = PredictionProcess(replace(options, output=output), release, self.source, adapter, limit)
                 process.run()
@@ -50,12 +54,14 @@ class ExplorationTarget:
             except (ValueError, RuntimeError, subprocess.SubprocessError, TimeoutError) as failure:
                 timed_out = isinstance(failure, (subprocess.TimeoutExpired, TimeoutError))
                 result = {"status": "prediction_timeout" if timed_out else "prediction_failed", "message": str(failure)}
+
             elapsed = time.monotonic_ns() - start
 
         row = {**self.identity, **result, "basis": basis, "release": previous["release"],
                "directory": str(output.relative_to(self.task)), "elapsed_ns": elapsed}
         if evidence is not None:
             row["evidence"] = str(evidence.relative_to(self.task))
+
         write_json(outcome, row, indent=2)
         return row
 
