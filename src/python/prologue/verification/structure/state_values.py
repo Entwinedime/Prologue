@@ -2,7 +2,7 @@
 
 from collections import Counter, defaultdict
 
-from prologue.verification.core.actions import ActionIdentity
+from prologue.verification.core.action_identity import ActionIdentity
 from prologue.verification.engine import FindingLedger
 
 
@@ -27,6 +27,7 @@ class StateValueComparison:
             field, operation, request = value["field"], value["operation"], value["request"]
             if field != "metadata" or operation not in {"write", "read"} or (field, operation, request) not in declared:
                 raise ValueError("state values have no corresponding declared request access")
+
             payload = value["values"]
             fields = {
                 "output_token",
@@ -35,12 +36,14 @@ class StateValueComparison:
                 "cached_tokens_host",
                 "cached_tokens_storage",
             }
+
             if payload is not None and (
                 payload.keys() != fields or any(type(item) is not int or item < 0 for item in payload.values())
             ):
                 raise ValueError("PD payload evidence lacks native token/cache scalar values")
             if type(value["room"]) is not int or value["room"] <= 0:
                 raise ValueError("PD payload evidence lacks its native request room")
+
             destination[group, request, operation].append({"room": value["room"], "values": payload})
 
     def source(self, raw, group):
@@ -49,6 +52,7 @@ class StateValueComparison:
             if "state" not in record["values"]:
                 continue
             scope = record["scope"]
+
             if type(scope) is not int or not 0 < scope < len(raw["scopes"]) or scope in values:
                 raise ValueError("state value observation has no unique native scope")
             values[scope] = record["values"]["state"]
@@ -57,16 +61,19 @@ class StateValueComparison:
                         for index in values if raw["scopes"][index]["role"] == "segment"}
         if any(raw["scopes"][parent]["role"] != "invocation" for parent in declarations):
             raise ValueError("state segment has no native invocation envelope")
+
         for index, scope in enumerate(raw["scopes"]):
             parent = scope["parent"]
             if index not in values and (scope["role"] != "segment" or parent not in declarations):
                 continue
+
             declared = self.declared([scope.get("state_accesses", ())], "local")
             if scope["role"] == "segment" and parent in declarations:
 
                 # A native read can precede a clock cut; its later value still belongs to this actual invocation.
                 declarations[parent].update(declared)
                 declared = declarations[parent]
+
             if index in values:
                 self.add(self.native, group, values[index], declared)
 
@@ -75,6 +82,7 @@ class StateValueComparison:
         position = work.get("continuation")
         if position is None:
             return declared
+
         callers = work.get("callers", [])
 
         # Depth locates a live frame; its full work and continuation must still match across cuts.
@@ -90,7 +98,9 @@ class StateValueComparison:
                 position["entry_context"],
             ):
                 raise ValueError("state segments do not continue the same native invocation")
+
             declared = declared | fields
+
         if position["exit"] != "call.return":
             self.continuations[key] = identity, position["exit"], position["exit_context"], declared
         return declared
@@ -102,6 +112,7 @@ class StateValueComparison:
             group = self.groups[graph["resources"][0]["rank"]]
             declared = self.declared((scope["slot_accesses"] for scope in graph["scopes"]), group)
             declared = self.invocation_fields(group, root, declared)
+
             if not any(field == "metadata" for field, _, _ in declared):
                 return
             boundary = next(port["event"] for port in root["ports"] if port["name"] == "call.return")
@@ -112,6 +123,7 @@ class StateValueComparison:
             owner = self.returns.pop(row["boundary"])
             if owner["group"] != row["group"] or owner["completed"] is None or row["time_ns"] < owner["completed"]:
                 raise ValueError("state value observation precedes its own native action return")
+
             self.add(self.predicted, row["group"], row["values"]["state"], owner["declared"])
 
     def compare(self, protocol):
@@ -119,6 +131,7 @@ class StateValueComparison:
         endpoints = {(group, request, "write" if (group, request) in sources else "read")
                      for (group, request), sources in requirements.items()}
         counts = Counter()
+
         for origin, observed in (("native", self.native), ("predicted", self.predicted)):
             for key in observed.keys() - endpoints:
                 self.findings.add(
@@ -126,11 +139,13 @@ class StateValueComparison:
                         {"group": key[0], "request": key[1]},
                         {"origin": origin, "reason": "unexpected payload endpoint"},
                     )
+
             for group, request, operation in endpoints:
                 records = observed[group, request, operation]
                 if len(records) != 1:
                     counts[f"{origin}_unpaired"] += 1
                     continue
+
                 if records[0]["values"] is None:
                     self.findings.add(
                             "state_payload",
@@ -142,6 +157,7 @@ class StateValueComparison:
                 if (group, request) in senders:
                     continue
                 received = observed[group, request, "read"]
+
                 for sender, _ in senders:
                     written = observed[sender, request, "write"]
                     if (
@@ -151,6 +167,7 @@ class StateValueComparison:
                         or received[0]["values"] is None
                     ):
                         continue
+
                     counts[f"{origin}_transfers_checked"] += 1
                     if written[0] != received[0]:
                         self.findings.add("state_payload", {"group": group, "request": request}, {
@@ -170,6 +187,7 @@ class StateValueComparison:
                     })
                 else:
                     counts["endpoints_matched"] += 1
+
         self.counts = {
             "endpoints": len(endpoints),
             **counts,
@@ -179,6 +197,7 @@ class StateValueComparison:
                 "unpaired occurrences are not covered."
             ),
         }
+
         return self.findings
 
 
@@ -217,6 +236,7 @@ class ActionResults:
             owner = self.returns.pop(row["boundary"])
             if owner["key"][0] != row["group"] or owner["completed_ns"] != row["time_ns"]:
                 raise ValueError("native action results do not belong to this completed return")
+
             result = {"progress": [], "publication": []}
             seen = set()
             for output in row["values"]["outputs"]:
@@ -225,18 +245,21 @@ class ActionResults:
                         or type(output["generated_tokens"]) is not int or output["generated_tokens"] < 0
                         or type(output["finished"]) is not bool or type(output["emits_output"]) is not bool):
                     raise ValueError("native action result has an invalid or repeated request")
+
                 seen.add(request)
                 value = {"id": self.requests[request], "generated_tokens": output["generated_tokens"]}
                 if output["emits_output"]:
                     result["publication"].append(value)
                 else:
                     result["progress"].append({**value, "finished": output["finished"]})
+
             self.predicted[owner["key"]] = result
 
     def compare(self, pairs):
         findings = []
         self.counts["observed_returns"] = len(self.predicted)
         self.counts["missing_returns"] = len(self.returns)
+
         if self.returns:
             findings.append(("native_evidence", {}, {"missing_action_results": len(self.returns)}))
         for source, target in pairs.items():
@@ -245,6 +268,7 @@ class ActionResults:
             actual, predicted = self.native[source], self.predicted[target]
             self.counts["compared"] += 1
             self.counts["matched"] += actual == predicted
+
             if actual != predicted:
                 findings.append(
                     (
@@ -253,6 +277,7 @@ class ActionResults:
                         {"native": actual, "predicted": predicted},
                     )
                 )
+
         for origin, records, paired in (
             ("native", self.native, pairs.keys()),
             ("predicted", self.predicted, pairs.values()),
@@ -260,7 +285,9 @@ class ActionResults:
             for key in records.keys() - set(paired):
                 if any(records[key].values()):
                     self.counts[f"{origin}_unpaired_nonempty"] += 1
+
             for result in records.values():
                 for kind, values in result.items():
                     self.counts[f"{origin}_{kind}"] += len(values)
+
         return findings

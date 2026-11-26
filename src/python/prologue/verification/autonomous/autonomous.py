@@ -34,6 +34,7 @@ class AutonomousVerification(VerificationRun):
         if not CapturedWorkers(instances).joint_execution:
             return "reference_requires_joint_execution"
         sessions = recording.sessions(recording.source, instances)
+
         if self.input_mismatch(source, sessions=sessions):
             return "input_mismatch"
 
@@ -43,6 +44,7 @@ class AutonomousVerification(VerificationRun):
             return "reference_missing_specialization_evidence"
         if native["specialization_loads"]:
             return "reference_loaded_specializations"
+
         rows = native["requests"]
         if any(actual["declared_ns"] != expected["arrival_ns"]
                for actual, expected in zip(rows, source["workload"]["requests"], strict=True)):
@@ -55,6 +57,7 @@ class AutonomousVerification(VerificationRun):
         self.report["max_submission_delay_ns"] = max(
             row[field] - row["declared_ns"] for field in submissions for row in rows
         )
+
         if any(order != sorted(rows, key=lambda row: row[field]) for field in submissions):
             return "reference_reordered_submissions"
         return "qualified"
@@ -69,6 +72,7 @@ class AutonomousVerification(VerificationRun):
         except (RuntimeError, TimeoutError, TimeoutExpired) as error:
             self.report["prediction_error"] = str(error)
             return "prediction_failed"
+
         self.report["prediction_result"] = str(output / "result.json")
         return "completed"
 
@@ -80,10 +84,12 @@ class AutonomousVerification(VerificationRun):
                                   modeling_image=args.modeling_image, control_image=args.control_image,
                                   execution_inputs=None, execution_trace=args.details)
         process = PredictionProcess(options, release, source, self.adapter)
+
         if process.task.binding is None:
             self.report["gap"] = process.task.missing_workers()
             return self.finish("template_gap")
         recording = self.recording
+
         if status := self.training_gap(templates=process.task.binding, costs=release.costs):
             return self.finish(status)
 

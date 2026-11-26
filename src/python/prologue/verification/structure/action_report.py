@@ -59,6 +59,7 @@ def write_action_report(output, report):
         "| Check | Coverage | Results and gaps |",
         "| --- | --- | --- |",
     ]
+
     for name, label in (
         ("contents", "Expanded template contents"),
         ("dependencies", "Named boundary dependencies within calls"),
@@ -72,12 +73,14 @@ def write_action_report(output, report):
     if wire["witnessed"]:
         rows.append(f"| CPU wire payloads | {wire['checked']} of {wire['witnessed']} witnessed messages | "
                     f"{wire['matched']} matched in dtype and byte geometry. |")
+
     if transfers := connections["device_transfer_payloads"]:
         rows.append(
             f"| Device transfer payloads | {connections['device_transfer_payloads_compared']} of {transfers} "
             "native endpoints | "
             f"{connections['device_transfer_payloads_matched']} matched in direction, dtype and shape. |"
         )
+
     rows.extend(
         [
             f"| Production and consumption | {connections['predicted_data_inputs_checked']} nonempty external "
@@ -93,6 +96,7 @@ def write_action_report(output, report):
             f"with {streams['extra_dependencies']} extra dependencies and {streams['activations_missing']} "
             "missing activations. "
             "Queue snapshots use the actual wait arrival. |",
+
             f"| Physical state within each run | {state.get('tensor_ports_checked', 0)} nonempty visible tensor "
             "ports, "
             f"{state.get('kv_regions_checked', 0)} logical KV regions, and "
@@ -106,6 +110,7 @@ def write_action_report(output, report):
             f"{report['actions_dependencies_matched']} in internal dependencies. "
             f"{report['unpaired_calls']['native']} native and {report['unpaired_calls']['predicted']} predicted "
             "calls remain unpaired. |",
+
             f"| Execution trace | Minimal order relations and resource history from both runs | "
             f"{order.get('missing_relations', 0)} relations appear only in the native run and "
             f"{order.get('extra_relations', 0)} only in prediction. "
@@ -117,6 +122,7 @@ def write_action_report(output, report):
             "The checks cover native getters and semantic boundaries. Per-call comparisons require paired "
             "evidence. |",
             "",
+
             "Control interactions require separate evidence for input delivery, queries, notifications, "
             "admission, and "
             "time conditions that affect decisions.",

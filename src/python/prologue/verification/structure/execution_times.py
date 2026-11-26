@@ -18,6 +18,7 @@ class ExecutionTimes:
             if record["time_ns"] < self.now_ns:
                 raise ValueError("execution clock moved backwards")
             self.now_ns = record["time_ns"]
+
         if kind == "graph":
             for work, service in zip(record["graph"]["work"], record["work_ns"], strict=True):
                 if service is not None and (type(service) is not int or service < 0):
@@ -31,6 +32,7 @@ class ExecutionTimes:
             begin, end = record["begin_ns"], record["end_ns"]
             if event in self.bounds or not 0 <= begin <= end:
                 raise ValueError("completion needs one ordered nonnegative time window")
+
             self.bounds[event] = begin, end
         elif kind == "completion":
             event, time_ns = record["event"], record["time_ns"]
@@ -39,6 +41,7 @@ class ExecutionTimes:
                 if not bound[0] <= time_ns <= bound[1]:
                     raise ValueError("completed event violates its supplied time window")
                 self.counts["checked_windows"] += 1
+
             for finish, service in self.starts.pop(event, ()):
                 self.finishes[finish].append((time_ns, service))
             if event in self.expected:
@@ -53,6 +56,7 @@ class ExecutionTimes:
                             raise ValueError("unknown service completed without its own explicit condition")
                     elif time_ns - start < service:
                         raise ValueError("completion condition waived a supplied service duration")
+
                     self.counts["checked_work"] += 1
 
     def finish(self, *, complete):

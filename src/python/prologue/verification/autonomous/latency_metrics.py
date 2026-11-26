@@ -22,17 +22,20 @@ class NativeLatencyMetrics:
         records = RecordedSubmissions.read(source, sessions)
         roles = {instance["mode"]: self.read_instance(instance, record)
                  for instance, record in zip(instances, records, strict=True)}
+
         if len(instances) == 1 and roles.keys() == {"null"}:
             self.ingress = self.emitter = roles["null"]
         elif len(instances) == 2 and roles.keys() == {"prefill", "decode"}:
             self.ingress, self.emitter = roles["prefill"], roles["decode"]
         else:
             raise ValueError("native latency requires ordinary serving or one Prefill/Decode pair")
+
         intake, output = self.ingress["delivery"], self.emitter["delivery"]
         self.origin_ns = intake.origin_ns
         self.requests = list(intake.requests.values())
         if self.origin_ns != output.origin_ns or self.requests != list(output.requests.values()):
             raise ValueError("native latency roles have different clocks or workloads")
+
         self.specializations = None
         if all(role["specializations"] is not None for role in roles.values()):
             self.specializations = [event for role in roles.values() for event in role["specializations"]]
@@ -42,6 +45,7 @@ class NativeLatencyMetrics:
             measurements = read_json(self.source / instance["latency"])
             if measurements["clock"] != delivery.clock:
                 raise ValueError("native latency and delivery clocks differ")
+
             rows = {row["id"]: row for row in measurements["requests"]}
             if len(rows) != len(measurements["requests"]) or rows.keys() != delivery.requests.keys():
                 raise ValueError("native latency records must cover each submitted request exactly once")
@@ -50,12 +54,14 @@ class NativeLatencyMetrics:
         else:
             rows, specializations = self.detailed_boundaries(instance, delivery)
             basis = "detailed_scheduler_send_bracket_end"
+
         return {"delivery": delivery, "rows": rows, "specializations": specializations, "basis": basis}
 
     def detailed_boundaries(self, instance, delivery):
         rows = {name: {} for name in delivery.requests}
         receiver = publisher = None
         loads = [] if set(instance["observed_roles"]) == set(instance["native_participants"]) else None
+
         for rank in instance["observed_roles"]:
             raw = read_json(self.source / f"rank-{rank}.json")
             if loads is not None:
@@ -63,10 +69,12 @@ class NativeLatencyMetrics:
                     loads = None
                 else:
                     loads.extend({"rank": rank, **event} for event in raw["specialization_loads"])
+
             if raw["request_ingress"]:
                 if receiver is not None:
                     raise ValueError("multiple workers claim the same external request ingress")
                 receiver = rank
+
                 for read in delivery.receives(raw["request_ingress"]):
                     for name in read["requests"]:
                         rows[name]["ingress_raw_ns"] = delivery.origin_ns + read["time_ns"]
@@ -79,6 +87,7 @@ class NativeLatencyMetrics:
                     raise ValueError("multiple workers claim the same token publication")
                 publisher = rank
                 row = rows[identity]
+
                 if count > row.get("output_tokens", 0):
                     row.setdefault("first_publication_raw_ns", finish)
                     row.setdefault("first_publication_bracket_ns", finish - begin)
@@ -102,6 +111,7 @@ class NativeLatencyMetrics:
             arrival = received_ns - self.origin_ns
             first = published["first_publication_raw_ns"] - self.origin_ns
             last = published["last_publication_raw_ns"] - self.origin_ns
+
             if count != expected["output_tokens"] or not 0 <= declared <= submitted <= arrival <= first <= last:
                 raise ValueError(f"native request {identity} has inconsistent delivery, output length or time")
             row = {
@@ -111,6 +121,7 @@ class NativeLatencyMetrics:
                 "scheduler_ttft_ns": first - arrival,
                 "tpot_ns": (last - first) / (count - 1) if count > 1 else None,
             }
+
             if disaggregated:
                 decode = self.emitter["delivery"].by_request[identity]
                 decode_ingress_ns = published["ingress_raw_ns"] - self.origin_ns
@@ -119,8 +130,11 @@ class NativeLatencyMetrics:
                     or not declared <= decode["submitted_ns"] <= decode_ingress_ns <= first
                 ):
                     raise ValueError(f"native request {identity} has inconsistent Decode delivery")
+
                 row.update(decode_submitted_ns=decode["submitted_ns"], decode_ingress_ns=decode_ingress_ns)
+
             requests.append(row)
+
         total = sum(row["output_tokens"] for row in requests)
         elapsed = max(row["last_publication_ns"] for row in requests)
         return {

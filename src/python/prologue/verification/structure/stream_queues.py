@@ -19,6 +19,7 @@ class StreamSynchronization:
         for edge in body["edges"]:
             if edge["kind"] == "submission":
                 incoming[edge["target"]].add(edge["source"])
+
         for work in body["work"]:
             finishes[work["start"]].add(work["finish"])
 
@@ -27,25 +28,31 @@ class StreamSynchronization:
             resource = body["resources"][body["events"][target]["resource"]]
             if resource["kind"] != "stream":
                 continue
+
             roots, seen, pending = set(), set(), list(parents)
             while pending:
                 event = pending.pop()
                 if event in seen:
                     continue
+
                 seen.add(event)
                 if event in incoming:
                     pending.extend(incoming[event])
                 else:
                     roots.add(events[event])
+
             stream = resource["rank"], resource["identity"]
             for finish in finishes.get(target, {target}):
                 key = events[target], events[finish]
                 self.commands[key] = stream, events[finish], set(roots)
                 self.finishes[events[finish]] = stream
+
                 for root in roots:
                     self.submissions[root].append(key)
                 self.counts["declared_commands"] += 1
+
             self.declared.update(roots)
+
         for scope in body["scopes"]:
             for port in scope["ports"]:
                 if "wait" not in port:
@@ -61,6 +68,7 @@ class StreamSynchronization:
         if event not in self.declared or event in self.activated:
             raise ValueError("stream boundary activation is unknown or repeated")
         self.activated.add(event)
+
         for key in self.submissions.pop(event, ()):
             stream, finish, roots = self.commands[key]
             roots.remove(event)
@@ -95,6 +103,7 @@ class StreamSynchronization:
             activation = record["activation"]
             if activation not in self.activated or record["relation"] != "signal" or record["delay_ns"] != 0:
                 raise ValueError("dynamic stream edge lacks its activating boundary or pure wait semantics")
+
             self.actual.add((activation, record["source"], record["target"]))
 
     def finish(self):
@@ -104,6 +113,7 @@ class StreamSynchronization:
                 "missing_activations": len(missing), "events": sorted(missing)[:3],
                 "reason": "completion alone cannot establish command acceptance or the wait's snapshot",
             })
+
         for expected, actual, reason in (
             (self.expected, self.actual, "missing"),
             (self.actual, self.expected, "extra"),
@@ -112,6 +122,7 @@ class StreamSynchronization:
                 self.findings.add("stream_frontier", {"event": activation}, {
                     "source": source, "target": target, "reason": reason + " dependency for the actual wait snapshot",
                 })
+
         return {
             **self.counts,
             "activation_points": len(self.declared),

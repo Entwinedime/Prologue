@@ -46,20 +46,24 @@ class ClockSegment:
             following = (offset + 1) % len(self.region)
             other = self.region[following]
             current_distance, next_distance = distances[offset], distances[following]
+
             if current_distance <= 0:
                 clipped.append(point)
                 causes.append(cause if current_distance == 0 and distances[offset - 1] > 0 else self.causes[offset])
+
             if current_distance * next_distance < 0:
                 fraction = current_distance / (current_distance - next_distance)
                 clipped.append(
                     tuple(left + fraction * (right - left) for left, right in zip(point, other, strict=True))
                 )
                 causes.append(self.causes[following] if current_distance < 0 else cause)
+
         if not clipped:
             self.conflict = {"witness": [value for value in self.causes if value is not None],
                              "minimum_violation_ns": str(min(distances))}
             if cause is not None:
                 self.conflict["witness"].append(cause)
+
         self.region, self.causes = clipped, causes
 
     def projection(self, axis):
@@ -103,6 +107,7 @@ class ClockConstraints(DeviceCalibration):
         self.measured += 1
         if self.conflict is not None:
             return
+
         begin, end = self.points[source], self.points[target]
         same_clock = self.device[source] == self.device[target]
 
@@ -111,6 +116,7 @@ class ClockConstraints(DeviceCalibration):
             first, last = (begin.nominal_ns, end.nominal_ns) if self.device[source] else (begin, end)
             if first <= last:
                 return
+
         cause = {"kind": "causal", "index": None, "source": source, "target": target}
         if same_clock:
             self.conflict = {**cause, "witness": [cause]}
@@ -120,6 +126,7 @@ class ClockConstraints(DeviceCalibration):
         point = begin if self.device[source] else end
         segment = self.segments[point.segment]
         segment.clip(left[0] - right[0], left[1] - right[1], right[2] - left[2], cause)
+
         if segment.conflict:
             self.conflict = {**cause, "segment": point.segment, **segment.conflict}
 
@@ -134,6 +141,7 @@ class ClockConstraints(DeviceCalibration):
             interval = self.segments[adjacent].projection(peer_axis)
             segment = self.segments[index]
             segment.intersect_axis(axis, interval)
+
             if segment.conflict:
                 self.conflict = {"kind": "shared_snapshot", "segment": index, "sample": index + axis,
                                  "required_correction_ns": [str(value) for value in interval],
@@ -141,6 +149,7 @@ class ClockConstraints(DeviceCalibration):
                                  "related_constraints": segment.conflict["witness"] + [
                                      value for value in self.segments[adjacent].causes if value is not None]}
                 break
+
         return self
 
     def explain(self, graph):
@@ -160,10 +169,13 @@ class ClockConstraints(DeviceCalibration):
                     "measurement": graph["evidence"]["events"][event],
                 }
                 point = self.points[event]
+
                 if isinstance(point, CounterPoint):
                     segment = self.segments[point.segment]
                     context[side]["device_counter"] = str(segment.first_counter + point.position * segment.counts)
+
             constraints.append(context)
+
         index = self.conflict.get("segment")
         return {
             "first_conflict": self.conflict,
@@ -197,13 +209,16 @@ class ClockRealization:
         self.clocks, self.host_protocol = clocks, host_protocol
         self.columns, self.origins, self.vertices = {}, {}, {}
         self.size = 0
+
         for rank, clock in clocks.items():
             self.columns[rank] = self.size
             self.size += len(clock.samples)
             self.origins[rank] = [sample["begin_raw_ns"] - midpoint
                                   for sample, midpoint in zip(clock.samples, clock.midpoints, strict=True)]
+
             for index, segment in enumerate(clock.segments):
                 self.vertices[rank, index] = tuple(dict.fromkeys(segment.region))
+
         self.size += 1
         self.constraints, self.equalities = {}, []
         self.samples = defaultdict(list)
@@ -215,11 +230,13 @@ class ClockRealization:
             ox, oy = self.origins[rank][index:index + 2]
             points = [(x - ox, y - oy) for x, y in vertices]
             column = self.columns[rank] + index
+
             for axis in (0, 1):
                 self.restrict({column + axis: 1}, max(point[axis] for point in points))
             for (x, y), (other_x, other_y) in zip(points, points[1:] + points[:1], strict=True):
                 dx, dy = other_x - x, other_y - y
                 self.restrict({column: dy, column + 1: -dx}, dy * x - dx * y)
+
         self.restrict({self.size - 1: 1}, 1)
 
         # Overlapping records share one physical function at the union of their observed breakpoints.
@@ -227,10 +244,12 @@ class ClockRealization:
             if clock.device_id != other.device_id:
                 continue
             begin, end = max(clock.counters[0], other.counters[0]), min(clock.counters[-1], other.counters[-1])
+
             if begin <= end:
                 counters = {begin, end} | {
                     value for owner in (clock, other) for value in owner.counters if begin < value < end
                 }
+
                 for counter in sorted(counters):
                     row, limit, _ = self.difference(
                         (rank, clock.at_counter(counter)), (peer, other.at_counter(counter))
@@ -267,6 +286,7 @@ class ClockRealization:
             if begin > end:
                 raise ValueError("native causal relation contradicts fixed RAW measurements")
             return
+
         if (
             rank == peer
             and isinstance(begin, CounterPoint)
@@ -293,6 +313,7 @@ class ClockRealization:
         left, begin, first = self.coefficients(*source)
         right, end, last = self.coefficients(*target)
         row = dict(left)
+
         for column, value in right.items():
             row[column] = row.get(column, 0) - value
 
@@ -303,10 +324,12 @@ class ClockRealization:
                 rank, index, a, b = term
                 groups[rank, index][0] += sign * a
                 groups[rank, index][1] += sign * b
+
         support = 0
         for (rank, index), (a, b) in groups.items():
             ox, oy = self.origins[rank][index:index + 2]
             support += max(a * (x - ox) + b * (y - oy) for x, y in self.vertices[rank, index])
+
         return row, end - begin, support
 
     def restrict(self, row, limit):
@@ -333,7 +356,9 @@ class ClockRealization:
             position = self.clocks[rank].points[event].position
             if position in ordinates:
                 raw_ns = min(ordinates[position], raw_ns) if lower else max(ordinates[position], raw_ns)
+
             ordinates[position] = raw_ns
+
         chain = []
         for point in sorted(ordinates.items()):
             while len(chain) >= 2:
@@ -341,10 +366,13 @@ class ClockRealization:
                 turn = ((middle[0] - left[0]) * (point[1] - middle[1])
                         - (middle[1] - left[1]) * (point[0] - middle[0]))
                 convex = turn > 0 if lower else turn < 0
+
                 if convex:
                     break
                 chain.pop()
+
             chain.append(point)
+
         return chain
 
     def solve(self):
@@ -365,12 +393,14 @@ class ClockRealization:
                     owner = clock.segments[index]
                     point = CounterPoint(index, position, owner.origin + position * owner.duration)
                     row, constant, _ = self.coefficients(rank, point)
+
                     if lower:
                         self.restrict(row, raw_ns - constant)
                     else:
                         row = {column: -value for column, value in row.items()}
                         row[self.size - 1] = 1
                         self.restrict(row, constant - raw_ns + 1)
+
         inequalities = [(dict(row), limit) for row, limit in self.constraints.items()]
 
         def matrix(rows):
@@ -380,6 +410,7 @@ class ClockRealization:
                 for column, value in row.items()
                 if value
             ]
+
             return coo_matrix(([value for _, _, value in entries],
                                ([index for index, _, _ in entries], [column for _, column, _ in entries])),
                               shape=(len(rows), self.size)).tocsr()
@@ -393,10 +424,12 @@ class ClockRealization:
             [float(value) for _, value in self.equalities] if self.equalities else None,
             method="highs",
         )
+
         if not result.success:
             raise ValueError(
                 f"clock candidate unavailable; exact joint realization remains unverified: {result.message}"
             )
+
         active = self.equalities + [
             row for row, residual in zip(inequalities, result.ineqlin.residual, strict=True) if residual == 0
         ]
@@ -408,6 +441,7 @@ class ClockRealization:
         constants = SparseMatrix([Rational(value.numerator, value.denominator) for _, value in active])
         variables = symbols(f"d0:{self.size}")
         solutions = list(linsolve((equations, constants), variables))
+
         if not solutions:
             raise ValueError("numerical clock basis has no exact rational solution")
         proposal = {variable: Rational(float(value)) for variable, value in zip(variables, result.x, strict=True)}
@@ -420,6 +454,7 @@ class ClockRealization:
                 or any(evaluate(row) > limit for row, limit in inequalities)
                 or any(evaluate(row) != value for row, value in self.equalities)):
             raise ValueError("clock candidate did not certify the exact measured constraints and strict rounding cells")
+
         self.solution = {rank: [origin + offsets[self.columns[rank] + index] for index, origin in enumerate(origins)]
                          for rank, origins in self.origins.items()}
 

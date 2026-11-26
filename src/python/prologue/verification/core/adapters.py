@@ -5,7 +5,7 @@ from prologue.integrations.bindings import device_runtime, platform_backend, rou
 
 
 def framework_evidence():
-    return route().framework_module("acquisition.evidence")
+    return route().framework_module("acquisition.reference")
 
 
 def platform_evidence():

@@ -3,7 +3,9 @@
 import json
 from collections import Counter, defaultdict
 
-from prologue.verification.core.actions import ActionBoundaries, ActionIdentity, GraphContents
+from prologue.verification.core.action_identity import ActionIdentity
+from prologue.verification.core.action_order import ActionBoundaries
+from prologue.verification.core.graph_contents import GraphContents
 from prologue.verification.engine import ContextValues
 
 
@@ -32,6 +34,7 @@ class InvocationComparison:
                 self.native_contexts[full_key, key].append(index)
                 self.native_classes[full_key].add(key)
                 self.expected.setdefault(key, (source, index, identity))
+
         # Compare contents independently of occurrence pairing, after native remote pools have their actual owners.
         self.contents = {
             key: source.snapshot(index, identity["group"]) for key, (source, index, identity) in self.expected.items()
@@ -61,11 +64,13 @@ class InvocationComparison:
         graph, events = row["graph"], row["event_ids"]
         root = graph["scopes"][0]
         group = ActionIdentity.group(graph, self.case.ranks[rank])
+
         try:
             identity = ActionIdentity.record(root, group)
         except ValueError as error:
             identity = {"group": group, "event": events[port["event"]], "action": root["role"]}
             self.finding("missing_predicted_identity", identity, {"reason": str(error)})
+
         key = (
             target.structure_key(0, identity, self.case.controls, self.keys)
             if "work" in identity
@@ -92,6 +97,7 @@ class InvocationComparison:
             self.content_checks[key] += 1
             content_match = self.compare_contents(identity, self.contents[key], snapshot)
             self.content_matches[key] += content_match
+
         boundary = ActionBoundaries(target, 0, events)
         self.pending.append((key, full_key, rank, identity, target_key, boundary, content_match,
                              snapshot if key in self.varied else None, conditioned_scope))
@@ -100,21 +106,25 @@ class InvocationComparison:
         for key, (_, _, identity) in self.expected.items():
             if not self.predicted_counts[key]:
                 self.finding("unmatched_native" if ended else "native_tail_unexecuted", identity, {})
+
         for key, count in self.full_occurrences.items():
             if not self.full_predicted_counts[key] and any(
                 self.predicted_counts[value] for value in self.native_classes[key]
             ):
                 self.finding("unpaired_native_context", self.keys.decode(json.loads(key)), {"observed_calls": count})
+
             if count > 1 and not checked_prefix:
                 self.finding("ambiguous_native_identity", self.keys.decode(json.loads(key)), {
                     "observed_calls": count, "predicted_calls": self.full_predicted_counts[key],
                     "reason": "complete logical context repeats; structure is checked independently",
                 })
+
         for key, count in self.full_predicted_counts.items():
             if not self.full_occurrences[key] and self.predicted_classes[key] & self.expected.keys():
                 self.finding(
                     "unpaired_predicted_context", self.keys.decode(json.loads(key)), {"predicted_calls": count}
                 )
+
             if count > 1 and self.full_occurrences[key] <= 1 and not checked_prefix:
                 self.finding(
                     "ambiguous_predicted_identity", self.keys.decode(json.loads(key)), {"predicted_calls": count}
@@ -131,6 +141,7 @@ class InvocationComparison:
             paired_index = conditioned_scope
             if paired_index is None and unique and ActionIdentity.occurrence_anchored(identity):
                 paired_index = indices[0]
+
             paired = paired_index is not None
             if unique and not paired:
                 self.finding(
@@ -156,6 +167,7 @@ class InvocationComparison:
                     )
                     self.content_checks[key] += 1
                     self.content_matches[key] += content_match
+
             self.checks.append((key, rank, identity, native, predicted, paired))
 
             # Only occurrence pairs may identify external producers, query results and communication rounds.
@@ -167,13 +179,16 @@ class InvocationComparison:
                         [ActionBoundaries(source, index).ranked(rank) for index in indices],
                         [],
                     )
+
                 self.repeated_groups[repeated_key][2].append(predicted)
                 continue
+
             self.pairs[identity["group"], paired_index] = target_key
             self.paired_counts[key] += 1
             self.actions.append((identity, native, predicted))
             self.compared += 1
             self.matched += content_match
+
         self.pending.clear()
 
     def compare_boundaries(self, actual_graph, predicted_graph, ordering):
@@ -189,6 +204,7 @@ class InvocationComparison:
                     if next(actual.differences(repeated), None) is not None:
                         self.signatures[key] = None
                         break
+
             actual = self.signatures[key]
             if paired and actual is None:
                 actual = actual_graph.signature(native)
@@ -198,8 +214,10 @@ class InvocationComparison:
                 for category, detail in actual.differences(predicted_graph.signature(predicted)):
                     self.finding(category, identity, detail)
                     different = True
+
                 self.dependency_matches[key] += not different
                 self.matched_dependencies += paired and not different
+
         ordering.compare(actual_graph, predicted_graph, self.actions)
         ordering.compare_repeated(actual_graph, predicted_graph, self.actions, self.repeated_groups)
 
@@ -215,6 +233,7 @@ class InvocationComparison:
             "actions_compared": self.compared,
             "actions_contents_matched": self.matched,
             "actions_dependencies_matched": self.matched_dependencies,
+
             "action_checks": {
                 "predicted_occurrences": sum(self.predicted_counts.values()),
                 "contents": {
@@ -226,6 +245,7 @@ class InvocationComparison:
                     "matched": sum(self.dependency_matches.values()),
                 },
             },
+
             "declared_control_classes": len(self.case.controls),
             "repeated_calls": [
                 {

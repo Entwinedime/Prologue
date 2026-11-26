@@ -54,6 +54,7 @@ class TraceReader:
     def __init__(self, path):
         self.path = path
         self.complete = False
+        self.terminal_records = 0
 
     @staticmethod
     def worker(capture, graphs, rank):
@@ -62,6 +63,8 @@ class TraceReader:
     def __iter__(self):
         contexts = ContextValues()
         self.complete = False
+        self.terminal_records = 0
+
         with self.path.open("rb") as stream:
             for line in stream:
 
@@ -69,17 +72,22 @@ class TraceReader:
                 if not line.endswith(b"\n"):
                     self.complete = False
                     return
+
                 row = json.loads(line)
                 kind = row["kind"]
                 self.complete = kind == "end"
+                self.terminal_records += self.complete
+
                 if kind == "context_value":
                     contexts.declare(row)
                     continue
+
                 if kind == "graph":
                     for scope in row["graph"]["scopes"]:
                         scope["work"] = contexts.decode(scope["work"])
                 elif kind == "input_read":
                     row["identity"] = contexts.decode(row["identity"])
+
                 yield row
 
 
@@ -118,6 +126,7 @@ class ContextValues:
         if not isinstance(frame, dict):
             return frame
         mapped = frame.copy()
+
         for name, value in frame.items():
             if name in cls.snapshots and isinstance(value, dict):
                 mapped[name] = {key: convert(field) for key, field in value.items()}
@@ -125,6 +134,7 @@ class ContextValues:
                 mapped[name] = [cls.transform(caller, convert) for caller in value]
             elif name in cls.frames:
                 mapped[name] = cls.transform(value, convert)
+
         return mapped
 
     def intern(self, value):
@@ -178,6 +188,7 @@ class BoundarySignature:
             yield "boundary_set", {"native_only": sorted(set(self.names) - set(predicted.names)),
                                    "predicted_only": sorted(set(predicted.names) - set(self.names))}
             return
+
         for target in self.names:
             native, estimate = self.predecessors[target], predicted.predecessors[target]
             if native != estimate:
@@ -191,6 +202,7 @@ class BoundarySignature:
                         "extra_examples": self.labels(estimate & ~native, 3),
                     },
                 )
+
         if self.work != predicted.work:
             missing, extra = self.work - predicted.work, predicted.work - self.work
             yield "work_placement", {
@@ -231,6 +243,7 @@ class GraphProjection:
             closure = {label for label in closure if label in self.live}
             anchor = self.indices.get(event)
             maximal = previous
+
             if anchor is not None:
                 for source in sorted(previous):
                     self.result.connect(source, anchor, "order")
@@ -243,8 +256,10 @@ class GraphProjection:
                 for target in self.graph.successors[position]:
                     self.receive(target, maximal, closure)
             self.release(previous)
+
             if anchor is not None:
                 self.release(maximal)
+
         self.result.prepare()
         return self.result
 
@@ -311,12 +326,14 @@ class CausalIndex:
         for targets in self.next.values():
             for target in targets:
                 pending[target] += 1
+
         ordered = [event for event, count in pending.items() if not count]
         for event in ordered:
             for target in self.next[event]:
                 pending[target] -= 1
                 if not pending[target]:
                     ordered.append(target)
+
         if len(ordered) != len(self.next):
             raise ValueError("dependency graph contains a cycle")
         self.positions = {event: index for index, event in enumerate(ordered)}
@@ -328,6 +345,7 @@ class CausalIndex:
         work = [(identity, self.positions[start], self.positions[finish]) for identity, start, finish in action.work]
         positions = anchors + [event for _, start, finish in work for event in (start, finish)]
         begin, end = min(positions), max(positions) + 1
+
         # Paths can leave the action tree. Only the topological interval bounds the search.
         before = self.propagate(anchors, begin, end)
         after = self.propagate(anchors, begin, end, reverse=True)
@@ -364,10 +382,12 @@ class CausalIndex:
             current = pending.pop()
             if current == finish:
                 return True
+
             for successor in self.successors[current]:
                 if successor <= finish and successor not in visited:
                     visited.add(successor)
                     pending.append(successor)
+
         return False
 
     def witness(self, source, target):
@@ -380,6 +400,7 @@ class CausalIndex:
                 if self.positions[successor] <= finish and successor not in parents:
                     parents[successor] = event
                     pending.append(successor)
+
         if target not in parents:
             raise ValueError("reported ordering difference has no supporting path")
 
@@ -390,6 +411,7 @@ class CausalIndex:
             counts.update(relations)
             path.append({"source": previous, "target": event, "relations": relations})
             event = previous
+
         path.reverse()
 
         # One actual path explains the finding; it does not prove that other paths or state effects are absent.
@@ -412,6 +434,7 @@ class CausalIndex:
                     for target in self.successors[source]:
                         if target < end:
                             bits[target - begin] |= mask
+
         return bits
 
     def reachable_masks(self, origins):

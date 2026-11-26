@@ -8,7 +8,7 @@ from itertools import pairwise
 
 from prologue.common.observation import ThreadService
 from prologue.verification.core.adapters import platform_evidence
-from prologue.verification.core.protocol import IngressEvidence
+from prologue.verification.core.ingress import IngressEvidence
 
 from .host_queues import HostQueueEvidence
 
@@ -70,6 +70,8 @@ class HostWait:
 class FixedThreadActivity(ThreadService):
 
     # Linux futex command and options recorded by the syscall tracepoint.
+    """Recover waits and runnable CPU intervals from original thread evidence for fixed-graph scoring."""
+
     futex_flags = 128 | 256
     futex_wait_ops = frozenset({0, 9})
     interrupt_flags = 0x08 | 0x10 | 0x40
@@ -78,14 +80,12 @@ class FixedThreadActivity(ThreadService):
         super().__init__(rows, dequeues, excluded)
         covered = [row for row in rows if row["thread"] in self.activity]
         self.targeted = {row["thread"] for row in covered if "target_wakes" in row}
-        self.calls = platform_evidence().thread_intervals([
-            platform_evidence().interval(row["begin_raw_ns"], row["end_raw_ns"], row["thread"], row)
-            for row in runtime if row["result"] == 0 and row["thread"] in self.targeted
-        ])
+        self.calls = platform_evidence().thread_intervals([call for call in runtime if call.thread in self.targeted])
         self.runnable, self.blocked_at, self.sleep = {}, {}, {}
         self.kernel_threads = {row["thread"]: row["kernel_thread"] for row in rows if "kernel_thread" in row}
         self.wakes = defaultdict(list)
         self.futex_waits = defaultdict(list)
+
         for row in covered:
             thread = row["thread"]
             runnable, blocked = self.switch_points(row)
@@ -96,6 +96,7 @@ class FixedThreadActivity(ThreadService):
                 if not running and resumed and (out, resume) not in pauses
             ]
             pids, entered = set(), None
+
             for kind, stamp, *payload in row.get("kernel_events", ()):
                 if kind == "switch_out":
                     pids.add(payload[0])
@@ -108,6 +109,7 @@ class FixedThreadActivity(ThreadService):
                     if entered is not None and payload[0] == 0:
                         self.futex_waits[thread].append((entered, stamp))
                     entered = None
+
             if thread in self.kernel_threads and pids - {self.kernel_threads[thread]}:
                 raise ValueError("worker activity changes its kernel thread identity")
             if len(pids) == 1:
@@ -120,6 +122,7 @@ class FixedThreadActivity(ThreadService):
             if "target_wakes" not in row:
                 continue
             recipient = self.kernel_threads[row["thread"]]
+
             for stamp, producer, flags in row["target_wakes"]:
 
                 # Interrupt tracepoints carry the interrupted task's PID, not a user-space waker.
@@ -127,6 +130,7 @@ class FixedThreadActivity(ThreadService):
                     self.wakes[recipient].append(KernelWake(stamp, None))
                 else:
                     self.wakes[recipient].append(KernelWake(stamp, local_threads.get(producer), producer))
+
         for stamps in self.wakes.values():
             stamps.sort(key=lambda wake: wake.raw_ns)
         self.report = {
@@ -146,6 +150,7 @@ class FixedThreadActivity(ThreadService):
         ]
         stamps = [stamp for stamp, _ in states]
         on_cpu = row["window_ns"][0]
+
         for (out, running), (resume, _) in pairwise(row["switches"]):
             if running:
                 on_cpu = out
@@ -160,6 +165,7 @@ class FixedThreadActivity(ThreadService):
                     pauses.add((out, resume))
                 else:
                     blocked[out] = on_cpu, stamp
+
         return sorted(pauses), blocked
 
     def waking(self, thread, begin, end):
@@ -174,11 +180,13 @@ class FixedThreadActivity(ThreadService):
 
                 # Perf can record the switch-out later than the kernel wake inside the same syscall.
                 return self.waking(thread, entered, resumed)
+
         transition = self.blocked_at[thread].get(out)
         if transition is None:
             return self.waking(thread, out, resumed)
         entered_cpu, blocked = transition
         wakes = self.waking(thread, blocked, resumed)
+
         if wakes:
             return wakes
 
@@ -196,16 +204,20 @@ class FixedThreadActivity(ThreadService):
             return ()
         if self.within(self.sleep[thread], call.begin, call.end) != [(out, resumed)]:
             return ()
+
         witnesses = self.waking(thread, call.begin, call.end)
         return witnesses if len(witnesses) == 1 and witnesses[0].raw_ns <= blocked else ()
 
 
 class FixedHostContext:
+    """Combine original CPU availability and measured boundary constraints for replay of the same observed graph."""
+
     @classmethod
     def retain(
         cls, native_case, rank, facts, graph, native_evidence, host_fences, launches, payload_times, report, details
     ):
         records = {key: facts[key] for key in ("resources", "environment", "measurements")}
+
         # Timed work and published physical signals retain their actual measured endpoints.
         timed = {piece[side] for piece in graph["work"] for side in ("start", "finish")}
         timed.update(port["event"] for scope in graph["scopes"] for port in scope["ports"]
@@ -214,18 +226,22 @@ class FixedHostContext:
         releases = native_evidence.sdk.release_evidence(
             graph, launches, native_evidence.queues, native_case.clocks[rank], records["observer_joins"]
         )
+
         omitted = {record for release in releases.values() for record in release.omitted}
         owner = native_case.ranks[rank]
         deliveries = zip(native_case.manifest["instances"], native_case.submissions, strict=True)
         delivery = next(submitted for instance, submitted in deliveries if instance["id"] == owner)
+
         context = cls(native_case.capture, rank, native_evidence, delivery)
         calls = native_case.cpu.native_calls[rank]
         measured = context.project(
             native_evidence, graph, host_fences, omitted, details, calls, native_case.cpu.native_times
         )
+
         delays, waits, idle_inputs, posts, queues, protocol = measured
         records["fixed_cpu_calls"] = protocol
         report["native_host_queues"] = queues
+
         records["fixed_host_delays"] = delays
         records["fixed_idle_inputs"] = idle_inputs
         records["host_fences"] = host_fences
@@ -248,6 +264,7 @@ class FixedHostContext:
         self.control_thread = evidence.window.thread
         activity = evidence.native["host_observation"].get("activity")
         rows = []
+
         if activity is not None:
             if activity != f"rank-{rank}-thread-activity.jsonl":
                 raise ValueError("fixed host activity file belongs to a different worker")
@@ -255,9 +272,9 @@ class FixedHostContext:
                 rows = [json.loads(line) for line in source]
 
         # Waits triggered by work on other resources still follow their original dependencies.
-        observer, dequeues, waits = evidence.replay_host_intervals()
-        self.active = FixedThreadActivity(rows, dequeues, [*observer, *waits], evidence.runtime)
-        self.observer = ThreadService.by_thread(observer)
+        replay = evidence.replay_host_intervals()
+        self.active = FixedThreadActivity(rows, replay.dequeues, [*replay.observer, *replay.waits], replay.calls)
+        self.observer = ThreadService.by_thread(replay.observer)
 
     def interruptions(self, tid, begin, end):
         activity = [(max(begin, first), min(end, last))
@@ -305,6 +322,7 @@ class FixedHostContext:
                 and (stopped, resumed) not in completions
                 and not self.active.within(excluded, stopped, resumed)
             ]
+
             if len(candidates) != 1:
                 continue
             (stopped, resumed), = candidates
@@ -315,6 +333,7 @@ class FixedHostContext:
                 continue
             _, _, source = events[slot - 1]
             _, end, target = events[slot]
+
             if resumed > end or (source, target) in work:
                 continue
             scope = graph["scopes"][graph["events"][source]["scope"]]
@@ -328,6 +347,7 @@ class FixedHostContext:
         edges = {cut[:2] for cut in cuts}
         ordered = {(edge["source"], edge["target"]) for edge in graph["edges"]
                    if edge["kind"] == "order" and (edge["source"], edge["target"]) in edges}
+
         return {cut: read for cut, read in cuts.items() if cut[:2] in ordered}
 
     def host_time(self, thread, begin, end, *, modeled, submission):
@@ -379,6 +399,7 @@ class FixedHostContext:
         if running is None:
             return None
         segments = list(running)
+
         if not segments or segments[0][0] != begin or segments[-1][1] != end:
             return None
 
@@ -406,6 +427,7 @@ class FixedHostContext:
             scope = graph["scopes"][piece["scope"]]
             origin, = scope["bindings"]["source_scopes"]
             native = self.native["scopes"][origin]
+
             if "service" in native:
                 interval = native["host_interval"]
                 windows.append(
@@ -413,6 +435,7 @@ class FixedHostContext:
                         interval["begin_raw_ns"], interval["end_raw_ns"], native["thread"], piece
                     )
                 )
+
         return platform_evidence().thread_intervals(windows)
 
     def call_at(self, thread, stamp):
@@ -423,6 +446,7 @@ class FixedHostContext:
         if thread not in self.thread_bounds:
             return ExternalWake(stamp), 0
         first, last, event = self.thread_bounds[thread]
+
         if first is None or last is None:
             return None, 0
         if stamp < first:
@@ -437,11 +461,13 @@ class FixedHostContext:
         out, resumed = blocked
         if self.active.within(self.active.excluded.get(thread, ()), out, resumed):
             return None
+
         wake = read_wake
         if wake is None:
             witnesses = self.active.sleep_wakes(thread, out, resumed)
             if len(witnesses) != 1:
                 return None
+
             wake, = witnesses
 
         kernel = self.active.kernel_threads.get(wake.local_thread, wake.kernel_thread)
@@ -453,6 +479,7 @@ class FixedHostContext:
         taken, completed = notice["dequeue_started_ns"], notice["dequeue_finished_ns"]
         resumed = notice["off_cpu_ns"][1]
         endpoint = positions.get((producer, notice["dequeue_order"]))
+
         if endpoint is not None:
             return HostWait(stopped, (self.rank, endpoint), resumed - completed)
 
@@ -481,6 +508,7 @@ class FixedHostContext:
             index = bisect_right(events, first, key=lambda event: event[0])
             if not 0 < index < len(events):
                 continue
+
             _, begin, source = events[index - 1]
             boundary, end, target = events[index]
             pair = source, target
@@ -491,74 +519,19 @@ class FixedHostContext:
                     or not begin <= entered <= returned <= end):
                 continue
             points = paths[pair]
+
             if points and entered < points[-1][0]:
                 raise ValueError("native CPU protocol intervals overlap on one host thread")
             points.append((entered, call.entered[1]))
             if call.posted is not None:
                 points.append((stamps[call.posted], call.posted[1]))
+
             points.append((returned, call.returned[1]))
+
         return paths
 
-    def project(self, evidence, graph, host_fences, omitted, details, calls, stamps):
-        queues = HostQueueEvidence(evidence, self.active)
-        work = {(row["start"], row["finish"]): row["kind"] for row in graph["work"]}
-        threads = {lane: int(resource["identity"].split("/")[1]) for lane, resource in enumerate(graph["resources"])
-                   if resource["kind"] == "thread" and resource["serial"]}
-        self.call_windows = self.synchronous_calls(graph, threads)
-        lanes, positions = defaultdict(list), {}
-        for event, (node, point) in enumerate(zip(graph["events"], graph["evidence"]["events"], strict=True)):
-            lane = node["resource"]
-            if lane in threads:
-                lanes[lane].append((point["order"], point["time_ns"], event))
-                positions[threads[lane], point["order"]] = event
-
-        report, arrivals, read_wakes = queues.observe()
-        report["scheduler_trace"] = self.active.report
-        notifications = defaultdict(list)
-        for row in report["notifications"]:
-            notifications[row["consumer"]].append(row)
-        self.submissions = {
-            thread for lane, thread in threads.items() if graph["resources"][lane]["role"] == "submission"
-        }
-        delays, counts = queues.handoffs(graph, positions, arrivals)
-        waits, idle_inputs, idle = [], {}, {}
-        self.steps = {thread: [] for thread in threads.values()}
-        self.thread_bounds = {}
-        protocol, by_thread = {}, defaultdict(list)
-        for call in calls:
-            if call.execution["in_flow"]:
-                protocol.update(((start, finish), None) for start, finish, _ in call.services())
-                by_thread[call.thread].append(call)
-        order = (
-            {(edge["source"], edge["target"]) for edge in graph["edges"] if edge["kind"] == "order"}
-            if protocol
-            else set()
-        )
-        for lane, events in lanes.items():
-            events.sort()
-            thread = threads[lane]
-            self.thread_bounds[thread] = events[0][1], events[-1][1], events[-1][2]
-            if thread == self.control_thread:
-                input_waits = self.idle_waits(graph, events, work, notifications.get(thread, ()))
-                idle = {(asleep, resumed): read for (_, _, asleep, resumed), read in input_waits.items()}
-            paths = self.protocol_partitions(events, by_thread[thread], stamps, order, work)
-            for (_, begin, source), (_, end, target) in pairwise(events):
-                edge = source, target
-                kind = work.get(edge)
-                if begin is None or end is None or begin >= end or kind not in {None, "host"} or edge in host_fences:
-                    continue
-                points = [(begin, source), *paths.get(edge, ()), (end, target)]
-                for (entered, start), (returned, finish) in pairwise(points):
-                    endpoints = start, finish
-                    modeled = kind == "host" or endpoints in protocol
-                    service, conditions = self.host_time(thread, entered, returned, modeled=modeled,
-                                                         submission=thread in self.submissions)
-                    if conditions:
-                        delays.setdefault(endpoints, {}).update(conditions)
-                    self.steps[thread].append(HostStep(start, finish, entered, returned, modeled, service))
-                    if endpoints in protocol:
-                        protocol[endpoints] = service
-
+    def collect_waits(self, notifications, idle, queues, positions, read_wakes):
+        waits, idle_inputs = [], {}
         bound, kernel, external = 0, 0, 0
         for tid, host in self.steps.items():
             queue_waits = {tuple(row["off_cpu_ns"]): row for row in notifications.get(tid, ())}
@@ -568,6 +541,7 @@ class FixedHostContext:
                     if not begin <= asleep < resumed <= end:
                         continue
                     stopped = self.progress(tid, step, asleep)
+
                     if stopped is None:
                         continue
                     if tid == self.control_thread and (read := idle.get((asleep, resumed))):
@@ -579,12 +553,14 @@ class FixedHostContext:
                         else:
                             waits.append(HostWait(stopped, None, resumed - asleep))
                         continue
+
                     notification = queue_waits.get((asleep, resumed))
                     if notification is not None:
                         wait = self.queue_wait(notification, stopped, positions, queues)
                     else:
                         blocked = asleep, resumed
                         wait = self.kernel_wait(tid, blocked, stopped, read_wake=read_wakes.get((tid, blocked)))
+
                     if wait is None:
                         continue
 
@@ -592,11 +568,85 @@ class FixedHostContext:
                     bound += notification is not None
                     kernel += notification is None
                     external += isinstance(wait.source, KernelWake) and wait.source.local_thread not in self.steps
+        return waits, idle_inputs, bound, kernel, external
 
+    def project(self, evidence, graph, host_fences, omitted, details, calls, stamps):
+        queues = HostQueueEvidence(evidence, self.active)
+        work = {(row["start"], row["finish"]): row["kind"] for row in graph["work"]}
+        threads = {lane: int(resource["identity"].split("/")[1]) for lane, resource in enumerate(graph["resources"])
+                   if resource["kind"] == "thread" and resource["serial"]}
+        self.call_windows = self.synchronous_calls(graph, threads)
+        lanes, positions = defaultdict(list), {}
+
+        for event, (node, point) in enumerate(zip(graph["events"], graph["evidence"]["events"], strict=True)):
+            lane = node["resource"]
+            if lane in threads:
+                lanes[lane].append((point["order"], point["time_ns"], event))
+                positions[threads[lane], point["order"]] = event
+
+        report, arrivals, read_wakes = queues.observe()
+        report["scheduler_trace"] = self.active.report
+        notifications = defaultdict(list)
+        for row in report["notifications"]:
+            notifications[row["consumer"]].append(row)
+
+        self.submissions = {
+            thread for lane, thread in threads.items() if graph["resources"][lane]["role"] == "submission"
+        }
+        delays, counts = queues.handoffs(graph, positions, arrivals)
+        idle = {}
+        self.steps = {thread: [] for thread in threads.values()}
+        self.thread_bounds = {}
+        protocol, by_thread = {}, defaultdict(list)
+
+        for call in calls:
+            if call.execution["in_flow"]:
+                protocol.update(((start, finish), None) for start, finish, _ in call.services())
+                by_thread[call.thread].append(call)
+
+        order = (
+            {(edge["source"], edge["target"]) for edge in graph["edges"] if edge["kind"] == "order"}
+            if protocol
+            else set()
+        )
+
+        for lane, events in lanes.items():
+            events.sort()
+            thread = threads[lane]
+            self.thread_bounds[thread] = events[0][1], events[-1][1], events[-1][2]
+
+            if thread == self.control_thread:
+                input_waits = self.idle_waits(graph, events, work, notifications.get(thread, ()))
+                idle = {(asleep, resumed): read for (_, _, asleep, resumed), read in input_waits.items()}
+            paths = self.protocol_partitions(events, by_thread[thread], stamps, order, work)
+
+            for (_, begin, source), (_, end, target) in pairwise(events):
+                edge = source, target
+                kind = work.get(edge)
+                if begin is None or end is None or begin >= end or kind not in {None, "host"} or edge in host_fences:
+                    continue
+
+                points = [(begin, source), *paths.get(edge, ()), (end, target)]
+                for (entered, start), (returned, finish) in pairwise(points):
+                    endpoints = start, finish
+                    modeled = kind == "host" or endpoints in protocol
+                    service, conditions = self.host_time(thread, entered, returned, modeled=modeled,
+                                                         submission=thread in self.submissions)
+
+                    if conditions:
+                        delays.setdefault(endpoints, {}).update(conditions)
+                    self.steps[thread].append(HostStep(start, finish, entered, returned, modeled, service))
+                    if endpoints in protocol:
+                        protocol[endpoints] = service
+
+        waits, idle_inputs, bound, kernel, external = self.collect_waits(
+            notifications, idle, queues, positions, read_wakes
+        )
         report["bound_to_fixed_work"] = bound
         report["kernel_wakes_bound"] = kernel
         report["external_kernel_wakes_bound"] = external
         report.update(counts)
+
         if not details:
             del report["notifications"]
         posts = {}
@@ -604,6 +654,8 @@ class FixedHostContext:
             boundary = positions.get((record.thread, record.order))
             if boundary is None:
                 boundary = self.progress_at(record.thread, record.posted_ns)
+
             if boundary is not None:
                 posts[record] = boundary
+
         return delays, waits, idle_inputs, posts, report, protocol

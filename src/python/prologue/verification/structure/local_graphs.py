@@ -3,8 +3,10 @@
 import json
 from collections import Counter
 
-from prologue.verification.core.actions import ActionBoundaries, ActionIdentity, GraphContents
-from prologue.verification.core.source import NativeCase
+from prologue.verification.core.action_identity import ActionIdentity
+from prologue.verification.core.action_order import ActionBoundaries
+from prologue.verification.core.graph_contents import GraphContents
+from prologue.verification.core.native_case import NativeCase
 from prologue.verification.engine import CausalIndex
 
 
@@ -23,6 +25,7 @@ class LocalActionComparison:
         signal = 1 << CausalIndex.relations.index("signal")
         local = CausalIndex()
         local.add_events(retained)
+
         for source in retained:
             for target, relations in dependencies.next[source].items():
                 if target not in retained:
@@ -43,6 +46,7 @@ class LocalActionComparison:
             if resource in previous:
                 local.connect(previous[resource], event, "order")
             previous[resource] = event
+
         local.prepare()
         return local
 
@@ -54,6 +58,7 @@ class LocalActionComparison:
         differences = list(GraphContents.differences(source.snapshot(scope, group), target.snapshot(0, group)))
         self.counts["contents_checked"] += 1
         self.counts["contents_matched"] += not differences
+
         for category, detail in differences:
             self.finding(category, rank, scope, detail)
 
@@ -69,6 +74,7 @@ class LocalActionComparison:
         changes = list(expected.differences(actual))
         self.counts["dependencies_checked"] += 1
         self.counts["dependencies_matched"] += not changes
+
         for category, detail in changes:
             self.finding(category, rank, scope, detail)
 
@@ -86,26 +92,32 @@ class LocalComparison(LocalActionComparison):
                 record = json.loads(line)
                 if summary is not None:
                     raise ValueError("local graph output continues after its summary")
+
                 if record["kind"] == "local_summary":
                     summary = record
                     continue
                 scope = record["source_scope"]
+
                 if record["kind"] != "local_graph" or type(scope) is not int or scope not in expected or scope in seen:
                     raise ValueError("local output has an unknown or duplicate action")
                 seen.add(scope)
                 if "error" in record:
                     self.finding("generation", rank, scope, {"reason": record["error"]})
                     continue
+
                 built += 1
                 graph = record["graph"]
                 supplied = case.sources[rank][0].graph["scopes"][scope]
                 group = case.groups[rank]
+
                 if ActionIdentity.record(supplied, group) != ActionIdentity.record(graph["scopes"][0], group):
                     self.finding(
                         "action_input", rank, scope, {"reason": "generated root changes the given action metadata"}
                     )
                     continue
+
                 self.compare(case, rank, scope, graph)
+
         if summary is None or summary["attempted"] != len(seen) or summary["built"] != built or seen != expected.keys():
             raise ValueError("local output is incomplete or omits actual actions")
         self.counts["given_actions"] += len(seen)
@@ -115,16 +127,19 @@ class LocalComparison(LocalActionComparison):
         self.output.mkdir(parents=True)
         report = {"status": "unverified", "capture": str(self.capture.resolve()), "graphs": str(self.graphs.resolve()),
                   "expanded": str(self.expanded.resolve())}
+
         try:
             case = NativeCase.read(self.capture, self.graphs)
             report["native_evidence"] = case.report(False)
             if report["native_evidence"]["status"] == "differences":
                 raise ValueError("observed case has confirmed contradictions")
+
             for rank in sorted(case.observed_roles):
                 try:
                     self.worker(case, rank)
                 except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
                     self.finding("output_evidence", rank, None, {"reason": str(error)})
+
             issues = self.counts.keys() - {
                 "given_actions", "built_actions", "contents_checked", "contents_matched", "dependencies_checked",
                 "dependencies_matched", "stream_frontier_relations_deferred",
@@ -134,6 +149,7 @@ class LocalComparison(LocalActionComparison):
             )
         except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
             report["error"] = str(error)
+
         report.update(
             counts=dict(self.counts),
             findings=self.findings,
@@ -143,6 +159,7 @@ class LocalComparison(LocalActionComparison):
                 "or held-out generalization claim."
             ),
         )
+
         (self.output / "local-graphs.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
         text = [
             "# Local Graph Expansion Check",
@@ -150,6 +167,7 @@ class LocalComparison(LocalActionComparison):
             f"Result `{report['status']}`.",
             "",
             f"Expanded {self.counts['built_actions']} of {self.counts['given_actions']} supplied native actions.",
+
             f"Matched contents for {self.counts['contents_matched']} of {self.counts['contents_checked']} checks "
             "and local "
             f"dependencies for {self.counts['dependencies_matched']} of {self.counts['dependencies_checked']} checks.",
@@ -162,5 +180,7 @@ class LocalComparison(LocalActionComparison):
             "evidence.",
             "",
         ]
+
         (self.output / "local-graphs.md").write_text("\n".join(text))
+
         return 0 if report["status"] == "local_actions_matched" else 1

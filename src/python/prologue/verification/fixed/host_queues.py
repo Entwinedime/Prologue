@@ -11,22 +11,32 @@ from prologue.verification.core.adapters import platform_evidence
 class HostQueueEvidence:
     def __init__(self, source, activity):
         self.source, self.activity = source, activity
+        self.native = {}
         recorded = {"eventfd_read": [], "eventfd_write": []}
-        for row in source.runtime_records.values():
+
+        for native in source.runtime:
+            row = native.record
             if row["api"] in recorded:
-                recorded[row["api"]].append(
-                    platform_evidence().interval(row["begin_raw_ns"], row["end_raw_ns"], row["fd"], row)
+
+                # Credits and wakes compare in RAW time. Queue attribution uses the existing counter interval.
+                interval = platform_evidence().interval(
+                    row["begin_raw_ns"], row["end_raw_ns"], row["fd"], row
                 )
+                self.native[id(interval)] = native
+                recorded[row["api"]].append(interval)
+
         self.notifications = sum(map(len, recorded.values()))
         self.reads = recorded["eventfd_read"]
         self.read_index, self.write_index = (
             platform_evidence().thread_intervals(records) for records in recorded.values()
         )
         self.takes, self.completions = defaultdict(list), defaultdict(list)
+
         for correlation, command in source.dequeue.items():
             self.takes[command.thread].append(command)
             if source.window.begin <= command.begin <= command.end <= source.window.end:
                 self.completions[command.thread].append((self.stamp(command, "end"), correlation))
+
         for commands in self.takes.values():
             commands.sort(key=lambda command: command.begin)
         for commands in self.completions.values():
@@ -49,6 +59,7 @@ class HostQueueEvidence:
             wake, = wakes
             matching = [write for write in writes if write.record["thread"] == wake.local_thread
                         and write.begin <= wake.raw_ns <= write.end]
+
             if len(matching) == 1:
                 return matching[0], wake
 
@@ -71,8 +82,9 @@ class HostQueueEvidence:
         index = bisect_left(takes, read.end, key=lambda command: command.begin)
         if index == len(takes) or (index and takes[index - 1].end > read.begin):
             return None
+
         take = takes[index]
-        producer = self.source.enqueue_ranges.enclosing(self.source.interval(write.record))
+        producer = self.source.enqueue_ranges.enclosing(self.native[id(write)])
         if producer is None or producer.thread == read.thread or take.end > self.source.window.end:
             return None
 
@@ -84,7 +96,7 @@ class HostQueueEvidence:
     def observe(self):
         counts, notifications, arrivals, read_wakes = Counter(), [], set(), {}
         for read in self.reads:
-            interval = self.source.interval(read.record)
+            interval = self.native[id(read)]
             if not (self.source.window.begin <= interval.begin < interval.end <= self.source.window.end):
                 continue
             if self.source.excluded_ranges.enclosing(interval) is not None:
@@ -97,6 +109,7 @@ class HostQueueEvidence:
                 if scope is None or scope in self.source.closed_scopes:
                     continue
                 counts["reads"] += 1
+
                 if reader not in self.activity.sleep:
                     counts["unknown_thread_activity"] += 1
                     continue
@@ -106,6 +119,7 @@ class HostQueueEvidence:
                 continue
             if not submission:
                 counts["blocked_reads"] += 1
+
             notice = self.producer(read, *sleeps[0]) if len(sleeps) == 1 else None
             if notice is None:
                 if not submission:
@@ -116,6 +130,7 @@ class HostQueueEvidence:
             if wake is not None:
                 key = reader, sleeps[0]
                 self.source.require(read_wakes.setdefault(key, wake) == wake, "conflicting eventfd wake evidence")
+
             if submission:
                 if pair := self.notified_take(interval, write):
                     take, post = pair
@@ -131,12 +146,14 @@ class HostQueueEvidence:
             if index < 0 or producer == reader:
                 counts["unpaired_queue_completions"] += 1
                 continue
+
             finish, correlation = commands[index]
             take = self.source.dequeue[correlation]
             enqueue = self.source.enqueue[correlation]
             if self.source.excluded_ranges.enclosing(enqueue) is not None:
                 counts["observer_producers"] += 1
                 continue
+
             counts["dequeue_mark_before_wait"] += finish < read.begin
             released = wake.raw_ns if wake is not None else write.begin
             notifications.append({
@@ -172,6 +189,7 @@ class HostQueueEvidence:
                 correlation = take.record["args"]["correlation_id"]
                 post = self.source.enqueue[correlation]
                 finish = self.stamp(take, "begin")
+
                 if previous is not None and post.begin < previous.end and correlation not in arrivals:
 
                     # Already submitted work follows the preceding dequeue on the same worker.
@@ -181,8 +199,10 @@ class HostQueueEvidence:
                 target = positions.get((take.thread, take.begin))
                 if post.thread == take.thread or (sender, target) not in edges:
                     continue
+
                 elapsed = finish - self.stamp(post, "begin")
                 self.source.require(elapsed >= 0, "observed queue take precedes its original enqueue")
                 delays[sender, target] = {"queue_handoff_ns": elapsed}
                 counts["notified_active_takes"] += correlation in arrivals
+
         return delays, counts

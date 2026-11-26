@@ -5,9 +5,9 @@ from itertools import zip_longest
 
 from prologue.common.io import write_json
 from prologue.verification.core import ReferenceRecording
-from prologue.verification.core.actions import ActionIdentity
-from prologue.verification.core.protocol import IngressEvidence
-from prologue.verification.core.source import NativeCase
+from prologue.verification.core.action_identity import ActionIdentity
+from prologue.verification.core.ingress import IngressEvidence
+from prologue.verification.core.native_case import NativeCase
 from prologue.verification.engine import TraceReader
 
 
@@ -29,16 +29,19 @@ class ScheduleComparison:
             group = self.reference.groups[rank]
             self.ingress.native(self.reference.ranks[rank], raw)
             clock = self.reference.clocks[rank]
+
             for index, identity in identities.items():
                 if identity["action"] != "run_batch":
                     continue
                 scope = contents.graph["scopes"][index]
                 ports = {port["name"]: port["event"] for port in scope["ports"]}
                 observed = [clock.window(ports[name]) for name in ("call.enter", "call.return")]
+
                 if any(window is None or window[0] != window[1] for window in observed):
                     raise ValueError(f"batch lacks measured host boundaries for {group}")
                 entered, returned = (window[0] - self.ingress.origin_ns for window in observed)
                 self.native[group].append(self.decision(scope["work"], entered, returned))
+
             history = self.reference.histories[group]
             for row in history["events"]:
                 operation = row["operation"]
@@ -55,6 +58,7 @@ class ScheduleComparison:
         pending = {}
         requests = sorted(self.reference.submissions[0].requests.values(), key=lambda request: request["arrival_ns"])
         reader = TraceReader(trace)
+
         for row in reader:
             kind = row["kind"]
             if kind == "resources":
@@ -67,6 +71,7 @@ class ScheduleComparison:
                 scope = row["graph"]["scopes"][0]
                 if scope["role"] != "run_batch":
                     continue
+
                 work = scope["work"]
                 group = self.reference.groups[work["rank"]]
                 stamp = {**self.decision(work, None, None), "submitted_ns": row["time_ns"]}
@@ -81,6 +86,7 @@ class ScheduleComparison:
                 op = row["operation"]
                 self.predicted_releases[row["group"]].append({"operation": op["kind"], "request": op.get("request"),
                                                              "time_ns": row["time_ns"]})
+
         if reader.complete and pending:
             raise ValueError("complete execution omitted a batch return")
         return reader.complete
@@ -102,6 +108,7 @@ class ScheduleComparison:
             name for name, window in bounds.items()
             if window["submitted_ns"] <= predicted_input["time_ns"] < window["received_ns"]
         ]
+
         return {
             "native_batch": left,
             "predicted_batch": right,
@@ -120,6 +127,7 @@ class ScheduleComparison:
         self.observe_native()
         complete = self.observe_prediction(trace)
         reports = {}
+
         for group in sorted(self.native.keys() | self.predicted.keys()):
             native, predicted = self.native[group], self.predicted[group]
             matched, difference, last = 0, None, None
@@ -133,10 +141,13 @@ class ScheduleComparison:
                 ):
                     difference = self.difference(group, left, right, last)
                     break
+
                 matched += 1
                 last = {"native": left, "predicted": right}
+
             reports[group] = {"native_batches": len(native), "predicted_batches": len(predicted),
                               "matched_prefix": matched, "first_difference": difference}
+
         inputs = {}
         for instance, reads in self.ingress.native_reads.items():
             predicted = [row for row in self.ingress.actual_reads[instance] if row["in_flow"]]
@@ -150,6 +161,7 @@ class ScheduleComparison:
                 "predicted_nonempty": [row for row in predicted if row["requests"]],
                 "availability_bounds": self.ingress.readiness(instance),
             }
+
         return {"prediction_complete": complete, "groups": reports, "inputs": inputs}
 
 

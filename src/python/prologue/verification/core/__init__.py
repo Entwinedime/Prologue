@@ -1,5 +1,7 @@
 """Qualify recorded requests, publication histories and independently trained assets."""
 
+from dataclasses import dataclass
+from pathlib import Path
 from statistics import mean
 
 from prologue.common.io import read_json
@@ -27,6 +29,7 @@ class RecordedSubmissions:
         requests = session["content"]["requests"]
         self.requests = {request["id"]: request for request in requests}
         self.aliases = dict(zip(session["source_requests"], self.requests, strict=True))
+
         if len(self.aliases) != len(requests):
             raise ValueError("each submitted request needs a unique native and workload identity")
 
@@ -43,20 +46,40 @@ class RecordedSubmissions:
             members = [self.aliases[name] for name in record["requests"]]
             if not members or time_ns < 0 or (rounds and time_ns < rounds[-1]["time_ns"]):
                 raise ValueError("receive rounds require nonempty members and nondecreasing times")
+
             for member in members:
                 if member in received or time_ns < max(
                     self.requests[member]["arrival_ns"], self.by_request[member]["submitted_ns"]
                 ):
                     raise ValueError(f"receive repeats {member} or precedes its submission")
+
                 received.add(member)
+
             rounds.append({"time_ns": time_ns, "requests": members})
+
         if received != self.requests.keys():
             raise ValueError("receive rounds do not cover every request exactly once")
         return rounds
 
 
+@dataclass(frozen=True, slots=True)
+class RawCaseSource:
+    """The raw recording and its independently read capture manifest."""
+
+    directory: Path
+    manifest: dict
+
+    @classmethod
+    def read(cls, directory):
+        return cls(directory, read_json(directory / "capture.json"))
+
+
 class ReferenceRecording(PublishedCapture):
     target_fields = ("model", "instances", "workload")
+
+    @property
+    def raw_source(self):
+        return RawCaseSource(self.source, self.manifest)
 
     @classmethod
     def input_difference(cls, job, target):
@@ -91,6 +114,7 @@ class ReferenceRecording(PublishedCapture):
             # Native content and routing hooks consume separate fields from this recorded session.
             if session["content"] != target.workload or captured != target.workload:
                 return "workload"
+
         return None
 
     def training(self, *, templates=None, costs=None):
@@ -107,6 +131,7 @@ class ReferenceRecording(PublishedCapture):
             sources = asset.get("sources", [])
             origins = asset.get("sample_recordings", [])
             samples = len(sources)
+
             if not samples or not isinstance(origins, list) or len(origins) != samples:
                 unknown.append({"cost_asset": str(costs), "reason": "sample recordings unavailable"})
             else:
@@ -150,6 +175,7 @@ def compare_request_metrics(reference, predicted):
             observed, estimate = row[metric], estimates[identity][metric]
             if (observed is None) != (estimate is None):
                 raise ValueError(f"request {identity} changes the applicability of {metric}")
+
             delta = None if observed is None else estimate - observed
             differences[identity][metric] = delta
 
@@ -160,6 +186,7 @@ def compare_request_metrics(reference, predicted):
                 zero += 1
             else:
                 errors.append(abs(delta) / observed)
+
         accuracy[metric] = {"mape_percent": mean(errors) * 100 if errors else None, "requests": len(errors),
                             "total_requests": len(actual), "not_applicable": missing, "zero_denominators": zero}
 
@@ -194,6 +221,7 @@ class FixedPublications:
         self.counts = {row["id"]: row["output_tokens"] for row in requests}
         self.positions = case.graph.positions
         self.ports, self.marks = {}, {}
+
         for rank, (contents, raw, _) in case.sources.items():
             if raw["environment"]["implementation"]["disaggregation_mode"] == "prefill":
                 continue
@@ -244,6 +272,7 @@ class FixedPublications:
                 if first is None or end < first["native_bracket_ns"][1]:
                     first = {"request": request, "generated_tokens": token, "native_rank": rank, "graph_port": address,
                              "native_bracket_ns": [begin, end], "replayed_ns": replayed}
+
         return {"basis": "detailed_scheduler_send_bracket_end", "checked_tokens": checked,
                 "checked_first_tokens": first_tokens, "checked_last_tokens": last_tokens,
                 "max_send_bracket_ns": max_width, "different_tokens": differences, "first_difference": first}
