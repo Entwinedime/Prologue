@@ -24,6 +24,7 @@ class BatchTensors:
         owners = {slot: member["id"] for slot, member in zip(slots, members, strict=True)}
         if len(owners) != len(members):
             raise ValueError("admitted members share a request-table slot")
+
         output, = (port["tensor"] for port in scope["ports"]
                    if port["name"] == "cache_locations" and port["direction"] == "output")
 
@@ -38,6 +39,7 @@ class BatchTensors:
 
     @staticmethod
     def boundaries(batch: Any) -> dict[str, tuple[Any, list[str]]]:
+
         # Capture and control publish the same batch ABI; native scratch tensors stay inside the call.
         return {
             "request_slots": (batch.req_pool_indices, ["members"]),
@@ -62,6 +64,7 @@ class BatchTensors:
             lengths = batch.extend_lens
         else:
             lengths = [1] * len(batch.reqs)
+
         decoding = {request.rid for request in batch.decoding_reqs or ()}
         return [
             {
@@ -108,12 +111,15 @@ class BatchTensors:
             if len(batch.global_num_tokens) != 1 or parallel.attn_cp_size != 1:
                 raise ValueError("model padding requires a declared DP/CP layout")
             model_tokens = BatchTensors.align_model_tokens(batch.global_num_tokens[0], parallel.attn_tp_size)
+
             if batch.forward_mode.is_decode():
                 model_members = model_tokens
+
         return {"model_tokens": model_tokens, "model_members": model_members}
 
     @staticmethod
     def model_padding_guards(parameters: dict[str, int]) -> list[list[str]]:
+
         # Padding zero rows and materializing a positive tail run different native work.
         dimensions = (("input_tokens", "model_tokens"), ("members", "model_members"))
         return [["eq" if parameters[actual] == parameters[padded] else "lt", actual, padded]
@@ -175,6 +181,7 @@ class DecisionClocks:
             self.consumer.reset(previous)
 
     def install(self):
+
         # These functions create or consume policy timestamps; metrics and background/watchdog clocks stay native.
         consumers = {
             symbols().scheduler_module: (
@@ -191,6 +198,7 @@ class DecisionClocks:
                 "MooncakeKVSender.__init__", "MooncakeKVReceiver.send_metadata",
             ),
         }
+
         for name, methods in consumers.items():
             module = importlib.import_module(name)
             module.time = ClockNamespace(self, module.time, module.__name__)
@@ -216,6 +224,7 @@ class BatchOperands:
         condition = query.get("condition", {})
         members = query.get("members", ())
         owners = {parent["owner"] for parent in query.get("callers", ())}
+
         if action == "segment":
             owners.add(condition.get("owner"))
 
@@ -225,10 +234,12 @@ class BatchOperands:
             phase = members[0]["phase"]
             if phase in {"prefill", "decode"} and all(member["phase"] == phase for member in members):
                 return phase, members
+
         context = query.get("context", {})
         if action == "batch_transform" and context.get("left") and context.get("operation") in {"filter", "merge"}:
             return "selection", [*context["left"], *context.get("right", [])]
         consumer = condition.get("read", {}).get("consumer")
+
         if (
             action == "query"
             and consumer == f"{symbols().req_time_stats}.{DecisionClocks.wait_queue_entry}"
@@ -245,6 +256,7 @@ class BatchOperands:
                 for member in queue:
                     if members.setdefault(member["id"], member) != member:
                         raise ValueError("native queues give different progress for the same request")
+
             return "scheduler", list(members.values())
 
     @classmethod
@@ -252,11 +264,13 @@ class BatchOperands:
         cut = cls.cut(query)
         if cut is None:
             return False
+
         mode = domain["implementation"]["disaggregation_mode"]
         instance, = (item for item in serving.instances if item.mode == mode)
         content = WorkloadContent(serving.workload["requests"], serving.workload["prefixes"])
         rows = []
         _, members = cut
+
         for member in members:
             identity = member["id"]
             rows.append(
@@ -267,6 +281,7 @@ class BatchOperands:
                     "output_tokens": content.requests[identity]["output_tokens"],
                 }
             )
+
         query["native_inputs"] = {"configuration": instance.configuration.values, "requests": rows}
         return True
 
@@ -430,6 +445,7 @@ class RequestStateCalls:
         return original(relay, indices, payload)
 
     def resolve(self, original, batch, relay):
+
         # These are the native read conditions before resolve_forward_inputs mutates the batch.
         if batch.prefill_input_ids_cpu is not None:
             if batch.mix_running_indices is not None:

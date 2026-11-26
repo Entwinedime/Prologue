@@ -4,6 +4,8 @@ from pathlib import Path
 
 
 class AscendDeployment:
+    """Map visible physical devices to logical ranks for one native attempt."""
+
     driver_mounts = ("/usr/local/Ascend/driver", "/etc/ascend_install.info", "/etc/hccn.conf")
 
     @staticmethod
@@ -35,6 +37,7 @@ class AscendDeployment:
             raise ValueError("single-device acquisition requires exactly one physical device")
         if not self.single_device and len(devices) < workers:
             raise ValueError(f"native protocol requires {workers} physical devices, got {len(devices)}")
+
         self.source = source
         self.devices = devices if self.single_device else devices[:workers]
 
@@ -45,6 +48,7 @@ class AscendDeployment:
             raise ValueError("Ascend PD capture needs a reachable store_url")
         if "transfer_protocol" in source and "store_url" not in source:
             raise ValueError("transfer_protocol needs a store_url")
+
         if "store_url" in source:
             protocol = source.get("transfer_protocol", "sdma")
 
@@ -79,8 +83,10 @@ class AscendDeployment:
                 "--mount", "type=bind,src=/sys/kernel/tracing/events,dst=/opt/prologue/trace-events,readonly",
                 "--mount", "type=bind,src=/proc,dst=/opt/prologue/host-proc,readonly",
             ])
+
         for name, value in self.environment.items():
             arguments.extend(["--env", f"{name}={value}"])
         if latency_only:
             arguments.extend(("--env", "LD_PRELOAD="))
+
         return arguments

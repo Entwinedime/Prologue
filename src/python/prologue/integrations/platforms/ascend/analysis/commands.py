@@ -33,6 +33,7 @@ def span_references(result):
             yield port["at"]
             if "wait" in port:
                 yield port["wait"]["begin"]
+
             if "rendezvous" in port:
                 yield port["rendezvous"]
 
@@ -64,6 +65,8 @@ class StreamCommand:
 
 
 class CommandPositions:
+    """Keep the SDK position and physical queue coordinates together for a recorded stream command."""
+
     def __init__(self, trace: AscendTrace, tasks: list[DeviceTask]) -> None:
         bounds = [(api.end, api.begin, index) for index, task in enumerate(tasks)
                   if (api := trace.apis.get(task.record["args"]["connection_id"])) is not None]
@@ -89,6 +92,8 @@ class CommandPositions:
 
 
 class StreamCommands:
+    """Correlate stream operations with their host submissions and retain candidate event relationships."""
+
     def __init__(self, trace: AscendTrace) -> None:
         self.trace = trace
         self.commands: list[StreamCommand] = []
@@ -107,6 +112,7 @@ class StreamCommands:
         calls: dict[int, list[NativeStreamCall]] = defaultdict(list)
         connections = set()
         covered = {}
+
         for native in trace.runtime:
             name = native.record["api"]
             copy = name == "aclrtMemcpyAsync" and native.record["bytes"] > 0
@@ -114,6 +120,7 @@ class StreamCommands:
                 continue
             if native.end <= trace.window.begin or trace.window.end <= native.begin:
                 continue
+
             api = trace.native_api(native)
             connection = api.record["args"]["connection_id"]
 
@@ -123,6 +130,7 @@ class StreamCommands:
                 continue
             if native.record["stream_status"] != 0:
                 raise ValueError("native stream operation has no observed stream identity")
+
             call = NativeStreamCall(api, native.record["stream"], owner, native)
             self.native_calls.append(call)
             if copy:
@@ -145,17 +153,20 @@ class StreamCommands:
         for task in trace.device_tasks:
             if task.record["args"]["connection_id"] not in connections:
                 streams[task.stream].append(task)
+
         for stream in sorted(streams.keys() | calls.keys()):
             tasks = sorted(streams[stream], key=lambda task: task.begin)
             positions = [task.begin for task in tasks]
             command_positions = None
             gaps: dict[int, list[NativeStreamCall]] = defaultdict(list)
+
             for call in calls[stream]:
                 observed = trace.tasks.get(call.api.record["args"]["connection_id"], [])
                 if observed:
                     task, = observed
                     if task.stream != stream or task.record["args"]["Task Type"] != "EVENT_WAIT":
                         raise ValueError("stream wait differs from its SDK device task")
+
                     position = bisect_left(positions, task.begin)
                 else:
 
@@ -172,7 +183,9 @@ class StreamCommands:
                             f"stream {stream} operation in scope {call.scope} has no unique "
                             f"command position: {lower}..{upper}"
                         )
+
                     position = lower
+
                 gaps[position].append(call)
 
             ordered = []
@@ -186,6 +199,7 @@ class StreamCommands:
                         raise ValueError(
                             f"concurrent native stream operations have no established order on stream {stream}"
                         )
+
                 ordered.extend(local)
                 if position < len(tasks):
                     ordered.append(tasks[position])
@@ -199,6 +213,7 @@ class StreamCommands:
                     if isinstance(source, DeviceTask)
                     else trace.tasks.get(source.api.record["args"]["connection_id"], [])
                 )
+
                 for task in physical:
                     self.physical[task.stream, task.begin] = command
                 if isinstance(source, NativeStreamCall):
@@ -226,16 +241,19 @@ class StreamCommands:
         submissions = trace.queues.inside(call.native, call.stream)
         if not submissions:
             return []
+
         groups = []
         for api in trace.api_ranges.overlapping(call.api):
             tasks = trace.tasks.get(api.record["args"]["connection_id"], [])
             if not tasks or not api.contains(call.api) or trace.owner(trace.origin(api)) != call.scope:
                 continue
+
             if (
                 all(task.stream == call.stream for task in tasks)
                 and trace.queues.inside(api, call.stream) == submissions
             ):
                 groups.append(tasks)
+
         if len(groups) > 1:
             raise ValueError(f"native copy in scope {call.scope} has competing SDK command groups")
 
@@ -257,6 +275,7 @@ class StreamCommands:
             api = trace.apis[arguments["connection_id"]]
             if command.post is None:
                 command.post = trace.queues.release(arguments)
+
         return api, command.post
 
     def submission_frontiers(self, staged_boundaries) -> None:
@@ -268,9 +287,11 @@ class StreamCommands:
                 connection = source.record["args"]["connection_id"]
                 if source.service is not None or connection not in trace.apis or trace.outside_window(source):
                     continue
+
                 observing = connection in trace.observer_connections or trace.auxiliary(source)
                 if observing and (command.stream, command.end) not in staged_boundaries:
                     continue
+
             _, post = self.posting(command)
             groups[command.stream, post.thread, post.begin] = command
 
@@ -281,6 +302,7 @@ class StreamCommands:
             post = command.post
             submitting.append(Interval(post.begin, post.end, command.stream, {}))
             submitted[command.stream].append((post.end, command))
+
         self.submitting = ThreadIntervals(submitting)
         self.frontiers = {}
         for stream, values in submitted.items():
@@ -288,6 +310,7 @@ class StreamCommands:
             latest = []
             for _, command in values:
                 latest.append(command if not latest or command.end > latest[-1].end else latest[-1])
+
             self.frontiers[stream] = [time for time, _ in values], latest
 
     def submitted(self, before: int, stream: int | None) -> list[StreamCommand]:
@@ -296,6 +319,7 @@ class StreamCommands:
 
             # Marker-only streams contain no business work after the drained warmup.
             return result
+
         selected = self.frontiers if stream is None else {stream: self.frontiers[stream]}
         for stream, (starts, latest) in selected.items():
             if any(
@@ -303,9 +327,11 @@ class StreamCommands:
                 for window in self.submitting.overlapping(Interval(before, before, stream, {}))
             ):
                 raise ValueError(f"stream {stream} fence overlaps a native queue submission")
+
             index = bisect_right(starts, before) - 1
             if index >= 0:
                 result.append(latest[index])
+
         return result
 
     def physical_record(self, command: StreamCommand) -> dict | None:
@@ -332,6 +358,7 @@ class StreamCommands:
                         else None,
                     }
                 )
+
             records.append(
                 {
                     "thread": call.native.thread,
@@ -347,12 +374,14 @@ class StreamCommands:
                     else None,
                 }
             )
+
         return records
 
     def measurements(self, observation: dict) -> dict:
         trace = self.trace
         spans, resources = observation["spans"], observation["resources"]
         positions = [set() for _ in resources]
+
         for span in spans:
             positions[span["resource"]].update((span["begin"], span["end"]))
         for anchor in span_references(observation):
@@ -376,6 +405,7 @@ class StreamCommands:
                 # Staging proves the protocol boundaries. Only physical transport can measure its service.
                 coordinates.extend({"resource": resource, "order": order, "time_ns": None} for order in sorted(orders))
                 continue
+
             descriptor = resources[resource]
             stream = int(descriptor["identity"].split("/")[1]) if descriptor["kind"] == "stream" else None
             for order in sorted(orders):
@@ -384,13 +414,16 @@ class StreamCommands:
                 measured = (
                     clocks[stream, order] if stream is not None else trace.host_times[descriptor["identity"], order]
                 )
+
                 if (
                     stream is not None
                     and measured is not None
                     and not trace.clock.begin_ns <= measured <= trace.clock.end_ns
                 ):
                     raise ValueError("observed device boundary lies outside the clock calibration window")
+
                 coordinates.append({"resource": resource, "order": order, "time_ns": measured})
+
             if stream is not None:
 
                 # Only physical payload contributes service time. Gaps between commands remain timeline evidence.
@@ -398,7 +431,9 @@ class StreamCommands:
                     start, finish = clocks[stream, begin], clocks[stream, end]
                     if start is None or finish is None or finish < start:
                         raise ValueError("native device payload has no ordered execution measurements")
+
                     device_services.append([resource, begin, end, finish - start])
+
         return {
             "clock": "monotonic_raw_ns",
             "window_ns": [
@@ -420,6 +455,8 @@ def tensor_layouts(environment):
 
 
 class ScopedTasks:
+    """Partition device work and profiler bookkeeping by the native scope that actually owns the interval."""
+
     @staticmethod
     def profile(root, rank):
         import torch_npu.profiler as sdk
@@ -443,6 +480,7 @@ class ScopedTasks:
         tasks = {(command.stream, command.begin, command.end): cls.identity(command.source.record)
                  for command in StreamCommands(source).payload}
         graph = catalog.graph
+
         if graph["evidence"]["window_ns"] != facts["measurements"]["window_ns"]:
             raise ValueError("source task partitions and template work use different observation windows")
 
@@ -451,6 +489,7 @@ class ScopedTasks:
             scope = piece["scope"]
             if scope not in scopes or piece["kind"] != "device":
                 continue
+
             lane = piece["resource"]
             resource = graph["resources"][lane]
             stream = int(resource["identity"].removeprefix("stream/"))
@@ -463,6 +502,7 @@ class ScopedTasks:
         for scope, parts in intervals.items():
             if len({part[0] for part in parts}) == 1 and all(part[3] for part in parts):
                 partitions[scope] = [(index, tasks) for _, _, index, tasks in sorted(parts)]
+
         return partitions
 
     @classmethod
@@ -471,15 +511,18 @@ class ScopedTasks:
         rows = sdk_rows(trace)
         markers = {row["name"]: Interval.read(row, counter) for row in rows
                    if row["name"].startswith("prologue.sample.")}
+
         if markers.keys() != {"prologue.sample.begin", "prologue.sample.call", "prologue.sample.end"}:
             return {"reason": "missing_scope_marker"}
         enqueues = AscendTrace.queue_index([Interval.read(row, counter) for row in rows if row.get("cat") == "enqueue"])
         dequeues = ThreadIntervals([Interval.read(row, counter) for row in rows if row.get("cat") == "dequeue"])
         boundary, owned = defaultdict(set), set()
+
         for row in rows:
             info = row.get("args", {})
             if "Thread Id" not in info or "connection_id" not in info:
                 continue
+
             api = Interval.read(row, counter)
             dequeue = dequeues.enclosing(api)
             origin = enqueues[dequeue.record["args"]["correlation_id"]] if dequeue else api
@@ -496,6 +539,7 @@ class ScopedTasks:
         for name in ("prologue.sample.begin", "prologue.sample.end"):
             endpoints.append([r for r in tasks if r["args"]["connection_id"] in boundary[name]
                               and r["args"]["Task Type"] == "EVENT_RECORD"])
+
         if any(len(items) != 1 for items in endpoints):
             return {"reason": "unresolved_device_timer"}
         begin, end = (items[0] for items in endpoints)
@@ -509,6 +553,7 @@ class ScopedTasks:
             return {"reason": "unordered_device_timers"}
         measured = lane[lane.index(begin) + 1:lane.index(end)]
         linked = sum(r["args"]["connection_id"] in owned for r in tasks)
+
         if len(measured) != linked or any(r["args"]["connection_id"] not in owned for r in measured):
             return {"reason": "scope_and_stream_disagree"}
         return {"tasks": [[*cls.identity(r), round(Decimal(str(r["dur"])) * 1000)] for r in measured]}

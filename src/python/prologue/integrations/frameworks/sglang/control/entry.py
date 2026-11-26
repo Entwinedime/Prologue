@@ -21,7 +21,7 @@ def main() -> None:
         os.environ["SGLANG_USE_CPU_ENGINE"] = "1"
         os.environ["OMP_NUM_THREADS"] = "1"
 
-        from prologue.integrations.runtimes.pytorch.control import CpuDeclarations
+        from .native_declarations import CpuDeclarations
 
         CpuDeclarations.install(arguments.kernel_python)
 

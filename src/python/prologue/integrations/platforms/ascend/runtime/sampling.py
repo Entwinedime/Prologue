@@ -28,6 +28,7 @@ class AscendExport:
         output.mkdir()
         working = output / profile.name
         working.mkdir()
+
         try:
 
             # SDK analysis writes alongside its inputs; copy raw framework/CANN records, not prior exports.
@@ -35,6 +36,7 @@ class AscendExport:
                 shutil.copyfile(metadata, working / metadata.name)
             shutil.copytree(profile / "FRAMEWORK", working / "FRAMEWORK")
             cann, = profile.glob("PROF_*")
+
             for directory in (cann / "host", *cann.glob("device_*")):
                 shutil.copytree(directory, working / cann.name / directory.name)
             analyse(str(working), max_process_number=1)
@@ -59,31 +61,23 @@ class TensorCopySamples:
     def now():
         return clock_gettime_ns(CLOCK_MONOTONIC_RAW)
 
-    def sample(self, job, directory, revision):
-        import torch
-
-        from prologue.integrations.platforms.ascend.runtime.profiling import AscendMarkers, AscendRuntimeTiming
-
-        directory.mkdir(parents=True)
-        start = self.now()
-        actual = AscendMarkers.environment()
-        if torch.npu.device_count() != 1 or any(actual[key] != value for key, value in job["runtime"].items()):
-            raise ValueError("isolated copy requires the recorded runtime and exactly one visible NPU")
-
+    def prepare_operands(self, torch, requests):
         # All operands are contiguous views of a preallocated buffer. Allocation and first use precede timing.
         operands = []
-        for operand in job["operands"]:
+        for operand in requests:
             caller = operand["caller"]
             direction = self.directions[caller]
             copy = getattr(torch.Tensor, caller.rsplit(".", 1)[1])
             name, width = operand["dtype"], operand["element_bytes"]
             sizes = [point["bytes"] for point in operand["points"]]
+
             if width <= 0 or not sizes or any(type(size) is not int or size <= 0 or size % width for size in sizes):
                 raise ValueError("copy sizes must be positive whole numbers of tensor elements")
             dtype = getattr(torch, name.removeprefix("torch."))
             upload = direction == "host_to_device"
             buffer = torch.ones(max(sizes) // width, dtype=dtype, device="cpu" if upload else "npu")
             buffer[1::2] = 0
+
             if buffer.element_size() != width or str(buffer.dtype) != name:
                 raise ValueError("isolated operand differs from its observed dtype or element width")
             for size in sizes:
@@ -92,37 +86,10 @@ class TensorCopySamples:
                 tensor = buffer[:size // width]
                 args = (tensor, "npu") if upload else (tensor,)
                 operands.append((copy, args, row))
-        AscendMarkers.synchronize()
-        prepared = self.now()
-        for copy, args, _ in operands:
-            copy(*args)
-        AscendMarkers.synchronize()
-        warmed = self.now()
 
-        windows = []
-        readbacks = []
-        path = directory / "runtime-timing.jsonl"
-        timing = AscendRuntimeTiming()
-        for enabled in (False, True):
-            if enabled:
-                timing.start()
-            try:
-                for repeat in range(7):
-                    for copy, args, row in operands:
-                        begin = self.now()
-                        result = copy(*args)
-                        end = self.now()
-                        row["timed_call_ns" if enabled else "plain_call_ns"].append(end - begin)
-                        if enabled:
-                            windows.append((row, format(args[0].data_ptr(), "x"), begin, end))
-                            if repeat == 6:
-                                readbacks.append((row, args[0], result))
-                        del result
-            finally:
-                if enabled:
-                    timing.finish(path)
-        observed = self.now()
+        return operands
 
+    def qualify_observations(self, torch, path, windows, readbacks):
         # Read the actual destination after timing stops, including the return value of Tensor.tolist.
         for row, source, result in readbacks:
             if isinstance(result, torch.Tensor):
@@ -139,14 +106,68 @@ class TensorCopySamples:
                 if (record["api"] == self.implementation and record["result"] == 0
                         and record["thread"] == get_native_id()):
                     transfers[record["source"], record["bytes"]].append(record)
+
         for row, address, begin, end in windows:
             matches = [call for call in transfers[address, row["bytes"]]
                        if begin <= call["begin_raw_ns"] <= call["end_raw_ns"] <= end
                        and SynchronousCopy.matches(call, address, row["bytes"], self.directions[row["caller"]])]
+
             if len(matches) == 1:
                 row["observations_ns"].append(matches[0]["end_raw_ns"] - matches[0]["begin_raw_ns"])
             else:
                 row["unmatched_calls"] += 1
+
+
+    def sample(self, job, directory, revision):
+        import torch
+
+        from prologue.integrations.platforms.ascend.runtime.profiling import AscendMarkers, AscendRuntimeTiming
+
+        directory.mkdir(parents=True)
+        start = self.now()
+        actual = AscendMarkers.environment()
+        if torch.npu.device_count() != 1 or any(actual[key] != value for key, value in job["runtime"].items()):
+            raise ValueError("isolated copy requires the recorded runtime and exactly one visible NPU")
+
+        operands = self.prepare_operands(torch, job["operands"])
+
+        AscendMarkers.synchronize()
+        prepared = self.now()
+        for copy, args, _ in operands:
+            copy(*args)
+
+        AscendMarkers.synchronize()
+        warmed = self.now()
+
+        windows = []
+        readbacks = []
+        path = directory / "runtime-timing.jsonl"
+        timing = AscendRuntimeTiming()
+
+        for enabled in (False, True):
+            if enabled:
+                timing.start()
+            try:
+                for repeat in range(7):
+                    for copy, args, row in operands:
+                        begin = self.now()
+                        result = copy(*args)
+                        end = self.now()
+                        row["timed_call_ns" if enabled else "plain_call_ns"].append(end - begin)
+
+                        if enabled:
+                            windows.append((row, format(args[0].data_ptr(), "x"), begin, end))
+                            if repeat == 6:
+                                readbacks.append((row, args[0], result))
+
+                        del result
+            finally:
+                if enabled:
+                    timing.finish(path)
+
+        observed = self.now()
+
+        self.qualify_observations(torch, path, windows, readbacks)
 
         rows = [row for _, _, row in operands]
         write_json(directory / "services.json", rows, replace=False)

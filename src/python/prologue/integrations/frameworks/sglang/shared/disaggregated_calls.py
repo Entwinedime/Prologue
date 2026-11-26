@@ -39,10 +39,12 @@ class PdPeerBindings:
         ordered = sorted(
             workers, key=lambda rank: (workers[rank]["parallel"]["pp_rank"], workers[rank]["parallel"]["tp_rank"])
         )
+
         for target in ordered:
             row = workers[target]
             if row["mode"] != "decode":
                 continue
+
             parallel = row["parallel"]
             mapping = NativeKvTopology(
                 parallel["logical_tp"], parallel["logical_pp"], parallel["tp_rank"], parallel["pp_rank"]
@@ -56,6 +58,7 @@ class PdPeerBindings:
                 for rank in ordered if workers[rank]["mode"] == "prefill"
                 and workers[rank]["parallel"]["tp_rank"] == tp_rank and workers[rank]["parallel"]["pp_rank"] == pp_rank
             ]
+
             for source in self.sources[target]:
                 if workers[source]["page_size"] != row["page_size"]:
                     raise ValueError("native PD transfer requires matching page sizes")
@@ -79,6 +82,7 @@ class PdPeerBindings:
             else [(source, local) for source in self.sources[local]]
         )
         result = []
+
         for source, target in pairs:
             peer = target if source == local else source
             layout = dict(self.workers[peer]["layout"])
@@ -92,6 +96,7 @@ class PdPeerBindings:
                 self.workers[source]["registration"]["metadata"]["row_bytes"],
                 self.workers[target]["registration"]["metadata"]["row_bytes"],
             ))
+
         return result
 
 
@@ -200,6 +205,7 @@ class DisaggregatedCalls:
             "members": 1, "input_tokens": fill - total, "prefix_tokens": prefix, "total_prefix_tokens": total,
         }
         work = self.calls.request_work(req, total, fill)
+
         with self.calls.call(
             "preallocate", original, parameters=parameters, work=work,
             guards=(["lt", 0, "prefix_tokens"] if prefix else ["eq", "prefix_tokens", 0],),
@@ -211,6 +217,7 @@ class DisaggregatedCalls:
         frame = calls.current.get()
         if not calls.enabled or frame is None or frame.operation != "decode_reserve":
             return original(tensor, *args, **kwargs)
+
         slots = frame.inputs.req_to_token_pool.req_to_token
         if tensor.untyped_storage()._cdata != slots.untyped_storage()._cdata:
             return original(tensor, *args, **kwargs)
@@ -223,6 +230,7 @@ class DisaggregatedCalls:
             implementation="prologue.integrations.frameworks.sglang.disaggregated_calls."
                            "DisaggregatedCalls.read_reservation_indices",
         )
+
         with calls.separate(boundary.operation, work), calls.boundary(self.read_reservation_indices, boundary):
             return original(tensor, *args, **kwargs)
 
@@ -232,6 +240,7 @@ class DisaggregatedCalls:
         req = decode_req.req
         parameters = {"members": 1}
         work = self.calls.request_work(req)
+
         with (
             self.calls.request_state.receive(decode_req),
             self.calls.call("kv_commit", original, parameters=parameters, work=work),
@@ -241,6 +250,7 @@ class DisaggregatedCalls:
             self.calls.request_state.metadata_values(
                 "read", req, req.output_ids[-1] if len(req.output_ids) == before + 1 else None
             )
+
             return result
 
     def prepare(self, original, batch):
@@ -252,6 +262,7 @@ class DisaggregatedCalls:
         ]
         work = self.calls.work(batch, members)
         parameters = BatchTensors.parameters(batch, sum(member["new_tokens"] for member in members))
+
         with self.calls.call("prebuilt_prepare", original, parameters=parameters, work=work, inputs=batch) as frame:
             result = original(batch)
             frame.tensor_outputs = BatchTensors.boundaries(batch)
@@ -262,6 +273,7 @@ class DisaggregatedCalls:
             return original(*arguments, **keywords)
         members = BatchTensors.members(batch)
         parameters = BatchTensors.parameters(batch, sum(member["new_tokens"] for member in members))
+
         with self.calls.request_state.members(batch), self.calls.call(
             operation, original, parameters=parameters, work=self.calls.work(batch, members),
             host_only=host_only, device_tail=device_tail,
@@ -269,9 +281,11 @@ class DisaggregatedCalls:
             result = original(*arguments, **keywords)
             if operation == "prebuilt_result":
                 frame.outputs = self.calls.completed(batch.reqs)
+
             return result
 
     def commit(self, original, batch, *args, **kwargs):
+
         # Native cache calls interrupt a CPU loop; token materialization and relay writes follow its last iteration.
         return self.batch("prebuilt_commit", original, batch, (batch, *args), kwargs, device_tail=True)
 
@@ -286,6 +300,7 @@ class DisaggregatedCalls:
             "chunk_start": req.start_send_idx, "chunk_limit": limit, "last_chunk": int(last_chunk),
             "page_size": scheduler.token_to_kv_pool_allocator.page_size,
         }
+
         with self.calls.call(
             "kv_prepare", original, parameters=parameters, work=self.calls.request_work(req), inputs=req,
             guards=(["eq", "last_chunk", int(last_chunk)],),
@@ -300,6 +315,7 @@ class DisaggregatedCalls:
         if mode == "prefill":
             hooks = (
                 (symbols().prefill_bootstrap_queue_create_sender, self.create_sender),
+
                 # Preparation, cache, batch transforms and KV submission are separate child actions.
                 (
                     scheduler + "get_next_disagg_prefill_batch_to_run",
@@ -307,6 +323,7 @@ class DisaggregatedCalls:
                 ),
                 (scheduler + "get_new_batch_prefill", self.calls.selection.select),
                 (scheduler + "process_prefill_chunk", partial(self.queue, "prefill_chunk", host_only=True)),
+
                 # Resource releases and publication are child actions; the remaining loop is CPU work.
                 (
                     scheduler + "process_disagg_prefill_inflight_queue",
@@ -326,6 +343,7 @@ class DisaggregatedCalls:
                 ),
                 (scheduler + "update_running_batch", self.calls.selection.select),
                 (scheduler + "process_decode_queue", partial(self.queue, "decode_queue")),
+
                 # Cache matching, tensor preparation and commit are child actions; admission only selects requests.
                 (scheduler + "get_new_prebuilt_batch", partial(self.queue, "prebuilt_admit", host_only=True)),
                 (
@@ -343,5 +361,6 @@ class DisaggregatedCalls:
                     self.result,
                 ),
             )
+
         for target, hook in hooks:
             HookTable.around(target, hook)

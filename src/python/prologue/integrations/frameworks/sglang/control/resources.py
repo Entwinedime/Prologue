@@ -7,7 +7,7 @@ import torch
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.shared.batches import RequestSubmissions
-from prologue.integrations.frameworks.sglang.shared.configuration import MhaKvLayout
+from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
 from prologue.integrations.frameworks.sglang.shared.resources import PoolCoordinates
 from prologue.integrations.frameworks.sglang.shared.selection import AllocationABI
 
@@ -45,6 +45,7 @@ class AllocationDemand:
         total_prefix_len = prefix_len if total_prefix_len is None else total_prefix_len
         if total_prefix_len != prefix_len:
             raise ValueError("Decode preallocation requires resident prefixes; tiered loadback is not implemented")
+
         tokens = len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0) - total_prefix_len
         slots = queue.req_to_token_pool
 
@@ -52,6 +53,7 @@ class AllocationDemand:
         slots.prefix_bindings[RequestSubmissions.index(req.rid)] = (
             {"node": req.last_node, "tokens": prefix_len} if prefix_len else None
         )
+
         try:
             with self.demand(queue.token_to_kv_pool_allocator, [req], [tokens]):
                 return original(queue, req, prefix_indices, prefix_len, total_prefix_len)
@@ -89,9 +91,11 @@ class RequestSlots:
                 RequestSubmissions.index(req.rid),
                 {"node": req.last_node, "tokens": len(req.prefix_indices)} if req.last_node is not None else None,
             )
+
             if prefix is not None:
                 member["prefix"] = prefix
             members.append(member)
+
         bindings = self.peer.call("slots", members=members)
         for req, binding in zip(reqs, bindings, strict=True):
             req.req_pool_idx = PoolCoordinates.native(binding["slot"])
@@ -177,6 +181,7 @@ class PageAllocator:
         return allocation["members"]
 
     def merge_and_sort_free(self, ordering):
+
         # The core already ordered the pages; ResourceCalls exposes this native operation's execution graph.
         return None
 
@@ -184,6 +189,7 @@ class PageAllocator:
         return self.indices(self.reserve(), dtype)
 
     def indices(self, bindings, dtype):
+
         # SGLang reserves physical page zero; the core uses zero-based page identities.
         indices = [index + self.page_size for binding in bindings for index in binding["indices"]]
         return torch.tensor(indices, dtype=dtype)
@@ -209,6 +215,7 @@ class PageAllocator:
             # Replay only index computation over core-owned pages; the helper never allocates or frees them.
             free_pages = torch.tensor(pages, dtype=torch.int64)
             alloc_extend_naive(prefix_lens, seq_lens, last_loc, free_pages, result, self.page_size, "cpu")
+
         return result
 
     def alloc_decode(self, seq_lens, seq_lens_cpu, last_loc):
@@ -237,6 +244,7 @@ default_radix_cache_factory = resolve(symbols().default_radix_cache_factory)
 class PrefixCache(RadixCache):
     @staticmethod
     def build(context, *, expected):
+
         # Native chunk-only storage retains its request bookkeeping and never builds a content index.
         if context.disable_radix_cache and context.effective_chunked_prefill_size is not None:
             cache = default_radix_cache_factory(context)
@@ -251,6 +259,7 @@ class PrefixCache(RadixCache):
             "disabled": context.disable_radix_cache,
             "eviction_policy": context.params.eviction_policy.lower(),
         }
+
         if actual != expected:
             raise ValueError(f"native control cache differs from template implementation: {actual} != {expected}")
         return cache
@@ -273,6 +282,7 @@ class PrefixCache(RadixCache):
         self._empty_match_result = MatchResult(torch.empty(0, dtype=torch.int64), 0, 0, 0)
 
     def reset(self):
+
         # Each simulation starts with its own resource pool; native flush must not create a second tree.
         raise NotImplementedError("reset prefix state by starting a new simulation resource pool")
 
@@ -375,6 +385,7 @@ class MetadataRunner(ModelRunner):
         torch.set_num_threads(1)
 
     def init_torch_distributed(self):
+
         # Native request/control collectives run on CPU; model collectives belong to the simulated graph.
         parallel_state.init_distributed_environment(
             backend="gloo",
@@ -392,6 +403,7 @@ class MetadataRunner(ModelRunner):
         self.tp_group = parallel_state.get_tp_group()
         self.pp_group = parallel_state.get_pp_group()
         self.attention_tp_group = get_attention_tp_group()
+
         return 0
 
     def _resolve_memory_pool_config(self, pre_model_load_memory):
@@ -422,6 +434,7 @@ class MetadataRunner(ModelRunner):
         self.token_to_kv_pool = self.token_to_kv_pool_allocator.storage
 
     def init_shared_mooncake_transfer_engine(self):
+
         # The transfer adapter submits graph work; prediction never opens a physical transport engine.
         self.shared_mooncake_transfer_engine = None
 

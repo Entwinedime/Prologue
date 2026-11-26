@@ -59,6 +59,7 @@ class ShardWeights:
             if t.device.type == platform_domain().device_type and t.numel()
         }
         footprint = sum(t.untyped_storage().nbytes() for t in weights.values())
+
         if footprint <= self.share:
             return model
 
@@ -71,6 +72,7 @@ class ShardWeights:
             container = path.rpartition(".")[0]
             while container and container not in layers:
                 container = container.rpartition(".")[0]
+
             owners[tensor.untyped_storage()._cdata].add(container)
 
         # Shared embeddings, cross-layer aliases and buffers outside a layer stay available to their actual consumers.
@@ -89,6 +91,7 @@ class ShardWeights:
             layer = modules[name]
             layer.forward = update_wrapper(partial(residence.forward, layer.forward), layer.forward)
             parked += sum(backing.nbytes for _, backing in residence.storage)
+
         write_json(
             self.directory / "weight-residency" / f"{distributed.get_rank()}.json",
             {
@@ -98,6 +101,7 @@ class ShardWeights:
                 "layers": len(groups),
             },
         )
+
         return model
 
 
@@ -116,6 +120,7 @@ class StagedWork:
                 completed = self.native.wait(*args, **kwargs)
             if not completed:
                 return completed
+
             for target, buffer in self.copies:
                 self.transport.compute(target.copy_, buffer)
 
@@ -179,11 +184,13 @@ class ShardTransport:
         arguments = signature.bind(*args, **kwargs)
         values = arguments.arguments
         source = values[source_name]
+
         if source.device.type == "cpu":
             with self.peers():
                 return original(*args, **kwargs)
         output = values[output_name]
         outputs = output if isinstance(output, list) else [output]
+
         with ExitStack() as observation:
             if self.record is not None:
                 observation.enter_context(self.record(name, source, outputs))
@@ -202,8 +209,10 @@ class ShardTransport:
                 copies = tuple(zip(outputs, buffers, strict=True))
                 if values.get("async_op", False):
                     return StagedWork(self, result, host, copies, observation.pop_all())
+
                 for target, prepared in copies:
                     self.compute(target.copy_, prepared)
+
         return result
 
     def post(self, name, signature, original, *args, **kwargs):
@@ -221,9 +230,11 @@ class ShardTransport:
                 buffer = torch.empty_like(tensor, device="cpu", memory_format=torch.contiguous_format)
             else:
                 buffer = self.compute(tensor.detach().to, device="cpu", memory_format=torch.contiguous_format)
+
             arguments.arguments["tensor"] = buffer
             with self.peers():
                 work = original(*arguments.args, **arguments.kwargs)
+
         return StagedWork(self, work, buffer, ((tensor, buffer),) if receives else ())
 
     @staticmethod
@@ -266,6 +277,7 @@ class ShardTransport:
             symbols().dummy_model_loader_load_model,
         ):
             HookTable.around(target, partial(self.compute, weights.load))
+
         for target in (
             symbols().model_runner_forward,
             symbols().model_runner_sample,

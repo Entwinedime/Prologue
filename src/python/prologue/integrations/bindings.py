@@ -13,6 +13,8 @@ from prologue.common.interfaces import DeviceRuntime, PlatformBackend, PlatformD
 
 @dataclass(frozen=True)
 class Route:
+    """Namespace identity shared by the host and its separately spawned workers."""
+
     framework: str
     platform: str
     revision: str
@@ -24,6 +26,9 @@ class Route:
             raise ValueError("a framework revision is required")
 
     def require_job(self, job):
+        if not isinstance(job, dict):
+            raise ValueError("native worker input must be an object")
+
         declared = {"framework": self.framework, "platform": self.platform,
                     "framework_revision": self.revision}
         for name, value in declared.items():
@@ -81,6 +86,7 @@ def _domain_from_wire(wire):
 
 
 def platform_domain() -> PlatformDomain:
+
     # Control processes consume only these values and never load a device package.
     wire = os.environ.get("PROLOGUE_PLATFORM_DOMAIN")
     if wire:
@@ -92,6 +98,8 @@ def platform_domain() -> PlatformDomain:
 
 
 class RuleName:
+    """Resolve a recipe identity in its installed framework and runtime domain."""
+
     def __init__(self, suffix, *, platform_only=False):
         self.suffix, self.platform_only = suffix, platform_only
 

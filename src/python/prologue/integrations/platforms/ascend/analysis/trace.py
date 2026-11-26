@@ -45,6 +45,7 @@ class HcclNotifications:
             row = command.source.record
             args = row["args"]
             key = args["Physic Stream Id"], args["Task Id"], args["Subtask Id"], Decimal(str(row["ts"]))
+
             if key not in self.tasks:
                 continue
             endpoint = self.tasks[key]
@@ -54,6 +55,7 @@ class HcclNotifications:
             # A record can signal after it starts. A wait can finish only after the signal has arrived.
             start, finish = clock.interval(row)
             signals.append([*endpoint, start if endpoint[0] == "record" else finish])
+
         return signals
 
 
@@ -79,6 +81,7 @@ class SynchronousCopy:
         inputs = ((port["name"], port["tensor"]) for port in scope["ports"]
                   if port["direction"] == "input" and port["tensor"] is not None)
         operands = []
+
         for name, tensor in chain(inputs, scope.get("local_copies", {}).items()):
             source = tensor.get("copy_source")
             if source and cls.matches(
@@ -110,11 +113,14 @@ class ServiceExecutions:
             for scope in scopes for call in scope["service"]["executions"]
         ]
         by_owner = defaultdict(list)
+
         for index, call in enumerate(self.executions):
             interval = owners[call.scope]["host_interval"]
             if not interval["begin_counter"] <= call.begin <= call.end <= interval["end_counter"]:
                 raise ValueError("transport execution escapes its synchronous service boundary")
+
             by_owner[call.scope, call.thread].append((index, call))
+
         self.submissions = {}
         queue_owners = {}
         submitted = set()
@@ -122,10 +128,12 @@ class ServiceExecutions:
             row = native.record
             if row["service"] < 0:
                 continue
+
             matches = [
                 (index, call) for index, call in by_owner[row["service"], native.thread]
                 if call.begin <= native.begin and native.end <= call.end
             ]
+
             if len(matches) != 1:
                 raise ValueError("native queue submission lacks one explicit service execution")
             (index, call), = matches
@@ -148,6 +156,7 @@ class ServiceExecutions:
         for task in tasks:
             if task.stream in grouped:
                 grouped[task.stream].append(task)
+
         for stream, submissions in self.submissions.items():
             if any(left[0].end > right[0].begin for left, right in zip(submissions, submissions[1:], strict=False)):
                 raise ValueError("concurrent private-queue submissions have no established order")
@@ -157,11 +166,13 @@ class ServiceExecutions:
             expected = sum(native.record["tasks"] for native, _ in submissions)
             if len(payload) != expected:
                 raise ValueError(f"private queue {stream} submission/task coverage differs: {expected}/{len(payload)}")
+
             position = 0
             for native, execution in submissions:
                 count = native.record["tasks"]
                 for task in payload[position:position + count]:
                     task.service = self.executions[execution].scope
+
                 position += count
 
 
@@ -202,6 +213,7 @@ class AscendTrace(RawTraceIndex):
                 task = DeviceTask(2 * order, 2 * order + 1, row)
                 self.tasks[task.record["args"]["connection_id"]].append(task)
                 self.device_tasks.append(task)
+
         services = [scope for scope in raw["scopes"] if "service" in scope]
         self.services = ServiceExecutions(services, self.queues)
         for native in self.runtime:
@@ -210,6 +222,7 @@ class AscendTrace(RawTraceIndex):
                 raise ValueError(
                     "a private transport queue has external runtime operations; explicit ports are required"
                 )
+
         self.services.assign(self.device_tasks)
 
         self.synchronizations = list(event_records(self.runtime, HOST_WAITS | self.stream_waits))
@@ -234,14 +247,17 @@ class AscendTrace(RawTraceIndex):
             slices = sorted((path for path in paths if path.name.rsplit("_", 1)[-1].isdigit()),
                             key=lambda path: int(path.name.rsplit("_", 1)[1]))
             data = b"".join(path.read_bytes() for path in slices)
+
             for magic, _, _, thread, _, stamp, _, dtype, algorithm, count, _ in layout.iter_unpack(
                 data[len(data) % layout.size :]
             ):
                 if magic != 0x5A5A:
                     raise ValueError("invalid SDK HCCL op record")
                 owner = calls.enclosing(Interval(stamp, stamp, thread, {}))
+
                 if owner is not None:
                     records[owner.record["scope"]].append([dtype, algorithm, count])
+
         return {scope: rows[0] for scope, rows in records.items() if len(rows) == 1}
 
     def owner(self, interval: Interval) -> int | None:
@@ -252,11 +268,13 @@ class AscendTrace(RawTraceIndex):
         marker = self.points[identity]
         api = self.point_api(identity)
         native = self.runtime_call(api)
+
         if native is None:
             raise ValueError(f"device point {identity} has no recorded API instance")
         tasks = self.tasks[api.record["args"]["connection_id"]]
         if len(tasks) != 1 or tasks[0].record["args"]["Task Type"] != "EVENT_RECORD":
             raise ValueError(f"device point {identity} does not identify one native event task")
+
         stream = int(tasks[0].record["args"]["Physic Stream Id"])
         if native.record["stream_status"] != 0 or native.record["stream"] != stream:
             raise ValueError(f"device point {identity} disagrees with its native stream")

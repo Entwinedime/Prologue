@@ -1,46 +1,14 @@
 """Execute CPU metadata operations and keep native tensors bound to simulated producers."""
 
-import sys
-import types
 from collections import defaultdict
 from dataclasses import dataclass, field
 from itertools import count
-from pathlib import Path
 
 import torch
 import torch.distributed as distributed
 from torch.multiprocessing.reductions import StorageWeakRef
 
 from prologue.integrations.runtimes.pytorch.shared import CpuTransfer
-
-
-class DeclarationDriver:
-    def get_benchmarker(self):
-        return self.reject
-
-    @staticmethod
-    def reject(*args, **kwargs):
-        raise RuntimeError("Native control must submit physical work to Prologue execution")
-
-
-class CpuDeclarations:
-    @staticmethod
-    def install(kernel_python: Path) -> None:
-        import triton
-
-        triton.runtime.driver.set_active(DeclarationDriver())
-
-        # The fixed upstream Python declarations are retained; only their binary loader is replaced.
-        sys.path.insert(0, str(kernel_python))
-        loader = types.ModuleType("sgl_kernel.load_utils")
-        loader.__package__ = "sgl_kernel"
-        loader._load_architecture_specific_ops = CpuDeclarations.load_declarations
-        loader._preload_cuda_library = CpuDeclarations.load_declarations
-        sys.modules[loader.__name__] = loader
-
-    @staticmethod
-    def load_declarations() -> None:
-        pass
 
 
 @dataclass(eq=False)
@@ -116,6 +84,8 @@ def install_distributed(bridge, names):
 
 
 class CpuCollectives:
+    """Return the virtual protocol's collective result to native control at its existing collective boundary."""
+
     def __init__(self, peer, world) -> None:
         self.peer = peer
         self.world = world
@@ -140,6 +110,7 @@ class CpuCollectives:
                     "dtype": str(tensor.dtype), "values": tensor.flatten().tolist(), **parameters,
                 },
             )
+
         work = MetadataWork(self.peer, handle, output, "collective_wait")
         if async_op:
             return work
@@ -185,10 +156,12 @@ class CollectiveCalls:
         key = (*group, position)
         header = {name: value for name, value in message.items() if name != "values"}
         call = self.pending.setdefault(key, CollectiveCall(header))
+
         if call.header != header:
             raise ValueError("Native CPU collective participants disagree on the operation")
         if call.values and len(next(iter(call.values.values()))) != len(message["values"]):
             raise ValueError("Native CPU collective participants disagree on tensor extent")
+
         self.positions[participant] = position + 1
         call.values[rank] = message["values"]
         kind = message["kind"]
@@ -251,10 +224,12 @@ class CpuPointToPoint(CpuTransfer):
             raise ValueError(
                 "Native metadata transport requires CPU tensors; device transfers belong to graph execution"
             )
+
         execution = self.context.get()
         if execution is None:
             raise ValueError("CPU metadata post requires its native protocol context")
         message = self.describe(tensor, group, tag, endpoint, group_endpoint, receiving)
+
         if not receiving:
             message["values"] = tensor.flatten().tolist()
         handle = self.peer.exchange("metadata_post", {**message, "execution": execution})

@@ -11,6 +11,7 @@ def install(description):
     runtime = device_runtime()
     device_api = f"torch.{platform_domain().device_type}"
     shard_transport = None
+
     if description["local_shards"]:
         from prologue.integrations.frameworks.sglang.observation.staging import ShardTransport
 
@@ -18,7 +19,7 @@ def install(description):
 
     # A latency-only worker must start without the observer bridge or a device profiler.
     if description["latency_only"]:
-        from prologue.integrations.frameworks.sglang.observation.observers import NativeTiming
+        from prologue.integrations.frameworks.sglang.observation.host_timing import NativeTiming
 
 
         if description["host_timing"]:
@@ -33,10 +34,12 @@ def install(description):
             if getattr(ctypes.CDLL(None), "prologue_set_runtime_enabled", None) is not None:
                 raise ValueError("latency measurement requires the native observer to be unloaded")
             timing = NativeTiming(description, specializations=runtime.specializations())
+
         if shard_transport is not None:
             auxiliary = timing.host.auxiliary if timing.host is not None else nullcontext
             record = timing.host.local_exchange if timing.host is not None else None
             shard_transport(description["output"], auxiliary, record).install(description)
+
         timing.install(device_api)
         return
 

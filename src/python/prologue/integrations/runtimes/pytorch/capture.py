@@ -39,6 +39,8 @@ class StorageBoundary:
 
 
 class TensorBoundaries(TorchDispatchMode):
+    """Capture tensor storage and data-transfer edges where a PyTorch operation crosses a semantic scope."""
+
     def __init__(self, capture: SemanticCapture) -> None:
         super().__init__()
         self.capture = capture
@@ -124,6 +126,7 @@ class TensorBoundaries(TorchDispatchMode):
             storage = self.storage(tensor, region)
             key = storage.identity, storage.version
             previous = self.tensors.get(tensor)
+
             if previous is None or previous[0] != key:
                 previous = key, next(self.value_ids)
                 self.tensors[tensor] = previous
@@ -139,11 +142,13 @@ class TensorBoundaries(TorchDispatchMode):
                 "allocation": storage.allocation,
                 "buffer": storage.buffer,
             }
+
             if shape is not None:
                 self.declare_shape(tensor, shape)
                 result["shape_rule"] = shape
                 if materializer:
                     result["copy_source"] = self.copy_source(tensor, materializer)
+
             return result
 
     def retire(self) -> None:
@@ -179,6 +184,7 @@ class TensorBoundaries(TorchDispatchMode):
                 if state.writer is None and (fresh or prior is None or prior.expired()):
                     state.allocation = state.writer = self.capture.current.get()
                     state.exposed = False
+
         return result
 
 
@@ -224,6 +230,8 @@ class ObservedSignal:
 
 
 class NativeSignals:
+    """Associate observed process-group completions with the original protocol call and its lifetime."""
+
     def __init__(self, current, scope, work_context, runtime=None) -> None:
         self.current = current
         self.scope = scope
@@ -254,7 +262,9 @@ class NativeSignals:
             ) as call:
                 result = self.record_event(original, event, stream)
                 self.publish(call, event, "completion")
+
             return result
+
         if self.current.get() != self.observed.get():
             return original(event, stream)
         return self.record_event(original, event, stream)
@@ -290,6 +300,7 @@ class NativeSignals:
                 observed["point"] = signal.point
             result = original(event)
             observed["result"] = result
+
         return result
 
     def consume(self, device, original, event, stream=None):
@@ -299,6 +310,7 @@ class NativeSignals:
             return original(*arguments)
         if self.current.get() != 0:
             raise ValueError("an exported event wait must have its own action boundary")
+
         with self.scope(
             "signal_wait", original, work=self.work_context.wait_work(signal.context, device=device, stream=stream),
             bindings={"device_wait": device}, device=device, stream=stream,
@@ -326,6 +338,8 @@ class GlooSample(Structure):
 
 
 class GlooTiming:
+    """Read the native Gloo probe at recorded CPU protocol boundaries."""
+
     clock = "monotonic_raw_ns"
 
     def __init__(self):
@@ -410,6 +424,7 @@ class CpuProtocol:
         with self.lock:
             position = self.positions.get(route, 0)
             self.positions[route] = position + 1
+
         post = {"key": (*route, position), "operation": name, "descriptor": description,
                 "interval": self.interval()}
 
@@ -422,6 +437,7 @@ class CpuProtocol:
         finally:
             if "transport_ticket" in post:
                 self.timing.end_post()
+
         asynchronous = name in {"isend", "irecv"}
         self.publish(post, None if asynchronous else post["interval"])
         return ProtocolWork(self, result, post) if asynchronous else result
@@ -436,6 +452,7 @@ class CpuProtocol:
                 "end_positions": [{"route": route, "position": position} for route, position in self.positions.items()],
                 "posts": posts,
             }
+
             if self.timing is not None:
                 self.timing.document(posts)
                 result["transport_clock"] = self.timing.clock

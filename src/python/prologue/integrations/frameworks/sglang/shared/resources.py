@@ -27,6 +27,7 @@ class CacheInputs:
         aligned = tokens // page * page
         if not 0 <= protected <= aligned:
             raise ValueError("native cache inputs have an invalid protected prefix")
+
         extent = ["mul", ["floor_div", "cache_tokens", "page_size"], "page_size"]
         guards = [["eq", extent, 0] if aligned == 0 else ["lt", 0, extent]]
         if operation == "cache.unfinished":
@@ -35,6 +36,7 @@ class CacheInputs:
             guards.append(
                 ["eq", extent, "protected_tokens"] if aligned == protected else ["lt", "protected_tokens", extent]
             )
+
         return guards
 
 
@@ -60,6 +62,7 @@ class ResourceInputs:
 
     @classmethod
     def scopes(cls, scopes, environment):
+
         # Native records retain the enclosing observation; only formal inputs cross a resource call boundary.
         owners = {}
         enabled = not environment["implementation"]["cache"]["disabled"]
@@ -76,14 +79,19 @@ class ResourceInputs:
                 parameters = cls.bind(operation, scope["parameters"], enabled)
                 if enabled and operation in CacheInputs.operations:
                     scope = {**scope, "guards": CacheInputs.guards(operation, parameters)}
+
                 scope = {**scope, "parameters": parameters,
                          "constants": {name: value for name, value in scope["constants"].items() if name in parameters},
                          "arguments": {name: value for name, value in scope["arguments"].items() if name in parameters}}
+
             result.append(scope)
+
         return result
 
 
 class ResourceCalls:
+    """Use the same semantic resource declarations in observation and virtual control."""
+
     def __init__(self, calls) -> None:
         self.calls = calls
         self.in_resource = ContextVar("native_resource_implementation", default=False)
@@ -155,6 +163,7 @@ class ResourceCalls:
                       "release_grouped": grouped, "release_index_bytes": width}
         guards = [["eq", "release_tokens", 0] if tokens == 0 else ["lt", 0, "release_tokens"],
                   ["eq", "release_grouped", grouped]]
+
         if width:
             guards.append(["eq", "release_index_bytes", width])
         else:
@@ -169,6 +178,7 @@ class ResourceCalls:
             condition["release_target_empty"] = destination.numel() == 0
             copies["free_index"] = indices, ["release_tokens"], "torch.Tensor.cpu"
             upload = "released_pages"
+
         with self.calls.call("pages.free", original, parameters=parameters, work=parent.work, guards=tuple(guards),
                              condition=condition, local_copies=copies, local_upload=upload) as frame:
             released = original(*args, **kwargs)
@@ -181,17 +191,20 @@ class ResourceCalls:
         parent = self.calls.current.get()
         if parent is None:
             return original(*args, **kwargs)
+
         parameters = {}
         if "page_size" in ResourceInputs.declarations[operation]:
             parameters["page_size"] = owner.page_size
         work = dict(parent.work)
         guards = []
         cache_enabled = operation in CacheInputs.operations and not owner.disable
+
         if operation in CacheInputs.operations:
             request = signature.bind(*args, **kwargs).arguments["req"]
             work["context"] = {"request": self.calls.progress((request,))[0]}
             if cache_enabled:
                 parameters.update(CacheInputs.native(operation, owner, request))
+
         if operation == "pages.flush":
             parameters.update(
                 release_calls=len(owner.free_group),
@@ -205,6 +218,7 @@ class ResourceCalls:
             )
             parameters.update(ordering)
             guards = [["lt", 0, "released_pages"] if ordering["released_pages"] else ["eq", "released_pages", 0]]
+
         with self.calls.call(
             operation,
             original,
@@ -226,6 +240,7 @@ class ResourceCalls:
         parent = self.calls.current.get()
         if not self.calls.enabled or parent is None:
             return self.internal(original, params)
+
         inserting = operation == "cache_insert"
         tokens = len(params.key)
         boundary = ActionCall(
@@ -239,6 +254,7 @@ class ResourceCalls:
             if request is not None
             else dict(parent.work.get("context", {}))
         )
+
         with self.calls.separate(boundary.operation, boundary.work), self.calls.boundary(original, boundary):
             previous = self.prefix_split.set((0, 0))
             try:
@@ -262,6 +278,7 @@ class ResourceCalls:
             if not owner.disable:
                 boundary.parameters.update(split_prefix_tokens=prefix, split_suffix_tokens=suffix)
                 boundary.guards += (["lt", 0, "split_prefix_tokens"] if prefix else ["eq", "split_prefix_tokens", 0],)
+
         return result
 
     def bind(self, cache, allocator, slots, *, native=True) -> None:
@@ -273,6 +290,7 @@ class ResourceCalls:
                 cache._split_node = update_wrapper(partial(self.split_node, split), split)
             else:
                 cache.record_split = self.record_split
+
         for name, operation in operations.items():
             original = getattr(cache, name)
             setattr(cache, name, update_wrapper(partial(self.prefix, operation, cache, original), original))
@@ -291,6 +309,7 @@ class ResourceCalls:
             (cache, ("inc_lock_ref", "dec_lock_ref", "evict")),
         ):
             self.bind_internal(owner, methods)
+
         for method in ("alloc", "alloc_extend", "alloc_decode"):
             original = getattr(allocator, method)
             wrapper = partial(self.allocate, allocator, original, method == "alloc_decode")
@@ -310,6 +329,7 @@ class ResourceCalls:
                 setattr(owner, name, update_wrapper(wrapper, original))
 
     def install(self):
+
         # Register before the framework applies hooks; cache objects are bound later during worker construction.
         HookTable.around(symbols().evict_from_tree_cache, self.evict)
 
@@ -337,6 +357,7 @@ class SourceLayout:
     prebuilt_batches = {"prebuilt_prepare", "prebuilt_commit", "prebuilt_result"}
 
     def __init__(self, environment, platform_layouts):
+
         # Each entry comes from the native decoder's layout at its observation boundary.
         self.position_layouts = {
             symbols().qwen3_decoder_layer: {"prefill", "mixed", "first_decode"},
@@ -362,6 +383,7 @@ class SourceLayout:
         if (scope["implementation"] == symbols().alloc_for_decode
                 and scope["role"] == "segment" and scope["work"]["continuation"]["exit"] == "call.return"):
             return "cache_locations", "output"
+
         role = scope["role"]
         if role not in {"layer", "attention"} or not self.layouts:
             return None
@@ -373,6 +395,7 @@ class SourceLayout:
 
                 # The native packed value slice materializes its row gap only for a multirow cache write.
                 return "argument.v", "input"
+
             return None
 
         local_phase = phase
@@ -380,6 +403,7 @@ class SourceLayout:
             local_phase = "first_decode"
         if "positions" in self.layouts and local_phase in self.position_layouts.get(scope["implementation"], ()):
             return "argument.positions", "input"
+
         return None
 
     def lower(self, scopes):
@@ -399,6 +423,7 @@ class SourceLayout:
                     scope = {**scope, "parameters": scope["parameters"] | layout}
                     if scopes[scope["parent"]]["role"] in self.model_calls:
                         scope["arguments"] = scope["arguments"] | {name: name for name in layout}
+
                 if scope["role"] == "model":
                     guards.extend(["eq", name, value] for name, value in layout.items())
                     guards.extend(BatchTensors.model_padding_guards(scope["parameters"]))
@@ -409,5 +434,7 @@ class SourceLayout:
                 size = tensor["shape"][0]
                 extent = tensor["shape_rule"][0]
                 guards.append(["eq", extent, 1] if size == 1 else ["lt", 1, extent])
+
             result.append({**scope, "guards": guards} if guards else scope)
+
         return result

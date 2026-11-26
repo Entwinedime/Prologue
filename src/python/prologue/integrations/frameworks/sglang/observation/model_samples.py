@@ -15,8 +15,9 @@ from prologue.common.io import write_json
 from prologue.integrations.bindings import device_runtime, platform_domain
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
+from prologue.integrations.frameworks.sglang.observation.call_ports import LocalModel, NativeCallObservation
 from prologue.integrations.frameworks.sglang.observation.communications import NativeCommunications
-from prologue.integrations.frameworks.sglang.observation.model import LocalModel, ModelScopes, NativeCallObservation
+from prologue.integrations.frameworks.sglang.observation.model import ModelScopes
 from prologue.integrations.frameworks.sglang.observation.staging import ShardTransport
 from prologue.integrations.frameworks.sglang.observation.window import (
     LocalProbe,
@@ -24,11 +25,11 @@ from prologue.integrations.frameworks.sglang.observation.window import (
     publish_facts,
 )
 from prologue.integrations.frameworks.sglang.shared.configuration import (
-    MhaKvLayout,
     NativeConfiguration,
     ParallelGroups,
     WorkerRoles,
 )
+from prologue.integrations.frameworks.sglang.shared.kv_layout import MhaKvLayout
 
 
 class DecodeAttentionObservation:
@@ -92,10 +93,12 @@ class DecodeAttentionObservation:
             },
         }
         profile = None
+
         if self.calls[key] == 2:
             root = Path("cuts") / f"rank-{self.rank}" / str(len(self.rows))
             row["profile"] = str(root)
             profile = device_runtime().scoped_tasks.profile(self.directory / root, self.rank)
+
         begin, end = (device_runtime().api.Event(enable_timing=True) for _ in range(2))
         device_runtime().api.current_stream().synchronize()
         marker = torch.autograd.profiler.record_function if profile is not None else nullcontext
@@ -104,9 +107,11 @@ class DecodeAttentionObservation:
                 begin.record()
             with marker("prologue.sample.call"):
                 result = original(q, k, v, forward_batch, *args, **kwargs)
+
             with marker("prologue.sample.end"):
                 end.record()
             end.synchronize()
+
         row["envelope_ns"] = round(begin.elapsed_time(end) * 1_000_000)
         self.rows.append(row)
         return result
@@ -161,6 +166,7 @@ class NativeAttentionBatch:
             spec_algorithm=self.native.SpeculativeAlgorithm.NONE,
         )
         batch.prepare_for_extend()
+
         if batch.input_ids is None:
             batch.input_ids = batch.prefill_input_ids_cpu.to(batch.device, non_blocking=True)
             batch.prefill_input_ids_cpu = None
@@ -207,6 +213,7 @@ class KvReadback:
             tokens = buffer[self.layer].flatten(0, 1)
             now = tokens[flat].cpu()
             expected_data = operand.reshape(-1, *tokens.shape[1:]).cpu()
+
             if extend:
                 correct = correct and torch.equal(now, expected_data)
             else:
@@ -215,7 +222,9 @@ class KvReadback:
                 matching_prefix = matching_prefix and torch.equal(
                     torch.cat([p[:-1] for p in pieces]), self.prefix[len(contents)]
                 )
+
             contents.append(now)
+
         self.operands = None
         if extend:
             self.prefix = contents
@@ -234,6 +243,7 @@ class AttentionRunner(LocalProbe):
         read = kv.read(batch, prefill["locations"], False)
         call = observer.rows[-1]
         call["kv"] = {"prefill": prefill, "decode": read}
+
         return {"context": lengths, "prepare_and_read_ns": prepared - started,
                 "decode_ns": decoded - prepared, "readback_ns": monotonic_ns() - decoded}
 
@@ -248,11 +258,13 @@ class AttentionRunner(LocalProbe):
         one_batch.initialize_fp4_gemm_config(args)
         runner, _ = one_batch.load_model(args, one_batch.PortArgs.init_new(args), gpu_id=0, tp_rank=0)
         initialized = monotonic_ns()
+
         try:
             actual = runner.torch_runner
             self.batch = NativeAttentionBatch(one_batch, runner)
             site = self.job["site"]
             module = actual.model.get_submodule(site)
+
             with module.register_forward_hook(self.batch.stop_after_call):
                 for lengths in self.job["contexts"]:
                     self.batch.decode(self.batch.extend(lengths))
@@ -263,10 +275,12 @@ class AttentionRunner(LocalProbe):
                 observer.attach(actual)
                 kv = KvReadback(actual.token_to_kv_pool, module)
                 timings = []
+
                 with module.register_forward_pre_hook(kv.retain):
                     for lengths in self.job["contexts"]:
                         for _ in range(2):
                             timings.append(self.measure(lengths, observer, kv))
+
             record = observer.document()
             record.update(
                 model=actual.model_config.hf_config.to_dict(), rank=observer.rank, load_format=args.load_format
@@ -309,6 +323,7 @@ class EmbeddingReady(Exception):
         args, config = loaded.args, loaded.config
         if not loaded.matches:
             raise ValueError("requested and loaded embedding model or dtype differ")
+
         resolve(symbols().initialize_dp_attention)(args, config)
 
         with loader.set_default_torch_dtype(config.dtype):
@@ -319,10 +334,12 @@ class EmbeddingReady(Exception):
                 site, shard = ready.args
             else:
                 raise ValueError("model initialization produced no native vocabulary embedding")
+
             if site not in domain["worker_roles"][str(rank)]["modules"] or shard.tp_size != args.tp_size:
                 raise ValueError("embedding shard does not match the declared native worker site and group")
             loader.initialize_dummy_weights(shard)
             shard.quant_method.process_weights_after_loading(shard)
+
         return site, shard.eval()
 
 
@@ -334,6 +351,7 @@ class ShardRows:
             self.ranges, [indices.org_vocab_start_index, indices.org_vocab_end_index], group=cpu_group
         )
         bounds = [0, *(end for _, end in self.ranges)]
+
         if (bounds[-1] != shard.org_vocab_size or any(end <= start for start, end in self.ranges)
                 or [start for start, _ in self.ranges] != bounds[:-1]):
             raise ValueError("native shards do not partition the model vocabulary")
@@ -342,6 +360,7 @@ class ShardRows:
         for position in range(count):
             start, end = self.ranges[position % shard.tp_size]
             ids.append(start + position % (end - start))
+
         self.ids = torch.tensor(ids, device=platform_domain().device_type, dtype=torch.int64)
 
         # Obtain expected values from the owning weight rows, independently of the embedding forward and its transport.
@@ -353,6 +372,7 @@ class ShardRows:
                 [ids[i] - start for i in positions], device=platform_domain().device_type, dtype=torch.int64
             )
             local[positions] = shard.weight.index_select(0, rows).cpu().float()
+
         contributions = [torch.empty_like(local) for _ in self.ranges]
         distributed.all_gather(contributions, local, group=cpu_group)
         self.expected = torch.stack(contributions).sum(0)
@@ -377,12 +397,14 @@ class EmbeddingRunner(LocalProbe):
         owner.description = {"rank_offset": 0, "pp_size": 1}
         owner.parallel, owner.worker_roles = role["parallel"], domain["worker_roles"]
         owner.groups = ParallelGroups()
+
         if owner.groups.document(0) != role["groups"]:
             raise ValueError("native embedding group differs from the declared role")
         owner.tensors.namespace = f"rank/{rank}/"
         owner.capture.scopes[0]["work"] = {"phase": job["phase"], "rank": rank}
         communication = NativeCommunications(owner)
         transport = None
+
         if job["single_device"]:
             transport = ShardTransport(output, owner.tensors.auxiliary, communication.local_exchange)
             transport.install_collectives(1)
@@ -408,7 +430,9 @@ class EmbeddingRunner(LocalProbe):
                     stack.enter_context(device_runtime().scoped_tasks.profile(output, rank))
                     stack.enter_context(markers.window())
                     stack.enter_context(owner.tensors)
+
                 result = lookup()
+
             if owner.active:
                 markers.synchronize()
                 communication.bind_returned_operands()
@@ -417,6 +441,7 @@ class EmbeddingRunner(LocalProbe):
                 write_json(output / f"rank-{rank}.json", raw)
                 write_json(output / f"rows-{rank}.json", rows.readback(site, result))
                 markers.release()
+
             owner.active = False
 
     def worker(self, rank):
@@ -425,12 +450,14 @@ class EmbeddingRunner(LocalProbe):
         staged = self.job["single_device"]
         device = activate_device(rank, world, staged)
         rendezvous = (self.output / "rendezvous").as_uri()
+
         if staged:
             ShardTransport.world(world, rank, rendezvous)
         else:
             parallel_state.init_distributed_environment(
                 world, rank, rendezvous, local_rank=device, backend=platform_domain().collective_backend
             )
+
         try:
             parallel_state.initialize_model_parallel(tensor_model_parallel_size=world)
             self.observe(rank)
@@ -449,4 +476,5 @@ class EmbeddingRunner(LocalProbe):
             name = f"facts-{rank}.json"
             publish_facts(self.output, rank, raw, self.output / f"sdk-{rank}", name)
             workers[str(rank)] = {"facts": name, "readback": f"rows-{rank}.json"}
+
         self.publish(revision, 0, workers=workers)

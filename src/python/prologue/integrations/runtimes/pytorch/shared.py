@@ -9,6 +9,11 @@ from prologue.common.cost import cost_features
 
 
 class CpuTransfer:
+    """Read the original native operands before the backend serializes them."""
+
+    operations = {"send": "dst", "recv": "src", "isend": "dst", "irecv": "src"}
+    route = staticmethod(itemgetter("group", "source", "target", "tag"))
+
     def __init__(self, world=None) -> None:
         self.world = world
 
@@ -17,9 +22,6 @@ class CpuTransfer:
 
         # Private object serialization can change byte counts without changing the native control operation.
         return {name: description[name] for name in ("group", "source", "target", "tag", "receiving", "dtype")}
-
-    operations = ("send", "recv", "isend", "irecv")
-    route = staticmethod(itemgetter("group", "source", "target", "tag"))
 
     @classmethod
     def hooks(cls, invoke):
@@ -37,13 +39,14 @@ class CpuTransfer:
         bound.apply_defaults()
         values = bound.arguments
         tensor = values["tensor"]
+
         if tensor.device.type != "cpu":
             return None
+
         group = distributed.group.WORLD if values["group"] is None else values["group"]
-        receiving = name in {"recv", "irecv"}
-        endpoint = "src" if receiving else "dst"
+        endpoint = self.operations[name]
         return self.describe(tensor, group, values["tag"], values[endpoint], values.get("group_" + endpoint),
-                             receiving), group
+                             endpoint == "src"), group
 
     def describe(self, tensor, group, tag, endpoint, group_endpoint, receiving):
         import torch.distributed as distributed
@@ -53,6 +56,7 @@ class CpuTransfer:
             endpoint = distributed.get_global_rank(group, group_endpoint)
         if endpoint is None:
             raise ValueError("Native metadata receive requires an explicit sender")
+
         world = self.world if self.world is not None else range(distributed.get_world_size())
         local = distributed.get_rank()
         source, target = (endpoint, local) if receiving else (local, endpoint)
@@ -89,11 +93,13 @@ class CpuProtocolWork:
         transport = post.get("transport")
         if transport is None:
             return None
+
         stamp, completion = transport["post_raw_ns"], transport["completion_raw_ns"]
         interval = post["interval"]
         if (any(type(transport[name]) is not int or transport[name] < 0 for name in ("slot", "peer", "post_raw_ns"))
                 or not interval["begin_raw_ns"] <= stamp <= interval["end_raw_ns"]):
             raise ValueError("Gloo transport post lies outside its native point-to-point call")
+
         if completion is not None:
             begin, end = completion
             thread = transport["completion_thread"]
@@ -101,6 +107,7 @@ class CpuProtocolWork:
                     or not stamp <= begin <= end
                     or post["consumed"] is not None and begin > post["consumed"]["end_raw_ns"]):
                 raise ValueError("Gloo completion contradicts its native post or successful consumption")
+
         return transport
 
     @staticmethod
@@ -119,11 +126,13 @@ class CpuProtocolWork:
             descriptor = post["descriptor"]
             interval = post["interval"]
             execution = interval["execution"]
+
             if execution["in_flow"]:
                 transport = cls.transport(post)
                 before, after = cls.post_operations(execution["operation"])
                 begin, end = interval["begin_raw_ns"], interval["end_raw_ns"]
                 stamp = transport["post_raw_ns"] if transport is not None else None
+
                 for operation, bounds in ((before, (begin, stamp)), (after, (stamp, end))):
                     identity, features = cls.service(descriptor, execution, operation)
                     yield identity, features, interval["thread"], bounds if stamp is not None else None
@@ -143,24 +152,30 @@ class CpuProtocolWork:
                 roles = messages[tuple(post["key"])]
                 if rank in roles:
                     raise ValueError("CPU transport repeats an observed endpoint")
+
                 roles[rank] = post
+
         for peers in messages.values():
             if len(peers) != 2:
                 continue
             executions = (post["interval"]["execution"] for post in peers.values())
             active = [call for call in executions if call["in_flow"]]
+
             if not active:
                 continue
             geometry = {tuple(post["descriptor"][name] for name in ("dtype", "elements", "element_bytes"))
                         for post in peers.values()}
+
             if len(geometry) != 1:
                 raise ValueError("native CPU message endpoints disagree on transfer geometry")
             measured = {rank: self.transport(post) for rank, post in peers.items()}
             last_post = None
+
             if None not in measured.values():
                 if len({row["slot"] for row in measured.values()}) != 1:
                     raise ValueError("CPU transport pairs different native slots")
                 last_post = max(row["post_raw_ns"] for row in measured.values())
+
             for rank, post in peers.items():
                 descriptor = post["descriptor"]
                 execution = post["interval"]["execution"]
@@ -168,9 +183,11 @@ class CpuProtocolWork:
                                                   self.readiness_operation(descriptor))
                 consumed = post["consumed"]
                 duration = None
+
                 if last_post is not None:
                     end_ns = None if consumed is None else consumed["end_raw_ns"]
                     bound = self.ready_window(measured[rank], last_post, end_ns)
                     if bound is not None:
                         duration = bound[0] - last_post
+
                 yield rank, identity, features, duration

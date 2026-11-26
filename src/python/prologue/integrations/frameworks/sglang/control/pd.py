@@ -18,12 +18,14 @@ class PdTopology:
         instances = {source["id"]: source for source, _, _, _ in workers}
         prefill, = [source for source in instances.values() if source["mode"] == "prefill"]
         decode, = [source for source in instances.values() if source["mode"] == "decode"]
+
         if (
             len(instances) != 2
             or prefill["model_config"] != decode["model_config"]
             or prefill["dtype"] != decode["dtype"]
         ):
             raise ValueError("PD requires one Prefill and one Decode instance of the same model and dtype")
+
         rows = {
             index: {
                 "mode": source["mode"],
@@ -39,6 +41,7 @@ class PdTopology:
         bindings = PdPeerBindings(rows)
         self.peers = {}
         self.info = bindings.infos.get(local)
+
         for origin, targets in bindings.destinations.items():
             layouts = bindings.layouts(origin)
             for target, binding in targets.items():
@@ -46,10 +49,12 @@ class PdTopology:
                     continue
                 if members[origin]["kv_peers"][binding] != layouts[binding]:
                     raise ValueError("PD destination geometry differs from the observed transfer template")
+
                 peer = target if local == origin else origin
                 self.peers[peer] = {
                     "pool": members[target]["group"], "binding": binding, "group": members[peer]["group"],
                 }
+
                 if local == target:
                     self.peers[peer]["publishers"] = [members[index]["group"] for index in targets]
 
@@ -66,6 +71,7 @@ class MetadataRows:
         self.buffers = [tensors[pointer] for pointer in pointers]
 
     def read(self, index):
+
         # Preserve native values, including its room gate; copying them here does not make them ready in simulated time.
         return [buffer[index].tolist() for buffer in self.buffers]
 
@@ -106,6 +112,7 @@ class NativePdBackend:
             source, value = packet["source"], packet["value"]
             if source not in self.topology.peers and source != self.local:
                 raise ValueError("PD message came from a worker outside its native transfer topology")
+
             kind = value["kind"]
             if kind == "reservation":
                 self.reservations[value["room"]][source] = value
@@ -192,6 +199,7 @@ class NativePdBackend:
             HookTable.around(f"{symbols().utils}.{name}", self.group_poll)
 
     def bind_metadata(self, original, buffers, req):
+
         # Native allocation precedes request admission; bind the row before its first graph write.
         self.scheduler.req_to_metadata_buffer_idx_allocator.bind(req, req.metadata_buffer_index)
         return original(buffers, req)
@@ -233,6 +241,7 @@ class NativeKvManager(BaseKVManager):
     update_status = CommonKVManager.update_status
 
     def register_to_bootstrap(self):
+
         # The serving task already supplies both native worlds; device-free control does not open a bootstrap server.
         return None
 
@@ -264,7 +273,9 @@ class NativeKvPolling:
                 self.backend.scheduler.peer.call(
                     "observed_completion", event=completions[max(visible)], boundary=query["boundary"],
                 )
+
             query["result"] = self.poll_state
+
         return self.poll_state
 
 
@@ -280,11 +291,13 @@ class NativeKvSender(NativeKvPolling, MooncakeKVSender):
         if self.backend.failed(self.bootstrap_room):
             self.kv_mgr.update_status(self.bootstrap_room, KVPoll.Failed)
         state = self.kv_mgr.check_status(self.bootstrap_room)
+
         if self.conclude_state is None and state == KVPoll.WaitingForInput and self.aux_index is None:
             reservations = self.backend.reservations[self.bootstrap_room]
             prefixes = {value["prefix"] for value in reservations.values()}
             if len(prefixes) != 1:
                 raise ValueError("native PD destinations disagree on the reused prefix")
+
             self.kv_mgr.req_to_decode_prefix_len[self.bootstrap_room] = prefixes.pop()
 
         # Native poll owns terminal states and bootstrap timeout; only transport visibility is adapted.
@@ -303,17 +316,21 @@ class NativeKvSender(NativeKvPolling, MooncakeKVSender):
         identity = backend.sequence
         backend.sequence += 1
         signals, packets, pools = {}, [], {}
+
         if len(kv_indices) or last:
             signals["transfer.complete"] = f"{scheduler.group}/pd/{identity}"
         metadata = self.kv_mgr.rows.read(self.aux_index) if last else None
         reservations = backend.reservations[self.bootstrap_room]
+
         for target, destination in reservations.items():
             peer = backend.topology.peers[target]
             if len(destination["pages"][index_slice]) != len(kv_indices):
                 raise ValueError("native PD sender chunk exceeds its receiver's page reservation")
+
             pools[peer["binding"]] = peer["pool"]
             if last:
                 packets.append(self.packet(target, "transfer", publication=identity, metadata=metadata))
+
         self.signals.update(signals.values())
 
         # Native Success is published after the whole destination group finishes, not each destination independently.
@@ -323,6 +340,7 @@ class NativeKvSender(NativeKvPolling, MooncakeKVSender):
 
             # The native transport only notifies after the final chunk; retain all chunks until that notice is consumed.
             backend.published[identity] = {"signals": completion_signals, "pending": set(backend.topology.peers)}
+
         work = {
             **scheduler.calls.request_work(req, begin, end),
             "pools": pools, "signals": signals,
@@ -336,6 +354,7 @@ class NativeKvSender(NativeKvPolling, MooncakeKVSender):
             request = scheduler.calls.progress((req,))[0]["id"]
             backend.publish(packets, req, backend.notice(scheduler.group, "kv_success", request),
                             signals=completion_signals)
+
         with scheduler.calls.call("kv_enqueue", self.send, parameters=parameters, work=work):
             if last:
                 scheduler.request_state.note("metadata", "read", [req])
@@ -381,6 +400,7 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
         work = calls.work(None)
         work["context"] = {"request": calls.progress((req,))[0]}
         request = work["context"]["request"]["id"]
+
         with calls.call("kv_reserve", self.send_metadata, parameters={"transfer_pages": len(kv_indices)}, work=work):
             self.aux_index = aux_index
             pages = kv_indices.tolist()
@@ -403,6 +423,7 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
                 publication["signals"] = {"reservation.ready": signal}
                 with calls.separate("kv_reservation", publication):
                     scheduler.action("kv_reservation", {}, publication)
+
             self.init_time = calls.clocks.read("time", symbols().mooncake_kv_receiver_send_metadata)
 
         # Register before polling: native receive-side publication progresses independently of the next scheduler turn.
@@ -430,6 +451,7 @@ class NativeKvReceiver(NativeKvPolling, MooncakeKVReceiver):
                 acknowledgements.append(
                     {"target": source, "value": {"kind": "consumed", "publication": packet["publication"]}}
                 )
+
             self.pending.clear()
             if acknowledgements:
                 self.backend.exchange(acknowledgements)

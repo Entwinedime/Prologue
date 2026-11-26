@@ -28,6 +28,7 @@ class AllocationABI:
             - (member["context_tokens"] + page_size - 1) // page_size
             for member in members
         )
+
         if decode:
             return "decode_pages" if pages else "decode_tail"
 
@@ -126,22 +127,26 @@ class AllocationIndices:
         self.begin, self.end = start + loop.lineno - 1, start + loop.end_lineno - 1
         self.parts = {}
         names = {"num1": "existing_page", "num2": "full_pages", "num3": "last_page"}
+
         for branch in loop.body:
             if isinstance(branch, ast.If) and isinstance(branch.test, ast.Name):
                 name = names[branch.test.id]
                 for statement in branch.body:
                     for line in range(start + statement.lineno - 1, start + statement.end_lineno):
                         self.parts[line] = name
+
         HookTable.around(symbols().paged_alloc_extend_naive, self.invoke)
 
     def invoke(self, original, prefix_lens, seq_lens, last_loc, free_pages, out_indices, page_size, device):
         arguments = (prefix_lens, seq_lens, last_loc, free_pages, out_indices, page_size, device)
         if not self.calls.enabled or self.calls.current.get() is None:
             return original(*arguments)
+
         previous = sys.gettrace()
         if previous is not None:
             raise RuntimeError("native allocation observation requires ownership of this thread's Python trace")
         iteration = AllocationIteration(self, original, out_indices)
+
         try:
             sys.settrace(iteration.observe)
             return original(*arguments)
@@ -169,8 +174,10 @@ class AllocationIteration:
                     self.start(native.f_locals["i"])
                 parts = self.active[1].condition["allocation_parts"]
                 part = self.owner.parts.get(line)
+
                 if part is not None and part not in parts:
                     parts.append(part)
+
         return self.observe
 
     def start(self, index):
@@ -205,6 +212,7 @@ class BatchPreparation(ActionCall):
         else:
             contexts = [len(req.prefix_indices) for req in batch.reqs]
             lengths = [req.extend_range.length for req in batch.reqs]
+
         members = [
             {"id": req.rid, "context_tokens": context, "new_tokens": tokens, "phase": mode}
             for req, context, tokens in zip(batch.reqs, contexts, lengths, strict=True)
@@ -222,6 +230,7 @@ class BatchPreparation(ActionCall):
 class BatchTransform(ActionCall):
     @staticmethod
     def private(operation, members):
+
         # Native filter_batch returns before accessing tensors when its input batch is empty.
         return operation == "filter" and members == 0
 
@@ -239,6 +248,7 @@ class BatchTransform(ActionCall):
         self.transformation = operation
         self.batch = batch
         self.work["context"] = {"operation": operation, "left": self.work["context"]["members"]}
+
         if other is not None:
             self.work["context"]["right"] = calls.progress(other.reqs)
         for side, value in (("left", batch), ("right", other)):
@@ -249,9 +259,11 @@ class BatchTransform(ActionCall):
                 for name, (tensor, _) in BatchTensors.boundaries(value).items()
                 if name in {"request_slots", "sequence_lengths"}
             })
+
             if operation == "mix":
                 self.parameters[f"{side}_tokens"] = int(value.out_cache_loc.numel())
                 self.inputs[f"{side}.cache_locations"] = value.out_cache_loc, [f"{side}_tokens"]
+
         if operation == "mix":
             self.parameters["input_tokens"] = self.parameters["left_tokens"] + self.parameters["right_tokens"]
 
@@ -268,6 +280,7 @@ class BatchTransform(ActionCall):
         if outcome in {"empty", "unchanged"}:
             self.inputs.clear()
             return
+
         self.outputs = {
             name: item for name, item in BatchTensors.boundaries(self.batch).items()
             if self.transformation == "mix" or name in {"request_slots", "sequence_lengths"}
@@ -318,6 +331,7 @@ class BatchSelection:
             original.__name__
         ]
         boundary = BatchPreparation(self.calls, batch, mode)
+
         with self.calls.call(
             boundary.operation, original, parameters=boundary.parameters, work=boundary.work,
             tensor_inputs=boundary.inputs,
@@ -327,6 +341,7 @@ class BatchSelection:
             result = original(batch)
             boundary.complete()
             frame.tensor_outputs = boundary.outputs
+
         return result
 
     def allocate(self, original, batch, token_per_req=None):
@@ -334,6 +349,7 @@ class BatchSelection:
         arguments = (batch, token_per_req) if decode else (batch,)
         if not self.calls.enabled or self.calls.current.get() is None:
             return original(*arguments)
+
         boundary = BatchAllocation(self.calls, batch, decode)
         with self.calls.call(
             boundary.operation, original, parameters=boundary.parameters, work=boundary.work,
@@ -344,6 +360,7 @@ class BatchSelection:
             result = original(*arguments)
             boundary.complete(result, decode)
             frame.tensor_outputs = boundary.outputs
+
         return result
 
     def transform(self, operation, original, batch, arguments, keywords, other=None):
@@ -351,12 +368,14 @@ class BatchSelection:
         if (not self.calls.enabled or parent is None
                 or parent.host_only and BatchTransform.private(operation, len(batch.reqs))):
             return original(batch, *arguments, **keywords)
+
         boundary = BatchTransform(self.calls, operation, batch, other)
         with self.calls.separate(boundary.operation, boundary.work), self.calls.boundary(original, boundary):
 
             # mix owns its nested merge; independently submitting it would count the same work twice.
             result = original(batch, *arguments, **keywords)
             boundary.complete()
+
         return result
 
     def filter(self, original, batch, *args, **kwargs):
@@ -386,6 +405,7 @@ class BatchSelection:
         work = self.calls.current.get().work
         observing = self.calls.request_state.observe
         inputs = None
+
         if observing:
             inputs = {name: getattr(info, name) for name in (
                 "num_tokens", "num_tokens_for_logprob", "can_cuda_graph", "is_extend_in_batch",
@@ -411,6 +431,7 @@ class BatchSelection:
                         )},
                     },
                 }
+
             return result
 
     def install(self) -> None:
@@ -418,6 +439,7 @@ class BatchSelection:
         AllocationPrefixes(self.calls).install()
         HookTable.around(symbols().mlp_sync_batch_info_all_gather, self.gather)
         owner = symbols().schedule_batch + "."
+
         for method, hook in (
             ("prepare_for_extend", self.prepare),
             ("prepare_for_decode", self.prepare),
@@ -427,6 +449,7 @@ class BatchSelection:
             ("mix_with_running", self.mix),
         ):
             HookTable.around(owner + method, hook)
+
         for method in ("alloc_for_extend", "alloc_for_decode"):
             HookTable.around(symbols().common + "." + method, self.allocate)
         HookTable.around(symbols().scheduler_get_next_batch_to_run, self.select)

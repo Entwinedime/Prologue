@@ -1,6 +1,5 @@
 """Select an installed ABI by native revision, declared alias or observed capabilities."""
 
-from dataclasses import replace
 from functools import lru_cache
 from importlib import import_module
 from pkgutil import iter_modules, resolve_name
@@ -33,15 +32,7 @@ def select(revision=None, capabilities=frozenset()) -> SGLangABI:
 
 @lru_cache
 def _for_platform(selection, domain):
-    profile = select(selection.revision)
-    overrides = {key: path for framework, key, path in domain.native_symbols if framework == selection.framework}
-    if domain.name != profile.native_platform:
-        required = {"paged_allocator", "mha_pool", "device_kv_manager", "communicator_attribute"}
-        if missing := required - overrides.keys():
-            raise ValueError(f"{domain.name} lacks native platform declarations for {sorted(missing)}")
-    if overrides:
-        return replace(profile, symbols=replace(profile.symbols, **overrides))
-    return profile
+    return select(selection.revision).for_platform(selection.framework, domain)
 
 
 def abi() -> SGLangABI:

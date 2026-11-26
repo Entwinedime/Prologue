@@ -42,12 +42,14 @@ class ObservationWindow:
                 self.pending[phase].discard(identity)
                 self.phase = phase
                 self.drained = False
+
                 if phase == "source":
 
                     # This hook runs at native request dispatch, after receive and rank broadcast.
                     self.receipts.append(
                         {"request": identity, "received_raw_ns": time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)}
                     )
+
                 return
 
     def receive(self, requests: list[str], time_ns: int, *, ingress: bool, attempt=None) -> None:
@@ -166,13 +168,16 @@ class NativeProfiles:
 
                 # The preceding request drained and flushed its KV. This replay owns fresh ingress and group receipts.
                 owner.window = ObservationWindow(owner.directory, owner.description)
+
             window = self.windows_by_round[self.round]
             owner.selected = owner.parallel["rank"] in window.observed
             self.protocol_root = window.protocol_directory(owner.directory)
             if window.replay:
+
                 # A later replay can reuse a registration with a different request slot. Keep this window's peer
                 # facts together.
                 owner.kv_pools = self.protocol_root / "kv-pools"
+
         if owner.selected:
             result = original(manager, request)
         else:
@@ -181,7 +186,9 @@ class NativeProfiles:
 
                 # Non-exporting participants still join the native profiler's stop consensus.
                 distributed.barrier(manager.dp_tp_cpu_group)
+
             result = resolve(symbols().profile_req_output)(success=True, message="Worker has no assigned observation")
+
         if request.req_type == ProfileReqType.START_PROFILE and result.success:
             self.protocol.begin()
             owner.window.prepared_phase = "profiler"
@@ -192,6 +199,7 @@ class NativeProfiles:
                 self.protocol_root / f"rank-{owner.parallel['rank']}.json", self.protocol.document(), replace=False
             )
             self.round += 1
+
         return result
 
     def start(self, original: Any, manager: Any, output_dir: str, *args: Any, **kwargs: Any) -> Any:
@@ -250,6 +258,7 @@ class EngineSubmissions:
                         (str(room), requests[index]["id"])
                         for room, index in zip(payload["bootstrap_room"], indices, strict=True)
                     )
+
                 self.submissions[-1].append((payload, {"group": group, "arrival_ns": arrival, "requests": indices}))
 
     def request_groups(self) -> list[list[str]]:
@@ -269,6 +278,7 @@ class EngineSubmissions:
                 # Worker idle, not client completion, closes a group; both PD instances join before advancing time.
                 await asyncio.to_thread(ObservationWindow.wait, directory, ranks, phase, f"group/{index - 1}")
                 barrier.wait()
+
             offset_ns = clock.origin.value - origin_ns
             for _, record in group:
                 record["scheduled_ns"] = offset_ns + record["arrival_ns"]
@@ -277,6 +287,7 @@ class EngineSubmissions:
                 asyncio.create_task(self.submit_at(endpoint, payload, record, origin_ns, submission_order))
                 for payload, record in group
             ]
+
             try:
                 responses = await asyncio.gather(*tasks)
             except BaseException:
@@ -284,6 +295,7 @@ class EngineSubmissions:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 raise
+
             indices = [request for _, record in group for request in record["requests"]]
             self.check_responses(self.prefix, [row for response in responses for row in response], indices)
 
@@ -307,18 +319,22 @@ class EngineSubmissions:
             request = self.ingress.requests[index]
             length = 1 if self.mode == "prefill" else request["output_tokens"]
             expected[self.ingress.native_id(prefix, index)] = length, self.ingress.content.output_token(request["id"])
+
         completed = set()
         for row in rows:
             metadata = row["meta_info"]
             identity = metadata["id"]
             reason = metadata["finish_reason"]
+
             if reason is None or reason["type"] != "length" or metadata["completion_tokens"] != expected[identity][0]:
                 raise RuntimeError(f"native request {identity} did not finish its fixed output: {reason}")
             if any(token != expected[identity][1] for token in row["output_ids"]):
                 raise RuntimeError(f"native request {identity} did not preserve its declared synthetic output")
             if identity in completed:
                 raise RuntimeError(f"native request completed twice: {identity}")
+
             completed.add(identity)
+
         if completed != expected.keys():
             raise RuntimeError(f"native responses omitted requests: {sorted(expected.keys() - completed)}")
 

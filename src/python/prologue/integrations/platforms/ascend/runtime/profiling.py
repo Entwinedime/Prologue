@@ -207,6 +207,7 @@ class AscendHostProfile:
             cleanup.callback(self.profiler.stop)
             cleanup.callback(self.activity.finish, activity)
             self.runtime.finish(runtime)
+
         profile, = (self.directory / "host-profile").glob("*_ascend_pt")
         queues = self.directory / "host-queues.json"
         write_json(queues, self.queue_intervals(profile, (self.begin_clock, self.clock_sample())), replace=False)
@@ -230,10 +231,12 @@ class AscendHostProfile:
         for counter, begin, end in clock_samples:
             sdk_ns = configuration.get_timestamp_from_syscnt(counter)
             corrections.append((begin - sdk_ns, end - sdk_ns))
+
         lower = max(begin for begin, _ in corrections)
         upper = min(end for _, end in corrections)
         if lower > upper:
             raise ValueError("CPU queue timestamps have no common host clock calibration")
+
         offset_ns = configuration.get_local_time(0) - (lower + upper) // 2
 
         def interval(record):
@@ -244,6 +247,7 @@ class AscendHostProfile:
         consumed = {record.corr_id: record for record in dequeues}
         if len(produced) != len(enqueues) or len(consumed) != len(dequeues):
             raise ValueError("host queue evidence repeats a native correlation")
+
         return {
             "clock": "monotonic_raw_ns",
             "clock_samples": clock_samples,
@@ -266,6 +270,7 @@ class AscendMarkers:
         )
         device = ctypes.c_int32()
         status = device_id(user_device, ctypes.byref(device))
+
         if status:
             raise RuntimeError(f"Ascend clock device mapping failed: {status}")
 
@@ -307,6 +312,7 @@ class AscendMarkers:
         observer = nullcontext() if activity is None else AscendThreadActivity().record(activity)
         if self.specializations is not None:
             self.specializations.start()
+
         try:
             with observer:
                 self.clock_samples.append(self.sample_clock(torch_npu.npu.current_device()))
@@ -324,6 +330,7 @@ class AscendMarkers:
         finally:
             if self.specializations is not None:
                 self.specializations.finish()
+
         self.activity = activity
 
     @staticmethod

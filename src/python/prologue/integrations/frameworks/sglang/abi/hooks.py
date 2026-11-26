@@ -10,6 +10,8 @@ from prologue.integrations.frameworks.sglang.abi.registry import abi, resolve
 
 @dataclass(frozen=True, slots=True)
 class HookSpec:
+    """Record the exact native symbol and the wrapper factory that owns its interception."""
+
     target: str
     callback: Callable
     mode: str = "around"
@@ -22,6 +24,8 @@ class HookSpec:
 
 
 class HookTable:
+    """Install the set of hooks supported by the selected upstream ABI as one profile."""
+
     def __init__(self, *specs):
         self.specs = specs
 
@@ -56,6 +60,7 @@ class HookTable:
     @staticmethod
     @contextmanager
     def scoped(instance, *specs):
+
         # Restoring an inherited method means removing the instance override.
         with ExitStack() as restore:
             for spec in specs:
@@ -65,8 +70,10 @@ class HookTable:
                 inherited = name not in vars(instance)
                 callback = spec.callback if spec.mode == "replace" else partial(spec.callback, original)
                 setattr(instance, name, callback)
+
                 if inherited:
                     restore.callback(delattr, instance, name)
                 else:
                     restore.callback(setattr, instance, name, local)
+
             yield

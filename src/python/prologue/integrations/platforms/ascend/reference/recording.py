@@ -38,6 +38,8 @@ class DeviceRelease:
 
 
 class SdkStreams:
+    """Rebuild each stream's native occurrences before checking the producer's projected intervals."""
+
     fields = ("connection_id", "Batch Id", "Task Id", "Subtask Id")
     boundaries = frozenset({"EVENT_RECORD", "EVENT_WAIT", "PROFILING_ENABLE", "PROFILING_DISABLE"})
 
@@ -49,6 +51,7 @@ class SdkStreams:
         self.logical_gaps = {}
         self.logical_slots = {}
         self.observer_payload = set()
+
         for stream, tasks in device_streams(rows, clock, flips).items():
             self.counts[stream] = len(tasks)
             for order, row in enumerate(tasks):
@@ -88,6 +91,7 @@ class SdkStreams:
             identity = stream, previous
             _, end = self.span(identity)
             retained = coordinates.get((resource, end))
+
             if retained is not None and retained not in observer_joins:
                 return retained, tuple(reversed(records))
 
@@ -97,6 +101,7 @@ class SdkStreams:
             if (args["Task Type"] != "EVENT_RECORD" and identity not in self.observer_payload
                     or args["connection_id"] not in queues.apis):
                 break
+
             completed = self.clock.interval(task)[1]
             if not self.clock.begin_ns <= completed <= self.clock.end_ns:
                 break
@@ -104,7 +109,9 @@ class SdkStreams:
                 post = queues.release(args)
             except ValueError:
                 break
+
             records.append(OmittedRecord(post.thread, post.begin, post.record["begin_raw_ns"], completed))
+
         return None, ()
 
     def release_evidence(self, graph, launches, queues, calibration, observer_joins):
@@ -113,12 +120,14 @@ class SdkStreams:
             for index, (event, point) in enumerate(zip(graph["events"], graph["evidence"]["events"], strict=True))
         }
         releases = {}
+
         for identity, (post, order) in launches.items():
             stream, ordinal = identity
             resource = f"stream/{stream}"
             recorded = coordinates[resource, order]
             target, completion = recorded, None
             kind = self.records[identity]["args"]["Task Type"]
+
             if kind in {"EVENT_RECORD", "EVENT_WAIT"}:
                 begin, end = self.span(identity)
 
@@ -127,10 +136,12 @@ class SdkStreams:
                 returned = coordinates.get((resource, end))
                 if returned != target:
                     completion = returned
+
             submitted = coordinates[f"thread/{post.thread}", post.begin]
             preceding = stream, ordinal - 1
             prior = self.records.get(preceding)
             previous, seen, omitted = None, None, ()
+
             if prior is not None:
                 previous = coordinates.get((f"stream/{stream}", self.span(preceding)[1]))
                 completed = self.clock.interval(prior)[1]
@@ -149,8 +160,10 @@ class SdkStreams:
                             previous, omitted = self.omitted_records(
                                 stream, ordinal, coordinates, queues, observer_joins
                             )
+
             releases[target] = DeviceRelease(submitted, previous, seen, ordinal == 0, recorded == completion,
                                              completion, omitted)
+
         return releases
 
     def inspect_coordinates(self, facts, apis, commands):
@@ -161,6 +174,7 @@ class SdkStreams:
                     continue
                 begin, end = command["begin"], command["end"]
                 stream = int(facts["resources"][effect["resource"]]["identity"].split("/")[1])
+
                 if begin % 2 or end != begin + 1 or begin // 2 in logical[stream]:
                     raise ValueError("elided native waits repeat or change a stream command slot")
                 logical[stream][begin // 2] = apis[effect["connection"]]
@@ -172,14 +186,17 @@ class SdkStreams:
                 if peer != stream:
                     continue
                 api = apis.get(row["args"]["connection_id"])
+
                 if api is not None:
                     before.append((api.end, order + 1))
                     after.append((api.begin, order))
+
             before.sort()
             after.sort()
             lower, upper = [0], [self.counts[stream]] * (len(after) + 1)
             for _, order in before:
                 lower.append(max(lower[-1], order))
+
             for index in range(len(after) - 1, -1, -1):
                 upper[index] = min(upper[index + 1], after[index][1])
             ends, starts = [time for time, _ in before], [time for time, _ in after]
@@ -189,6 +206,7 @@ class SdkStreams:
                 api = logical[stream][slot]
                 left = lower[bisect_right(ends, api.begin)]
                 right = upper[bisect_left(starts, api.end)]
+
                 if slot - index != left or left != right:
                     raise ValueError("elided native wait changes or lacks its unique raw SDK position")
 
@@ -196,6 +214,7 @@ class SdkStreams:
             stream: [slot - index for index, slot in enumerate(slots)] for stream, slots in positions.items()
         }
         self.logical_slots = positions
+
         for identity, span in commands.items():
             if span != self.span(identity):
                 raise ValueError("native command changes its actual SDK occurrence coordinate")
@@ -205,16 +224,21 @@ class SdkStreams:
             resource = facts["resources"][point["resource"]]
             if resource["kind"] != "stream":
                 continue
+
             stream, order = int(resource["identity"].split("/")[1]), point["order"]
             task = self.task(stream, order)
             measured = None if task is None else self.clock.interval(task)[order % 2]
             if point["time_ns"] != measured:
                 raise ValueError("device boundary changes or loses its original SDK measurement")
+
             checked += measured is not None
+
         return checked
 
 
 class SdkRecording(RawTraceIndex):
+    """Use the common raw index with independently derived reference measurements and coordinates."""
+
     waits = STREAM_WAITS
 
     def __init__(self, capture, rank, native, facts, sdk):
@@ -233,6 +257,7 @@ class SdkRecording(RawTraceIndex):
         self.queries = {query["scope"]: {**query, "thread": native["scopes"][query["scope"]]["thread"]}
                         for query in native["state_queries"]}
         self.queried_points = {row["point"] for row in self.queries.values() if row["kind"] == "event"}
+
         for query in self.queries.values():
             self.native_interval(query)
         self.index_graph(facts)
@@ -295,11 +320,13 @@ class SdkRecording(RawTraceIndex):
             for scope in self.native["scopes"]
         }
         work, waits = {}, defaultdict(list)
+
         for interval, producer in event_records(self.runtime, EVENT_WAITS):
             if interval.end <= self.window.begin or self.window.end <= interval.begin:
                 continue
             api = self.native_api(interval)
             owner = self.owner(api)
+
             if owner is None:
                 continue
             self.require(producer is not None, "native event consumer has no recorded generation")
@@ -307,9 +334,11 @@ class SdkRecording(RawTraceIndex):
             connection = recorded.record["args"]["connection_id"]
             waits[owner, connection].append((interval.record, api))
             producer = self.owner(recorded)
+
             if producer in peers[owner]:
                 self.require(
                     work.setdefault(producer, connection) == connection,
                     "native Work has competing completion generations",
                 )
+
         return work, waits

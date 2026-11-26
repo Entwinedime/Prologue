@@ -23,6 +23,7 @@ class AscendClock(DeviceCalibration):
         physical = device.name.removeprefix("device_")
         if self.device_id != int(physical):
             raise ValueError("device clock calibration has a different device from the SDK profile")
+
         self.begin_ns, self.end_ns = self.midpoints[0], self.midpoints[-1]
 
         # Keep the epoch offset exact; float-to-string conversion can lose several device counter ticks.
@@ -56,6 +57,10 @@ class AscendClock(DeviceCalibration):
 
 
 class HostCounter:
+    """Convert SDK host measurements back to their native counter coordinates before relating them to RAW
+    timestamps.
+    """
+
     def __init__(self, profile: Path) -> None:
         start, = profile.glob("PROF_*/host/start_info")
         host, = profile.glob("PROF_*/host/host_start.log")
@@ -111,22 +116,27 @@ class Interval:
 
 
 class ThreadIntervals:
+    """Index independently nested caller intervals with thread-local lookup coordinates."""
+
     def __init__(self, intervals: list[Interval]) -> None:
         self.threads: dict[int, tuple[list[int], list[Interval], list[int], list[int]]] = {}
         grouped: dict[int, list[Interval]] = defaultdict(list)
         for interval in intervals:
             grouped[interval.thread].append(interval)
+
         for thread, values in grouped.items():
             values.sort(key=lambda value: (value.begin, -value.end))
             parents = []
             furthest = []
             active = []
+
             for index, value in enumerate(values):
                 while active and not values[active[-1]].contains(value):
                     active.pop()
                 parents.append(active[-1] if active else -1)
                 active.append(index)
                 furthest.append(max(value.end, furthest[-1] if furthest else value.end))
+
             self.threads[thread] = [value.begin for value in values], values, parents, furthest
 
     def enclosing(self, interval: Interval) -> Interval | None:
@@ -179,6 +189,7 @@ def task_flips(profile: Path) -> set[tuple[int, int, int]]:
         batches[stream] += 1
         if flip != 65535:
             flips.add((stream, task, batches[stream]))
+
     return flips
 
 
@@ -195,6 +206,7 @@ def driver_submissions(runtime):
             continue
         if row["result"] != 0:
             raise ValueError("recorded driver queue operation failed")
+
         key = row["device"], row["task_system"], row["queue"]
         if row["api"] == "halSqCqAllocate":
             queues[key] = row["stream"]
@@ -204,6 +216,7 @@ def driver_submissions(runtime):
             stream = queues[key]
             if type(row["tasks"]) is not int or row["tasks"] < 0:
                 raise ValueError("driver queue posting requires an observed nonnegative SQE count")
+
             yield stream, native
 
 
@@ -269,7 +282,9 @@ def physical_slots(tasks, flips):
         for index, (_, owners) in enumerate(ordered):
             for owner in owners:
                 positions[owner].append(index)
+
         indexed[stream] = ordered, positions
+
     return indexed
 
 
@@ -281,11 +296,13 @@ class QueueSlots:
         self.tasks = [row["args"] for row in rows if "Task Type" in row.get("args", {})]
         self.submissions = list(driver_submissions(runtime))
         by_caller, self.issued, self.post_index = defaultdict(list), defaultdict(list), {}
+
         for stream, post in self.submissions:
             by_caller[post.thread, stream].append(post)
             if post.record["tasks"]:
                 self.post_index[id(post)] = len(self.issued[stream])
                 self.issued[stream].append(post)
+
         self.by_caller = {key: ([p.begin for p in posts], posts) for key, posts in by_caller.items()}
         self.resolved = {}
 
@@ -318,23 +335,27 @@ class QueueSlots:
         issued = self.issued[stream]
         index = self.post_index[id(post)] + side
         slots, owners = self.slots[stream]
+
         if not 0 <= index < len(issued) or not 0 <= position < len(slots):
             return False
         tag = slots[position][1]
         if len(tag) != 1:
             return False
+
         connection, = tag
         if connection not in self.apis:
             return False
         group = self.posts(connection, stream)
         boundary = -1 if side < 0 else 0
         neighbor = issued[index]
+
         if not group or group[boundary] is not neighbor:
             return False
         if not self.successive_posts([neighbor, post] if side < 0 else [post, neighbor]):
             return False
         if len(group) == 1:
             return True
+
         tagged = owners[connection]
         block = slots[tagged[0]:tagged[-1] + 1]
         return (position == tagged[boundary] and len(block) == sum(p.record["tasks"] for p in group)
@@ -347,6 +368,7 @@ class QueueSlots:
         tagged = by_owner[connection]
         width = sum(post.record["tasks"] for post in posts)
         starts = []
+
         if posts and tagged and self.successive_posts(posts):
             for start in range(max(0, tagged[-1] - width + 1), min(tagged[0], len(slots) - width) + 1):
                 end = start + width
@@ -359,7 +381,9 @@ class QueueSlots:
                     and self.consecutive(slots[start - 1:end + 1])
                 ):
                     continue
+
                 starts.append(start)
+
         if len(starts) != 1:
             raise ValueError(
                 f"driver evidence cannot identify one release on stream {stream} for connection {connection}"
@@ -372,7 +396,9 @@ class QueueSlots:
             for slot, tags in slots[cursor:end]:
                 if connection in tags:
                     releases[slot] = post
+
             cursor = end
+
         return releases
 
     def release(self, task):
@@ -397,10 +423,12 @@ class RawTraceIndex:
         self.apis = {}
         counter = HostCounter(profile)
         queues = {"enqueue": [], "dequeue": []}
+
         for interval in sdk_host_intervals(rows, counter):
             row = interval.record
             for position in (interval.begin, interval.end):
                 self.host_times[f"thread/{interval.thread}", position] = counter.timestamp(position)
+
             category = row.get("cat")
             if category in queues:
                 queues[category].append(interval)
@@ -408,7 +436,9 @@ class RawTraceIndex:
                 key = row["args"]["connection_id"]
                 if key in self.apis:
                     raise ValueError(f"duplicate native API connection: {key}")
+
                 self.apis[key] = interval
+
         self.enqueue = self.queue_index(queues["enqueue"])
         self.dequeue = self.queue_index(queues["dequeue"])
         self.enqueue_ranges = ThreadIntervals(queues["enqueue"])
@@ -428,6 +458,7 @@ class RawTraceIndex:
                 prefix, number = name.split("/")
                 identity = int(number)
                 index = self.scopes if prefix == "prologue.scope" else self.points
+
                 if identity in index:
                     raise ValueError(f"duplicate native marker: {name}")
                 index[identity] = interval
@@ -435,6 +466,7 @@ class RawTraceIndex:
                     self.excluded.append(interval)
             elif name in {"prologue.observer", "prologue.auxiliary"}:
                 self.excluded.append(interval)
+
         if len(windows) != 1:
             raise ValueError("native recording requires one closed observation window")
         self.window, = windows
@@ -450,8 +482,10 @@ class RawTraceIndex:
                 self.scopes[identity] = self.native_interval({
                     **scope["host_interval"], "thread": scope["thread"], "name": f"prologue.scope/{identity}",
                 })
+
             if "service" in scope or scope["parent"] in self.closed_scopes:
                 self.closed_scopes.add(identity)
+
         if set(self.scopes) != set(range(1, len(raw["scopes"]))):
             raise ValueError("native scope metadata and recorded CPU markers differ")
         self.scope_ranges = ThreadIntervals(list(self.scopes.values()))
@@ -462,6 +496,7 @@ class RawTraceIndex:
             if row["result"] != 0:
                 raise RuntimeError(f"native runtime call failed: {row['api']} ({row['result']})")
             self.runtime.append(self.native_interval(row))
+
         self.runtime_ranges = ThreadIntervals(self.runtime)
         self.queues = QueueSlots(self.runtime, self.apis, rows, flips)
 
