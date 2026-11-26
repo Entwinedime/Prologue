@@ -102,6 +102,7 @@ public:
                 boundary(scope, access.start);
                 boundary(scope, access.finish);
             }
+
             for (const auto & access : source.scopes[scope].kv_accesses) {
                 boundary(scope, access.start);
                 boundary(scope, access.finish);
@@ -269,6 +270,7 @@ private:
             if (!access.value.rule) throw std::invalid_argument("KV access has no declared member range rule at " + frame.site);
             if (access.value.rule->evaluate(observed.info.work) != access.value.regions)
                 throw std::invalid_argument("declared KV range differs from observation at " + frame.site);
+
             definition.kv_accesses.push_back({ access.value.access,
                                                *access.value.rule,
                                                reference(scope, access.start, definition, frame),

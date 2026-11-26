@@ -58,6 +58,7 @@ void frame(const TemplateLibrary & library, const TemplateFrame & bindings, std:
     if (bindings.state_input && bindings.state_input->empty()) throw std::invalid_argument("template state input has no name");
     for (const auto & binding : bindings.state.kv) {
         if (binding.pool.empty() || binding.layer < 0) throw std::invalid_argument("template KV binding requires a pool and nonnegative layer");
+
         binding.slice.validate();
     }
     for (const auto & pool : bindings.state.slots) {
@@ -74,6 +75,7 @@ void frame(const TemplateLibrary & library, const TemplateFrame & bindings, std:
             throw std::invalid_argument("template tensor binding is missing or unexpected");
         if (bindings.tensors[port]) {
             const auto & tensor = *bindings.tensors[port];
+
             if (tensor.value.empty() || tensor.storage.empty() || tensor.version < 0) throw std::invalid_argument("invalid template tensor binding");
             if (!tensor.buffer.empty()) {
                 if (!tensor.external) throw std::invalid_argument("persistent buffer cannot be an invocation-local allocation");
@@ -217,6 +219,7 @@ void TemplateLibrary::validate_observations() const {
                 if (port.direction != Direction::Input || port.use != PortUse::Control || port.relation != Relation::Signal || port.tensor
                     || definition.resources.at(port.wait->resource).kind != ResourceKind::Stream)
                     throw std::invalid_argument("invalid template stream wait port");
+
                 reference(definition, port.wait->begin);
             }
             if (port.use == PortUse::Data && !port.tensor) throw std::invalid_argument("template data ports require a tensor");
@@ -231,6 +234,7 @@ void TemplateLibrary::validate_observations() const {
                 }
             }
         }
+
         for (const auto & child : definition.children) {
             for (const auto & imported : child.imports) reference(definition, imported);
         }

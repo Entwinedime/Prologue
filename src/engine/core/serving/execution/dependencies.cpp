@@ -207,6 +207,7 @@ std::vector<std::size_t> GraphDependencies::insert(const CoarseGraph & graph, Ti
             }
             for (const auto & [contents, read] : reads) {
                 auto ranges = contents->initialized;
+
                 for (const auto & access : accesses.at(contents)) {
                     if (access.write && preceding[access.finish]) ranges.emplace_back(access.begin, access.end);
                 }

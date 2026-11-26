@@ -262,6 +262,7 @@ TemplateDeclarations NativeTemplates::describe(CoarseGraph graph) {
         if (info.role == "stream_wait") condition["streams"] = bindings.at("streams");
         if (info.role == "gather") condition["collective"] = bindings.at("collective");
         if (info.role == "transfer_send" || info.role == "transfer_receive") condition["dtype"] = bindings.at("dtype");
+
         condition = NativeTemplates::condition(info.role, std::move(condition));
         conditions.validate(scope, info.role, condition);
         entries.push_back({ scope, info.role, std::move(condition) });

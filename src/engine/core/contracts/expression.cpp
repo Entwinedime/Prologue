@@ -3,29 +3,32 @@
 #include "core/contracts/serving.hpp"
 
 #include <algorithm>
+#include <array>
 #include <limits>
+#include <optional>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 #include <nlohmann/json.hpp>
 
 namespace prologue {
+
+struct ExpressionOperator {
+    using Reduce = std::int64_t (*)(std::int64_t, std::int64_t);
+
+    std::string_view name;
+    Reduce reduce;
+    bool binary = false;
+    bool canonical = false;
+    std::optional<std::int64_t> identity{};
+    std::optional<std::int64_t> right_identity{};
+};
+
 namespace {
 
-const std::map<std::string, Expression::Kind> operations{
-    {       "add",         Expression::Kind::Add },
-    {       "mul",    Expression::Kind::Multiply },
-    { "floor_div", Expression::Kind::FloorDivide },
-    {       "mod",      Expression::Kind::Modulo },
-    {       "min",     Expression::Kind::Minimum },
-    {       "max",     Expression::Kind::Maximum },
-    {        "eq",       Expression::Kind::Equal },
-    {        "lt",        Expression::Kind::Less },
-    {        "le",   Expression::Kind::LessEqual },
-    {       "and",         Expression::Kind::And },
-    {        "or",          Expression::Kind::Or },
-};
+using Integer = std::int64_t;
 
 std::int64_t add(std::int64_t left, std::int64_t right) {
     std::int64_t result;
@@ -51,6 +54,29 @@ std::int64_t floor_divide(std::int64_t numerator, std::int64_t denominator) {
     return quotient;
 }
 
+Integer modulo(Integer left, Integer right) {
+
+    // Division and remainder both reject a zero divisor and the signed minimum divided by -1.
+    floor_divide(left, right);
+    const auto rest = left % right;
+    return rest != 0 && (rest < 0) != (right < 0) ? add(rest, right) : rest;
+}
+
+constexpr std::array operations{
+    ExpressionOperator{ .name = "add", .reduce = add, .canonical = true, .identity = 0 },
+    ExpressionOperator{ .name = "mul", .reduce = multiply, .canonical = true, .identity = 1 },
+    ExpressionOperator{ .name = "floor_div", .reduce = floor_divide, .binary = true, .right_identity = 1 },
+    ExpressionOperator{ .name = "mod", .reduce = modulo, .binary = true },
+    ExpressionOperator{ "min", [](Integer a, Integer b) -> Integer { return std::min(a, b); } },
+    ExpressionOperator{ "max", [](Integer a, Integer b) -> Integer { return std::max(a, b); } },
+    ExpressionOperator{ .name = "eq", .reduce = [](Integer a, Integer b) -> Integer { return a == b; },
+                        .binary = true, .canonical = true },
+    ExpressionOperator{ .name = "lt", .reduce = [](Integer a, Integer b) -> Integer { return a < b; }, .binary = true },
+    ExpressionOperator{ .name = "le", .reduce = [](Integer a, Integer b) -> Integer { return a <= b; }, .binary = true },
+    ExpressionOperator{ "and", [](Integer a, Integer b) -> Integer { return a != 0 && b != 0; } },
+    ExpressionOperator{ "or", [](Integer a, Integer b) -> Integer { return a != 0 || b != 0; } },
+};
+
 } // namespace
 
 Parameters read_parameters(const nlohmann::json & source) {
@@ -70,40 +96,41 @@ Expression Expression::read(const nlohmann::json & value) {
     }
     else if (value.is_string()) result.value_ = value.get<std::string>();
     else {
-        const auto kind = operations.at(value.at(0).get<std::string>());
-        const auto count = value.size() - 1;
+        const auto & name = value.at(0).get_ref<const std::string &>();
+        const auto definition = std::ranges::find(operations, name, &ExpressionOperator::name);
+        if (definition == operations.end()) throw std::invalid_argument("unknown expression operator: " + name);
 
-        if (count == 0
-            || ((kind == Kind::FloorDivide || kind == Kind::Modulo || kind == Kind::Equal || kind == Kind::Less || kind == Kind::LessEqual) && count != 2))
+        const auto count = value.size() - 1;
+        if (count == 0 || (definition->binary && count != 2))
             throw std::invalid_argument("invalid expression arity");
 
         std::vector<Expression> arguments;
+        arguments.reserve(count);
         for (std::size_t index = 1; index < value.size(); ++index) arguments.push_back(read(value.at(index)));
-        return make_operation(kind, std::move(arguments));
+        return make_operation(*definition, std::move(arguments));
     }
 
     return result;
 }
 
-Expression Expression::make_operation(Kind kind, std::vector<Expression> arguments) {
-    if (kind == Kind::Add || kind == Kind::Multiply) {
-        const std::int64_t identity = kind == Kind::Add ? 0 : 1;
+Expression Expression::make_operation(const ExpressionOperator & definition, std::vector<Expression> arguments) {
+    if (definition.identity) {
 
-        // Remove only neutral operands; reassociation or absorbing zero could hide checked overflow or invalid division.
+        // Removing other values, such as a zero multiplier, could hide an earlier overflow or division failure.
         std::erase_if(arguments, [&](const auto & argument) {
-            const auto * constant = std::get_if<std::int64_t>(&argument.value_);
-            return constant && *constant == identity;
+            const auto * constant = std::get_if<Integer>(&argument.value_);
+            return constant && *constant == *definition.identity;
         });
-        if (arguments.empty()) return read(identity);
+        if (arguments.empty()) return read(*definition.identity);
     }
-    if (kind == Kind::FloorDivide) {
-        const auto * divisor = std::get_if<std::int64_t>(&arguments[1].value_);
-        if (divisor && *divisor == 1) return std::move(arguments.front());
+    if (definition.right_identity) {
+        const auto * right = std::get_if<Integer>(&arguments[1].value_);
+        if (right && *right == *definition.right_identity) return std::move(arguments.front());
     }
     if (arguments.size() == 1) return std::move(arguments.front());
 
     Expression result;
-    result.value_ = Operation{ kind, std::move(arguments) };
+    result.value_ = Operation{ &definition, std::move(arguments) };
     return result;
 }
 
@@ -131,49 +158,10 @@ std::int64_t Expression::evaluate(const Parameters & parameters) const {
     auto result = operation.arguments.front().evaluate(parameters);
 
     for (std::size_t index = 1; index < operation.arguments.size(); ++index) {
+
+        // Every operand is checked, including the right side of a logical operation.
         const auto next = operation.arguments[index].evaluate(parameters);
-
-        switch (operation.kind) {
-        case Kind::Add:
-            result = add(result, next);
-            break;
-        case Kind::Multiply:
-            result = multiply(result, next);
-            break;
-
-        case Kind::FloorDivide:
-            result = floor_divide(result, next);
-            break;
-
-        case Kind::Modulo: {
-            floor_divide(result, next);
-            result %= next;
-            if (result != 0 && (result < 0) != (next < 0)) result = add(result, next);
-            break;
-        }
-
-        case Kind::Minimum:
-            result = std::min(result, next);
-            break;
-        case Kind::Maximum:
-            result = std::max(result, next);
-            break;
-        case Kind::Equal:
-            result = result == next;
-            break;
-        case Kind::Less:
-            result = result < next;
-            break;
-        case Kind::LessEqual:
-            result = result <= next;
-            break;
-        case Kind::And:
-            result = result != 0 && next != 0;
-            break;
-        case Kind::Or:
-            result = result != 0 || next != 0;
-            break;
-        }
+        result = operation.definition->reduce(result, next);
     }
 
     return result;
@@ -184,19 +172,11 @@ nlohmann::json Expression::document() const {
     if (const auto * parameter = std::get_if<std::string>(&value_)) return *parameter;
 
     const auto & operation = std::get<Operation>(value_);
-    nlohmann::json result = nlohmann::json::array();
-    for (const auto & [name, kind] : operations) {
-        if (kind == operation.kind) {
-            result.push_back(name);
-            break;
-        }
-    }
-
+    auto result = nlohmann::json::array({ operation.definition->name });
     for (const auto & argument : operation.arguments) result.push_back(argument.document());
 
     // Binary commutation preserves checked arithmetic; reordering longer sums/products can change overflow.
-    if (operation.arguments.size() == 2 && (operation.kind == Kind::Add || operation.kind == Kind::Multiply || operation.kind == Kind::Equal)
-        && result[2] < result[1])
+    if (operation.arguments.size() == 2 && operation.definition->canonical && result[2] < result[1])
         std::swap(result[1], result[2]);
 
     return result;
@@ -215,7 +195,7 @@ Expression Expression::substitute(const std::map<std::string, Expression> & expr
     if (const auto * operation = std::get_if<Operation>(&value_)) {
         std::vector<Expression> arguments;
         for (const auto & argument : operation->arguments) arguments.push_back(argument.substitute(expressions));
-        return make_operation(operation->kind, std::move(arguments));
+        return make_operation(*operation->definition, std::move(arguments));
     }
     return *this;
 }

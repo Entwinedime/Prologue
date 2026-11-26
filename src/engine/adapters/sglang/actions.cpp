@@ -146,6 +146,7 @@ CoarseGraph NativeActionGraphs::build(const ServingAction & action, const nlohma
     if (action.work.contains("signals")) {
         for (const auto & [name, signal] : action.work.at("signals").get<std::map<std::string, std::string>>()) {
             if (!signals_.contains(signal)) throw std::invalid_argument("native action refers to a released completion signal");
+
             call.signals.emplace(name, signal);
         }
     }

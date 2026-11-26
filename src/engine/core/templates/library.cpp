@@ -224,6 +224,7 @@ nlohmann::json TemplateDefinition::document() const {
             {   "start",          access.start.document() },
             {  "finish",         access.finish.document() }
         });
+
         if (!access.publication.empty()) result["slot_accesses"].back()["publication"] = access.publication;
     }
     result["kv_accesses"] = nlohmann::json::array();
@@ -243,6 +244,7 @@ nlohmann::json TemplateDefinition::document() const {
             {    "start",  piece.start.document() },
             {   "finish", piece.finish.document() }
         });
+
         if (piece.copy) result["work"].back()["copy"] = piece.copy->document();
     }
     for (const auto & edge : edges)
@@ -289,6 +291,7 @@ TemplateFrame read_frame(const nlohmann::json & source, const std::map<std::size
     if (const auto owned = source.find("allocations"); owned != source.end())
         result.allocations = owned->get<std::set<std::string>>();
     result.state = StateBindings::read(source.at("state"));
+
     if (!source.at("state_input").is_null()) result.state_input = source.at("state_input").get<std::string>();
     for (const auto & tensor : source.at("tensors").get_ref<const nlohmann::json::array_t &>()) {
         if (tensor.is_null()) result.tensors.push_back(std::nullopt);

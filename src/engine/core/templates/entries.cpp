@@ -110,6 +110,7 @@ public:
             for (const auto & port : source_.scopes[scope].ports) {
                 auto copy = port;
                 copy.event = event_ids_.at(port.event);
+
                 if (copy.wait) copy.wait->begin = event_ids_.at(copy.wait->begin);
                 if (copy.rendezvous) copy.rendezvous = event_ids_.at(*copy.rendezvous);
                 if (copy.tensor && copy.tensor->writer) {

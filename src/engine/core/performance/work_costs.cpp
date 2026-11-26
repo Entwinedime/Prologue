@@ -99,6 +99,7 @@ WorkCosts::WorkCosts(nlohmann::json domain, const nlohmann::json & asset, const 
         models_[index].resize(work.size());
     }
     const auto & bindings = selected->at("models").get_ref<const nlohmann::json::array_t &>();
+
     for (std::size_t ordinal = 0; ordinal < bindings.size(); ++ordinal) {
         const auto & model = bindings[ordinal];
         const auto definition = model.at("definition").get<std::size_t>();
@@ -220,6 +221,7 @@ GraphTiming WorkCosts::timing(const CoarseGraph & graph, std::span<const Templat
         const auto & scope = graph.scopes[work.scope];
         const auto & geometry = coordinates[coordinates.index(work)];
         const auto cost = work_estimate(model_indices_.at(origin.definition), origin.interval, work.kind, geometry);
+
         if (!cost.service_ns && (!first_gap || first_gap->is_null())) {
             auto missing = gap(cost, geometry, {
                 { "action_site", graph.scopes.front().info.site },

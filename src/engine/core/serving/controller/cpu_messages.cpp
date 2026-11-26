@@ -183,6 +183,7 @@ void CpuMessages::post(std::size_t call, const std::string & group, const nlohma
         throw std::invalid_argument("CPU post crosses native worlds or changes its actor");
     auto & message = messages_[key];
     if (message.endpoints[side]) throw std::invalid_argument("CPU post repeats a live endpoint");
+
     auto & endpoint = message.endpoints[side].emplace();
     endpoint.group = group;
     endpoint.actor = key[receiving ? 2 : 1].get<std::size_t>();

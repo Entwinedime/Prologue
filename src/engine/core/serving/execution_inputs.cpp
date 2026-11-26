@@ -55,6 +55,7 @@ ExecutionInputs::ExecutionInputs(const nlohmann::json & source, ControlObserver 
                 throw std::invalid_argument("execution input requires an operation, logical identity and source reference");
             if (operation == "action") {
                 const bool ports = step.contains("boundaries");
+
                 if (layouts_ && (!step.at("layout").is_number_unsigned() || (!ports && step.contains("bindings"))))
                     throw std::invalid_argument("strict measured layouts require time facts without native construction bindings");
                 has_port_actions_ |= ports;
@@ -72,6 +73,7 @@ ExecutionInputs::ExecutionInputs(const nlohmann::json & source, ControlObserver 
     }
     for (const auto & record : source.at("transfers")) {
         const auto & posts = record.at("posts");
+
         if (!posts.is_array() || posts.empty() || posts.size() > 2)
             throw std::invalid_argument("CPU transfer requires its observed in-flow post positions");
         std::set<nlohmann::json> positions;
@@ -212,6 +214,7 @@ GraphTiming measured_timing(const CoarseGraph & graph, const ActionLayout & layo
     for (const auto & interval : record.at("services").get_ref<const nlohmann::json::array_t &>()) {
         if (!interval.is_array() || interval.size() != 2 || !interval[0].is_number_unsigned() || !interval[1].is_number_unsigned())
             throw std::invalid_argument("observed service requires two measured endpoint positions");
+
         const auto & start = result.boundaries.at(interval[0].get<std::size_t>());
         const auto & finish = result.boundaries.at(interval[1].get<std::size_t>());
         if (!start.window || !finish.window) throw std::invalid_argument("observed service requires measured start and finish");

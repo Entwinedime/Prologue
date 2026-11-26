@@ -39,6 +39,7 @@ NativeController::NativeController(std::vector<Request> requests, std::span<cons
                 { "rank",  participant.rank }
             });
         }
+
         const auto & settings = instance.settings;
         configuration.push_back({
             {       "id",                                                                                      instance.id                         },
@@ -59,6 +60,7 @@ NativeController::NativeController(std::vector<Request> requests, std::span<cons
         for (const auto & [name, _] : groups_) names.push_back(name);
         observed->bind(names);
     }
+
     auto content = nlohmann::json::array();
     for (const auto & request : requests_) {
         nlohmann::json value{
@@ -102,6 +104,7 @@ NativeController::NativeController(std::vector<Request> requests, std::span<cons
             initialized = true;
             continue;
         }
+
         const auto & name = message.at("group").get_ref<const std::string &>();
         const auto identity = call.at("id").get<std::size_t>();
         if (cpu_call(identity, name, message)) continue;
@@ -335,6 +338,7 @@ std::optional<ServingAction> NativeController::handle_message(const nlohmann::js
     if (kind == "action_values") {
         const auto boundary = message.at("boundary").get<std::size_t>();
         const auto & values = message.at("values");
+
         if (!control_observer_ || !timeline_.completed(boundary) || !values.is_object() || values.empty())
             throw std::invalid_argument("value observation requires a completed boundary and nonempty object");
         control_observer_->observed_values(name, boundary, values, now_ns);
@@ -356,6 +360,7 @@ std::optional<ServingAction> NativeController::handle_message(const nlohmann::js
         const auto boundary = read_boundary(name, message);
         const auto signal = message.at("signal").get<std::string>();
         const auto producer = completion_event(signal);
+
         if (!producer) throw std::invalid_argument("native completion reference has no live producer: " + signal);
         const auto event = *producer;
         const bool completed = timeline_.completed(event);
@@ -365,6 +370,7 @@ std::optional<ServingAction> NativeController::handle_message(const nlohmann::js
         }
         else observed_[event].insert(instances_.at(name));
         if (control_observer_) control_observer_->completion_read(name, boundary, signal, event, completed, now_ns);
+
         reply(identity, completed);
         return std::nullopt;
     }

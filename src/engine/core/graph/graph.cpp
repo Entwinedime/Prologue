@@ -1,9 +1,10 @@
 #include "core/graph/graph.hpp"
 
+#include "core/graph/dependency_order.hpp"
+
 #include <algorithm>
 #include <compare>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <map>
 #include <set>
@@ -89,6 +90,7 @@ nlohmann::json CoarseGraph::document(bool include_environment) const {
             value["finish"] = access.finish;
             record["slot_accesses"].push_back(std::move(value));
         }
+
         record["kv_accesses"] = nlohmann::json::array();
         for (const auto & access : scope.kv_accesses) {
             auto value = access.value.document();
@@ -112,6 +114,7 @@ nlohmann::json CoarseGraph::document(bool include_environment) const {
                 };
             if (port.rendezvous) boundary["rendezvous"] = *port.rendezvous;
             if (port.use == PortUse::Signal) boundary["signal"] = port.signal;
+
             record["ports"].push_back(std::move(boundary));
         }
         result["scopes"].push_back(std::move(record));
@@ -129,6 +132,7 @@ nlohmann::json CoarseGraph::document(bool include_environment) const {
             {    "start",           piece.start },
             {   "finish",          piece.finish }
         });
+
         if (piece.copy) result["work"].back()["copy"] = piece.copy->document();
     }
     for (const auto & edge : edges)
@@ -357,6 +361,7 @@ void CoarseGraph::validate_ports(OrderedIntervals & ordered_intervals) const {
         }
         std::size_t rendezvous = 0;
         std::set<std::pair<Direction, std::string>> ports;
+
         for (const auto & port : scopes[scope].ports) {
             if (port.name.empty() || !ports.emplace(port.direction, port.name).second || port.event >= events.size())
                 throw std::invalid_argument("scope has an invalid or duplicate port");
@@ -375,6 +380,7 @@ void CoarseGraph::validate_ports(OrderedIntervals & ordered_intervals) const {
             }
             if (port.rendezvous) {
                 ++rendezvous;
+
                 if (!scopes[scope].communication || *port.rendezvous >= events.size() || port.direction != Direction::Output || port.use != PortUse::Control
                     || port.relation != Relation::Communication || port.tensor || port.wait)
                     throw std::invalid_argument("invalid communication completion port");
@@ -427,7 +433,6 @@ void CoarseGraph::validate_state_access(OrderedIntervals & ordered_intervals) co
 void CoarseGraph::validate_edges(const OrderedIntervals & ordered_intervals) const {
     // A work interval contributes start -> finish; waiting itself contributes no additional cost.
     std::vector<std::set<std::size_t>> successors(events.size());
-    std::vector<std::size_t> remaining(events.size());
     std::vector<std::optional<std::size_t>> work_finish(events.size());
     std::set<std::size_t> collective_scopes;
     for (const auto & piece : work) {
@@ -448,6 +453,7 @@ void CoarseGraph::validate_edges(const OrderedIntervals & ordered_intervals) con
                 throw std::invalid_argument("ordered peer service requires a staged transport interval");
         }
         if (work_finish[piece.start]) throw std::invalid_argument("coarse work is charged twice at one entry boundary");
+
         work_finish[piece.start] = piece.finish;
         successors[piece.start].insert(piece.finish);
     }
@@ -458,21 +464,12 @@ void CoarseGraph::validate_edges(const OrderedIntervals & ordered_intervals) con
             throw std::invalid_argument("invalid coarse dependency endpoint");
         successors[edge.source].insert(edge.target);
     }
-    for (const auto & targets : successors) {
-        for (const auto target : targets) ++remaining[target];
-    }
-
-    std::deque<std::size_t> ready;
-    for (std::size_t event = 0; event < events.size(); ++event) {
-        if (remaining[event] == 0) ready.push_back(event);
-    }
+    const auto order = dependency_order(successors);
     std::vector<std::optional<std::size_t>> frontiers(resources.size());
     std::vector<std::size_t> positions(events.size());
-    std::size_t visited = 0;
-    while (!ready.empty()) {
-        const auto event = ready.front();
-        ready.pop_front();
-        positions[event] = visited++;
+    for (std::size_t index = 0; index < order.size(); ++index) {
+        const auto event = order[index];
+        positions[event] = index;
 
         // Serial resources must carry an explicit chain, not rely on a topological tie-break.
         const auto resource = events[event].resource;
@@ -483,11 +480,8 @@ void CoarseGraph::validate_edges(const OrderedIntervals & ordered_intervals) con
                 throw std::invalid_argument("coarse work crosses an unsplit serial resource boundary");
             frontiers[resource] = event;
         }
-        for (const auto target : successors[event]) {
-            if (--remaining[target] == 0) ready.push_back(target);
-        }
     }
-    if (visited != events.size()) throw std::invalid_argument("coarse graph contains a dependency cycle");
+    if (order.size() != events.size()) throw std::invalid_argument("coarse graph contains a dependency cycle");
 
     // Topological order alone cannot prove causality across resources or concurrent service intervals.
     for (const auto & [start, finish] : ordered_intervals) {

@@ -37,6 +37,7 @@ nlohmann::json ResourceService::call(const nlohmann::json & message, const std::
             const auto capacity = read_integer(message.at("capacity"), "capacity");
             if (field.empty() || request_fields_.contains(field) || fields_.contains(field) || capacity <= 0)
                 throw std::invalid_argument("state slot declaration requires a new field and positive capacity");
+
             fields_.try_emplace(field, static_cast<std::size_t>(capacity));
             return nullptr;
         }
@@ -49,6 +50,7 @@ nlohmann::json ResourceService::call(const nlohmann::json & message, const std::
         const auto index = read_integer(message.at("slot"), "slot");
         if (index < 0) throw std::invalid_argument("state slot index must be nonnegative");
         const auto slot = static_cast<std::size_t>(index);
+
         if (operation == "bind") {
             slots.bind(request(message.at("request"), delivered), slot);
             return nullptr;
@@ -84,6 +86,7 @@ nlohmann::json ResourceService::call(const nlohmann::json & message, const std::
         }
         if (operation == "insert") {
             const auto pages = message.at("pages").get<std::vector<std::size_t>>();
+
             for (const auto page : pages) {
                 if (page >= pool_.capacity().pages) throw std::invalid_argument("cached page lies outside its pool");
             }
@@ -153,6 +156,7 @@ nlohmann::json ResourceService::call(const nlohmann::json & message, const std::
     }
     if (kind == "release_pages") {
         auto pages = message.at("pages").get<std::vector<std::size_t>>();
+
         for (const auto page : pages) {
             if (page >= pool_.capacity().pages) throw std::invalid_argument("returned page lies outside its pool");
         }

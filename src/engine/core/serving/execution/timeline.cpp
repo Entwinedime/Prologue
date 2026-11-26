@@ -128,6 +128,7 @@ std::vector<std::size_t> Timeline::insert(const CoarseGraph & graph, const Graph
         }
         if (observer_) observer_->conditioned({ offset + event, boundary->window, boundary->source_event });
     }
+
     std::vector<bool> has_previous(graph.events.size()), has_next(graph.events.size());
     for (const auto & edge : graph.edges) {
         connect(offset + edge.source, offset + edge.target, 0, edge.kind);

@@ -71,6 +71,7 @@ nlohmann::json serve(const std::map<std::size_t, TemplateLibrary> & libraries, c
     std::vector<NativeInstance> instances;
     std::set<std::string> instance_ids;
     auto sources = nlohmann::json::array();
+
     for (const auto & description : task.at("instances").get_ref<const nlohmann::json::array_t &>()) {
         const auto id = description.at("id").get<std::string>();
         if (id.empty() || !instance_ids.insert(id).second) throw std::invalid_argument("serving instance identities must be unique and nonempty");
@@ -107,6 +108,7 @@ nlohmann::json serve(const std::map<std::size_t, TemplateLibrary> & libraries, c
             const auto & library = libraries.at(template_source);
             const auto & environment = binding.at("environment");
             const auto & parallel = environment.at("parallel");
+
             if (ranks.empty()) {
                 implementation = environment.at("implementation");
                 runtime = { { "framework_revision", implementation.at("framework_revision") }, { "torch", environment.at("torch") } };
@@ -123,6 +125,7 @@ nlohmann::json serve(const std::map<std::size_t, TemplateLibrary> & libraries, c
                 throw std::invalid_argument("participants must follow their native TP/PP rank order");
             const auto rank = read_integer(binding.at("rank"), "rank");
             if (rank < 0 || parallel.at("rank") != rank) throw std::invalid_argument("participant rank must match its nonnegative environment rank");
+
             ranks.push_back(static_cast<std::size_t>(rank));
             workers.push_back({
                 { "rank", rank },
@@ -141,6 +144,7 @@ nlohmann::json serve(const std::map<std::size_t, TemplateLibrary> & libraries, c
             const auto control_count = std::ranges::count_if(local_resources, [](const auto & resource) {
                 return resource.kind == ResourceKind::Thread && resource.role == "control";
             });
+
             if (control_count != 1) throw std::invalid_argument("native CPU services require one declared control thread per participant");
             const auto control_thread = *std::ranges::find_if(local_resources, [](const auto & resource) {
                 return resource.kind == ResourceKind::Thread && resource.role == "control";
@@ -168,6 +172,7 @@ nlohmann::json serve(const std::map<std::size_t, TemplateLibrary> & libraries, c
         };
         if (implementation.at("scheduling") != scheduling)
             throw std::invalid_argument("native instance scheduling mechanisms differ from the observed implementation");
+
         sources.push_back({
             { "id", id },
             { "runtime", std::move(runtime) },
@@ -187,6 +192,7 @@ nlohmann::json serve(const std::map<std::size_t, TemplateLibrary> & libraries, c
         });
     }
     if (instances.empty()) throw std::invalid_argument("serving requires a native instance");
+
     peer.send({
         {      "kind",           "source" },
         { "instances", std::move(sources) }

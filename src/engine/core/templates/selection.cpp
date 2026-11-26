@@ -196,6 +196,7 @@ public:
             };
             for (std::size_t child = 0; child < body.children.size(); ++child) {
                 const auto & call = body.children[child];
+
                 if (call.row && call.row->member >= members.size()) {
                     chosen = {};
                     chosen.rejection = RejectedCall{path_, &source, &body, caller, Rejection::Parameters, parameters,

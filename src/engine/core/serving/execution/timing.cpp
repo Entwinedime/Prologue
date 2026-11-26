@@ -7,6 +7,7 @@
 #include <string>
 #include <utility>
 
+#include "core/graph/dependency_order.hpp"
 #include "core/graph/graph.hpp"
 
 namespace prologue {
@@ -17,7 +18,6 @@ GraphTiming GraphTiming::conditioned(const CoarseGraph & graph, std::vector<Serv
     if (std::ranges::all_of(result.work_ns, [](const auto & value) { return value.has_value(); })) return result;
 
     std::vector<std::vector<std::size_t>> next(graph.events.size());
-    std::vector<std::size_t> pending(graph.events.size());
     std::vector<std::optional<std::int64_t>> upper(graph.events.size());
     std::set<std::size_t> bounded;
     for (const auto & boundary : result.boundaries) {
@@ -25,23 +25,9 @@ GraphTiming GraphTiming::conditioned(const CoarseGraph & graph, std::vector<Serv
         upper.at(boundary.event) = boundary.window->end_ns;
         bounded.insert(boundary.event);
     }
-    for (const auto & edge : graph.edges) {
-        next[edge.source].push_back(edge.target);
-        ++pending[edge.target];
-    }
-    for (const auto & work : graph.work) {
-        next[work.start].push_back(work.finish);
-        ++pending[work.finish];
-    }
-    std::vector<std::size_t> ordered;
-    for (std::size_t event = 0; event < pending.size(); ++event) {
-        if (pending[event] == 0) ordered.push_back(event);
-    }
-    for (std::size_t position = 0; position < ordered.size(); ++position) {
-        for (const auto target : next[ordered[position]]) {
-            if (--pending[target] == 0) ordered.push_back(target);
-        }
-    }
+    for (const auto & edge : graph.edges) next[edge.source].push_back(edge.target);
+    for (const auto & work : graph.work) next[work.start].push_back(work.finish);
+    const auto ordered = dependency_order(next);
 
     // Named conditions bound their actual causal ancestors, never another stream's unrelated work.
     for (const auto event : std::views::reverse(ordered)) {

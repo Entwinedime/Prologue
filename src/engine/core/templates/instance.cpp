@@ -161,6 +161,7 @@ private:
                 event(scope, access.finish)
             });
         }
+
         for (std::size_t index = 0; index < definition.kv_accesses.size(); ++index) {
             const auto & access = definition.kv_accesses[index];
             const auto & binding = state.kv[index];

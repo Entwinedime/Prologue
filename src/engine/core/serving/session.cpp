@@ -36,6 +36,7 @@ nlohmann::json ServingSession::run() {
     std::vector<TemplateInterval> origins;
     auto outputs = nlohmann::json::array();
     bool plan = true;
+
     while (!control_.done() || !timeline_.done()) {
         const bool planning = plan;
         while (plan) {
@@ -54,17 +55,18 @@ nlohmann::json ServingSession::run() {
             const auto timing = times_.action(*action, graph, origins, supplied);
             const auto events = participant.dependencies.insert(graph, timeline_, timing, pools, communication.preceding_service(graph));
             communication.insert(graph, events, timing.work_ns, timeline_);
-            const auto returned = events.at(graph.scopes.front().port("call.return", Direction::Output).event);
+            // Returning the native caller and publishing a storage version are separate effects of one submission.
+            const auto & root = graph.scopes.front();
+            const auto returned = events.at(root.port("call.return", Direction::Output).event);
             auto caller_returned = returned;
-            for (const auto & port : graph.scopes.front().ports) {
-                if (port.name == "caller.return" && port.direction == Direction::Output) caller_returned = events.at(port.event);
-            }
-            ++actions[action->name];
             std::map<std::string, StorageBinding> values;
-            for (const auto & port : graph.scopes.front().ports) {
-                if (port.use == PortUse::Data && port.direction == Direction::Output)
+            for (const auto & port : root.ports) {
+                if (port.direction != Direction::Output) continue;
+                if (port.name == "caller.return") caller_returned = events.at(port.event);
+                if (port.use == PortUse::Data)
                     values.emplace(port.name, StorageBinding{ port.tensor->storage, port.tensor->version });
             }
+            ++actions[action->name];
             pending.emplace(returned, ReturnedAction{ std::move(*action), std::move(values), caller_returned });
         }
 
@@ -110,6 +112,7 @@ nlohmann::json ServingSession::run() {
         plan = true;
     }
     if (!communication.empty()) throw std::runtime_error("serving ended with missing communication participants");
+
     nlohmann::json result{
         {     "completed_ns",       timeline_.now_ns() },
         {          "actions",                  actions },

@@ -102,6 +102,7 @@ public:
         }
         else {
             for (std::size_t depth = 0; depth + 1 < path.size(); ++depth) parent = parent.child(source_, path[depth]);
+
             const auto position = path.back();
             const auto call = parent.child(source_, position);
             const auto interface = source_.call_interface(*call.frame);
@@ -208,6 +209,7 @@ public:
             if (i && id != original_body) continue;
             auto bound = body.children.at(pos).bind(parameters, members);
             const auto arguments = target_.definitions.at(id).bind(std::move(bound.parameters), read_parameters(slot.at("constants")));
+
             if (i && (!arguments || TemplateGuard::read(slot.at("guard")).evaluate(*arguments))) continue;
             if (!arguments || sample.at("frame").at("site") != slot.at("site")
                 || !ObservedArguments::read(sample.at("input")).matches(*arguments, bound.members)) {

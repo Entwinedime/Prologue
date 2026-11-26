@@ -15,16 +15,11 @@ using Parameters = std::map<std::string, std::int64_t>;
 
 Parameters read_parameters(const nlohmann::json & source);
 
-// The same integer expression is checked on source observations and evaluated for targets.
+struct ExpressionOperator;
+
+// The same checked expressions bind both observed and projected geometry.
 class Expression {
 public:
-    enum class Kind { Add, Multiply, FloorDivide, Modulo, Minimum, Maximum, Equal, Less, LessEqual, And, Or };
-
-    struct Operation {
-        Kind kind;
-        std::vector<Expression> arguments;
-    };
-
     static Expression read(const nlohmann::json & value);
 
     std::int64_t evaluate(const Parameters & parameters) const;
@@ -35,7 +30,12 @@ public:
     nlohmann::json document(const std::map<std::string, Expression> & arguments) const;
 
 private:
-    static Expression make_operation(Kind kind, std::vector<Expression> arguments);
+    struct Operation {
+        const ExpressionOperator * definition;
+        std::vector<Expression> arguments;
+    };
+
+    static Expression make_operation(const ExpressionOperator & definition, std::vector<Expression> arguments);
     std::variant<std::int64_t, std::string, Operation> value_;
 };
 

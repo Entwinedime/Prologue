@@ -51,6 +51,7 @@ public:
             }
             for (const auto & port : scope.ports) {
                 add(port.at);
+
                 if (port.wait) add(port.wait->begin);
                 if (port.rendezvous) add(*port.rendezvous);
             }
