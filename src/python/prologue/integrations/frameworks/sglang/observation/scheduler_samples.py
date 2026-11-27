@@ -140,6 +140,7 @@ class SchedulerBatch:
         self.record = observer.recording if observed else nullcontext
         self.publishes = scheduler.ipc_channels.send_to_detokenizer.socket is not None
         self.preparation = None
+        self.expected = []
 
     def receive(self, receiver):
         if not self.publishes:
@@ -154,20 +155,27 @@ class SchedulerBatch:
                                                    message.finished_reasons, strict=True)]
 
     def prime_batch(self, tokens, receiver):
-        batch = self.scheduler.get_next_batch_to_run()
-        if batch is None:
+        if self.step(tokens, receiver) is None:
             raise ValueError("the native scheduler ran out of work while preparing local request progress")
-        self.advance(batch, tokens, receiver)
 
-    def advance(self, batch, tokens, receiver):
+    def step(self, tokens, receiver, *, skip_model=False):
         scheduler = self.scheduler
-        scheduler.cur_batch = batch
+        batch = scheduler.cur_batch = scheduler.get_next_batch_to_run()
+        if batch is not None:
+            return self.advance(batch, tokens, receiver, skip_model=skip_model)
+
+        scheduler.on_idle()
+        scheduler.last_batch = None
+        return None
+
+    def advance(self, batch, tokens, receiver, *, skip_model=False):
+        scheduler = self.scheduler
         supplied = torch.tensor([tokens[req.rid] for req in batch.reqs], dtype=torch.int64, device=scheduler.device)
         worker = scheduler.model_worker
         forward = worker.forward_batch_generation
 
         def supply(batch, **kwargs):
-            if not self.model_cut:
+            if skip_model or not self.model_cut:
                 return GenerationBatchResult(next_token_ids=supplied)
 
             # Future model work reads real KV. Let the native forward fill it before publishing the input token.
@@ -196,58 +204,130 @@ class SchedulerBatch:
 
         return requests, tokens
 
-    def warm_cost(self, rows, receiver):
+    def warm_cost(self, inputs, receiver):
+        started = monotonic_ns()
         scheduler = self.scheduler
         allocator, slots = scheduler.token_to_kv_pool_allocator, scheduler.req_to_token_pool
         free = allocator.available_size(), slots.available_size()
 
-        # Exercise the actual prompt shapes before timing, with just one Prefill and one Decode per request.
-        requests, tokens = self.operands(rows, output_tokens=2)
-        scheduler.process_input_requests(list(requests.values()))
-        finished, batches = set(), 0
-        while (batch := scheduler.get_next_batch_to_run()) is not None:
-            published = self.advance(batch, tokens, receiver)
+        if self.model_cut:
+
+            # Specializations depend on the selected batch, including its membership after native priming.
+            ingress, tokens = self.prepare(inputs, receiver)
+            batch = self.select(inputs["phase"], ingress)
+            warmed = BatchTensors.members(batch)
+            self.advance(batch, tokens, receiver)
+            expected, batches = None, 1
+        else:
+            requests, tokens = self.operands(inputs["requests"], output_tokens=2)
+            scheduler.process_input_requests(list(requests.values()))
+            warmed, expected, batches = None, requests.keys(), 0
+
+        # Finish warmup through native result processing without running unrelated model work.
+        finished = set()
+        productive = True
+        while True:
+            published = self.step(tokens, receiver, skip_model=True)
+            if published is None:
+                if scheduler.is_fully_idle():
+                    break
+                if not productive:
+                    raise ValueError("native warmup could not admit or advance its remaining requests")
+
+                # Filtering a full but finished Decode batch can free slots for the following selection.
+                productive = False
+                continue
+
+            productive = True
             finished.update(row["id"] for row in published if row["finished"])
             batches += 1
 
-        scheduler.cur_batch = scheduler.last_batch = None
         device_runtime().api.synchronize()
-        if self.publishes and finished != requests.keys():
+        if self.publishes and expected is not None and finished != expected:
             raise ValueError("native warmup did not complete every local request")
         if not scheduler.flush_cache(empty_cache=False) or (allocator.available_size(), slots.available_size()) != free:
             raise ValueError("native warmup did not restore the original free slots and KV capacity")
 
         self.preparation = {
-            "requests": len(requests),
+            "requests": len(inputs["requests"]),
             "native_batches": batches,
             "free_tokens": free[0],
             "free_slots": free[1],
+            "elapsed_ns": monotonic_ns() - started,
         }
+        if warmed is not None:
+            self.preparation["model_batch"] = warmed
+
+    def prepare_cohort(self, cohort, requests, tokens, receiver):
+        identities = cohort["admit"]
+        self.scheduler.process_input_requests([requests[identity] for identity in identities])
+        queued = {req.rid: req for req in self.scheduler.waiting_queue}
+        admitted = [queued[identity] for identity in identities]
+        frontier = cohort.get("prefill_until", {r.rid: len(r.origin_input_ids) for r in admitted})
+
+        # Native selection and result processing own every allocation and chunk transition.
+        while (before := {r.rid: r.kv_committed_len for r in admitted}) != frontier:
+            self.prime_batch(tokens, receiver)
+            after = {r.rid: r.kv_committed_len for r in admitted}
+            if after == before or any(after[rid] > length for rid, length in frontier.items()):
+                raise ValueError("native priming did not reach the requested prefill frontier")
+
+        for _ in range(cohort["decode_steps"]):
+            self.prime_batch(tokens, receiver)
+
+    def seed_cache(self, rows, receiver):
+        requests, tokens = self.operands(rows)
+        for identity in requests:
+            self.prepare_cohort({"admit": [identity], "decode_steps": 0}, requests, tokens, receiver)
+            batch = self.scheduler.get_next_batch_to_run()
+            self.scheduler.cur_batch = self.scheduler.last_batch = batch
+            if batch is not None or not self.scheduler.is_fully_idle():
+                raise ValueError("prefix seeding left a live native request")
+
+        # Keep the populated native prefix tree and discard the preparation request aliases.
+        self.aliases.clear()
+
+    def replay(self, plan, inputs, receiver):
+        requests, tokens = self.operands([*plan["prior_requests"], *inputs["requests"]])
+        arrivals = {}
+        for identity, step in plan["admissions"]:
+            arrivals.setdefault(step, []).append(requests[identity])
+
+        # Empty selections also update native scheduler state. Only the demanded cut contributes evidence.
+        for step in range(plan["steps"]):
+            if incoming := arrivals.get(step):
+                self.scheduler.process_input_requests(incoming)
+            self.step(tokens, receiver)
+        return arrivals.get(plan["steps"], []), tokens
 
     def prepare(self, inputs, receiver):
         scheduler = self.scheduler
-        requests, tokens = self.operands(inputs["requests"])
+        self.expected = [row["id"] for row in inputs["requests"]]
+        if seeds := inputs.get("cache_seeds"):
+            self.seed_cache(seeds, receiver)
 
-        for cohort in inputs["priming"]:
-            scheduler.process_input_requests([requests[identity] for identity in cohort["admit"]])
-            self.prime_batch(tokens, receiver)
-            for _ in range(cohort["decode_steps"]):
-                self.prime_batch(tokens, receiver)
+        if plan := inputs.get("replay"):
+            ingress, tokens = self.replay(plan, inputs, receiver)
+            if ingress:
+                scheduler.process_input_requests(ingress)
+            ingress = []
+        else:
+            requests, tokens = self.operands(inputs["requests"])
+            admitted = set()
 
-        if inputs["phase"] == "scheduler" and inputs["waiting"]:
-            scheduler.process_input_requests([requests[rid] for rid in inputs["waiting"]])
+            for cohort in inputs["priming"]:
+                self.prepare_cohort(cohort, requests, tokens, receiver)
+                admitted.update(cohort["admit"])
 
-        result = None
-        if not self.model_cut and inputs["phase"] in {"prefill", "decode"}:
-            result = GenerationBatchResult(
-                next_token_ids=torch.tensor(list(tokens.values()), dtype=torch.int64, device=scheduler.device)
-            )
+            if inputs["phase"] == "scheduler" and inputs["waiting"]:
+                scheduler.process_input_requests([requests[rid] for rid in inputs["waiting"]])
+            ingress = [request for identity, request in requests.items() if identity not in admitted]
 
-        return list(requests.values()), result
+        return ingress, tokens
 
     def select(self, phase, ingress):
         scheduler = self.scheduler
-        if phase in {"admission", "prefill"}:
+        if phase in {"admission", "prefill", "mixed"}:
             scheduler.process_input_requests(ingress)
 
         if phase == "admission":
@@ -259,7 +339,7 @@ class SchedulerBatch:
             if batch is not None:
                 raise ValueError("native worker selected a batch after its idle-pool flush")
         elif phase not in {"selection", "scheduler"} and (
-            batch is None or [req.rid for req in batch.reqs] != list(self.aliases) or BatchTensors.phase(batch) != phase
+            batch is None or [req.rid for req in batch.reqs] != self.expected or BatchTensors.phase(batch) != phase
         ):
             raise ValueError("native selection differs from the requested phase or ordered members")
 
@@ -270,6 +350,11 @@ class SchedulerBatch:
             if phase == "scheduler":
                 queues = self.observer.calls.scheduler_work()["context"]
                 batch = self.select(phase, ingress)
+
+                # The serving loop runs the native idle path after a selection without a batch.
+                if batch is None:
+                    self.scheduler.on_idle()
+
                 return {"phase": phase, "queues": queues, "selected": [req.rid for req in batch.reqs] if batch else []}
 
             batch = self.select(phase, ingress)
@@ -311,14 +396,21 @@ class SchedulerBatch:
             if batch_input is not None:
                 phase = batch_input["phase"]
                 warm = warm_cost and batch_input["requests"] and phase != "admission"
-                if self.publishes and (warm or batch_input["priming"] or phase == "prefill" and not self.model_cut):
+                needs_output = phase in {"prefill", "mixed"} and not self.model_cut
+                prepares_requests = any(batch_input.get(name) for name in ("priming", "cache_seeds", "replay"))
+                if self.publishes and (warm or prepares_requests or needs_output):
                     ctx = stack.enter_context(zmq.Context())
                     receiver = stack.enter_context(ctx.socket(zmq.PULL))
                     receiver.bind(ports.tokenizer_ipc_name)
 
                 if warm:
-                    self.warm_cost(batch_input["requests"], receiver)
-                ingress, result = self.prepare(batch_input, receiver)
+                    self.warm_cost(batch_input, receiver)
+                ingress, tokens = self.prepare(batch_input, receiver)
+
+                if not self.model_cut and phase in {"prefill", "decode", "mixed"}:
+                    result = GenerationBatchResult(next_token_ids=torch.tensor(
+                        [tokens[identity] for identity in self.expected], dtype=torch.int64, device=scheduler.device,
+                    ))
 
             if self.model_cut:
                 return self.observe_model(phase, ingress)

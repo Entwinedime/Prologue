@@ -11,6 +11,7 @@ from prologue.integrations.frameworks.sglang.abi.registry import symbols
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
 
 from ..contracts import CopyOperand, LocalCut, LocalRule, WorkerDomain, embedding_rule
+from ..endpoints import copy_sizes
 
 
 class LocalPrebuilt(LocalRule):
@@ -227,7 +228,9 @@ class LocalCopies(CopyOperand, LocalRule):
         operands = defaultdict(lambda: defaultdict(set))
         for query in queries:
             caller, dtype, width, size = self.point(query)
-            operands[caller, dtype, width][size].add(WorkerDomain.rank(query["domain"]))
+            for point in copy_sizes(query, width, size):
+                operands[caller, dtype, width][point].add(WorkerDomain.rank(query["domain"]))
+
         cuts = [{"caller": caller, "dtype": dtype, "element_bytes": width,
                  "points": [{"bytes": size, "ranks": sorted(ranks)} for size, ranks in sorted(sizes.items())]}
                 for (caller, dtype, width), sizes in sorted(operands.items())]
@@ -261,18 +264,26 @@ class LocalCopies(CopyOperand, LocalRule):
             domain = query["domain"]
             caller, dtype, width, size = self.point(query)
             key = caller, dtype, size
-            row = rows.get(key)
+            rank = WorkerDomain.rank(domain)
+            verified = {
+                point: rows[point] for n in copy_sizes(query, width, size) if (point := (caller, dtype, n)) in rows
+                and planned[point][0] == width and rank in planned[point][1]
+                and rows[point]["verified_operand"] and rows[point]["observations_ns"]
+            }
 
             if (domain["implementation"]["framework_revision"] != inputs["framework_revision"]
                     or self.runtime(domain) != self.runtime(recording.manifest["runtime"])):
                 answers.append({"status": "untriggered", "missing": "target_runtime"})
-            elif (not row or planned[key][0] != width or WorkerDomain.rank(domain) not in planned[key][1]
-                    or not row["verified_operand"] or not row["observations_ns"]):
+            elif key not in verified:
                 answers.append({"status": "untriggered", "missing": "matching_synchronous_copy_and_destination"})
             else:
                 name, _, keys = groups.setdefault(cost_identity(domain), (f"samples/{len(groups)}.json", domain, set()))
-                keys.add(key)
-                answers.append({"status": "qualified", "asset": name, "observations": len(row["observations_ns"])})
+                keys.update(verified)
+                answer = {"status": "qualified", "asset": name, "observations": len(verified[key]["observations_ns"])}
+                if endpoints := sorted(n for _, _, n in verified if n != size):
+                    answer["endpoint_bytes"] = endpoints
+
+                answers.append(answer)
 
         products = {}
         for name, domain, keys in groups.values():

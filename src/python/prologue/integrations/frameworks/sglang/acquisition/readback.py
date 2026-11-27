@@ -55,25 +55,6 @@ class WorkerCapture:
         return result
 
     @staticmethod
-    def template_resources(facts):
-        environment = facts["environment"]
-        if environment["parallel"]["logical_pp"] != 1 or environment["implementation"]["disaggregation_mode"] != "null":
-            return facts["resources"]
-
-        # Synchronous cuts run in the caller's stream. Both device markers record that actual stream, including
-        # around collective transport.
-        streams = {facts["spans"][p["at"]["span"]]["resource"] for scope in facts["scopes"] for p in scope["ports"]
-                   if p["name"] in {"device.enter", "device.complete"}}
-        resources = facts["resources"]
-        if len(streams) == 1:
-            lane, = streams
-            if resources[lane]["kind"] == "stream":
-                resources = resources.copy()
-                resources[lane] = resources[lane] | {"binding": "synchronous_caller"}
-
-        return resources
-
-    @staticmethod
     def observed_facts(source, rank, trace):
         raw = read_json(source / f"rank-{rank}.json")
         raw["scopes"] = observed_scopes(raw, device_runtime().tensor_layouts)
@@ -152,15 +133,17 @@ class BatchReadback:
 
     @staticmethod
     def check_host(batch, bounds, facts):
-        expected = []
+        expected, publication = [], []
         for row, member in zip(batch["requests"], bounds["members"], strict=True):
             prompt = sum(n for _, n in row["prompt"])
-            count = 1 if batch["phase"] == "prefill" else member["context_tokens"] - prompt + 2
-            expected.append({"id": row["id"], "generated_tokens": count, "finished": count == row["output_tokens"]})
+            context = member["context_tokens"]
+            count = (context - prompt + 2 if member["phase"] == "decode"
+                     else int(context + member["new_tokens"] == prompt))
+            effect = {"id": row["id"], "generated_tokens": count, "finished": count == row["output_tokens"]}
+            expected.append(effect)
+            if count:
+                publication.append(effect | {"tokens": [row["next_token"]]})
 
-        publication = [
-            effect | {"tokens": [row["next_token"]]} for effect, row in zip(expected, batch["requests"], strict=True)
-        ]
         emitter = facts["environment"]["parallel"]["tp_rank"] == 0
 
         if bounds["effects"] != expected or bounds["publication"] != (publication if emitter else []):
@@ -170,7 +153,7 @@ class BatchReadback:
         owners = {b.get("segment", {}).get("owner") for b in bindings}
         produced = [b["publication"] for b in bindings if "publication" in b]
         completed = [b["effects"] for b in bindings if "effects" in b and b["segment"]["owner"] == "result"]
-        named = [{k: e[k] for k in ("id", "generated_tokens")} for e in expected]
+        named = [{k: e[k] for k in ("id", "generated_tokens")} for e in publication]
         required = {"selection", "preparation", "result"} | ({"publication"} if emitter else set())
 
         if not required <= owners or produced != ([named] if emitter else []) or completed != [expected]:

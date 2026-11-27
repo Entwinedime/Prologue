@@ -29,8 +29,14 @@ class FlowExecution(CallSegments):
         self.groups = ParallelGroups()
         self.clocks = DecisionClocks(self)
         self.clocks.install()
+
         HostReads(self).install()
-        self.selection = BatchSelection(self)
+        retain = (
+            scheduler.ps.tp_size == scheduler.ps.pp_size == 1 and scheduler.experts is None
+            and scheduler.server_args.disaggregation_mode == "null"
+            and (scheduler.chunked_prefill_size is not None or not scheduler.server_args.disable_radix_cache)
+        )
+        self.selection = BatchSelection(self, retain_preparation=retain)
         self.selection.install()
         self.resources = ResourceCalls(self)
         self.resources.install()
@@ -62,7 +68,10 @@ class FlowExecution(CallSegments):
         return self.scheduler.request_input.request_id(native_id)
 
     def work(self, batch, members=None, *, phase="prefill"):
-        return self.scheduler.batch_names.describe(batch) | super().work(batch, members, phase=phase)
+        work = self.scheduler.batch_names.describe(batch) | super().work(batch, members, phase=phase)
+        if preparation := self.selection.preparation(batch):
+            work["preparation"] = preparation
+        return work
 
     @staticmethod
     def completed(requests):

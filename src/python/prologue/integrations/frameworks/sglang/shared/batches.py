@@ -209,31 +209,74 @@ class DecisionClocks:
 
 class BatchOperands:
     queues = ("running", "previous", "waiting", "chunked")
+    replay_phases = {"prefill", "decode", "mixed", "scheduler"}
 
     @classmethod
     def queue_input(cls, query):
         contexts = [parent["context"] for parent in query.get("callers", ()) if parent["owner"] == "selection"]
         contexts.append(query.get("context", {}))
         for context in contexts:
-            if all(name in context for name in cls.queues) and not context["chunked"]:
+            if all(name in context for name in cls.queues):
                 return {name: context[name] for name in cls.queues}
+
+    @staticmethod
+    def result_geometry(progress):
+        members = []
+        for request in progress:
+            end = request["committed_tokens"]
+            if request["generated_tokens"]:
+
+                # Decode advances the native KV position by one without updating the previous extend range.
+                phase, begin = "decode", end - 1
+            else:
+                extent = request["extend"]
+                if extent is None or extent[1] != end:
+                    return ()
+
+                phase, begin = "prefill", extent[0]
+            if not 0 <= begin < end:
+                return ()
+
+            members.append({"id": request["id"], "phase": phase, "context_tokens": begin, "new_tokens": end - begin})
+
+        return members
+
+    @staticmethod
+    def queue_cut(queues):
+        members = {}
+        for queue in queues.values():
+            for member in queue:
+                if members.setdefault(member["id"], member) != member:
+                    raise ValueError("native queues give different progress for the same request")
+
+        return "scheduler", list(members.values())
 
     @classmethod
     def cut(cls, query):
         action = query.get("action")
         condition = query.get("condition", {})
         members = query.get("members", ())
-        owners = {parent["owner"] for parent in query.get("callers", ())}
+        callers = query.get("callers", ())
+        owners = {parent["owner"] for parent in callers}
 
         if action == "segment":
             owners.add(condition.get("owner"))
 
-        # Nested frees and publications run inside the same result call. Its batch supplies the phase and token
-        # progress.
+        # A call inside selection owns local operands, but its preparation can depend on all live queues.
+        if "selection" in owners and query.get("preparation", {}).get("replay"):
+            if queues := cls.queue_input(query):
+                return cls.queue_cut(queues)
+
+        # Cache bookkeeping may own only one request. Recreate its enclosing batch from the result entry.
+        if not members and "result" in owners:
+            result = next((parent for parent in reversed(callers) if parent["owner"] == "result"), None)
+            if result is not None:
+                members = cls.result_geometry(result["context"]["members"])
+
         if members and (action in {"run_batch", "host_read"} or owners & {"preparation", "result", "publication"}):
-            phase = members[0]["phase"]
-            if phase in {"prefill", "decode"} and all(member["phase"] == phase for member in members):
-                return phase, members
+            phases = {member["phase"] for member in members}
+            if phases <= {"prefill", "decode"}:
+                return (next(iter(phases)) if len(phases) == 1 else "mixed"), members
 
         context = query.get("context", {})
         if action == "batch_transform" and context.get("left") and context.get("operation") in {"filter", "merge"}:
@@ -251,13 +294,7 @@ class BatchOperands:
 
         # Nested decisions carry the queue at entry to native selection. A request may also be in the previous batch.
         if (queues := cls.queue_input(query)) is not None:
-            members = {}
-            for queue in queues.values():
-                for member in queue:
-                    if members.setdefault(member["id"], member) != member:
-                        raise ValueError("native queues give different progress for the same request")
-
-            return "scheduler", list(members.values())
+            return cls.queue_cut(queues)
 
     @classmethod
     def bind(cls, query, serving, domain):
@@ -267,22 +304,23 @@ class BatchOperands:
 
         mode = domain["implementation"]["disaggregation_mode"]
         instance, = (item for item in serving.instances if item.mode == mode)
-        content = WorkloadContent(serving.workload["requests"], serving.workload["prefixes"])
-        rows = []
-        _, members = cut
+        content = serving.content
 
-        for member in members:
-            identity = member["id"]
-            rows.append(
-                {
-                    "id": identity,
-                    "prompt": content.prompt_runs(identity),
-                    "next_token": content.output_token(identity),
-                    "output_tokens": content.requests[identity]["output_tokens"],
-                }
-            )
+        def request(identity):
+            return {
+                "id": identity,
+                "prompt": content.prompt_runs(identity),
+                "next_token": content.output_token(identity),
+                "output_tokens": content.requests[identity]["output_tokens"],
+            }
 
-        query["native_inputs"] = {"configuration": instance.configuration.values, "requests": rows}
+        phase, members = cut
+        expected = {member["id"]: request(member["id"]) for member in members}
+        native = {"configuration": instance.configuration.values, "requests": list(expected.values())}
+        if phase in cls.replay_phases and (replay := query.get("preparation", {}).get("replay")):
+            native["prior_requests"] = [request(identity) for identity, _ in replay["admissions"]
+                                        if identity not in expected]
+        query["native_inputs"] = native
         return True
 
 

@@ -103,7 +103,7 @@ class CostSamples:
             return cls.batch(session, model, workspace, recording=recording)
 
         with TemporaryDirectory(dir=workspace) as scratch:
-            report = cls.transport(recording, queries, model, Path(scratch))
+            (_, report), = cls.transport(recording, queries, model, Path(scratch))
         return report | {"acquisition_rule": recording.inputs["rule"], "native_recordings": [recording.attempt_id]}
 
     @classmethod
@@ -137,33 +137,44 @@ class CostSamples:
         return samples.document(absent)
 
     @classmethod
+    def device_support(cls, facts, catalog):
+        table = cls.worker_table(facts, catalog)
+        return {"samples/device.json": table} if table["samples"] else {}
+
+    @classmethod
     def transport(cls, recording, queries, model, directory):
         embedded = recording.inputs["rule"] == embedding_rule
         sources = (dict.fromkeys(map(int, recording.manifest["workers"]), recording.source) if embedded
                    else {worker.rank: worker.source for worker in WorkerCapture.observed(recording)})
         traces = {r: path / (f"sdk-{r}" if embedded else "sdk") / "trace.json" for r, path in sources.items()}
-        rank = WorkerDomain.rank(queries[0]["domain"])
-
-        if any(WorkerDomain.rank(q["domain"]) != rank or set(q["features"]["transport"]["members"]) - sources.keys()
-               for q in queries):
-            raise ValueError("transport service requires one worker and an observed physical peer group")
+        ranks = set()
+        for query in queries:
+            rank = WorkerDomain.rank(query["domain"])
+            operand = query["features"]["transport"]
+            if rank != operand["rank"] or not sources.keys() >= {rank, *operand["members"]}:
+                raise ValueError("transport service requires all workers in the observed physical peer group")
+            ranks.add(rank)
 
         if recording.inputs["deployment"].get("acquisition_mode", "full") != "full":
             raise ValueError("transport calibration requires the full physical deployment")
         peers = {actor: WorkerCapture.observed_facts(source, actor, traces[actor]) for actor, source in sources.items()}
-        catalog = WorkerCapture.project_work(peers[rank], model, directory)
         backend = platform_backend()
-        clocks = backend.collectives(peers, sources, [rank])
-        services = backend.observed_services(catalog.graph, peers[rank], clocks.samples[rank], physical_peers=True)
-        origin = {"native_recording": recording.attempt_id, "rank": rank}
-        profile = platform_backend().transport_profile(sources, peers, traces[rank], origin,
-                                         recording.inputs["image"], recording.inputs["deployment"])
-        samples, absent = profile.samples(catalog, services)
-        report = samples.document(absent) | {"transport_profile": profile.qualification}
+        clocks = backend.collectives(peers, sources, sorted(ranks))
 
-        if conflicts := clocks.notification_conflicts[rank]:
-            report["collective_notification_conflicts"] = conflicts
-        return report
+        for rank in sorted(ranks):
+            worker = directory / str(rank)
+            worker.mkdir()
+            catalog = WorkerCapture.project_work(peers[rank], model, worker)
+            services = backend.observed_services(catalog.graph, peers[rank], clocks.samples[rank], physical_peers=True)
+            origin = {"native_recording": recording.attempt_id, "rank": rank}
+            profile = backend.transport_profile(sources, peers, traces[rank], origin,
+                                                recording.inputs["image"], recording.inputs["deployment"])
+            samples, absent = profile.samples(catalog, services)
+            report = samples.document(absent) | {"transport_profile": profile.qualification}
+
+            if conflicts := clocks.notification_conflicts[rank]:
+                report["collective_notification_conflicts"] = conflicts
+            yield rank, report
 
     def measure(self, rank, catalog, *, transport_only=False):
         observation = {"production": str(self.production), "rank": rank}

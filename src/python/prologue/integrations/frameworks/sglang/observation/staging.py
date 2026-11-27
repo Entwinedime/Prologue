@@ -144,6 +144,7 @@ class ShardTransport:
         self.auxiliary = auxiliary
         self.record = record
         self.lease = None
+        self.local_only = False
 
     def acquire(self, handle):
         with self.auxiliary():
@@ -170,6 +171,8 @@ class ShardTransport:
 
     @contextmanager
     def peers(self):
+        if self.local_only:
+            raise ValueError("targeted local work cannot issue a peer transfer")
         handle = self.lease
         if handle is None:
             yield

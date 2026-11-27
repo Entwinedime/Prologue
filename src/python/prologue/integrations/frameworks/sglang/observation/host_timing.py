@@ -20,6 +20,7 @@ from prologue.integrations.frameworks.sglang.observation.experts import NativeCo
 from prologue.integrations.frameworks.sglang.observation.kv_scopes import NativeKvScopes
 from prologue.integrations.frameworks.sglang.observation.model import ModelScopes
 from prologue.integrations.frameworks.sglang.observation.pipeline import HostPipelineScopes
+from prologue.integrations.frameworks.sglang.observation.probes.batch_timing import BatchTiming
 from prologue.integrations.frameworks.sglang.observation.serving import ServingCuts
 from prologue.integrations.frameworks.sglang.observation.window import ObservationWindow
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors, RequestStateCalls
@@ -78,6 +79,7 @@ class NativeHostSamples(ServingCuts):
     def scope(
         self, role, site, implementation, *, work=None, condition=None, parameters=None, bindings=None, dimensions=None
     ):
+        observed_begin = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
         occurrence = {
             "id": len(self.scopes), "parent": self.parent.get(), "role": role, "site": site,
             "implementation": implementation, "work": {} if work is None else dict(work),
@@ -98,8 +100,14 @@ class NativeHostSamples(ServingCuts):
         try:
             yield occurrence
         finally:
-            occurrence["raw_interval"] = [begin, clock_gettime_ns(CLOCK_MONOTONIC_RAW)]
+            end = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+            native_begin, native_end = occurrence.setdefault("raw_interval", [begin, end])
             self.parent.reset(previous)
+
+            # A caller encloses the observer's setup and cleanup for each nested native scope.
+            thread = occurrence["thread"]
+            self.auxiliary_intervals.append([thread, observed_begin, native_begin])
+            self.auxiliary_intervals.append([thread, native_end, clock_gettime_ns(CLOCK_MONOTONIC_RAW)])
 
     def native_call(self, role, original, *, implementation=None, **facts):
         implementation = implementation or native_implementation(original)
@@ -166,8 +174,24 @@ class NativeHostSamples(ServingCuts):
 
     @contextmanager
     def read_boundary(self, kind, original, work, condition):
-        with self.native_call("query", original, work=work, condition=condition):
-            yield {}
+        with self.native_call("query", original, work=work, condition=condition) as occurrence:
+            yield {"native_read": original, "scope": occurrence}
+
+    def native_read(self, query, original, *args, **kwargs):
+        if query is None or query["native_read"] is not original:
+            return original(*args, **kwargs)
+
+        # Only the outer native read owns the service interval, including any internal clock calls.
+        occurrence = query["scope"]
+        occurrence["direct_native_call"] = True
+        return self.timed_call(occurrence, original, *args, **kwargs)
+
+    @staticmethod
+    def timed_call(occurrence, original, *args, **kwargs):
+        begin = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+        result = original(*args, **kwargs)
+        occurrence["raw_interval"] = [begin, clock_gettime_ns(CLOCK_MONOTONIC_RAW)]
+        return result
 
     def load_model(self, original, runner):
         result = original(runner)
@@ -202,25 +226,25 @@ class NativeHostSamples(ServingCuts):
                 with self.auxiliary():
                     arguments = ModelScopes.bound_arguments(body_signature, args, kwargs)
                     scope["dimensions"] = ModelScopes.model_dimensions(arguments)
-            return original(*args, **kwargs)
+            return self.timed_call(scope, original, *args, **kwargs)
 
     def run_batch(self, original, scheduler, batch, *args, **kwargs):
         work = self.batch_work(batch)
         with self.auxiliary():
             members = work["members"]
             dimensions = BatchTensors.input_dimensions(sum(member["new_tokens"] for member in members), len(members))
-        with self.native_call("run_batch", original, work=work, dimensions=dimensions):
-            return original(scheduler, batch, *args, **kwargs)
+        with self.native_call("run_batch", original, work=work, dimensions=dimensions) as scope:
+            return self.timed_call(scope, original, scheduler, batch, *args, **kwargs)
 
     def forward(self, original, runner, batch, *args, **kwargs):
         with self.auxiliary():
             dimensions = BatchTensors.input_dimensions(batch.input_ids.numel(), batch.batch_size)
-        with self.native_call("model", original, dimensions=dimensions):
-            return original(runner, batch, *args, **kwargs)
+        with self.native_call("model", original, dimensions=dimensions) as scope:
+            return self.timed_call(scope, original, runner, batch, *args, **kwargs)
 
     def sample(self, original, runner, *args, **kwargs):
-        with self.native_call("sample", original):
-            return original(runner, *args, **kwargs)
+        with self.native_call("sample", original) as scope:
+            return self.timed_call(scope, original, runner, *args, **kwargs)
 
     @contextmanager
     def auxiliary(self):
@@ -274,6 +298,7 @@ class NativeTiming:
         self.content = NativeContent(description)
         self.host = None
         self.attention = attention(self.window, description) if attention else None
+        self.batch_timing = BatchTiming(self.window, self.content.aliases) if description["batch_timing"] else None
         self.routing = None
 
         if host_profile is not None:
@@ -373,6 +398,8 @@ class NativeTiming:
             else:
                 requests = [row for row in self.requests.values() if len(row) > 1]
                 record = {"requests": requests, "specialization_loads": self.specializations.finish()}
+                if self.batch_timing is not None:
+                    record["batch_timing"] = self.batch_timing.document()
 
             write_json(directory / "record.json", {**record, "rank": rank}, replace=False)
 
@@ -401,6 +428,8 @@ class NativeTiming:
             HookTable.around(symbols().sender_wrapper_send_output, self.publish)
 
         self.content.install()
+        if self.batch_timing is not None:
+            self.batch_timing.install()
         if self.routing is not None:
             HookTable.around(symbols().model_runner_load_model, self.load_routed_model)
             self.routing.install()

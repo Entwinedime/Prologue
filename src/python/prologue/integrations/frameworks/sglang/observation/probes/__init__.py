@@ -1,4 +1,4 @@
-"""Register short native captures without loading model or device libraries during CLI parsing."""
+"""Register native probes without loading model or device libraries during CLI parsing."""
 
 import os
 from collections.abc import Callable

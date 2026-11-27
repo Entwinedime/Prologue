@@ -40,6 +40,7 @@ class ServingObservation:
     resource_trace: bool
     service_reference: bool
     latency_only: bool
+    batch_timing: bool
     host_timing: bool
     attention_sites: dict[str, list[str]] | None
 
@@ -131,7 +132,10 @@ class NativeServingInstance:
             replace=False,
         )
 
-        return {"latency": str(path.relative_to(self.output))}
+        published = {"latency": str(path.relative_to(self.output))}
+        if self.options.batch_timing:
+            published["batch_timing"] = {rank: str(record.relative_to(self.output)) for rank, record in records.items()}
+        return published
 
     def observe(self, engine, capture, clock, barrier):
         windows = None
@@ -370,7 +374,7 @@ class NativeRendezvous:
 class NativeServingSession:
     """Supervise all native instances so a child failure reaches the owner before the rest are torn down."""
 
-    def __init__(self, job, output, mode, local_shards, attention_sites):
+    def __init__(self, job, output, mode, local_shards, attention_sites, *, batch_timing=False):
         self.framework_revision = NativeConfiguration.upstream_revision(route().revision)
         serving = CaptureInput(job)
         self.output = output.resolve()
@@ -384,6 +388,7 @@ class NativeServingSession:
             resource_trace=resource_trace or service_reference,
             service_reference=service_reference,
             latency_only=latency_only,
+            batch_timing=batch_timing,
             host_timing=host_timing,
             attention_sites=attention_sites,
         )

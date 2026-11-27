@@ -78,8 +78,9 @@ class CallFrame:
     def child(self, work):
 
         # Preserve the caller's logical position, not a run-local call counter or resource binding.
-        if "observation_context" in self.work:
-            work.setdefault("observation_context", self.work["observation_context"])
+        for key in ("observation_context", "preparation"):
+            if key in self.work:
+                work.setdefault(key, self.work[key])
         work["callers"] = [*self.work.get("callers", ()), {
             "owner": self.operation, "context": self.work.get("context", {}),
             "entry": self.entry, "entry_context": self.entry_context,
@@ -99,6 +100,9 @@ class CallSegments:
     def enclosing(self, frame):
         return nullcontext()
 
+    def auxiliary(self):
+        return nullcontext()
+
     def fragment(self, frame):
         raise NotImplementedError
 
@@ -113,13 +117,14 @@ class CallSegments:
 
     @contextmanager
     def read(self, kind, original, work, *, read=None):
-        work = dict(work)
-        work["context"] = {**work["context"], "query": kind}
-        condition = {"query": kind}
+        with self.auxiliary():
+            work = dict(work)
+            work["context"] = {**work["context"], "query": kind}
+            condition = {"query": kind}
 
-        if read is not None:
-            work["context"]["read"] = read
-            condition["read"] = read
+            if read is not None:
+                work["context"]["read"] = read
+                condition["read"] = read
 
         # Finish preceding CPU work before observing state; do not add a wait for the queried producer.
         with self.separate("query", work), self.read_boundary(kind, original, work, condition) as query:
@@ -130,9 +135,14 @@ class CallSegments:
             finally:
                 self.reading.reset(previous)
 
+    def native_read(self, query, original, *args, **kwargs):
+        return original(*args, **kwargs)
+
     def clock_sample(self, original, query):
-        value = original()
-        return value, round(value * 1_000_000_000)
+        value = self.native_read(query, original)
+        with self.auxiliary():
+            ticks = round(value * 1_000_000_000)
+        return value, ticks
 
     def clock_read(self, original, description):
         if not self.enabled:
@@ -143,11 +153,13 @@ class CallSegments:
 
             # A poll's internal clock belongs to that read, not to a second independently expanded query.
             value, ticks = self.clock_sample(original, reading)
-            reading["clocks"].append({"read": description, "result": ticks})
+            with self.auxiliary():
+                reading["clocks"].append({"read": description, "result": ticks})
             return value
 
-        parent = self.current.get()
-        work = self.scheduler_work() if parent is None else dict(parent.work)
+        with self.auxiliary():
+            parent = self.current.get()
+            work = self.scheduler_work() if parent is None else dict(parent.work)
         with self.read("clock", original, work, read=description) as query:
             value, query["result"] = self.clock_sample(original, query)
 
@@ -215,44 +227,50 @@ class CallSegments:
         return work
 
     def resume(self, frame, entry="call.enter", context=None, tensor_inputs=None):
-        frame.entry = entry
-        frame.entry_context = {} if context is None else context
-        frame.exit = ""
-        frame.exit_context = {}
-        frame.segment_facts.clear()
+        with self.auxiliary():
+            frame.entry = entry
+            frame.entry_context = {} if context is None else context
+            frame.exit = ""
+            frame.exit_context = {}
+            frame.segment_facts.clear()
 
-        if entry != "call.enter" and tensor_inputs is not None:
+            if entry != "call.enter" and tensor_inputs is not None:
 
-            # A resource-only child leaves borrowed inputs live; explicit returns replace the continuation contract.
-            frame.tensor_inputs = dict(tensor_inputs)
+                # A resource-only child leaves borrowed inputs live.
+                frame.tensor_inputs = dict(tensor_inputs)
 
-        frame.tensor_outputs = {}
-        frame.segment = self.fragment(frame)
-        frame.segment.__enter__()
+            frame.tensor_outputs = {}
+            frame.segment = self.fragment(frame)
+            frame.segment.__enter__()
 
     def suspend(self, frame, boundary, context=None, error=None):
-        segment, frame.segment = frame.segment, None
-        if segment is None:
-            return
-        frame.exit = boundary
-        frame.exit_context = {} if context is None else context
-        segment.__exit__(
-            type(error) if error is not None else None, error, error.__traceback__ if error is not None else None
-        )
+        with self.auxiliary():
+            segment, frame.segment = frame.segment, None
+            if segment is None:
+                return
+
+            frame.exit = boundary
+            frame.exit_context = {} if context is None else context
+            segment.__exit__(
+                type(error) if error is not None else None, error, error.__traceback__ if error is not None else None
+            )
 
     @contextmanager
     def separate(self, operation, work):
-        parent = self.current.get()
-        context = work.get("context", {})
-        if parent is not None:
-            parent.child(work)
-            self.suspend(parent, operation, context)
+        with self.auxiliary():
+            parent = self.current.get()
+            context = work.get("context", {})
+            if parent is not None:
+                parent.child(work)
+                self.suspend(parent, operation, context)
 
-        previous = self.current.set(None)
+            previous = self.current.set(None)
+
         try:
             yield
         finally:
-            self.current.reset(previous)
+            with self.auxiliary():
+                self.current.reset(previous)
 
         # Independently submitted actions must not also appear inside their caller's segment.
         if parent is not None:
@@ -264,29 +282,30 @@ class CallSegments:
         host_only=False, device_tail=False, tensor_inputs=None, tensor_outputs=None, metadata_inputs=None,
         allocations=None, condition=None, host_inputs=None, local_copies=None, local_upload=None,
     ):
-        parent = self.current.get()
-        work = dict(parent.work if work is None else work)
-        context = work.get("context", {})
+        # The parent segment can still be open while the observer prepares its child.
+        with self.auxiliary():
+            parent = self.current.get()
+            work = dict(parent.work if work is None else work)
+            context = work.get("context", {})
 
-        if parent is not None:
-            parent.child(work)
-            self.suspend(parent, operation, context)
+            if parent is not None:
+                parent.child(work)
+                self.suspend(parent, operation, context)
 
-        # Continuations inherit their owner's inputs; independent resource APIs supply their own explicit inputs.
-        frame = CallFrame(
-            operation, original,
-            dict(parent.parameters if parameters is None else parameters),
-            work, inputs, guards, host_only,
-            tensor_inputs={} if tensor_inputs is None else tensor_inputs,
-            metadata_inputs={} if metadata_inputs is None else metadata_inputs,
-            tensor_allocations={} if allocations is None else allocations,
-            condition={} if condition is None else condition,
-            host_inputs={} if host_inputs is None else host_inputs,
-            local_copies={} if local_copies is None else local_copies,
-            local_upload=local_upload,
-            device_tail=device_tail,
-        )
-        previous = self.current.set(frame)
+            frame = CallFrame(
+                operation, original,
+                dict(parent.parameters if parameters is None else parameters),
+                work, inputs, guards, host_only,
+                tensor_inputs={} if tensor_inputs is None else tensor_inputs,
+                metadata_inputs={} if metadata_inputs is None else metadata_inputs,
+                tensor_allocations={} if allocations is None else allocations,
+                condition={} if condition is None else condition,
+                host_inputs={} if host_inputs is None else host_inputs,
+                local_copies={} if local_copies is None else local_copies,
+                local_upload=local_upload,
+                device_tail=device_tail,
+            )
+            previous = self.current.set(frame)
 
         try:
             with self.enclosing(frame):
@@ -299,7 +318,8 @@ class CallSegments:
                 else:
                     self.suspend(frame, "call.return")
         finally:
-            self.current.reset(previous)
+            with self.auxiliary():
+                self.current.reset(previous)
 
         # Resume only after a successful child return; a failing call cannot publish another successful segment.
         if parent is not None:

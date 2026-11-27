@@ -24,6 +24,7 @@ def serving_facts(directory, rank, trace, *, evidence):
     observation = observed_graph(directory, rank, recording, trace, evidence=evidence)
     observation.name_streams(*PipelineABI.stream_declarations(recording))
     facts = observation.document()
+    facts["resources"] = SourceLayout.resource_bindings(facts)
     native.connect_metadata(facts)
     if evidence and (timing := native.protocol_timings()) is not None:
         facts["measurements"]["pd_protocol"] = timing

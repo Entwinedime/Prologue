@@ -311,18 +311,45 @@ class BatchAllocation(ActionCall):
 
 
 class BatchSelection:
-    def __init__(self, calls) -> None:
+    def __init__(self, calls, *, retain_preparation=False) -> None:
         self.calls = calls
+        self.retain_preparation = retain_preparation
+        self.prepared = None
+        self.steps = 0
+        self.admissions = {}
 
     def select(self, original, scheduler, *args, **kwargs):
         if not self.calls.enabled:
             return original(scheduler, *args, **kwargs)
 
         work = self.calls.scheduler_work()
+        queues = work["context"]
+        preparation = None
+        if self.retain_preparation:
+
+            # Selection can mutate the previous ScheduleBatch in place. Start a new preparation lifetime.
+            self.prepared = None
+            for request in queues["waiting"]:
+                self.admissions.setdefault(request["id"], self.steps)
+
+            replay = {"steps": self.steps, "admissions": list(self.admissions.items())}
+            preparation = queues | {"replay": replay}
+            work["preparation"] = preparation
 
         # Native admission and loops choose child actions; the envelope has no second execution graph.
         with self.calls.call("selection", original, parameters={}, work=work, host_only=True):
-            return original(scheduler, *args, **kwargs)
+            batch = original(scheduler, *args, **kwargs)
+
+        # A selection without a batch can still release finished requests before the next attempt.
+        if self.retain_preparation:
+            self.steps += 1
+            if batch is not None:
+                self.prepared = batch, preparation
+        return batch
+
+    def preparation(self, batch):
+        if self.prepared is not None and self.prepared[0] is batch:
+            return self.prepared[1]
 
     def prepare(self, original, batch):
         if not self.calls.enabled:

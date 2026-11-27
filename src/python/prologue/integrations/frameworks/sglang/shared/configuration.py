@@ -8,7 +8,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from prologue.common.cost import WorkCatalog
-from prologue.common.workload import ExpertRoutes
+from prologue.common.workload import ExpertRoutes, WorkloadContent
 from prologue.integrations.bindings import platform_domain
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 
@@ -180,6 +180,7 @@ class ServingInput:
             raise ValueError("native PD transfer requires equal page sizes")
 
         self.workload = self.workload_input(source["workload"])
+        self.content = WorkloadContent(self.workload["requests"], self.workload["prefixes"])
         for instance in self.instances:
             routes = instance.configuration.routes(self.workload)
             if routes is not None:
@@ -304,7 +305,7 @@ class AttentionCatalog:
         instances = job["instances"]
         if len(instances) == 1 and instances[0]["mode"] == "null":
             settings = instances[0]["configuration"]
-            if settings["tp"] == settings.get("pp", 1) == 1 and "ep" not in settings:
+            if settings.get("pp", 1) == 1 and "ep" not in settings:
                 return {"model": job["model"], "configuration": settings}
         return None
 

@@ -12,12 +12,12 @@ from prologue.integrations.frameworks.sglang.shared.configuration import (
     AttentionCatalog,
     CaptureInput,
 )
+from prologue.integrations.frameworks.sglang.shared.resources import SourceLayout
 
 from . import recipes
 from .contracts import SGLangPlacement
 from .evidence import CostSamples
 from .host_samples import HostCostSamples
-from .readback import WorkerCapture
 from .sampling import BatchHostReuse, SGLangSampling
 from .target import SGLangTask
 
@@ -50,13 +50,13 @@ class SGLangLaunch(SGLangPlacement):
         )
         installed = contributions(recipes, "rules")
         rules = (kind(context) for kind in installed if training_sources is None or kind.source_window)
-        return LocalAcquisition(rules, context, cls.check_local_placement, WorkerCapture.template_resources)
+        return LocalAcquisition(rules, context, cls.check_local_placement, SourceLayout.resource_bindings)
 
     def sampling(self, source):
         return SGLangSampling(self, source)
 
-    def capture(self, arguments, limit=None, *, latency_only=False, host_timing=False, service_reference=False,
-                attention_sites=None):
+    def capture(self, arguments, limit=None, *, latency_only=False, batch_timing=False, host_timing=False,
+                service_reference=False, attention_sites=None):
         if attention_sites is not None:
             ranks = {str(rank) for rank in range(self.serving.worker_count)}
             if not isinstance(attention_sites, dict) or not attention_sites or not attention_sites.keys() <= ranks:
@@ -75,13 +75,14 @@ class SGLangLaunch(SGLangPlacement):
             "framework_revision": self.image_revision(image), "model_path": str(destination.resolve(strict=True)),
             "model_destination": str(destination), "resource_trace": arguments.resource_trace or service_reference,
         }
-        latency = latency_only or bool(attention_sites)
+        latency = latency_only or batch_timing or bool(attention_sites)
         flags = {"resource_trace": arguments.resource_trace, "latency_only": latency_only,
-                 "attention": attention_sites, "host_timing": host_timing, "service_reference": service_reference}
+                 "batch_timing": batch_timing, "attention": attention_sites, "host_timing": host_timing,
+                 "service_reference": service_reference}
 
         if attention_sites:
             inputs["job"] = self.job | {"attention_sites": attention_sites}
-        inputs.update({k: True for k in ("host_timing", "service_reference") if flags[k]})
+        inputs.update({k: True for k in ("batch_timing", "host_timing", "service_reference") if flags[k]})
         if latency or host_timing:
             inputs["latency_only"] = True
 

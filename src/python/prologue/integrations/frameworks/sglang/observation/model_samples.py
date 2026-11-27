@@ -3,17 +3,18 @@
 import hashlib
 import json
 from collections import defaultdict
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from functools import partial
 from pathlib import Path
 from time import monotonic_ns
 
 import torch
 import torch.distributed as distributed
+from torch.multiprocessing import spawn
 
 from prologue.common.io import write_json
 from prologue.integrations.bindings import device_runtime, platform_domain
-from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
+from prologue.integrations.frameworks.sglang.abi.hooks import HookSpec, HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.call_ports import LocalModel, NativeCallObservation
 from prologue.integrations.frameworks.sglang.observation.communications import NativeCommunications
@@ -40,6 +41,7 @@ class DecodeAttentionObservation:
         self.sites = description["attention_sites"]
         self.calls = defaultdict(int)
         self.rows = []
+        self.batch_profile = None
 
     def load_model(self, original, runner):
         result = original(runner)
@@ -58,6 +60,18 @@ class DecodeAttentionObservation:
             module = modules[site]
             module.forward = partial(self.invoke, site, module, module.forward)
 
+    def profile_path(self, name):
+        return Path("cuts") / f"rank-{self.rank}" / str(name)
+
+    @contextmanager
+    def profile_batch(self):
+        self.batch_profile = self.profile_path("batch")
+        try:
+            with device_runtime().scoped_tasks.profile(self.directory / self.batch_profile, self.rank):
+                yield
+        finally:
+            self.batch_profile = None
+
     def invoke(self, site, module, original, q, k, v, forward_batch, *args, **kwargs):
 
         if (self.window is not None and self.window.phase != "source") or not forward_batch.forward_mode.is_decode():
@@ -68,7 +82,6 @@ class DecodeAttentionObservation:
         key = site, tuple(sorted(context)), query_rows
         self.calls[key] += 1
 
-        # Repeating the geometry measures the unprofiled envelope before recording device tasks.
         pool = resolve(symbols().get_attn_backend)().token_to_kv_pool
         row = {
             "site": site,
@@ -92,23 +105,28 @@ class DecodeAttentionObservation:
                 "value_dim": module.v_head_dim,
             },
         }
-        profile = None
 
+        profile = nullcontext()
+        marker = nullcontext
+        scope = f"prologue.sample/{len(self.rows)}"
+
+        # Measure the unprofiled envelope before recording device tasks for the same geometry.
         if self.calls[key] == 2:
-            root = Path("cuts") / f"rank-{self.rank}" / str(len(self.rows))
-            row["profile"] = str(root)
-            profile = device_runtime().scoped_tasks.profile(self.directory / root, self.rank)
+            root = self.batch_profile or self.profile_path(len(self.rows))
+            row.update(profile=str(root), scope=scope)
+            marker = torch.autograd.profiler.record_function
+            if self.batch_profile is None:
+                profile = device_runtime().scoped_tasks.profile(self.directory / root, self.rank)
 
         begin, end = (device_runtime().api.Event(enable_timing=True) for _ in range(2))
         device_runtime().api.current_stream().synchronize()
-        marker = torch.autograd.profiler.record_function if profile is not None else nullcontext
-        with profile if profile is not None else nullcontext():
-            with marker("prologue.sample.begin"):
+        with profile:
+            with marker(f"{scope}/begin"):
                 begin.record()
-            with marker("prologue.sample.call"):
+            with marker(f"{scope}/call"):
                 result = original(q, k, v, forward_batch, *args, **kwargs)
 
-            with marker("prologue.sample.end"):
+            with marker(f"{scope}/end"):
                 end.record()
             end.synchronize()
 
@@ -129,11 +147,30 @@ class AttentionReturned(Exception):
 
 
 class NativeAttentionBatch:
-    def __init__(self, native, runner):
+    def __init__(self, native, runner, module):
         self.native, self.runner = native, runner
         self.model = runner.torch_runner
+        self.module = module
+        self.query = (module.tp_q_head_num, module.qk_head_dim)
+        self.key = (module.tp_k_head_num, module.qk_head_dim)
+        self.value = (module.tp_v_head_num, module.v_head_dim)
+        self.generator = torch.Generator(device="cpu").manual_seed(0)
+        self.kv = KvReadback(self.model.token_to_kv_pool, module)
+        self.allocator = self.model.token_to_kv_pool_allocator
         self.cache = native.TreeCacheNamespace(page_size=self.model.server_args.page_size, device=self.model.device,
-                                              token_to_kv_pool_allocator=self.model.token_to_kv_pool_allocator)
+                                              token_to_kv_pool_allocator=self.allocator)
+
+    def operand(self, rows, geometry):
+        heads, width = geometry
+        return torch.rand((rows, heads * width), generator=self.generator, device="cpu",
+                          dtype=self.model.model_config.dtype).to(self.model.device)
+
+    def attention(self, input_ids, positions, forward_batch, **kwargs):
+
+        # Keep the native runner's batch metadata and KV writes while supplying only the target call's operands.
+        rows = input_ids.numel()
+        key, value = self.kv.operands = self.operand(rows, self.key), self.operand(rows, self.value)
+        return self.module(self.operand(rows, self.query), key, value, forward_batch)
 
     @staticmethod
     def stop_after_call(module, args, result):
@@ -151,6 +188,19 @@ class NativeAttentionBatch:
             return
         raise ValueError("the native forward did not reach the requested attention site")
 
+    def allocate_prefix(self, prefix, prefix_cpu, sequences, sequences_cpu, last, count):
+        lengths, page = sequences_cpu.tolist(), self.allocator.page_size
+        if any(prefix_cpu.tolist()) or sum(lengths) != count:
+            raise ValueError("local attention preparation requires fresh native request pages")
+
+        # A fresh prefix starts at page boundaries, so the native allocator can reserve whole pages directly.
+        sizes = [((length + page - 1) // page) * page for length in lengths]
+        pages = self.allocator.alloc(sum(sizes))
+        if pages is None:
+            return None
+
+        return torch.cat([slots[:length] for slots, length in zip(pages.split(sizes), lengths, strict=True)])
+
     def extend(self, lengths):
         self.runner.clear()
         vocab = self.model.model_config.vocab_size
@@ -165,12 +215,19 @@ class NativeAttentionBatch:
             enable_overlap=False,
             spec_algorithm=self.native.SpeculativeAlgorithm.NONE,
         )
-        batch.prepare_for_extend()
+        if self.allocator.page_size > 1:
+            allocate = HookSpec("alloc_extend", self.allocate_prefix, "replace")
+            with HookTable.scoped(self.allocator, allocate):
+                batch.prepare_for_extend()
+        else:
+            batch.prepare_for_extend()
 
-        if batch.input_ids is None:
-            batch.input_ids = batch.prefill_input_ids_cpu.to(batch.device, non_blocking=True)
-            batch.prefill_input_ids_cpu = None
-        self.forward(batch)
+        # Decode needs the prefix in its assigned slots. The native pool can write it without a Prefill forward.
+        rows = batch.out_cache_loc.numel()
+        key, value = self.kv.operands = self.operand(rows, self.key), self.operand(rows, self.value)
+        self.kv.pool.set_kv_buffer(self.module, batch.out_cache_loc, key.view(rows, *self.key),
+                                   value.view(rows, *self.value))
+        self.runner.synchronize()
         return batch
 
     def decode(self, batch):
@@ -181,15 +238,25 @@ class NativeAttentionBatch:
         batch.prepare_for_decode()
         self.forward(batch)
 
+    def measure(self, lengths, observer):
+        started = monotonic_ns()
+        batch = self.extend(lengths)
+        prefill = self.kv.read(batch, None, True)
+        prepared = monotonic_ns()
+        self.decode(batch)
+        decoded = monotonic_ns()
+        read = self.kv.read(batch, prefill["locations"], False)
+        observer.rows[-1]["kv"] = {"prefill": prefill, "decode": read}
+
+        return {"context": lengths, "prepare_and_read_ns": prepared - started,
+                "decode_ns": decoded - prepared, "readback_ns": monotonic_ns() - decoded}
+
 
 class KvReadback:
     def __init__(self, pool, module):
         self.pool = pool
         self.layer = module.layer_id - pool.start_layer
         self.operands = None
-
-    def retain(self, module, args):
-        self.operands = args[1:3]
 
     def read(self, batch, locations, extend):
 
@@ -233,75 +300,97 @@ class KvReadback:
 
 
 class AttentionRunner(LocalProbe):
-    def measure(self, lengths, observer, kv):
-        started = monotonic_ns()
-        batch = self.batch.extend(lengths)
-        prefill = kv.read(batch, None, True)
-        prepared = monotonic_ns()
-        self.batch.decode(batch)
-        decoded = monotonic_ns()
-        read = kv.read(batch, prefill["locations"], False)
-        call = observer.rows[-1]
-        call["kv"] = {"prefill": prefill, "decode": read}
+    def observe(self, one_batch, runner, rank, initialized):
+        actual = runner.torch_runner
+        site, contexts = self.job["site"], self.job["contexts"]
+        module = actual.model.get_submodule(site)
+        cut = NativeAttentionBatch(one_batch, runner, module)
+        forward = HookSpec("forward", cut.attention, "replace")
+        warmup = []
 
-        return {"context": lengths, "prepare_and_read_ns": prepared - started,
-                "decode_ns": decoded - prepared, "readback_ns": monotonic_ns() - decoded}
+        with HookTable.scoped(actual.model, forward), module.register_forward_hook(cut.stop_after_call):
+            for lengths in contexts:
+                start = monotonic_ns()
+                batch = cut.extend(lengths)
+                extended = monotonic_ns()
+                cut.decode(batch)
+                warmup.append({"context": lengths, "prefill_ns": extended - start,
+                               "decode_ns": monotonic_ns() - extended})
 
-    def run(self, revision):
-        started = monotonic_ns()
+            warmed = monotonic_ns()
+            observer = DecodeAttentionObservation(
+                None, {"output": self.output, "rank_offset": 0, "attention_sites": {str(rank): [site]}}
+            )
+            observer.attach(actual)
+            timings = [cut.measure(lengths, observer) for lengths in contexts]
+
+            # Each cut retains its own markers inside the shared device profile.
+            with observer.profile_batch():
+                timings.extend(cut.measure(lengths, observer) for lengths in contexts)
+
+        record = observer.document()
+        record.update(model=actual.model_config.hf_config.to_dict(), rank=observer.rank,
+                      load_format=actual.server_args.load_format)
+        runner.clear()
+        return record, {"warmup_ns": warmed - initialized, "warmup": warmup, "points": timings}
+
+    def worker(self, rank, revision, args, ports, started):
         one_batch = resolve(symbols().one_batch)
+        world, selected = args.tp_size, self.job["rank"]
+        staged = world > 1
+        device = activate_device(rank, world, staged)
+        if staged:
+            ShardTransport.world(world, rank, (self.output / "rendezvous").as_uri())
+            transport = ShardTransport(self.output, nullcontext)
+            transport.install({"ep_size": 1, "instance_directory": self.output, "worker_count": world})
+            HookTable.apply()
 
-        config = NativeConfiguration(self.job["runner"]["configuration"])
-        args = self.runner_args(one_batch, config, self.job["runner"]["model"])
         one_batch.initialize_moe_config(args)
         one_batch.initialize_fp8_gemm_config(args)
         one_batch.initialize_fp4_gemm_config(args)
-        runner, _ = one_batch.load_model(args, one_batch.PortArgs.init_new(args), gpu_id=0, tp_rank=0)
-        initialized = monotonic_ns()
 
         try:
-            actual = runner.torch_runner
-            self.batch = NativeAttentionBatch(one_batch, runner)
-            site = self.job["site"]
-            module = actual.model.get_submodule(site)
+            runner, _ = one_batch.load_model(args, ports, gpu_id=device, tp_rank=rank)
+            initialized = monotonic_ns()
+            if rank == selected:
+                if staged:
+                    transport.local_only = True
+                record, timing = self.observe(one_batch, runner, rank, initialized)
 
-            with module.register_forward_hook(self.batch.stop_after_call):
-                for lengths in self.job["contexts"]:
-                    self.batch.decode(self.batch.extend(lengths))
-                warmed = monotonic_ns()
-                observer = DecodeAttentionObservation(
-                    None, {"output": self.output, "rank_offset": 0, "attention_sites": {"0": [site]}}
-                )
-                observer.attach(actual)
-                kv = KvReadback(actual.token_to_kv_pool, module)
-                timings = []
-
-                with module.register_forward_pre_hook(kv.retain):
-                    for lengths in self.job["contexts"]:
-                        for _ in range(2):
-                            timings.append(self.measure(lengths, observer, kv))
-
-            record = observer.document()
-            record.update(
-                model=actual.model_config.hf_config.to_dict(), rank=observer.rank, load_format=args.load_format
-            )
-            runner.clear()
+            # Peers supply native initialization but stay off the device during the measured local cut.
+            if staged:
+                distributed.barrier()
         finally:
             one_batch.destroy_model_parallel()
             one_batch.destroy_distributed_environment()
 
-        # SDK postprocessing starts after the measured worker has released its process group.
+        if rank == selected:
+            self.export(revision, world, record, timing | {"initialization_ns": initialized - started})
+
+    def export(self, revision, world, record, timing):
         exporting = monotonic_ns()
-        device_runtime().scoped_tasks.export_calls(self.output, observer.rank, record["calls"])
-        write_json(self.output / "attention.json", record)
-        self.publish(
-            revision, 1,
-            measurements='attention.json',
-            initialization_ns=initialized - started,
-            warmup_ns=warmed - initialized,
-            points=timings,
-            postprocessing_ns=monotonic_ns() - exporting,
-        )
+        try:
+            device_runtime().scoped_tasks.export_calls(self.output, record["rank"], record["calls"])
+        finally:
+            write_json(self.output / "attention.json", record)
+
+        self.publish(revision, world, measurements="attention.json", **timing,
+                     postprocessing_ns=monotonic_ns() - exporting)
+
+    def run(self, revision):
+        started = monotonic_ns()
+        one_batch = resolve(symbols().one_batch)
+        runner = self.job["runner"]
+        configuration = NativeConfiguration(runner["configuration"])
+        args = self.runner_args(one_batch, configuration, runner["model"])
+        worker_args = revision, args, one_batch.PortArgs.init_new(args), started
+
+        # The file rendezvous needs its parent before any worker starts.
+        self.output.mkdir(parents=True, exist_ok=True)
+        if configuration.tp == 1:
+            self.worker(0, *worker_args)
+        else:
+            spawn(self.worker, args=worker_args, nprocs=configuration.tp, join=True)
 
 
 class EmbeddingReady(Exception):
@@ -466,8 +555,6 @@ class EmbeddingRunner(LocalProbe):
             parallel_state.destroy_distributed_environment()
 
     def run(self, revision):
-        from torch.multiprocessing import spawn
-
         world = self.job["domain"]["parallel"]["logical_tp"]
         spawn(self.worker, nprocs=world, join=True)
         workers = {}

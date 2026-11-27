@@ -5,6 +5,7 @@ from dataclasses import replace
 from prologue.integrations.bindings import RuleName
 
 from ..contracts import WorkerDomain
+from ..evidence import CostSamples
 from ..host_samples import HostCostSamples
 from ..readback import WorkerCapture
 from .scheduler import LocalSchedulerBatch
@@ -26,9 +27,18 @@ class PairedHostService(LocalSchedulerWork):
 
         # Matching cuts identify the service. The structural pass must never supply its elapsed time.
         original, timed = (WorkerCapture(recording, rank, name) for name in ("structure", "timing"))
-        _, catalog = original.measure(self.compiler(timeout), recording.directory.parent)
+        invocations = LocalSchedulerBatch.invocations(queries)
+        facts, _, structure = LocalSchedulerBatch.readback(invocations, original)
+        evidence, catalog = original.measure(self.compiler(timeout), recording.directory.parent)
         report = HostCostSamples.local(original, timed, catalog)
-        return self.answers(queries, report, "samples/host.json")
+        products, answers = self.answers(queries, report, "samples/host.json")
+
+        # The already qualified structural cut can also answer later template queries.
+        if products:
+            support = {structure: facts, **CostSamples.device_support(evidence, catalog)}
+            LocalSchedulerBatch.attach_support(products, answers, support)
+
+        return products, answers
 
 
 rules = (PairedHostService,)

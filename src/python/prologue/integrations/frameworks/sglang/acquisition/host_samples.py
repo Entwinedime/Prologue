@@ -182,9 +182,11 @@ class HostCostSamples:
         profile, = (source_root / "native" / f"rank-{rank}").glob(platform_backend().profile_glob)
         trace = platform_backend().trace(profile, source_root / "runtime", original, trace_path)
         runtime, activity = (list(read_jsonl(directory / timing[key])) for key in ("runtime", "activity"))
+        observer_intervals = queues.get("observer_intervals", ())
         alignment = platform_backend().host_alignment(trace, original["scopes"], probe["scopes"], queues["commands"],
                                                       runtime, activity, probe["auxiliary_intervals"],
-                                                      cold[rank].values())
+                                                      cold[rank].values(),
+                                                      observer_intervals=observer_intervals)
         exact = alignment.cuts(pairs, original["state_queries"])
         local = alignment.cuts(local_pairs, original["state_queries"], strict_runtime=True) if local_pairs else None
 
@@ -194,21 +196,38 @@ class HostCostSamples:
         evidence = graph["evidence"]["events"]
         samples = ServiceSamples(catalog.domain, catalog.definitions)
         measured, missing = Counter(), Counter()
+        copies = Counter()
         for piece, definition, interval, features in catalog:
             resource = graph["resources"][piece["resource"]]
-            if not self.supports(piece, resource):
+            thread_copy = piece["kind"] == "transfer" and resource["kind"] == "thread" and "copy" not in piece
+            if not thread_copy and not self.supports(piece, resource):
                 continue
 
             scope = graph["scopes"][piece["scope"]]
             key = f"{resource['role']}/{scope['role']}"
+            direct = False
             if piece["kind"] == "collective":
                 source, = scope["bindings"]["source_scopes"]
                 duration = collectives.get(pairs.get(source))
             else:
                 begin, end = (evidence[piece[side]]["order"] for side in ("start", "finish"))
                 thread = int(resource["identity"].split("/")[1])
+
+                if thread_copy:
+
+                    # Copies with declared tensor operands use the ready-operand probe.
+                    copy = exact.synchronous_copy(thread, begin, end)
+                    if copy is None:
+                        copies["missing"] += 1
+                    else:
+                        duration, operand = copy
+                        samples.add(definition, interval, features, duration, copy=operand, direct_native_call=True)
+                        copies["measured"] += 1
+                    continue
+
                 submission = resource["role"] == "submission"
                 duration = exact.duration(thread, begin, end, submission)
+                direct = (thread, begin, end) in exact.direct_reads
 
                 if duration is None and local_pairs and source_calls.supports_local_work(
                     scope, features, observed_calls, local_pairs
@@ -216,11 +235,12 @@ class HostCostSamples:
                     duration = local.duration(thread, begin, end, submission)
                     if duration is not None:
                         self.qualification["locally_matched_work"] += 1
+                        direct = (thread, begin, end) in local.direct_reads
 
             if duration is None:
                 missing[key] += 1
                 continue
-            samples.add(definition, interval, features, duration)
+            samples.add(definition, interval, features, duration, direct_native_call=direct)
             measured[key] += 1
 
         if "protocol" in probe:
@@ -230,7 +250,7 @@ class HostCostSamples:
                 if actor == rank and duration is not None:
                     samples.add_external(identity, "transfer", features, duration)
 
-        report = samples.document({"host": sum(missing.values())})
+        report = samples.document({"host": sum(missing.values()), "transfer": copies["missing"]})
         batches = [s["id"] for s in original["scopes"] if s["role"] == "run_batch"]
         counts = {"detailed": len(batches), "host": sum(s["role"] == "run_batch" for s in probe["scopes"]),
                   "matched": sum(i in pairs for i in batches)}
@@ -240,6 +260,9 @@ class HostCostSamples:
             "queue_correction_ns": queues["raw_correction_ns"],
             "measured": dict(measured), "missing": dict(missing),
             "alignment": dict(self.qualification + exact.misses), "lost_threads": alignment.service.loss,
+            "paired_synchronous_transfers": copies["measured"],
         }
+        if observer_intervals:
+            report["qualification"]["measured_observer_intervals"] = len(observer_intervals)
 
         return report

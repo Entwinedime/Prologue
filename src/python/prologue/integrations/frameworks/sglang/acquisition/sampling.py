@@ -141,12 +141,16 @@ class SGLangSampling:
 
     def sampling_sources(self):
         source = self.source
-        rank, = source.ranks
-        stored = read_json(source.production / "result.json").get("sampling", {}).get(str(rank))
-        cut = read_json(asset_path(source.production, stored)) if stored else AttentionCatalog.extract(
-            source.recording.source, source.projection / "work", rank, source.identities(rank),
-            self.runner_input, device_runtime().scoped_tasks.source)
-        yield source.recording.attempt_id, cut
+        stored = read_json(source.production / "result.json").get("sampling", {})
+
+        for rank in source.ranks:
+            if path := stored.get(str(rank)):
+                cut = read_json(asset_path(source.production, path))
+            else:
+                cut = AttentionCatalog.extract(source.recording.source, source.projection / "work", rank,
+                    source.identities(rank), self.runner_input, device_runtime().scoped_tasks.source)
+
+            yield source.recording.attempt_id, cut
 
     def local_windows(self, demand):
         windows = {}

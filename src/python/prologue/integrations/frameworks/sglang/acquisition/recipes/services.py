@@ -53,6 +53,7 @@ class LocalDeviceWork(LocalSchedulerWork):
 
 class LocalPeerWork(LocalSchedulerWork):
     name = RuleName("peer_service")
+    conditions = ("native_batch", "physical_peer_operands")
 
     def matches(self, query):
         operand = query.get("features", {}).get("transport")
@@ -61,12 +62,17 @@ class LocalPeerWork(LocalSchedulerWork):
 
     @staticmethod
     def session_key(query, deployment):
-        return LocalSchedulerWork.session_key(query, deployment), query["features"]["transport"]["members"]
+        action, = LocalSchedulerBatch.invocations([query])
+        domain, *batch = LocalSchedulerBatch.session_key(action, deployment)
+        operand = {name: value for name, value in query["features"]["transport"].items() if name != "rank"}
+
+        # The probe observes the whole participating group in the same native batch.
+        return WorkerDomain.role_plan(domain), batch, operand
 
     def cut(self, queries, session, deployment, arguments):
-        cut = LocalSchedulerBatch.work_job(queries, deployment)
-        peers = session[1]
-        if cut.job["single_device"] or any(q["features"]["transport"]["members"] != peers for q in queries):
+        cut = LocalSchedulerBatch.work_job(queries[:1], deployment)
+        peers = session[2]["members"]
+        if cut.job["single_device"]:
             raise EvidenceGap("missing_physical_peers", required_ranks=peers, physical_devices=cut.cards)
 
         # Service after rendezvous requires simultaneous arrivals from every peer.
@@ -75,11 +81,21 @@ class LocalPeerWork(LocalSchedulerWork):
 
     def qualify(self, queries, recording, timeout=None):
         model = self.compiler(timeout)
+        by_rank = {}
+        for index, query in enumerate(queries):
+            by_rank.setdefault(WorkerDomain.rank(query["domain"]), {})[index] = query
+
+        products, answers = {}, {}
         with TemporaryDirectory(dir=recording.directory.parent) as scratch:
             directory = Path(scratch)
-            report = CostSamples.transport(recording, queries, model, directory)
+            for rank, report in CostSamples.transport(recording, queries, model, directory):
+                group = by_rank[rank]
+                asset = f"samples/transport-{rank}.json"
+                assets, result = self.answers(list(group.values()), report, asset, model, directory)
+                products.update(assets)
+                answers.update(zip(group, result, strict=True))
 
-            return self.answers(queries, report, "samples/transport.json", model, directory)
+        return products, [answers[index] for index in range(len(queries))]
 
 
 class LocalHostWork(LocalSchedulerWork):
@@ -109,7 +125,19 @@ class LocalHostWork(LocalSchedulerWork):
         image = DockerImage.id(arguments.source_image)
         model = self.compiler(arguments.preparation_seconds)
 
-        for worker in self.sources(deployment, WorkerDomain.rank(domain)):
+        workers = self.sources(deployment, WorkerDomain.rank(domain))
+        try:
+            planned = LocalSchedulerBatch.work_job(queries, deployment).job
+        except EvidenceGap:
+            pass
+        else:
+
+            # Try the same native invocation before projecting other cuts that may share the work identity.
+            workers = sorted(workers, key=lambda worker: any(
+                worker.job.get(key) != value for key, value in planned.items()
+            ))
+
+        for worker in workers:
             source = worker.recording
             job = source.inputs["job"]
             if (source.inputs["image"] != image

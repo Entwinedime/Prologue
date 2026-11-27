@@ -100,10 +100,12 @@ class ResourceCalls:
     def read(self, description, unit, original, *args, **kwargs):
         if not self.calls.enabled or self.in_resource.get():
             return original(*args, **kwargs)
-        parent = self.calls.current.get()
-        work = self.calls.scheduler_work() if parent is None else dict(parent.work)
+
+        with self.calls.auxiliary():
+            parent = self.calls.current.get()
+            work = self.calls.scheduler_work() if parent is None else dict(parent.work)
         with self.calls.read("resource", original, work, read=description) as query:
-            result = original(*args, **kwargs)
+            result = self.calls.native_read(query, original, *args, **kwargs)
 
             # The native allocator reports tokens; the common resource service reports whole pages.
             query["result"] = int(result) // unit
@@ -372,6 +374,24 @@ class SourceLayout:
         self.environment = environment
         self.backend = environment["implementation"]["attention_backend"]
         self.first_layer = str(environment["parallel"]["layer_range"][0])
+
+    @staticmethod
+    def resource_bindings(facts):
+        environment = facts["environment"]
+        resources = facts["resources"]
+        if environment["parallel"]["logical_pp"] != 1 or environment["implementation"]["disaggregation_mode"] != "null":
+            return resources
+
+        # Native call markers identify the caller's stream even when collectives also use private streams.
+        lanes = {facts["spans"][port["at"]["span"]]["resource"] for scope in facts["scopes"] for port in scope["ports"]
+                 if port["name"] in {"device.enter", "device.complete"}}
+        if len(lanes) == 1:
+            lane, = lanes
+            if resources[lane]["kind"] == "stream":
+                resources = resources.copy()
+                resources[lane] = resources[lane] | {"binding": "synchronous_caller"}
+
+        return resources
 
     def layout_operand(self, scope, scopes):
         direction = self.relay_ports.get(scope["role"])

@@ -195,17 +195,7 @@ class NativeScheduler(Scheduler):
         if batch is None:
             return {}, self.batch_names.describe(None)
         members = BatchTensors.members(batch)
-
-        for member in members:
-            member["id"] = self.request_input.request_id(member["id"])
-        work = {
-            **self.batch_names.describe(batch),
-            "phase": BatchTensors.phase(batch),
-            "rank": self.graph_rank,
-            "members": members,
-        }
-        work["context"] = {"members": self.calls.progress(batch.reqs)}
-
+        work = self.calls.work(batch, members, phase=BatchTensors.phase(batch))
         return BatchTensors.parameters(batch, sum(member["new_tokens"] for member in members)), work
 
     def action(

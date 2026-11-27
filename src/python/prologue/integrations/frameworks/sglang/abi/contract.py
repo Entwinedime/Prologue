@@ -7,9 +7,8 @@ from types import MappingProxyType
 
 @dataclass(frozen=True, slots=True)
 class NativeSymbols:
-    """Native call sites with explicit redeclaration of device-owned symbols on other platforms."""
+    """Native call sites with device-owned symbols supplied by the platform."""
 
-    communicator_attribute: str = field(metadata={"platform_required": True})
     alloc_extend_naive: str
     alloc_for_decode: str
     alloc_for_extend: str
@@ -39,7 +38,6 @@ class NativeSymbols:
     deep_ep_dispatcher: str
     default_model_loader_load_model: str
     default_radix_cache_factory: str
-    device_kv_manager: str = field(metadata={"platform_required": True})
     disaggregation_mode: str
     dummy_model_loader_load_model: str
     dynamic_grad_mode: str
@@ -85,7 +83,6 @@ class NativeSymbols:
     memory_pool_config: str
     metadata_buffers_get_buf: str
     metadata_buffers_set_buf: str
-    mha_pool: str = field(metadata={"platform_required": True})
     mlp_sync_batch_info_all_gather: str
     model_config: str
     model_runner_module: str
@@ -105,7 +102,6 @@ class NativeSymbols:
     mooncake_transfer_engine_batch_transfer_sync: str
     one_batch: str
     paged_alloc_extend_naive: str
-    paged_allocator: str = field(metadata={"platform_required": True})
     parallel_lm_head: str
     parallel_state: str
     port_args: str
@@ -166,6 +162,10 @@ class NativeSymbols:
     utils: str
     vocab_parallel_embedding: str
     vocab_parallel_embedding_init: str
+    communicator_attribute: str = field(default="", metadata={"platform_required": True})
+    device_kv_manager: str = field(default="", metadata={"platform_required": True})
+    mha_pool: str = field(default="", metadata={"platform_required": True})
+    paged_allocator: str = field(default="", metadata={"platform_required": True})
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,20 +175,18 @@ class SGLangABI:
     revision: str
     symbols: NativeSymbols
     capabilities: frozenset[str]
-    native_platform: str
     aliases: tuple[str, ...] = ()
     hook_paths: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
     def for_platform(self, framework, domain):
         overrides = {key: path for owner, key, path in domain.native_symbols if owner == framework}
-        if domain.name != self.native_platform:
-            required = {symbol.name for symbol in fields(self.symbols) if symbol.metadata.get("platform_required")}
-            if missing := required - overrides.keys():
-                raise ValueError(f"{domain.name} lacks native platform declarations for {sorted(missing)}")
+        required = {symbol.name for symbol in fields(self.symbols) if symbol.metadata.get("platform_required")}
+        if missing := required - overrides.keys():
+            raise ValueError(f"{domain.name} lacks native platform declarations for {sorted(missing)}")
 
-        return replace(self, symbols=replace(self.symbols, **overrides)) if overrides else self
+        return replace(self, symbols=replace(self.symbols, **overrides))
 
     def extend(self, revision, *, symbols=None, aliases=(), capabilities=None, hooks=None):
         return SGLangABI(revision, replace(self.symbols, **(symbols or {})),
                          self.capabilities if capabilities is None else frozenset(capabilities),
-                         self.native_platform, tuple(aliases), MappingProxyType(dict(self.hook_paths) | (hooks or {})))
+                         tuple(aliases), MappingProxyType(dict(self.hook_paths) | (hooks or {})))
