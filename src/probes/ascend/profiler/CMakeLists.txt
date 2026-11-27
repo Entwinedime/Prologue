@@ -17,6 +17,7 @@ list(GET sdk_configuration 1 torch_npu_root)
 # Rebuild the upstream component against the installed SDK headers and Torch ABI.
 find_package(Torch REQUIRED PATHS "${torch_root}/share/cmake/Torch")
 add_subdirectory("${PROLOGUE_TORCH_NPU_SOURCE_DIR}/torch_npu/csrc/toolkit/profiler" profiler)
+target_include_directories(npu_profiler BEFORE PRIVATE "${PROLOGUE_TORCH_NPU_SOURCE_DIR}")
 target_include_directories(npu_profiler SYSTEM PRIVATE "${torch_npu_root}/include" ${TORCH_INCLUDE_DIRS})
 target_compile_options(npu_profiler PRIVATE -O2 -fstack-protector-all)
 target_link_options(npu_profiler PRIVATE -Wl,-z,relro,-z,now,-z,noexecstack)

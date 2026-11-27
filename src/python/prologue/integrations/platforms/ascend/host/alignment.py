@@ -14,6 +14,8 @@ class HostCuts:
     def __init__(self, service):
         self.service = service
         self.points = {}
+        self.copies = {}
+        self.direct_reads = set()
         self.misses = Counter()
         self.scopes = set()
 
@@ -26,6 +28,14 @@ class HostCuts:
         self.point(source.thread, source.begin, target.thread, target.begin)
         self.point(source.thread, source.end, target.thread, target.end)
 
+    def runtime_call(self, source, target):
+        self.anchors(source, target)
+        native = target.record
+        if native["api"] == "aclrtMemcpy" and native["bytes"] and source.record["result"] == 0:
+            key = source.thread, source.begin, source.end
+            if self.copies.setdefault(key, target) != target:
+                self.copies[key] = None
+
     def duration(self, thread, begin, end, submission):
         begin = self.points.get((thread, begin))
         end = self.points.get((thread, end))
@@ -33,9 +43,20 @@ class HostCuts:
             return None
         return self.service.duration(begin[0], begin[1], end[1], submission)
 
+    def synchronous_copy(self, thread, begin, end):
+        measured = self.copies.get((thread, begin, end))
+        if measured is None or self.service.within(
+            self.service.unavailable.get(measured.thread, ()), measured.begin, measured.end
+        ):
+            return None
+
+        native = measured.record
+        return measured.end - measured.begin, [native["bytes"], native["direction"]]
+
 
 class AscendHostAlignment:
-    def __init__(self, trace, source_scopes, scopes, commands, runtime, activity, auxiliary, cold):
+    def __init__(self, trace, source_scopes, scopes, commands, runtime, activity, auxiliary, cold,
+                 *, observer_intervals=()):
         self.trace = trace
         self.posts = {scope["id"]: scope["local_exchanges"] for scope in source_scopes if scope.get("local_exchanges")}
         self.observed = {scope["id"]: Interval(*scope["raw_interval"], scope["thread"], scope) for scope in scopes[1:]}
@@ -59,6 +80,9 @@ class AscendHostAlignment:
                     unavailable.append(dequeue)
 
         excluded_time = [(row.thread, row.begin, row.end) for row in auxiliary]
+
+        # Recorder work is excluded from service but still identifies the genuine queue command.
+        excluded_time.extend(observer_intervals)
         for row in runtime:
             thread = row["thread"]
             before, after = row["before_raw_ns"], row["after_raw_ns"]
@@ -181,13 +205,16 @@ class AscendHostAlignment:
                 result.anchors(source, target)
             for matches in runtime:
                 for source, target in matches:
-                    result.anchors(source, target)
+                    result.runtime_call(source, target)
 
         for query in queries:
             scope = query["scope"]
             if scope in pairs and (not strict_runtime or scope in result.scopes):
                 previous = self.trace.scopes[scope]
-                result.anchors(Interval(query["begin_counter"], query["end_counter"], previous.thread, {}),
-                               self.observed[pairs[scope]])
+                measured = self.observed[pairs[scope]]
+                begin, end = query["begin_counter"], query["end_counter"]
+                result.anchors(Interval(begin, end, previous.thread, {}), measured)
+                if measured.record.get("direct_native_call"):
+                    result.direct_reads.add((previous.thread, begin, end))
 
         return result

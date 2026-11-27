@@ -1,0 +1,90 @@
+--- a/torch_npu/csrc/toolkit/profiler/src/data_dumper.cpp
++++ b/torch_npu/csrc/toolkit/profiler/src/data_dumper.cpp
+@@ -1,4 +1,6 @@
+ #include <unistd.h>
++
++#include <cstdint>
+ 
+ #include <vector>
+ #include <map>
+@@ -10,6 +12,9 @@
+ #include "torch_npu/csrc/toolkit/profiler/common/utils.h"
+ #include "torch_npu/csrc/core/npu/npu_log.h"
+ 
++extern "C" bool prologue_ascend_host_timing_active() __attribute__((weak));
++extern "C" void prologue_ascend_queue_mark_recorded(std::int64_t counter) __attribute__((weak));
++
+ namespace torch_npu {
+ namespace toolkit {
+ namespace profiler {
+@@ -45,10 +50,13 @@
+ 
+ void DataDumper::Start()
+ {
+-    if (!init_.load() || Thread::Start() != 0) {
++    if (!init_.load()) {
+         return;
+     }
+     start_.store(true);
++    if (Thread::Start() != 0) {
++        start_.store(false);
++    }
+ }
+ 
+ void DataDumper::Stop()
+@@ -90,11 +98,15 @@
+ 
+ void DataDumper::Run()
+ {
++    const bool timing = prologue_ascend_host_timing_active && prologue_ascend_host_timing_active();
++
++    // Keep encoding and writes outside host measurement while the existing buffer has headroom.
++    const auto notify_at = timing ? data_chunk_buf_.Capacity() / 2 : kNotifyInterval;
+     for (;;) {
+         if (!start_.load()) {
+             break;
+         }
+-        if (data_chunk_buf_.Size() > kNotifyInterval) {
++        if (data_chunk_buf_.Size() > notify_at) {
+             GatherAndDumpData();
+         } else {
+             usleep(kMaxWaitTimeUs);
+@@ -114,7 +126,11 @@
+     if (C10_UNLIKELY(!start_.load() || data == nullptr)) {
+         return;
+     }
+-    data_chunk_buf_.Push(std::move(data));
++    const bool observe = prologue_ascend_queue_mark_recorded && data->tag == "torch.op_mark";
++    const auto counter = observe ? static_cast<const OpMarkData &>(*data).time_ns : 0;
++    if (data_chunk_buf_.Push(std::move(data)) && observe) {
++        prologue_ascend_queue_mark_recorded(counter);
++    }
+ }
+ 
+ void DataDumper::Dump(const std::map<std::string, std::vector<uint8_t>> &dataMap)
+@@ -173,10 +189,13 @@
+ 
+ void TraceDataDumper::Start()
+ {
+-    if (!init_.load() || Thread::Start() != 0) {
++    if (!init_.load()) {
+         return;
+     }
+     start_.store(true);
++    if (Thread::Start() != 0) {
++        start_.store(false);
++    }
+ }
+ 
+ void TraceDataDumper::Stop()
+--- a/torch_npu/csrc/toolkit/profiler/common/ring_buffer.h
++++ b/torch_npu/csrc/toolkit/profiler/common/ring_buffer.h
+@@ -107,6 +107,8 @@
+         return true;
+     }
+ 
++    size_t Capacity() const { return capacity_; }
++
+     size_t Size()
+     {
+         size_t curr_read_index = read_index_.load(std::memory_order_relaxed);

@@ -248,7 +248,7 @@ class SdkRecording(RawTraceIndex):
         profile, = (capture / "native" / f"rank-{rank}").glob("*_ascend_pt")
         rows = sdk_rows(sdk)
         flips = task_flips(profile)
-        super().__init__(profile, capture / "runtime", native, rows, flips)
+        super().__init__(profile, capture / "runtime", native, sdk.parent, rows, flips)
         self.sdk = SdkStreams(rows, self.clock, flips)
         self.runtime_records = {(interval.thread, interval.begin): interval.record for interval in self.runtime}
         self.require(len(self.runtime_records) == len(self.runtime), "raw runtime repeats an API interval identity")

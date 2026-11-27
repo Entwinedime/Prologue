@@ -6,6 +6,8 @@ from math import prod
 
 from prologue.common.interfaces import PlatformDomain
 
+from .abi import native_symbols
+
 
 class Component:
     def __init__(self, module, name):
@@ -21,7 +23,7 @@ class Component:
 
 
 class AscendDeviceRuntime:
-    domain = PlatformDomain("ascend", "npu", "torch_npu", "hccl", ("ascend",), "ascend", 200)
+    domain = PlatformDomain("ascend", "npu", "torch_npu", "hccl", ("ascend",), "ascend", 200, native_symbols)
     markers = Component(".runtime.profiling", "AscendMarkers")
     profiling = Component(".runtime.profiling", "AscendProfiling")
     host_profile = Component(".runtime.profiling", "AscendHostProfile")

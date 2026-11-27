@@ -3,7 +3,6 @@
 import json
 from collections import defaultdict
 from dataclasses import dataclass
-from itertools import permutations
 
 from prologue.common.cost import RendezvousService
 from prologue.integrations.platforms.ascend.trace_store import (
@@ -19,7 +18,7 @@ class NotifyProgress:
     @classmethod
     def within(cls, rows, start, finish, clock):
         endpoints = defaultdict(list)
-        for side, local, remote, handle, stamp in rows:
+        for side, local, remote, handle, stamp in sorted(rows, key=lambda row: row[-1]):
             if not start <= stamp <= finish:
                 raise ValueError("HCCL notification falls outside its measured collective")
             endpoints[side, local, remote, handle].append(
@@ -28,15 +27,19 @@ class NotifyProgress:
         return endpoints
 
     @staticmethod
-    def pairs(recorded, waited):
-        for (side, local, remote, handle), steps in recorded.items():
-            if side != "record" or local == remote:
-                continue
-            matches = waited.get(("wait", remote, local, handle), ())
+    def pairs(peers):
+        ranks = tuple(peers)
+        for local, sender in enumerate(ranks):
+            for (side, origin, remote, handle), records in peers[sender].notifications.items():
+                if side != "record" or origin != local or remote == local or not 0 <= remote < len(ranks):
+                    continue
 
-            # Equal sequences propose a pairing. The calibrated endpoints qualify it for the channel.
-            if len(steps) == len(matches):
-                yield from zip(steps, matches, strict=True)
+                # SDK endpoints use communicator rank order. Both physical actors must own the paired handle.
+                receiver = ranks[remote]
+                waits = peers[receiver].notifications.get(("wait", remote, local, handle), ())
+                if len(records) == len(waits):
+                    for record, wait in zip(records, waits, strict=True):
+                        yield sender, receiver, record, wait
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,8 +95,7 @@ class CollectiveClock:
             raise ValueError("measured collective endpoints contradict their calibrated elapsed times")
 
     def refine(self, peers):
-        signals = [(sender, receiver, record, wait) for sender, receiver in permutations(peers, 2)
-                   for record, wait in NotifyProgress.pairs(peers[sender].notifications, peers[receiver].notifications)]
+        signals = list(NotifyProgress.pairs(peers))
         if not signals:
             return True
 

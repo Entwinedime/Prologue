@@ -14,6 +14,7 @@ from prologue.common.io import write_json
 from prologue.integrations.platforms.ascend.analysis.trace import AscendTrace, DeviceTask
 from prologue.integrations.platforms.ascend.runtime.sampling import AscendExport
 from prologue.integrations.platforms.ascend.trace_store import (
+    DeviceTaskIntervals,
     HostCounter,
     Interval,
     ThreadIntervals,
@@ -506,17 +507,11 @@ class ScopedTasks:
         return partitions
 
     @classmethod
-    def measured(cls, profile, trace):
-        counter = HostCounter(profile)
-        rows = sdk_rows(trace)
-        markers = {row["name"]: Interval.read(row, counter) for row in rows
-                   if row["name"].startswith("prologue.sample.")}
-
-        if markers.keys() != {"prologue.sample.begin", "prologue.sample.call", "prologue.sample.end"}:
-            return {"reason": "missing_scope_marker"}
+    def connections(cls, rows, counter, markers):
         enqueues = AscendTrace.queue_index([Interval.read(row, counter) for row in rows if row.get("cat") == "enqueue"])
         dequeues = ThreadIntervals([Interval.read(row, counter) for row in rows if row.get("cat") == "dequeue"])
-        boundary, owned = defaultdict(set), set()
+        windows = ThreadIntervals(list(markers.values()))
+        connections = defaultdict(set)
 
         for row in rows:
             info = row.get("args", {})
@@ -526,24 +521,30 @@ class ScopedTasks:
             api = Interval.read(row, counter)
             dequeue = dequeues.enclosing(api)
             origin = enqueues[dequeue.record["args"]["correlation_id"]] if dequeue else api
-            for name, marker in markers.items():
-                if marker.contains(origin):
-                    if name == "prologue.sample.call":
-                        owned.add(info["connection_id"])
-                    elif info["id"] == "aclrtRecordEvent":
-                        boundary[name].add(info["connection_id"])
+            if (marker := windows.enclosing(origin)) is not None:
+                name = marker.record["name"]
+                if name.endswith("/call") or info["id"] == "aclrtRecordEvent":
+                    connections[name].add(info["connection_id"])
 
-        flips = task_flips(profile)
-        tasks = [r for r in rows if "Task Type" in r.get("args", {}) and not queue_marker(r["args"], flips)]
+        return connections
+
+    @classmethod
+    def selected(cls, scope, markers, connections, tasks, times):
+        start, work, stop = (f"{scope}/{name}" for name in ("begin", "call", "end"))
+        if any(name not in markers for name in (start, work, stop)):
+            return {"reason": "missing_scope_marker"}
+
+        owned = connections[work]
         endpoints = []
-        for name in ("prologue.sample.begin", "prologue.sample.end"):
-            endpoints.append([r for r in tasks if r["args"]["connection_id"] in boundary[name]
+        for name in (start, stop):
+            endpoints.append([r for r in tasks if r["args"]["connection_id"] in connections[name]
                               and r["args"]["Task Type"] == "EVENT_RECORD"])
 
         if any(len(items) != 1 for items in endpoints):
             return {"reason": "unresolved_device_timer"}
         begin, end = (items[0] for items in endpoints)
         stream = begin["args"]["Physic Stream Id"]
+
         def position(row):
             info = row["args"]
             return Decimal(row["ts"]), info["Batch Id"], info["Task Id"], info["Subtask Id"]
@@ -556,19 +557,45 @@ class ScopedTasks:
 
         if len(measured) != linked or any(r["args"]["connection_id"] not in owned for r in measured):
             return {"reason": "scope_and_stream_disagree"}
-        return {"tasks": [[*cls.identity(r), round(Decimal(str(r["dur"])) * 1000)] for r in measured]}
+
+        payload = []
+        for row in measured:
+            begin_ns, end_ns = times.interval(row)
+            payload.append([*cls.identity(row), end_ns - begin_ns])
+
+        return {"tasks": payload}
+
+    @classmethod
+    def measured(cls, profile, trace, calls):
+        counter, times = HostCounter(profile), DeviceTaskIntervals(trace.parent)
+        rows = sdk_rows(trace)
+        samples = defaultdict(list)
+        for row in rows:
+            if row["name"].startswith("prologue.sample/"):
+                samples[row["name"]].append(Interval.read(row, counter))
+
+        markers = {name: values[0] for name, values in samples.items() if len(values) == 1}
+        connections = cls.connections(rows, counter, markers)
+        flips = task_flips(profile)
+        tasks = [r for r in rows if "Task Type" in r.get("args", {}) and not queue_marker(r["args"], flips)]
+
+        for call in calls:
+            call.update(cls.selected(call["scope"], markers, connections, tasks, times))
 
     @classmethod
     def export_calls(cls, directory, rank, calls):
+        profiles = defaultdict(list)
         for call in calls:
-            if "profile" not in call:
-                continue
-            root = directory / call["profile"]
+            if "profile" in call:
+                profiles[call["profile"]].append(call)
+
+        for name, group in profiles.items():
+            root = directory / name
             profile, = (root / "native" / f"rank-{rank}").glob("*_ascend_pt")
             with TemporaryDirectory(dir=root) as temporary:
                 data = Path(temporary) / "sdk"
                 AscendExport.run(root, rank, data)
-                call.update(cls.measured(profile, data / "trace.json"))
+                cls.measured(profile, data / "trace.json", group)
 
     @classmethod
     def publish(cls, directory):

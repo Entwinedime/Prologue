@@ -10,6 +10,7 @@ from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 
 from prologue.common.io import write_json
 from prologue.integrations.platforms.ascend.analysis.trace import SynchronousCopy
+from prologue.integrations.platforms.ascend.trace_store import DeviceTaskIntervals
 
 
 class AscendExport:
@@ -22,6 +23,7 @@ class AscendExport:
 
     @staticmethod
     def run(source: Path, rank: int, output: Path) -> None:
+        from torch_npu.profiler import ExportType
         from torch_npu.profiler.profiler import analyse
 
         profile, = (source / "native" / f"rank-{rank}").glob("*_ascend_pt")
@@ -39,10 +41,13 @@ class AscendExport:
 
             for directory in (cann / "host", *cann.glob("device_*")):
                 shutil.copytree(directory, working / cann.name / directory.name)
-            analyse(str(working), max_process_number=1)
+            analyse(str(working), max_process_number=1, export_type=[ExportType.Text, ExportType.Db])
 
-            # SDK exit alone is insufficient; interpretation will check the exported queue and marker evidence.
-            os.link(working / "ASCEND_PROFILER_OUTPUT/trace_view.json", output / "trace.json")
+            # The combined SDK database preserves native TASK rows even when the intermediate database is removed.
+            exports = working / "ASCEND_PROFILER_OUTPUT"
+            database, = exports.glob("ascend_pytorch_profiler*.db")
+            DeviceTaskIntervals.export(database, output)
+            os.link(exports / "trace_view.json", output / "trace.json")
         finally:
             shutil.rmtree(working)
 
@@ -163,7 +168,7 @@ class TensorCopySamples:
                         del result
             finally:
                 if enabled:
-                    timing.finish(path)
+                    timing.finish(path, os.devnull)
 
         observed = self.now()
 

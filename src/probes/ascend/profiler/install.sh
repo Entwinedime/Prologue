@@ -7,12 +7,12 @@ PROLOGUE_TORCH_NPU_REVISION=$(python3 -c "import runpy, sys; print(runpy.run_pat
 PROLOGUE_PROFILER_SOURCE=$(mktemp -d)
 trap 'rm -r "$PROLOGUE_PROFILER_SOURCE"' EXIT
 
-# Publish the running flag before pthread_create, so a new dumper cannot exit at startup.
+# Build the installed SDK revision with ordered startup and queue recorder timing.
 curl --fail --location --max-time 120 \
     "https://codeload.github.com/Ascend/pytorch/tar.gz/$PROLOGUE_TORCH_NPU_REVISION" \
     | tar --extract --gzip --directory "$PROLOGUE_PROFILER_SOURCE" --strip-components=1 \
         --wildcards '*/torch_npu/csrc/toolkit/profiler/*'
-patch --batch --fuzz=0 --directory "$PROLOGUE_PROFILER_SOURCE" --strip=1 < "$PROLOGUE_PROFILER_INSTALL/start.patch"
+patch --batch --fuzz=0 --directory "$PROLOGUE_PROFILER_SOURCE" --strip=1 < "$PROLOGUE_PROFILER_INSTALL/dumper.patch"
 
 # Building this CPU-only library does not load or initialize the device backend.
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 cmake -S "$PROLOGUE_PROFILER_INSTALL" -B "$PROLOGUE_PROFILER_SOURCE/build" \

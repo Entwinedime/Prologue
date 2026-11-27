@@ -9,7 +9,9 @@ import threading
 import time
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
+from fractions import Fraction
 from inspect import signature
+from math import ceil
 from pathlib import Path
 from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 from typing import Any
@@ -17,7 +19,7 @@ from typing import Any
 import torch
 import torch_npu
 
-from prologue.common.io import write_json
+from prologue.common.io import read_jsonl, write_json
 
 
 def native_function(library, symbol, result, *operands):
@@ -154,10 +156,12 @@ class AscendRuntimeTiming:
     def __init__(self):
         bridge = ctypes.PyDLL(None)
         self.start = native_function(bridge, "prologue_runtime_timing_start", None)
-        self.stop = native_function(bridge, "prologue_runtime_timing_stop", ctypes.c_int, ctypes.c_char_p)
+        self.stop = native_function(
+            bridge, "prologue_runtime_timing_stop", ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p,
+        )
 
-    def finish(self, path):
-        if self.stop(os.fsencode(path)):
+    def finish(self, path, marks):
+        if self.stop(os.fsencode(path), os.fsencode(marks)):
             raise RuntimeError("cannot publish native runtime timing evidence")
 
 
@@ -187,13 +191,13 @@ class AscendHostProfile:
             on_trace_ready=profiler.tensorboard_trace_handler(str(self.directory / "host-profile"), analyse_flag=False),
         )
         self.begin_clock = self.clock_sample()
+        self.runtime.start()
         self.profiler.start()
 
         # The SDK still emits queue marks with ATen range callbacks disabled.
         _enable_record_function(False)
         self.activity.start()
         self.specializations.start()
-        self.runtime.start()
         self.started = True
 
     def finish(self) -> dict:
@@ -202,23 +206,39 @@ class AscendHostProfile:
         specializations = self.specializations.finish()
         runtime = self.directory / "runtime-timing.jsonl"
         activity = self.directory / "thread-activity.jsonl"
+        marks = self.directory / "queue-mark-spans.jsonl"
         with ExitStack() as cleanup:
             cleanup.callback(_enable_record_function, True)
-            cleanup.callback(self.profiler.stop)
+            cleanup.callback(self.runtime.finish, runtime, marks)
             cleanup.callback(self.activity.finish, activity)
-            self.runtime.finish(runtime)
+            self.profiler.stop()
 
         profile, = (self.directory / "host-profile").glob("*_ascend_pt")
         queues = self.directory / "host-queues.json"
-        write_json(queues, self.queue_intervals(profile, (self.begin_clock, self.clock_sample())), replace=False)
+        measured = self.queue_intervals(profile, (self.begin_clock, self.clock_sample()), marks)
+        write_json(queues, measured, replace=False)
         return {
             "profile": str(profile.relative_to(self.directory)), "queues": queues.name,
-            "activity": activity.name, "runtime": runtime.name,
+            "activity": activity.name, "runtime": runtime.name, "queue_marks": marks.name,
             "specialization_loads": specializations,
         }
 
     @staticmethod
-    def queue_intervals(profile: Path, clock_samples) -> dict:
+    def recorder_intervals(marks, configuration, clock_samples):
+        scale, upper = Fraction(1), 0
+        if configuration._syscnt_enable:
+            scale = Fraction(1000) / Fraction(str(configuration._freq))
+            lower = max(begin - counter * scale for counter, begin, _ in clock_samples)
+            upper = min(end - counter * scale for counter, _, end in clock_samples)
+            if lower > upper:
+                raise ValueError("queue recorder spans have no common RAW clock calibration")
+
+        # The latest possible start excludes only time known to belong to the recorder.
+        spans = [(thread, ceil(counter * scale + upper), end) for thread, counter, end in marks]
+        return [span for span in spans if span[1] < span[2]]
+
+    @classmethod
+    def queue_intervals(cls, profile: Path, clock_samples, mark_path) -> dict:
         from torch_npu.profiler.analysis._profiler_config import ProfilerConfig
         from torch_npu.profiler.analysis.prof_parse._fwk_file_parser import FwkFileParser
 
@@ -248,11 +268,16 @@ class AscendHostProfile:
         if len(produced) != len(enqueues) or len(consumed) != len(dequeues):
             raise ValueError("host queue evidence repeats a native correlation")
 
+        marks = list(read_jsonl(mark_path))
+        if len(marks) < 2 * (len(produced) + len(consumed)):
+            raise ValueError("host queue evidence is missing recorder boundaries")
+
         return {
             "clock": "monotonic_raw_ns",
             "clock_samples": clock_samples,
             "raw_correction_ns": [lower, upper],
             "unpaired": len(produced.keys() ^ consumed.keys()),
+            "observer_intervals": cls.recorder_intervals(marks, configuration, clock_samples),
             "commands": [
                 [command.origin_name, interval(produced[key]), interval(command)]
                 for key, command in consumed.items() if key in produced

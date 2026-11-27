@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import csv
 import json
+import sqlite3
 import struct
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
+from contextlib import closing
 from dataclasses import dataclass
 from decimal import Decimal
 from functools import cached_property
@@ -17,18 +20,58 @@ from prologue.common.io import read_jsonl
 from prologue.common.observation import DeviceCalibration
 
 
+class DeviceTaskIntervals:
+    """Index integer SDK task times by physical identity within one device recording."""
+
+    filename = "device-task-times.csv"
+
+    @classmethod
+    def export(cls, database: Path, output: Path) -> None:
+        uri = f"{database.resolve().as_uri()}?mode=ro&immutable=1"
+
+        # Keep only native timing coordinates. The merged SDK trace still owns task attribution.
+        with closing(sqlite3.connect(uri, uri=True)) as source, (output / cls.filename).open("w", newline="") as file:
+            tasks = source.execute("SELECT streamId, taskId, contextId, startNs, endNs FROM TASK")
+            csv.writer(file).writerows(tasks)
+
+    def __init__(self, directory: Path) -> None:
+        self.ends: dict[tuple[int, int, int, int], int] = {}
+        with (directory / self.filename).open(newline="") as file:
+            for row in csv.reader(file):
+                stream, task, context, begin, end = map(int, row)
+                identity = stream, task, context, begin
+
+                # CANN can export identical rows more than once. An endpoint must still be unique.
+                if begin > end or self.ends.setdefault(identity, end) != end:
+                    raise ValueError(f"invalid or conflicting native device interval: {identity}")
+
+    def interval(self, record: dict) -> tuple[int, int]:
+        task = record["args"]
+        start_ns = Decimal(record["ts"]) * 1000
+        begin = int(start_ns)
+
+        # Merged connections are attribution IDs. The physical subtask and exact SDK start identify the TASK row.
+        identity = int(task["Physic Stream Id"]), int(task["Task Id"]), int(task["Subtask Id"]), begin
+        end = self.ends.get(identity)
+        if start_ns != begin or end is None:
+            raise ValueError(f"device task has no native interval: {identity[:3]} at {start_ns} ns")
+
+        return begin, end
+
+
 class AscendClock(DeviceCalibration):
-    def __init__(self, device: Path, samples: list[dict]) -> None:
+    def __init__(self, device: Path, samples: list[dict], tasks: DeviceTaskIntervals) -> None:
         super().__init__(samples)
         physical = device.name.removeprefix("device_")
         if self.device_id != int(physical):
             raise ValueError("device clock calibration has a different device from the SDK profile")
 
         self.begin_ns, self.end_ns = self.midpoints[0], self.midpoints[-1]
+        self.tasks = tasks
 
         # Keep the epoch offset exact; float-to-string conversion can lose several device counter ticks.
         start = json.loads((device / f"start_info.{physical}").read_text())
-        self.offset_us = Decimal(str(start["collectionTimeBegin"])) - Decimal(start["clockMonotonicRaw"]) / 1000
+        self.offset_ns = Decimal(str(start["collectionTimeBegin"])) * 1000 - int(start["clockMonotonicRaw"])
         info = json.loads((device / f"info.json.{physical}").read_text())
         self.frequency = Decimal(info["DeviceInfo"][0]["hwts_frequency"]) * 1_000_000
         host = self.values(device / f"host_start.log.{physical}")
@@ -44,16 +87,16 @@ class AscendClock(DeviceCalibration):
         return {key.strip(): int(value.strip()) for line in path.read_text().splitlines()
                 if ":" in line for key, value in [line.split(":", 1)]}
 
-    def timestamp(self, microseconds: Decimal) -> int:
-        raw = (microseconds - self.offset_us) * 1000
+    def timestamp(self, sdk_ns: int) -> int:
+        raw = sdk_ns - self.offset_ns
         counter = self.counter_anchor + round((raw - self.host_anchor) * self.frequency / 1_000_000_000)
 
         # Extrapolated SDK setup/teardown records are filtered outside the valid observation window.
         return self.raw_timestamp(counter)
 
     def interval(self, record: dict) -> tuple[int, int]:
-        begin = Decimal(str(record["ts"]))
-        return self.timestamp(begin), self.timestamp(begin + Decimal(str(record["dur"])))
+        begin, end = self.tasks.interval(record)
+        return self.timestamp(begin), self.timestamp(end)
 
 
 class HostCounter:
@@ -415,10 +458,10 @@ class QueueSlots:
 class RawTraceIndex:
     """Index the SDK and native recorder independently for each projection or reference reader."""
 
-    def __init__(self, profile, runtime, raw, rows, flips):
+    def __init__(self, profile, runtime, raw, sdk, rows, flips):
         self.cann, = profile.glob("PROF_*")
         device, = self.cann.glob("device_*")
-        self.clock = AscendClock(device, raw["device_clock"])
+        self.clock = AscendClock(device, raw["device_clock"], DeviceTaskIntervals(sdk))
         self.host_times = {}
         self.apis = {}
         counter = HostCounter(profile)

@@ -202,7 +202,7 @@ class AscendTrace(RawTraceIndex):
     def __init__(self, profile: Path, runtime: Path, raw: dict, trace: Path, *, evidence=False) -> None:
         rows = sdk_rows(trace)
         flips = task_flips(profile)
-        super().__init__(profile, runtime, raw, rows, flips)
+        super().__init__(profile, runtime, raw, trace.parent, rows, flips)
         self.notifications = HcclNotifications(rows) if evidence else None
         self.tasks: dict[int, list[DeviceTask]] = defaultdict(list)
         self.device_tasks = []

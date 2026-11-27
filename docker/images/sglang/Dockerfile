@@ -16,7 +16,7 @@ RUN bash /opt/prologue/install-sglang.sh /opt/prologue/sglang && rm /opt/prologu
 # FA keeps the paged KV layout consumed by native mixed-batch attention.
 ENV ASCEND_USE_FA=true ASCEND_USE_FIA=false
 
-# The SDK dumper must publish its running flag before starting the background thread.
+# Keep the SDK dumper's startup ordered and measure its queue recorder work.
 COPY src/probes/ascend /opt/prologue/native/ascend
 RUN bash /opt/prologue/native/ascend/profiler/install.sh
 
@@ -46,6 +46,7 @@ COPY src/python/prologue/integrations/frameworks/__init__.py ./python/prologue/i
 COPY src/python/prologue/integrations/frameworks/sglang/__init__.py ./python/prologue/integrations/frameworks/sglang/
 COPY src/python/prologue/integrations/platforms/__init__.py ./python/prologue/integrations/platforms/
 COPY src/python/prologue/integrations/platforms/ascend/__init__.py src/python/prologue/integrations/platforms/ascend/backend.py src/python/prologue/integrations/platforms/ascend/trace_store.py ./python/prologue/integrations/platforms/ascend/
+COPY src/python/prologue/integrations/platforms/ascend/abi ./python/prologue/integrations/platforms/ascend/abi/
 # The capture worker records and interprets traces. Independent reference checks run on the host.
 COPY src/python/prologue/integrations/platforms/ascend/runtime ./python/prologue/integrations/platforms/ascend/runtime/
 COPY src/python/prologue/integrations/platforms/ascend/analysis ./python/prologue/integrations/platforms/ascend/analysis/

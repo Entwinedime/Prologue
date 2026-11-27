@@ -29,8 +29,15 @@ struct Interval {
     std::int64_t after_ns;
 };
 
+struct QueueMark {
+    long thread;
+    std::int64_t counter;
+    std::int64_t recorded_ns;
+};
+
 std::mutex samples_mutex;
 std::vector<Interval> samples;
+std::vector<QueueMark> queue_marks;
 
 std::int64_t now_ns() {
     timespec time{};
@@ -59,11 +66,26 @@ void RuntimeSample::finish(int result, std::uint32_t tasks, std::size_t bytes, i
     samples.back().after_ns = now_ns();
 }
 
+extern "C" bool prologue_ascend_host_timing_active() {
+    return observation.load(std::memory_order_relaxed) == Observation::Timing;
+}
+
+extern "C" void prologue_ascend_queue_mark_recorded(std::int64_t counter) {
+    if (observation.load(std::memory_order_relaxed) != Observation::Timing) return;
+
+    thread_local const auto thread = syscall(SYS_gettid);
+    std::lock_guard lock(samples_mutex);
+    if (observation.load(std::memory_order_relaxed) != Observation::Timing) return;
+
+    queue_marks.push_back({ thread, counter, 0 });
+    queue_marks.back().recorded_ns = now_ns();
+}
+
 extern "C" void prologue_runtime_timing_start() {
     observation.store(Observation::Timing, std::memory_order_relaxed);
 }
 
-extern "C" int prologue_runtime_timing_stop(const char * path) {
+extern "C" int prologue_runtime_timing_stop(const char * path, const char * mark_path) {
     observation.store(Observation::Off, std::memory_order_relaxed);
     try {
         std::lock_guard lock(samples_mutex);
@@ -78,7 +100,16 @@ extern "C" int prologue_runtime_timing_stop(const char * path) {
                    << ",\"end_raw_ns\":" << sample.end_ns << ",\"after_raw_ns\":" << sample.after_ns << "}\n";
         }
         output.close();
+
+        std::ofstream marks(mark_path);
+        marks.exceptions(std::ios::failbit | std::ios::badbit);
+        for (const auto & mark : queue_marks) {
+            marks << '[' << mark.thread << ',' << mark.counter << ',' << mark.recorded_ns << "]\n";
+        }
+        marks.close();
+
         samples.clear();
+        queue_marks.clear();
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "prologue: %s\n", error.what());
