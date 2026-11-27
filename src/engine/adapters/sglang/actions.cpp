@@ -124,6 +124,7 @@ CoarseGraph NativeActionGraphs::build(const ServingAction & action, const nlohma
     const auto state_inputs = worker_.state_inputs(bindings, action.work);
     auto entry = select(action.name, action.condition, action.parameters, state_inputs, action.work);
     auto graph_work = action.work;
+    graph_work.erase("preparation");
     worker_.bind(entry.frame, instance_, graph_work);
     graph_work["bindings"] = bindings;
 

@@ -263,8 +263,8 @@ TemplateEntry TemplateSelection::select(std::string_view action, const nlohmann:
             { "status", status }, { "action", action }, { "condition", condition }, { "parameters", parameters }, { "domain", library_.domain }
         };
 
-        // A local observation needs each admitted member's extent; aggregate dimensions cannot recover their order.
-        for (const auto key : { "members", "context", "callers" }) {
+        // Preserve the inputs that identify the native cut, including its continuation through resource work.
+        for (const auto key : { "members", "context", "callers", "continuation", "preparation" }) {
             if (work.contains(key)) details[key] = work.at(key);
         }
         for (const auto & [name, state] : state_inputs) details["state_inputs"][name] = state.document();

@@ -34,7 +34,7 @@ GraphTiming ServiceTimes::action(const ServingAction & action, const CoarseGraph
 
         // Keep the measured work identity separate from the live invocation an adapter can use to reproduce it.
         auto & call = details["invocation"] = {{ "action", action.name }, { "condition", action.condition }, { "parameters", action.parameters }};
-        for (const auto key : { "members", "context", "callers" }) {
+        for (const auto key : { "members", "context", "callers", "continuation", "preparation" }) {
             if (action.work.contains(key)) call[key] = action.work.at(key);
         }
         throw CostGap(std::move(details));
