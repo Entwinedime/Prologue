@@ -18,6 +18,7 @@ def register(group):
     for flag, description in (("resource-trace", "record resource and input-read evidence"),
                               ("service-reference", "record structure and same-run CPU activity"),
                               ("latency-only", "record scheduler latency without profiling"),
+                              ("batch-timing", "record native scheduler call boundaries for timing diagnosis"),
                               ("host-timing", "measure CPU work and queue cuts")):
         observation.add_argument("--" + flag, action="store_true", help=description)
 
@@ -35,7 +36,8 @@ def run(args):
     launch = args.adapters.native(args.source, read_json(args.deployment))
     sites = read_json(args.attention_sites) if args.attention_sites else None
     launch.capture(options(CaptureOptions, args), attention_sites=sites, latency_only=args.latency_only,
-                   host_timing=args.host_timing, service_reference=args.service_reference).run()
+                   batch_timing=args.batch_timing, host_timing=args.host_timing,
+                   service_reference=args.service_reference).run()
 
 
 def project_capture(args):

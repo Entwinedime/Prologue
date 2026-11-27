@@ -10,8 +10,9 @@ from prologue.host.performance.registry import service_models
 
 
 class DomainCosts:
-    def __init__(self, domain):
+    def __init__(self, domain, observed_overhead_sources):
         self.domain = domain
+        self.observed_overhead_sources = observed_overhead_sources
         self.definitions, self.indices = [], {}
         self.groups = defaultdict(list)
 
@@ -41,10 +42,27 @@ class DomainCosts:
             key = index, row["interval"], features["phase"], transport
             self.groups[key].append((location, row))
 
+    def select_observations(self, definition, interval, rows):
+        kind = self.definitions[definition]["work"][interval]["kind"]
+        corrected = self.observed_overhead_sources if kind == "host" else ()
+        if not corrected and not any(row.get("direct_native_call") for _, row in rows):
+            return rows
+
+        # Prefer a direct native interval at the same coordinate and physical operand.
+        selected, best = [], {}
+        for location, row in rows:
+            key = cost_identity((row["features"], row.get("copy")))
+            quality = 2 if row.get("direct_native_call") else int(location[0] in corrected)
+            best[key] = max(best.get(key, 0), quality)
+            selected.append((location, row, key, quality))
+
+        return [(location, row) for location, row, key, quality in selected if quality == best[key]]
+
     def document(self):
         accepted, unresolved = [], []
         for (definition, interval, phase, transport), rows in sorted(self.groups.items()):
             operand = json.loads(transport) if transport else None
+            rows = self.select_observations(definition, interval, rows)
             model = service_models.fit(self.definitions[definition], interval, rows, operand)
             if operand is not None:
                 model["transport"] = operand
@@ -65,6 +83,8 @@ class FittedCosts:
         self.sources = [str(path) for path in sources]
         self.sample_recordings = [source.get("native_recordings", []) for source in sources.values()]
         source_indices = {path: index for index, path in enumerate(self.sources)}
+        observed_overhead_sources = {index for index, source in enumerate(sources.values())
+                                     if source.get("qualification", {}).get("measured_observer_intervals")}
         self.reused = reused
         domains, placements = {}, {}
 
@@ -77,7 +97,7 @@ class FittedCosts:
 
             domain = cost_identity(source["domain"])
             if domain not in domains:
-                domains[domain] = DomainCosts(source["domain"])
+                domains[domain] = DomainCosts(source["domain"], observed_overhead_sources)
             domains[domain].add(source["definitions"], self.observations(index, source["samples"], source_indices))
 
         self.domains = [group.document() for group in domains.values()]

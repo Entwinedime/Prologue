@@ -78,14 +78,18 @@ class MatrixInputs:
             if prefix is not None:
                 request["prefix_id"] = prefix
             requests.append(request)
+
         result = {"id": case["id"], "requests": requests, "prefixes": case["prefixes"]}
         WorkloadContent(requests, case["prefixes"])
+
+        # A topology shared by several serving instances needs the largest declared padding range.
         topologies = {}
         for instance in instances:
             configuration = instance["configuration"]
             if "ep" in configuration:
                 identity = configuration["ep"]["id"]
                 topologies[identity] = max(topologies.get(identity, 0), configuration["tp"] - 1)
+
         if topologies:
             assignments = self.routes(requests, case["prefixes"], geometry, case["routes"], case["patterns"])
             balanced = [expert * (geometry["experts"] // geometry["top_k"]) for expert in range(geometry["top_k"])]

@@ -24,7 +24,8 @@ class AutonomousVerification(VerificationRun):
 
     def qualify_reference(self, recording, source):
         recorded = recording.inputs
-        if (not recorded.get("latency_only") or recorded.get("host_timing") or "attention_sites" in recorded["job"]
+        if (not recorded.get("latency_only") or recorded.get("host_timing") or recorded.get("batch_timing")
+                or "attention_sites" in recorded["job"]
                 or not all("latency" in instance for instance in recording.manifest["instances"])):
             return "reference_requires_latency_capture"
         if self.input_mismatch(source):

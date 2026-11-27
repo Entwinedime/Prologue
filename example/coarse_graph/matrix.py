@@ -8,8 +8,11 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
+from acceptance import Acceptance
+from holdout import BlindHoldout
 from prologue.common.io import write_json
-from prologue.host.acquisition.recording import PublishedCapture
+from prologue.host.acquisition.capture import NativeAttempt
+from prologue.host.acquisition.recording import PublishedCapture, SessionCapture
 from prologue.host.libraries.release import LibraryRelease
 from prologue.host.registry import AdapterRegistry
 from prologue.host.runtime.docker import OwnedContainers
@@ -23,7 +26,7 @@ class MatrixRun:
     def __init__(self, root, matrix):
         self.root = root.resolve(strict=True)
         self.repository = Path(__file__).resolve().parents[2]
-        self.matrix = json.loads(matrix.read_text())
+        self.matrix_path, self.matrix = matrix, json.loads(matrix.read_text())
         environment = json.loads((matrix.parent / "environment.json").read_text())
         self.images, self.budget = environment["images"], environment["validation_budget"]
         self.binary = (matrix.parent / "prologue").resolve(strict=True)
@@ -42,8 +45,11 @@ class MatrixRun:
         self.results = self.root / "results" / self.name
         self.results.mkdir(parents=True, exist_ok=True)
         self.storage = OperationLimit(self.root, self.budget["retained_bytes"])
+        self.holdout = None
+        if settings := environment.get("blind_acquisition"):
+            self.holdout = BlindHoldout(self, matrix.parent / "source-manifest.json", settings)
 
-    def step(self, name, command, charges, timeout, owner=None):
+    def step(self, name, command, charges, timeout, capture=None, *, exploration=None):
         container = f"prologue-matrix-{self.name}-{name.replace('/', '--')}"
         command = command[:2] + ["--name", container] + command[2:]
         path = self.steps / f"{name}.step.json"
@@ -87,21 +93,25 @@ class MatrixRun:
         elapsed = time.monotonic() - started
         record.update(exit_code=code, elapsed_seconds=elapsed)
         try:
-            if owner is None:
+            if exploration is not None:
+                if exploration.is_file():
+                    usage = json.loads(exploration.read_text())["usage"]
+                    native = usage["native_charged_ns"] / 1e9
+                    processing = max(elapsed - native, usage["postprocessing_ns"] / 1e9)
+                    record.update(charges={"card_seconds": usage["card_ns"] / 1e9,
+                                           "native_attempts": usage["native_attempts"],
+                                           "processing_seconds": processing},
+                                  charge_basis="exploration")
+            elif capture is None:
                 record.update(charges={"processing_seconds": elapsed}, charge_basis="elapsed")
-            elif owner.exists():
-                state = json.loads(owner.read_text())
-                if owner.name == "execution.json":
-                    attempts = state["attempts"]
-                    record["charges"] = {
-                        "native_seconds": max(elapsed, sum(row["charged_ns"] for row in attempts) / 1e9),
-                        "native_attempts": len(attempts),
-                    }
-                else:
-                    native = state["native_charged_ns"] / 1e9
-                    record["charges"] = {"native_seconds": native, "native_attempts": state["native_attempts"],
-                                         "processing_seconds": max(state["postprocessing_ns"] / 1e9, elapsed - native)}
-                record["charge_basis"] = "owner"
+            else:
+                owner, cards = capture
+                if owner.is_file():
+                    attempts = json.loads(owner.read_text())["attempts"]
+                    if all(row["status"] != "running" for row in attempts):
+                        native = sum(row["charged_ns"] for row in attempts) / 1e9
+                        record.update(charges={"card_seconds": native * len(cards), "native_attempts": len(attempts),
+                                               "processing_seconds": max(0, elapsed - native)}, charge_basis="owner")
         finally:
 
             # A malformed owner report cannot erase an already observed process exit or release its reservation.
@@ -130,7 +140,22 @@ class MatrixRun:
             code = self.process(f"{name}/source-evidence-{index}", command)
             path = output / "source-evidence.json"
             checks.append({"recording": recording.attempt_id, "mapped": code == 0, "report": str(path)})
+
+        for index, session in enumerate(domain.get("template_sessions", [])):
+            recording = SessionCapture(self.root / session)
+            output = self.results / "sources" / name / f"local-{index}"
+            checks.append(self.local_source(f"{name}/local-source-evidence-{index}", recording, release, output))
+
         return {"id": name, "status": "source_evidence_checked", "libraries": str(release.directory), "checks": checks}
+
+    def local_source(self, step, recording, release, output):
+        command = self.commands.command(
+            "verify", "source", "--from-session", recording.session, "--libraries", release.directory,
+            "--output", output, "--binary", self.binary, "--modeling-image", self.images["modeling"],
+            "--timeout", self.budget["operation_seconds"],
+        )
+        code = self.process(step, command)
+        return {"recording": recording.attempt_id, "mapped": code == 0, "report": str(output / "source-evidence.json")}
 
     @staticmethod
     def selected_source(source, prediction):
@@ -148,15 +173,22 @@ class MatrixRun:
         return {"source_status": "source-evidence-unqualified" if missing else "ready",
                 "source_recordings": list(task.binding.recordings), "unverified_recordings": missing}
 
-    def evaluate(self, phase, domain, case, source, target):
+    def evaluate(self, phase, domain, case, source, target, blind):
         native = json.loads((self.root / case["capture_input"]).read_text())
         prediction = json.loads((self.root / case["prediction_input"]).read_text())
-        if difference := ReferenceRecording.input_difference(native, prediction):
-            raise ValueError(f"native and prediction inputs differ in {difference}")
+        with AdapterRegistry.bind(source=native):
+            if difference := ReferenceRecording.input_difference(native, prediction):
+                raise ValueError(f"native and prediction inputs differ in {difference}")
+
+        if phase == "blind":
+            return self.holdout.explore(domain, case, prediction)
         if phase in {"detailed", "light"}:
             return self.physical_reference(phase, domain, case, native)
         if phase == "targets":
             return self.target(domain, case, native)
+
+        if blind is not None:
+            source = self.holdout.source(case, source, blind)
 
         # Only the structure and fixed-graph paths consume the detailed target recording.
         if phase in {"compare", "fixed"} and target["status"] == "produced":
@@ -188,7 +220,12 @@ class MatrixRun:
                 return {"status": "native-capture-failed", "capture_exit": code, "native": str(owner)}
 
         recording = self.reference(domain, owner, native, mode)
-        return {"status": "recorded", "native": str(recording.directory), "attempt": recording.attempt_id}
+        with AdapterRegistry.bind(source=native) as (_, adapter):
+            cards = adapter.native(native, json.loads((self.root / domain["deployment"]).read_text())).platform.devices
+
+        elapsed = NativeAttempt.usage(owner).native_ns / 1e9
+        return {"status": "recorded", "native": str(recording.directory), "attempt": recording.attempt_id,
+                "card_seconds": elapsed * len(cards)}
 
     def reference(self, domain, owner, native, mode):
         deployment = json.loads((self.root / domain["deployment"]).read_text())
@@ -199,19 +236,19 @@ class MatrixRun:
 
     def target(self, domain, case, capture_input):
         name = case["id"]
-        directory = self.root / "targets" / self.name / name
-        task = self.root / case["capture_input"]
         result = {"id": name}
         mode = case.get("detailed_capture", "resource-trace")
         if mode not in {"resource-trace", "service-reference"}:
             raise ValueError("a structure target needs a detailed native observation")
+
         if "observation" in case:
 
             # An explicit immutable task replaces collection; the same complete input check still precedes production.
             output = (self.root / case["observation"]).resolve(strict=True)
             result["observation"] = str(output)
         else:
-            output = directory / "native"
+            output = self.root / "targets" / self.name / name / "native"
+            task = self.root / case["capture_input"]
             timeout = case.get("detailed_timeout_seconds", self.budget["task_seconds"])
             code = self.observe(f"{name}/capture", domain, task, output, mode, timeout)
             result["capture_exit"] = code
@@ -224,39 +261,35 @@ class MatrixRun:
         identity = hashlib.sha256(f"{recording.directory}\0{recording.attempt_id}".encode()).hexdigest()
         step = f"graphs/{identity}"
         production = self.root / "targets" / self.name / step
-        code = self.process(
-            step,
-            self.commands.command(
-                "capture",
-                "project",
-                "--capture",
-                recording.directory,
-                "--product",
-                "graphs",
-                "--output",
-                production,
-                "--binary",
-                self.binary,
-                "--source-image",
-                self.images["source"],
-                "--modeling-image",
-                self.images["modeling"],
-                "--budget-seconds",
-                self.budget["operation_seconds"],
-                "--keep-intermediates",
-            ),
+        command = self.commands.command(
+            "capture", "project",
+            "--capture", recording.directory,
+            "--product", "graphs",
+            "--output", production,
+            "--binary", self.binary,
+            "--source-image", self.images["source"],
+            "--modeling-image", self.images["modeling"],
+            "--budget-seconds", self.budget["operation_seconds"],
+            "--keep-intermediates",
         )
+
+        code = self.process(step, command)
         result.update(native=str(recording.directory), production=str(production), production_exit=code)
         return result | {"status": "target-production-failed" if code else "produced"}
 
     def observe(self, step, domain, task, output, mode, timeout):
+        native = json.loads(task.read_text())
+        deployment = self.root / domain["deployment"]
+        with AdapterRegistry.bind(source=native) as (_, adapter):
+            cards = adapter.native(native, json.loads(deployment.read_text())).platform.devices
+
         command = self.commands.command(
             "capture",
             "run",
             "--input",
             task,
             "--deployment",
-            self.root / domain["deployment"],
+            deployment,
             "--output",
             output,
             "--source-image",
@@ -268,10 +301,11 @@ class MatrixRun:
             "--attempt-limit",
             1,
             f"--{mode}",
-            model=json.loads(task.read_text())["model"]["path"],
+            model=native["model"]["path"],
         )
-        return self.step(step, command, {"native_seconds": timeout + 60, "native_attempts": 1},
-                         timeout + 60, output / "execution.json")
+        allowance = timeout + 60
+        charges = {"card_seconds": allowance * len(cards), "native_attempts": 1, "processing_seconds": 60}
+        return self.step(step, command, charges, allowance, (output / "execution.json", cards))
 
     def compare(self, case, prediction, source, target):
         name = case["id"]
@@ -324,7 +358,7 @@ class MatrixRun:
             if target["status"] != "produced":
                 return result | {"status": "target-prerequisite-unqualified"}
             operation = "fixed-graph"
-            release = LibraryRelease(self.root / domain["libraries"])
+            release = LibraryRelease(Path(source.get("libraries", self.root / domain["libraries"])))
             if release.costs is None:
                 return result | {"status": "cost-asset-unavailable"}
             evidence = ("--capture", target["native"], "--reference", target["production"], "--costs", release.costs)
@@ -375,13 +409,19 @@ class MatrixRun:
         output = self.results / f"{report}.json"
         with ExitStack() as contexts:
             contexts.enter_context(file_lock(self.steps / f".{phase}.lock"))
+            blind = self.blind_gate(phase, contexts)
+            if phase == "summary":
+                summary = Acceptance(self.holdout).report()
+                write_json(self.results / "acceptance-summary.json", summary, indent=2)
+                return summary["status"] == "passed"
+
             results = {}
             for name in {"sources", "targets", report}:
                 path = self.results / f"{name}.json"
                 results[name] = json.loads(path.read_text()) if path.exists() else {}
             sources, targets, records = (results[name] for name in ("sources", "targets", report))
             needs_native = (
-                phase in {"detailed", "light"}
+                phase in {"blind", "detailed", "light"}
                 or phase == "autonomous"
                 and any("latency_observation" not in case for domain in domains for case in domain["targets"])
                 or phase == "targets"
@@ -399,7 +439,7 @@ class MatrixRun:
                         else:
                             source = sources.get(domain["id"], {"status": "not-executed"})
                             target = targets.get(case["id"], {"status": "not-executed"})
-                            result = self.evaluate(phase, domain, case, source, target)
+                            result = self.evaluate(phase, domain, case, source, target, blind.get(case["id"]))
                     except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
                         # Bad artifacts have a terminal finding; unresolved processes still stop above.
                         result = {
@@ -409,6 +449,22 @@ class MatrixRun:
                         }
                     records[case["id"]] = result
                     write_json(output, records, indent=2)
+        return True
+
+    def blind_gate(self, phase, contexts):
+        if self.holdout is None:
+            if phase in {"blind", "summary"}:
+                raise ValueError("this matrix has no frozen blind acquisition settings")
+            return {}
+
+        # All blind and reference phases share the same gate, including when called by separate coordinators.
+        contexts.enter_context(file_lock(self.steps / ".holdout.lock"))
+        self.holdout.check_freeze(self.matrix_path)
+        if phase == "blind":
+            self.holdout.require_no_references()
+        elif phase != "sources":
+            return self.holdout.require_blind_results()
+        return {}
 
 
 def main():
@@ -416,11 +472,13 @@ def main():
     parser.add_argument("--root", type=Path, required=True, help="existing investigation directory")
     parser.add_argument("--matrix", type=Path, required=True, help="frozen matrix beside environment.json and prologue")
     parser.add_argument(
-        "--phase", choices=("sources", "detailed", "light", "targets", "compare", "fixed", "autonomous"), required=True
+        "--phase",
+        choices=("sources", "blind", "detailed", "light", "targets", "compare", "fixed", "autonomous", "summary"),
+        required=True,
     )
     parser.add_argument("--domain", help="one named domain; omit for the whole stage")
     arguments = parser.parse_args()
-    MatrixRun(arguments.root, arguments.matrix).run(arguments.phase, arguments.domain)
+    raise SystemExit(0 if MatrixRun(arguments.root, arguments.matrix).run(arguments.phase, arguments.domain) else 1)
 
 
 if __name__ == "__main__":

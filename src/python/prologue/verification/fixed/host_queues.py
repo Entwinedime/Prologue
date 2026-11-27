@@ -2,7 +2,7 @@
 
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
-from itertools import pairwise
+from itertools import chain, pairwise
 
 from prologue.common.observation import ThreadService
 from prologue.verification.core.adapters import platform_evidence
@@ -184,23 +184,29 @@ class HostQueueEvidence:
     def handoffs(self, graph, positions, arrivals):
         delays, counts = {}, Counter()
         edges = {(edge["source"], edge["target"]) for edge in graph["edges"] if edge["kind"] == "submission"}
+        targets = {target for _, target in edges}
+        events = graph["events"]
+        ordered = ((edge["source"], edge["target"]) for edge in graph["edges"] if edge["kind"] == "order")
+        work = ((interval["start"], interval["finish"]) for interval in graph["work"])
+        serial_predecessors = {target for source, target in chain(ordered, work)
+                               if target in targets and events[source]["resource"] == events[target]["resource"]}
+
         for takes in self.takes.values():
             for previous, take in pairwise([None, *takes]):
                 correlation = take.record["args"]["correlation_id"]
                 post = self.source.enqueue[correlation]
-                finish = self.stamp(take, "begin")
-
-                if previous is not None and post.begin < previous.end and correlation not in arrivals:
-
-                    # Already submitted work follows the preceding dequeue on the same worker.
-                    continue
-
                 sender = positions.get((post.thread, post.begin))
                 target = positions.get((take.thread, take.begin))
                 if post.thread == take.thread or (sender, target) not in edges:
                     continue
 
-                elapsed = finish - self.stamp(post, "begin")
+                if (previous is not None and post.begin < previous.end
+                        and target in serial_predecessors and correlation not in arrivals):
+
+                    # The retained serial predecessor supplies readiness for queued work.
+                    continue
+
+                elapsed = self.stamp(take, "begin") - self.stamp(post, "begin")
                 self.source.require(elapsed >= 0, "observed queue take precedes its original enqueue")
                 delays[sender, target] = {"queue_handoff_ns": elapsed}
                 counts["notified_active_takes"] += correlation in arrivals

@@ -2,14 +2,17 @@
 
 from pathlib import Path
 
+from prologue.host.acquisition.options import QualificationOptions
+from prologue.host.acquisition.recording import SessionCapture
 from prologue.host.cli.arguments import command, control, modeling, paths, timeout
 from prologue.host.libraries.release import LibraryRelease
+from prologue.host.runtime.docker import ModelingProcess
 from prologue.verification.autonomous.autonomous import AutonomousVerification
 from prologue.verification.autonomous.latency_metrics import compare_publications
 from prologue.verification.autonomous.schedule import compare_schedule
 from prologue.verification.core import RawCaseSource
 from prologue.verification.core.native_case import NativeCase
-from prologue.verification.core.source import ProductionEvidence
+from prologue.verification.core.source import LocalTemplateEvidence, ProductionEvidence
 from prologue.verification.fixed.fixed_graph import FixedPerformance
 from prologue.verification.structure.compare_actions import ActionComparison
 from prologue.verification.structure.execution_inputs import NativeInputs
@@ -18,10 +21,8 @@ from prologue.verification.structure.structure import StructureVerification
 
 
 def register(group):
-    native = command(group, "source", "check native evidence and calibrated clocks", source)
-    paths(native, "production", "capture", "output")
-    native.add_argument("--libraries", type=Path, help="check the published templates against the recording")
-    details(native)
+    native = command(group, "source", "check native evidence and its published templates", configure=source_mode)
+    native.add_argument("--from-session", type=Path, help="check fragments from a qualified local cut")
     timing = command(group, "inputs", "extract measured conditions for structure verification", inputs)
     paths(timing, "capture", "graphs", "output")
     timing.add_argument("--layouts", type=Path, help="require the measured endpoints for each action")
@@ -47,6 +48,20 @@ def register(group):
 
 def details(parser):
     parser.add_argument("--details", action="store_true", help="retain detailed verification evidence")
+
+
+def source_mode(parser, args):
+    paths(parser, "output")
+    if args.from_session is not None:
+        paths(parser, "libraries")
+        modeling(parser)
+        timeout(parser)
+        return local_source
+
+    paths(parser, "production", "capture")
+    parser.add_argument("--libraries", type=Path, help="check the published templates against the recording")
+    details(parser)
+    return source
 
 
 def structure_mode(parser, args):
@@ -91,6 +106,14 @@ def source(args):
     if args.libraries is not None:
         document["published_templates"] = check.published_templates(LibraryRelease(args.libraries))
     return check.publish(document)
+
+
+def local_source(args):
+    recording = SessionCapture(args.from_session)
+    model = ModelingProcess(args.binary, args.modeling_image, args.timeout)
+    options = QualificationOptions(binary=args.binary, modeling_image=args.modeling_image, timeout=args.timeout)
+    acquisition = args.adapters.native.local_acquisition(args.release, options)
+    return LocalTemplateEvidence(recording, args.release, model, acquisition.template_resources).run(args.output)
 
 
 def inputs(args):

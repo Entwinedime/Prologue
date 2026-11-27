@@ -40,7 +40,7 @@ class TaskCommands:
             command.extend(["--mount", f"type=bind,src={source},dst={destination}" + (",readonly" if readonly else "")])
         command.extend([
             "--workdir", str(self.repository),
-            "--env", "PYTHONPATH=src/python",
+            "--env", "PYTHONPATH=src/python", "--env", "PYTHONDONTWRITEBYTECODE=1",
             "--entrypoint", "python3", self.images["control"], "-m", "prologue",
         ])
         return command + [str(value) for value in arguments]

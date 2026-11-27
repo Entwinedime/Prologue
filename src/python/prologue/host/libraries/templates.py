@@ -29,16 +29,8 @@ class TemplatePublication:
         shards = self.observation["shards"]
         shard = next((row for row in shards if row["product"] == identity), None)
         if shard is None:
-            source, graph, library = (
-                self.scratch / f"{identity}-{part}.json" for part in ("facts", "graph", "template")
-            )
-            projected = {key: value for key, value in facts.items() if key not in {"sampling", "export_site"}}
-            projected["resources"] = self.template_resources(facts)
-            write_json(source, projected)
-            self.model.run_model("project", graph, source)
-            options = ("--root-site", facts["export_site"]) if "export_site" in facts else ()
-            self.model.run_model("templates", library, graph, options=options)
-            shard = self.catalog.write_shard(self.directory, f"observed/{identity}.json", read_json(library),
+            template = self.compile(self.model, self.scratch, identity, facts, self.template_resources)
+            shard = self.catalog.write_shard(self.directory, f"observed/{identity}.json", template,
                                              sampling=facts.get("sampling"))
             shard["product"] = identity
             shards.append(shard)
@@ -56,6 +48,18 @@ class TemplatePublication:
                 self.index["bindings"].append({"domain": query["domain"], "workers": self.origin, "imports": []})
                 self.initialized.add(content_id(query["domain"]))
                 self.catalog = TemplateCatalog(self.directory, self.index)
+
+    @staticmethod
+    def compile(model, scratch, identity, facts, resources):
+        source, graph, library = (scratch / f"{identity}-{part}.json" for part in ("facts", "graph", "template"))
+        projected = {key: value for key, value in facts.items() if key not in {"sampling", "export_site"}}
+        projected["resources"] = resources(facts)
+        write_json(source, projected)
+        model.run_model("project", graph, source)
+
+        options = ("--root-site", facts["export_site"]) if "export_site" in facts else ()
+        model.run_model("templates", library, graph, options=options)
+        return read_json(library)
 
     @staticmethod
     def same_worker(first, second):

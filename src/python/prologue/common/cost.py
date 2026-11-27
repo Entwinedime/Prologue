@@ -4,8 +4,20 @@ import json
 from dataclasses import dataclass
 
 
+def _identity_value(value):
+    if isinstance(value, dict):
+        return {key: _identity_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_identity_value(item) for item in value]
+
+    # The engine compares integer and floating-point JSON numbers by value.
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
 def cost_identity(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return json.dumps(_identity_value(value), sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def cost_features(axes, *, phase="", transport=None):
@@ -70,12 +82,14 @@ class ServiceSamples:
         self.rows = {}
         self.external = {}
 
-    def add(self, definition, interval, features, duration_ns, copy=None, collective=None):
-        key = definition, interval, cost_identity([features, copy, collective])
+    def add(self, definition, interval, features, duration_ns, copy=None, collective=None, *, direct_native_call=False):
+        key = definition, interval, cost_identity([features, copy, collective]), direct_native_call
         row = self.rows.setdefault(key, {
             "definition": definition, "interval": interval, "features": features, "observations_ns": [],
         })
 
+        if direct_native_call:
+            row["direct_native_call"] = True
         if copy is not None:
             row["copy"] = {"bytes": copy[0], "direction": copy[1]}
         if collective is not None:

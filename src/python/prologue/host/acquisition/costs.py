@@ -32,8 +32,10 @@ class CostSource:
         self.production, self.output = production, output
         self.deployment = deployment
         self.recording = PublishedCapture(capture, job)
-        if read_json(production / "production.json")["inputs"]["capture_path"] != str(self.recording.source):
+        inputs = read_json(production / "production.json")["inputs"]
+        if inputs["capture_path"] != str(self.recording.source):
             raise ValueError("training production belongs to a different native observation")
+        self.images = inputs["images"]
         self.ranks = read_json(production / "result.json")["observed_roles"]
         self.projection = production
 
@@ -183,11 +185,13 @@ class CostAcquisition:
                 self.limit.run_worker(operation, options, output.with_suffix(".log"), seconds)
 
     def project(self, source):
-        if all((source.production / "work" / f"{rank}-{file}").is_file()
-               for rank in source.ranks for file in ("graph.json", "facts.json", "sdk/trace.json")):
+        if source.images == self.images and all(
+            (source.production / "work" / f"{rank}-{file}").is_file()
+            for rank in source.ranks for file in ("graph.json", "facts.json", "sdk/trace.json")
+        ):
             return
 
-        # A compact parent still owns the closed observation. Recreate only derived evidence in this task.
+        # Compact or older productions still own the closed observation. Recreate their derived evidence here.
         source.projection = source.output / "projection"
         allowance = self.budget.available_to(CaptureProduction.usage(source.projection), self.spending(self.output))
         if allowance.processing_ns <= 0:

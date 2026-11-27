@@ -5,10 +5,12 @@ from bisect import bisect_right
 from collections import Counter, defaultdict
 from heapq import heappop, heappush
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from prologue.common.io import read_json
+from prologue.common.io import content_id, read_json
 from prologue.host.acquisition.recording import PublishedCapture
 from prologue.host.libraries.release import asset_path
+from prologue.host.libraries.templates import TemplatePublication
 from prologue.verification.core import RawCaseSource
 from prologue.verification.core.actions import ActionScopes
 from prologue.verification.core.adapters import device_effects, stream_declarations
@@ -278,6 +280,82 @@ class SourceEvidence:
         }
 
 
+def template_matches(catalog, shard, observed):
+    body = catalog.read_shard(shard)
+
+    # A portable definition keeps its source ID even if its position in the file changes.
+    definitions = body.pop("definitions")
+    indexed = {definition.pop("id"): definition for definition in definitions}
+    header_body = {key: value for key, value in observed.items() if key != "definitions"}
+    return (len(indexed) == len(definitions) and indexed == dict(enumerate(observed["definitions"]))
+            and (body | shard["header"]) == header_body)
+
+
+class LocalTemplateEvidence:
+    """Check the released fragments against the qualified products of their native cut."""
+
+    def __init__(self, recording, release, model, resources):
+        self.recording, self.release, self.model, self.resources = recording, release, model, resources
+
+    def inspect(self, scratch):
+        recording = self.recording
+        catalog = self.release.templates
+        observation = catalog.observations.get(recording.attempt_id)
+        if observation is None or observation["deployment"] != recording.inputs["deployment"]:
+            raise ValueError("released fragments do not belong to this native cut")
+
+        shards = observation["shards"]
+        if not shards:
+            raise ValueError("native cut has no released fragments")
+        needed = {shard["product"].partition("-")[0] for shard in shards}
+        products = {}
+        for name, digest in recording.receipt["assets"].items():
+            identity = content_id([recording.attempt_id, name])
+            if identity not in needed:
+                continue
+            product = read_json(asset_path(recording.session, name))
+            if (content_id(product) != digest or recording.attempt_id not in product["native_recordings"]
+                    or product["acquisition_rule"] != recording.receipt["rule"]):
+                raise ValueError(f"qualified local product changed: {name}")
+
+            if "participants" in product:
+                for worker in product["participants"]:
+                    rank = worker["environment"]["parallel"]["rank"]
+                    products[f"{identity}-{rank}"] = worker
+            else:
+                products[identity] = product
+
+        for shard in shards:
+            identity = shard["product"]
+            if identity not in products:
+                raise ValueError(f"template has no qualified local product: {identity}")
+            facts = products[identity]
+            template = TemplatePublication.compile(self.model, scratch, identity, facts, self.resources)
+            sampling = read_json(asset_path(catalog.directory, shard["sampling"])) if "sampling" in shard else None
+            initial = shard.get("initialization", {})
+            if (not template_matches(catalog, shard, template) or sampling != facts.get("sampling")
+                    or any(facts[key] != value for key, value in initial.items())):
+                raise ValueError(f"released template differs from its qualified local product: {identity}")
+
+        return len(shards)
+
+    def run(self, output):
+        output.mkdir(parents=True)
+        result = {"recording": self.recording.attempt_id, "scope": "local_acquisition_cut"}
+        try:
+            with TemporaryDirectory(dir=output) as temporary:
+                result.update(status="matched", checked_fragments=self.inspect(Path(temporary)))
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            result.update(status="unverified", error=str(error))
+
+        matched = result["status"] == "matched"
+        result["qualification"] = {"local_templates": matched, "joint_reference": False}
+        report = ReportBuilder("Local template source")
+        report.note(result.get("error", f"Checked {result.get('checked_fragments', 0)} released fragments."))
+        report.publish(output, "source-evidence", result)
+        return 0 if matched else 1
+
+
 class ProductionEvidence:
     """Qualify each projected rank and then establish whether the original observations support a joint
     reference.
@@ -303,13 +381,7 @@ class ProductionEvidence:
 
         for name, shard in zip(paths, observation["shards"], strict=True):
             native = read_json(asset_path(production, name))
-            body = catalog.read_shard(shard)
-
-            # A portable definition keeps its original ID even if its position in the file changes.
-            definitions = body.pop("definitions")
-            indexed = {definition.pop("id"): definition for definition in definitions}
-            expected = dict(enumerate(native.pop("definitions")))
-            if len(indexed) != len(definitions) or indexed != expected or (body | shard["header"]) != native:
+            if not template_matches(catalog, shard, native):
                 return result | {"status": "template_mismatch", "body": shard["body"]}
 
             result["checked_workers"] += 1
