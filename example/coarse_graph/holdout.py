@@ -2,6 +2,7 @@
 
 import shutil
 from hashlib import sha256
+from pathlib import Path
 
 from prologue.common.io import read_json, write_json
 from prologue.host.acquisition.recording import SessionCapture
@@ -61,23 +62,46 @@ class BlindHoldout:
         ):
             raise ValueError("matrix inputs differ from the sealed request draw")
 
+        references = [path for case in self.coordinates() for path in self.references(case)]
+        paths = set(references)
+        if len(paths) != len(references) or any(paths.intersection(path.parents) for path in paths):
+            raise ValueError("references require distinct, non-overlapping directories")
+
     def coordinates(self):
         return (case for domain in self.domains for case in domain["targets"])
 
-    def require_no_references(self):
-        for case in self.coordinates():
-            for field in ("observation", "latency_observation"):
-                if asset_path(self.root, case[field]).exists():
-                    raise ValueError("blind acquisition must finish before any full-service reference exists")
+    def references(self, case):
+        light = case["latency_observations"]
+        if not isinstance(light, list) or len(light) not in {2, 3}:
+            raise ValueError("a frozen holdout needs two or three declared latency references per case")
+        return tuple(asset_path(self.root, name) for name in (case["observation"], *light))
 
-    def require_blind_results(self):
+    def require_no_references(self):
+        if any(path.exists() for case in self.coordinates() for path in self.references(case)):
+            raise ValueError("blind acquisition must finish before any full-service reference exists")
+
+    def require_blind_results(self, *, before_collection=False):
         path = self.results / "blind.json"
         if not path.is_file():
             raise ValueError("full-service reference collection requires the completed blind phase")
 
         records = read_json(path)
-        if any("report" not in records.get(case["id"], {}) for case in self.coordinates()):
-            raise ValueError("every target needs a terminal formal exploration before reference collection")
+        for case in self.coordinates():
+            name = case["id"]
+            record = records.get(name, {})
+            if "report" not in record:
+                raise ValueError(f"blind exploration has no terminal result for {name}")
+            if not before_collection:
+                continue
+
+            prediction = record.get("prediction")
+            if record["status"] != "complete" or prediction is None:
+                raise ValueError(f"full-service reference requires a completed blind prediction for {name}")
+
+            sealed = Path(prediction["report"]).resolve(strict=True)
+            if not sealed.is_relative_to(self.root) or digest(sealed) != prediction["sha256"]:
+                raise ValueError(f"sealed blind prediction changed for {name}: {sealed}")
+
         return records
 
     @staticmethod
@@ -132,6 +156,11 @@ class BlindHoldout:
                  "initial_release": initial.identity, "final_release": release.identity,
                  "libraries": report["libraries"],
                  "initial_hot": warm, "usage": report["usage"], "sessions": str(output / "acquisition/sessions")}
+        if result == 0:
+            target, = report["targets"]
+            path = asset_path(output, target["evidence"])
+            entry["prediction"] = {"report": str(path), "sha256": digest(path)}
+
         for gap in ("template-gap", "cost-gap"):
             if (path := first / f"{gap}.json").is_file():
                 entry["initial_gap"] = {"kind": gap, "status": read_json(path)["status"], "report": str(path)}

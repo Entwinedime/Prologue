@@ -13,7 +13,7 @@ from holdout import BlindHoldout
 from prologue.common.io import write_json
 from prologue.host.acquisition.capture import NativeAttempt
 from prologue.host.acquisition.recording import PublishedCapture, SessionCapture
-from prologue.host.libraries.release import LibraryRelease
+from prologue.host.libraries.release import LibraryRelease, asset_path
 from prologue.host.registry import AdapterRegistry
 from prologue.host.runtime.docker import OwnedContainers
 from prologue.host.runtime.limits import OperationLimit
@@ -182,8 +182,16 @@ class MatrixRun:
 
         if phase == "blind":
             return self.holdout.explore(domain, case, prediction)
-        if phase in {"detailed", "light"}:
-            return self.physical_reference(phase, domain, case, native)
+        if phase == "detailed":
+            mode = case["detailed_capture"]
+            if mode not in {"resource-trace", "service-reference"}:
+                raise ValueError("a detailed reference requires a native graph observation")
+            return self.physical_reference(phase, domain, case, native, case["observation"], mode)
+        if phase == "light":
+            references = [self.physical_reference(phase, domain, case, native, path, "latency-only")
+                          for path in case["latency_observations"]]
+            status = "recorded" if all(row["status"] == "recorded" for row in references) else "incomplete"
+            return {"status": status, "references": references}
         if phase == "targets":
             return self.target(domain, case, native)
 
@@ -198,22 +206,16 @@ class MatrixRun:
                 raise ValueError("target report refers to a different native observation")
         if phase == "compare":
             return self.compare(case, prediction, source, target)
-        if phase == "autonomous" and "latency_observation" in case:
-            self.reference(domain, self.root / case["latency_observation"], native, "latency-only")
-        return self.performance(phase, domain, case, prediction, source, target)
+        if phase == "fixed":
+            return self.fixed(domain, case, source, target)
+        return self.autonomous(domain, case, native, prediction, source)
 
-    def physical_reference(self, phase, domain, case, native):
-        if phase == "detailed":
-            destination, mode = case["observation"], case["detailed_capture"]
-            if mode not in {"resource-trace", "service-reference"}:
-                raise ValueError("a detailed reference requires a native graph observation")
-        else:
-            destination, mode = case["latency_observation"], "latency-only"
-        owner = (self.root / destination).resolve()
+    def physical_reference(self, phase, domain, case, native, destination, mode):
+        owner = asset_path(self.root, destination)
+        step = f"references/{owner.relative_to(self.root)}"
 
-        # Both source modes name the same physical target. Only an explicit collection phase creates it.
-        if not owner.exists():
-            step = f"references/{owner.relative_to(self.root)}"
+        # Reopen the step receipt even if a failed attempt left partial native artifacts.
+        if not owner.exists() or (self.steps / f"{step}.step.json").is_file():
             timeout = case.get(f"{phase}_timeout_seconds", self.budget["task_seconds"])
             code = self.observe(step, domain, self.root / case["capture_input"], owner, mode, timeout)
             if code:
@@ -349,42 +351,61 @@ class MatrixRun:
             return result | {"status": "verification-error"}
         return result | json.loads(path.read_text()) | {"report": str(path)}
 
-    def performance(self, phase, domain, case, prediction, source, target):
+    def fixed(self, domain, case, source, target):
         name = case["id"]
         result = {"id": name}
-        if phase == "fixed" and case.get("detailed_capture") != "service-reference":
+        if case.get("detailed_capture") != "service-reference":
             return result | {"status": "not-selected"}
-        if phase == "fixed":
-            if target["status"] != "produced":
-                return result | {"status": "target-prerequisite-unqualified"}
-            operation = "fixed-graph"
-            release = LibraryRelease(Path(source.get("libraries", self.root / domain["libraries"])))
-            if release.costs is None:
-                return result | {"status": "cost-asset-unavailable"}
-            evidence = ("--capture", target["native"], "--reference", target["production"], "--costs", release.costs)
-            if groups := case.get("fixed_work_groups"):
-                evidence += ("--work-groups", self.root / groups)
-        else:
-            operation = "autonomous"
-            latency = self.root / case.get("latency_observation", f"targets/{self.name}/{name}/latency")
-            if "latency_observation" not in case:
-                timeout = case.get("latency_timeout_seconds", self.budget["task_seconds"])
-                code = self.observe(
-                    f"{name}/latency", domain, self.root / case["capture_input"], latency, "latency-only", timeout
-                )
-                if code:
-                    return result | {"status": "native-capture-failed", "capture_exit": code}
+        if target["status"] != "produced":
+            return result | {"status": "target-prerequisite-unqualified"}
+        release = LibraryRelease(Path(source.get("libraries", self.root / domain["libraries"])))
+        if release.costs is None:
+            return result | {"status": "cost-asset-unavailable"}
 
-            # Keep the frozen native observation even when the current prediction asset is unusable.
-            result["native_task"] = str(latency)
-            result.update(self.selected_source(source, prediction))
-            if result["source_status"] != "ready":
-                return result | {"status": "source-prerequisite-unqualified"}
-            evidence = ("--capture", latency, "--libraries", source["libraries"],
-                        "--input", self.root / case["prediction_input"], "--control-image", self.images["control"])
-            if case.get("retain_execution_trace"):
-                evidence += ("--details",)
+        evidence = ("--capture", target["native"], "--reference", target["production"], "--costs", release.costs)
+        if groups := case.get("fixed_work_groups"):
+            evidence += ("--work-groups", self.root / groups)
+        return result | self.verify_performance(name, "fixed", "fixed-graph", evidence)
 
+    def autonomous(self, domain, case, native, prediction, source):
+        name = case["id"]
+        explicit = "latency_observations" in case
+        paths = case.get("latency_observations", [f"targets/{self.name}/{name}/latency"])
+        result = {"id": name, **self.selected_source(source, prediction)}
+        references = []
+        for index, path in enumerate(paths):
+            owner = asset_path(self.root, path)
+            step = f"{name}/{index + 1}" if explicit else name
+            try:
+                references.append(self.autonomous_reference(step, domain, case, native, source, result, owner,
+                                                            explicit))
+            except (OSError, ValueError, KeyError) as error:
+                references.append({"status": "artifact-error", "native_task": str(owner), "error": str(error)})
+
+        if not explicit:
+            return result | references[0]
+        status = "compared" if all(row["status"] == "compared" for row in references) else "incomplete"
+        return result | {"status": status, "references": references}
+
+    def autonomous_reference(self, step, domain, case, native, source, selection, owner, explicit):
+        result = {"native_task": str(owner)}
+        if not explicit:
+            timeout = case.get("latency_timeout_seconds", self.budget["task_seconds"])
+            code = self.observe(f"{step}/latency", domain, self.root / case["capture_input"], owner, "latency-only",
+                                timeout)
+            if code:
+                return result | {"status": "native-capture-failed", "capture_exit": code}
+        self.reference(domain, owner, native, "latency-only")
+        if selection["source_status"] != "ready":
+            return result | {"status": "source-prerequisite-unqualified"}
+
+        evidence = ("--capture", owner, "--libraries", source["libraries"],
+                    "--input", self.root / case["prediction_input"], "--control-image", self.images["control"])
+        if case.get("retain_execution_trace"):
+            evidence += ("--details",)
+        return result | self.verify_performance(step, "autonomous", "autonomous", evidence)
+
+    def verify_performance(self, name, phase, operation, evidence):
         output = self.results / phase / name
         timeout = self.budget["operation_seconds"]
         command = self.commands.command(
@@ -395,8 +416,8 @@ class MatrixRun:
         code = self.step(f"{name}/{phase}", command, {"processing_seconds": allowance}, allowance)
         path = output / "result.json"
         if not path.exists():
-            return result | {"status": "verification-error", "verification_exit": code}
-        return result | {"status": json.loads(path.read_text())["status"], "report": str(path)}
+            return {"status": "verification-error", "verification_exit": code}
+        return {"status": json.loads(path.read_text())["status"], "report": str(path)}
 
     def run(self, phase, domain_name):
         if self.matrix["status"] != "frozen":
@@ -423,7 +444,7 @@ class MatrixRun:
             needs_native = (
                 phase in {"blind", "detailed", "light"}
                 or phase == "autonomous"
-                and any("latency_observation" not in case for domain in domains for case in domain["targets"])
+                and any("latency_observations" not in case for domain in domains for case in domain["targets"])
                 or phase == "targets"
                 and any("observation" not in case for domain in domains for case in domain["targets"])
             )
@@ -463,7 +484,7 @@ class MatrixRun:
         if phase == "blind":
             self.holdout.require_no_references()
         elif phase != "sources":
-            return self.holdout.require_blind_results()
+            return self.holdout.require_blind_results(before_collection=phase in {"detailed", "light"})
         return {}
 
 
