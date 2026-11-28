@@ -45,7 +45,7 @@ class NativeHostSamples(ServingCuts):
         self.auxiliary_intervals = []
         self.host_profile = host_profile
         self.profile = None
-        self.communications = DeviceCollectiveCuts(self)
+        self.communications = DeviceCollectiveCuts(self, self.record_auxiliary)
         self.protocol = None
         self.pipeline = None
 
@@ -77,9 +77,10 @@ class NativeHostSamples(ServingCuts):
 
     @contextmanager
     def scope(
-        self, role, site, implementation, *, work=None, condition=None, parameters=None, bindings=None, dimensions=None
+        self, role, site, implementation, *, work=None, condition=None, parameters=None, bindings=None,
+        dimensions=None, entered=None,
     ):
-        observed_begin = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+        observed_begin = clock_gettime_ns(CLOCK_MONOTONIC_RAW) if entered is None else entered
         occurrence = {
             "id": len(self.scopes), "parent": self.parent.get(), "role": role, "site": site,
             "implementation": implementation, "work": {} if work is None else dict(work),
@@ -101,13 +102,18 @@ class NativeHostSamples(ServingCuts):
             yield occurrence
         finally:
             end = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
-            native_begin, native_end = occurrence.setdefault("raw_interval", [begin, end])
+            occurrence.setdefault("raw_interval", [begin, end])
             self.parent.reset(previous)
+            self.record_auxiliary(observed_begin, occurrence)
 
-            # A caller encloses the observer's setup and cleanup for each nested native scope.
-            thread = occurrence["thread"]
-            self.auxiliary_intervals.append([thread, observed_begin, native_begin])
-            self.auxiliary_intervals.append([thread, native_end, clock_gettime_ns(CLOCK_MONOTONIC_RAW)])
+    def record_auxiliary(self, entered, occurrence=None):
+        if occurrence is None:
+            self.auxiliary_intervals.append([get_native_id(), entered, clock_gettime_ns(CLOCK_MONOTONIC_RAW)])
+            return
+        native_begin, native_end = occurrence["raw_interval"]
+        thread = occurrence["thread"]
+        self.auxiliary_intervals.append([thread, entered, native_begin])
+        self.auxiliary_intervals.append([thread, native_end, clock_gettime_ns(CLOCK_MONOTONIC_RAW)])
 
     def native_call(self, role, original, *, implementation=None, **facts):
         implementation = implementation or native_implementation(original)
@@ -129,7 +135,7 @@ class NativeHostSamples(ServingCuts):
                 })
         yield
 
-    def observe_exchange(self, original, role, group, root_rank, operand, run):
+    def observe_exchange(self, original, role, group, root_rank, operand, run, *, entered=None):
         work, parameters, bindings = None, None, None
         if operand is not None and operand.output is None:
             parameters = PipelineABI.tensor_parameters(operand.tensor)
@@ -138,21 +144,24 @@ class NativeHostSamples(ServingCuts):
             bindings = {"collective": PipelineABI.gather_condition(operand.tensor, operand.gather_dim, group_role)}
             if self.pipeline is not None:
                 work = self.pipeline.messages.work()
-        with self.native_call(role, original, work=work, parameters=parameters, bindings=bindings):
-            return run()
+
+        with self.native_call(
+            role, original, work=work, parameters=parameters, bindings=bindings, entered=entered
+        ) as scope:
+            return self.timed_call(scope, run)
 
     def observe_expert_exchange(self, original, dispatcher, *args, **kwargs):
         if not self.enabled:
             return original(dispatcher, *args, **kwargs)
-        with self.native_call("communication", original):
-            return original(dispatcher, *args, **kwargs)
+        with self.native_call("communication", original) as scope:
+            return self.timed_call(scope, original, dispatcher, *args, **kwargs)
 
     def collective(self, original, boundary, arguments):
         role = boundary.condition["collective"]["group"]
         with self.native_call(boundary.operation, original, work=boundary.work, condition=boundary.condition) as scope:
             scope["group"] = self.collective_groups[role]
             scope["parameters"] = boundary.parameters
-            return original(**arguments)
+            return self.timed_call(scope, original, **arguments)
 
     def enclosing(self, frame):
         return self.native_call("invocation", frame.original, work=frame.work)
@@ -219,31 +228,34 @@ class NativeHostSamples(ServingCuts):
     def module(self, role, site, implementation, body_signature, original, *args, **kwargs):
         if not self.enabled:
             return original(*args, **kwargs)
-        with self.scope(role, site, implementation) as scope:
-            if body_signature is not None:
 
-                # Read the tensors passed to the model after the native backend has applied padding.
-                with self.auxiliary():
-                    arguments = ModelScopes.bound_arguments(body_signature, args, kwargs)
-                    scope["dimensions"] = ModelScopes.model_dimensions(arguments)
+        enter_ns = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+        dimensions = None
+        if body_signature is not None:
+
+            # Read the tensors passed to the model after the native backend has applied padding.
+            arguments = ModelScopes.bound_arguments(body_signature, args, kwargs)
+            dimensions = ModelScopes.model_dimensions(arguments)
+        with self.scope(role, site, implementation, dimensions=dimensions, entered=enter_ns) as scope:
             return self.timed_call(scope, original, *args, **kwargs)
 
     def run_batch(self, original, scheduler, batch, *args, **kwargs):
+        enter_ns = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
         work = self.batch_work(batch)
-        with self.auxiliary():
-            members = work["members"]
-            dimensions = BatchTensors.input_dimensions(sum(member["new_tokens"] for member in members), len(members))
-        with self.native_call("run_batch", original, work=work, dimensions=dimensions) as scope:
+        members = work["members"]
+        dimensions = BatchTensors.input_dimensions(sum(member["new_tokens"] for member in members), len(members))
+        with self.native_call("run_batch", original, work=work, dimensions=dimensions, entered=enter_ns) as scope:
             return self.timed_call(scope, original, scheduler, batch, *args, **kwargs)
 
     def forward(self, original, runner, batch, *args, **kwargs):
-        with self.auxiliary():
-            dimensions = BatchTensors.input_dimensions(batch.input_ids.numel(), batch.batch_size)
-        with self.native_call("model", original, dimensions=dimensions) as scope:
+        enter_ns = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+        dimensions = BatchTensors.input_dimensions(batch.input_ids.numel(), batch.batch_size)
+        with self.native_call("model", original, dimensions=dimensions, entered=enter_ns) as scope:
             return self.timed_call(scope, original, runner, batch, *args, **kwargs)
 
     def sample(self, original, runner, *args, **kwargs):
-        with self.native_call("sample", original) as scope:
+        enter_ns = clock_gettime_ns(CLOCK_MONOTONIC_RAW)
+        with self.native_call("sample", original, entered=enter_ns) as scope:
             return self.timed_call(scope, original, runner, *args, **kwargs)
 
     @contextmanager

@@ -20,24 +20,39 @@ class PairedHostService(LocalSchedulerWork):
 
     def cut(self, queries, session, deployment, arguments):
         cut = LocalSchedulerBatch.work_job(queries, deployment)
+        batch = cut.job["batch"]
+        if "rank" in batch and not cut.job["single_device"]:
+            batch["peer_ranks"] = sorted(map(int, queries[0]["domain"]["worker_roles"]))
         return replace(cut, worker="--local-host-pair", host_timing=True)
 
     def qualify(self, queries, recording, timeout=None):
-        rank = WorkerDomain.rank(queries[0]["domain"])
-
-        # Matching cuts identify the service. The structural pass must never supply its elapsed time.
-        original, timed = (WorkerCapture(recording, rank, name) for name in ("structure", "timing"))
+        domain = queries[0]["domain"]
+        requested = WorkerDomain.rank(domain)
+        peers = recording.inputs["job"]["batch"].get("peer_ranks", ())
         invocations = LocalSchedulerBatch.invocations(queries)
-        facts, _, structure = LocalSchedulerBatch.readback(invocations, original)
-        evidence, catalog = original.measure(self.compiler(timeout), recording.directory.parent)
-        report = HostCostSamples.local(original, timed, catalog)
-        products, answers = self.answers(queries, report, "samples/host.json")
+        model = self.compiler(timeout)
+        support = {}
 
-        # The already qualified structural cut can also answer later template queries.
-        if products:
-            support = {structure: facts, **CostSamples.device_support(evidence, catalog)}
-            LocalSchedulerBatch.attach_support(products, answers, support)
+        for rank in (requested, *(peer for peer in peers if peer != requested)):
+            role = domain["worker_roles"][str(rank)]
+            placed = WorkerDomain.execution_domain(WorkerDomain.bind_worker(domain, role))
+            calls = [invocation | {"domain": placed} for invocation in invocations]
+            original, timed = (WorkerCapture(recording, rank, name) for name in ("structure", "timing"))
+            facts, _, structure = LocalSchedulerBatch.readback(calls, original)
+            evidence, catalog = original.measure(model, recording.directory.parent)
 
+            # Each rank contributes its own paired timings even when its schedule is shared.
+            report = HostCostSamples.local(original, timed, catalog)
+            if rank != requested:
+                support[f"samples/host-rank-{rank}.json"] = report
+                continue
+
+            products, answers = self.answers(queries, report, "samples/host.json")
+            if not products:
+                return products, answers
+            support.update({structure: facts, **CostSamples.device_support(evidence, catalog)})
+
+        LocalSchedulerBatch.attach_support(products, answers, support)
         return products, answers
 
 

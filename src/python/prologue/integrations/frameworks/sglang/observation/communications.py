@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
+from time import CLOCK_MONOTONIC_RAW, clock_gettime_ns
 from typing import Any
 
 import torch.distributed as distributed
@@ -42,47 +43,68 @@ class CollectiveOperand:
 class DeviceCollectiveCuts:
     """Keep structural and CPU-only observations on the same native call boundaries."""
 
-    def __init__(self, scopes) -> None:
+    def __init__(self, scopes, record_auxiliary=None) -> None:
         self.scopes = scopes
+        self.record_auxiliary = record_auxiliary
         self.enclosing = ContextVar("native_communication", default=False)
 
     def invoke(self, signature, original, group, *args, **kwargs):
         if not self.scopes.enabled or group.world_size == 1 or self.enclosing.get():
             return original(group, *args, **kwargs)
-        arguments = signature.bind(group, *args, **kwargs)
-        arguments.apply_defaults()
-        tensors = list(tensor_ports(arguments.arguments, "arguments"))
 
-        if not any(tensor.device.type == platform_domain().device_type for _, tensor in tensors):
-            return original(group, *args, **kwargs)
+        enter_ns = clock_gettime_ns(CLOCK_MONOTONIC_RAW) if self.record_auxiliary is not None else None
+        exchange = self.group_operands(signature, original, group, args, kwargs)
+        return self.exchange(original, exchange, enter_ns, group, *args, **kwargs)
 
-        root_rank = group.ranks[arguments.arguments["src"]] if original.__name__ == "broadcast" else None
+    def group_operands(self, signature, original, group, args, kwargs):
+
+        # The native all_reduce hot path has one positional tensor and no optional arguments to bind.
+        if original.__name__ == "all_reduce" and len(args) == 1 and not kwargs:
+            arguments = {"input_": args[0]}
+        else:
+            bound = signature.bind(group, *args, **kwargs)
+            bound.apply_defaults()
+            arguments = bound.arguments
+
+        tensors = tensor_ports(arguments, "arguments")
+        device = platform_domain().device_type
+
+        if not any(tensor.device.type == device for _, tensor in tensors):
+            return None
+
+        root_rank = group.ranks[arguments["src"]] if original.__name__ == "broadcast" else None
         operand = None
         role = "communication"
-        if original.__name__ == "all_gather" and arguments.arguments["output_tensor_list"] is None:
-            tensor = arguments.arguments["input_"]
-            operand = CollectiveOperand(group, tensor, arguments.arguments["dim"] % tensor.ndim)
+        if original.__name__ == "all_gather" and arguments["output_tensor_list"] is None:
+            tensor = arguments["input_"]
+            operand = CollectiveOperand(group, tensor, arguments["dim"] % tensor.ndim)
             if self.scopes.collective_at_root:
                 role = "gather"
         elif original.__name__ == "all_reduce" and not self.scopes.collective_at_root:
-            operand = CollectiveOperand(group, arguments.arguments["input_"])
+            operand = CollectiveOperand(group, arguments["input_"])
         elif original.__name__ in {"all_gather_into_tensor", "reduce_scatter_tensor"}:
-            operand = CollectiveOperand(group, arguments.arguments["input"], output=arguments.arguments["output"])
+            operand = CollectiveOperand(group, arguments["input"], output=arguments["output"])
 
-        with self.outer():
-            return self.scopes.observe_exchange(
-                original, role, group.device_group, root_rank, operand, partial(original, group, *args, **kwargs),
-            )
+        return role, group.device_group, root_rank, operand
 
     def distributed(self, signature, original, *args, **kwargs):
         if not self.scopes.enabled or self.enclosing.get():
             return original(*args, **kwargs)
+
+        enter_ns = clock_gettime_ns(CLOCK_MONOTONIC_RAW) if self.record_auxiliary is not None else None
+        exchange = self.distributed_operands(signature, original, args, kwargs)
+        return self.exchange(original, exchange, enter_ns, *args, **kwargs)
+
+    @staticmethod
+    def distributed_operands(signature, original, args, kwargs):
         arguments = signature.bind(*args, **kwargs)
         arguments.apply_defaults()
         tensors = tensor_ports(arguments.arguments, "arguments")
+        device = platform_domain().device_type
 
-        if not any(tensor.device.type == platform_domain().device_type for _, tensor in tensors):
-            return original(*args, **kwargs)
+        if not any(tensor.device.type == device for _, tensor in tensors):
+            return None
+
         if arguments.arguments["async_op"]:
             raise ValueError("asynchronous native collectives need an explicit work-completion boundary")
 
@@ -90,7 +112,7 @@ class DeviceCollectiveCuts:
         if group is None:
             group = distributed.group.WORLD
         if distributed.get_world_size(group) == 1:
-            return original(*args, **kwargs)
+            return None
 
         root_rank = arguments.arguments.get("src")
         if arguments.arguments.get("group_src") is not None:
@@ -102,18 +124,21 @@ class DeviceCollectiveCuts:
                 None, arguments.arguments["input_tensor"], output=arguments.arguments["output_tensor"]
             )
 
-        with self.outer():
-            return self.scopes.observe_exchange(
-                original, "communication", group, root_rank, operand, partial(original, *args, **kwargs),
-            )
+        return "communication", group, root_rank, operand
 
-    @contextmanager
-    def outer(self):
+    def exchange(self, original, exchange, entered, *args, **kwargs):
+        if exchange is None:
+            if entered is not None:
+                self.record_auxiliary(entered)
+            return original(*args, **kwargs)
 
         # Public group methods may call each other; record one scope for each native exchange.
+        run = partial(original, *args, **kwargs)
         token = self.enclosing.set(True)
         try:
-            yield
+            if entered is None:
+                return self.scopes.observe_exchange(original, *exchange, run)
+            return self.scopes.observe_exchange(original, *exchange, run, entered=entered)
         finally:
             self.enclosing.reset(token)
 
