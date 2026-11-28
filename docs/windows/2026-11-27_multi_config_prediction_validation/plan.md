@@ -6,9 +6,9 @@
 
 | 里程碑 | 核心目标 | 主要覆盖配置与模型 | 预算上限 | 停机门控 |
 | :--- | :--- | :--- | :---: | :---: |
-| **M1** | 多卡 TP + 跨模型预测矩阵；TP2 单卡装配独立对照 | Qwen3-8B `TP2/TP4/TP8`、Mistral-7B `TP2`；独立 TP2 单卡 + 短物理通信片段对照 | ≤ 18,000 卡秒 | **M1 完必停** |
-| **M2** | 异构高级并行预测矩阵（完整短流建库，0 逆向调度特例） | Qwen3-8B `PD (P-TP1/D-TP2)`、Mistral-7B `PP3` & `TP2×PP3`、Qwen3-30B-A3B `TP4×EP4` | ≤ 25,000 卡秒 | **M2 完必停** |
-| **M3** | Azure 2024 真实流量压测 + 8 域总验收与文档收口 | Azure CSV 连续窗口 `32 → 128 → 256` 请求 + 汇总 S05/M1/M2/M3 8 域总表 + 文档同步 | ≤ 25,000 卡秒 | **M3 终审停机** |
+| **M1** | 多卡 TP + 跨模型预测矩阵；TP2 单卡装配独立对照；Ascend 按卡 NUMA 绑核 | Qwen3-8B `TP2/TP4/TP8`、Mistral-7B `TP2`；独立 TP2 单卡 + 短物理通信片段对照 | ≤ 60,000 卡秒 | **M1 完必停** |
+| **M2** | 异构高级并行预测矩阵（完整短流建库，0 逆向调度特例） | Qwen3-8B `PD (P-TP1/D-TP2)`、Mistral-7B `PP3` & `TP2×PP3`、Qwen3-30B-A3B `TP4×EP4` | ≤ 60,000 卡秒 | **M2 完必停** |
+| **M3** | Azure 2024 真实流量压测 + 8 域总验收与文档收口 | Azure CSV 连续窗口 `32 → 128 → 256` 请求 + 汇总 S05/M1/M2/M3 8 域总表 + 文档同步 | ≤ 60,000 卡秒 | **M3 终审停机** |
 
 ---
 
@@ -23,14 +23,29 @@
 2. **主线：完整拓扑短流建库与盲测留出（Qwen3-8B TP2/TP4/TP8 + Mistral-7B TP2）**：
    - 每个配置用 1–2 组覆盖跨页、多成员与典型长度的**完整拓扑短流**（开发目录 `data/multi-config-prediction/dev/m1/`）建库并核对结构与固定图基线（可按来源隔离规则只读复用 S06 已验物理通信/宿主资产，或直接用完整短流配对宿主录制）；
    - 严禁为多卡 TP 新增任何逆向调度状态脚本；遇到明确输入超界点允许留出盲测走正式 `predict explore` 的弱状态探针（Attention / Copy / 物理通信片段）或短流通用补齐；
-   - 冻结 M1 留出清单，抽样全新未见请求（如 8–16 请求），完成盲测预测 → 完整物理详细参考 + 预登记 `K` 次轻量参考 → 三路核验（结构 `full_structure_matched`、固定图实测基线合格、三路 `training == "separate"`、中位数 TTFT/TPOT `< 6% MAPE`）与**跨 TP2/TP4/TP8 吞吐及延迟排序一致性**。
+   - 冻结 M1 留出清单，抽样全新未见请求（如 8–16 请求）。四案盲测预测成功且封存的结果哈希通过校验后，启动完整物理详细参考及预登记 `K` 次轻量参考。随后完成三路核验（结构 `full_structure_matched`、固定图实测基线合格、三路 `training == "separate"`、中位数 TTFT/TPOT `< 6% MAPE`）与**跨 TP2/TP4/TP8 吞吐及延迟排序一致性**。
 3. **独立对照项（不阻塞主线）：Qwen3-8B TP2 单卡 + 独立短物理通信片段装配**：
    - 用单卡分片来源（复用或新采 TP2 单卡短流）+ 独立短物理通信探针提供的真实通信与提交片段，执行严格整图结构对照；
    - 单独记录：**总卡时 vs 完整双卡建库卡时、动作匹配率、剩余差异归因**，写入 `data/multi-config-prediction/dev/m1/single-device-assembly-report.json`。
 
+### M1 恢复与两步收口路线（2026-11-27 AGY 根因定案后追加）
+AGY 离线取证已实锤 TP4 首批 `10.92%` TTFT 偏差与跨运行 `74.44 ms` 漂移源于 **Kunpeng-920 192 核 8-NUMA（本地距离 `10` vs 跨片 `24–32`）完全未绑核未绑内存**：同批次 TP4 四个 rank 的非同步宿主计算分别为 Rank 0 `618.43 ms`（`17.0 ms/层`）、Rank 2 `680.53 ms`（`+10.0%`）、Rank 1 `701.41 ms`（`+13.4%`）、Rank 3 `702.73 ms`（`+13.6%`），慢卡在每层 `AllReduce` 前拖累快卡于 `aclrtSynchronizeStream` 上自愿挂起（占 Rank 0 `93.63 ms` `off_cpu` 的 `91.3%`）；本机物理 NPU 拓扑为 `NPU0/1 → NUMA 6 (CPU 144-167)`、`NPU2/3 → NUMA 4 (CPU 96-119)`、`NPU4/5 → NUMA 0 (CPU 0-23)`、`NPU6/7 → NUMA 2 (CPU 48-71)`，无 `cpufreq` 动态调频。TP8 两次失败纯属短超时（`207s`/`94s`）触发 `exit 137` 误杀。Codex 按以下两步顺序收口 M1：
+
+1. **Step A — Ascend 按物理 NPU 动态 NUMA 绑核与本地内存绑定（平台通用底座，零跨层泄露）**：
+   - 仅在 `src/python/prologue/integrations/platforms/ascend/`（及必要容器启动/运行时入口）实现物理 NPU → 本地 NUMA / CPU 亲和拓扑解析（动态解析 `npu-smi info -t topo` 或内核 PCIe/NUMA sysfs，不写死魔法数字；按共享同一 NUMA 节点的 NPU 数量均匀切分**每 rank 独占本地核段**，如本机每卡 12 核：`NPU0: 144-155`、`NPU1: 156-167`、`NPU2: 96-107`、`NPU3: 108-119`、`NPU4: 0-11`、`NPU5: 12-23`、`NPU6: 48-59`、`NPU7: 60-71`）；
+   - **容器级 + 进程级双保险**：容器侧传合并 `--cpuset-cpus`（避免容器游荡到无关 NUMA）；**容器内每个 worker rank 进程在初始化早期**必须按自身物理卡绑定独占核集合（`os.sched_setaffinity`）与本地 NUMA 内存策略（`set_mempolicy(MPOL_BIND)` / `libnuma`），因为 TP4/TP8 单容器跨多个 NUMA 节点，仅容器级 `--cpuset-cpus` 无法阻止 rank 间跨片漂移；
+   - **全采集模式一致生效**：必须覆盖 `detailed_timing`、`host_timing`、局部探针与 `latency_only`（无 `LD_PRELOAD`）全部原生执行模式，确保训练宿主样本与纯时延轻量参考落在完全相同的本地核组与内存域；严格保持 `sglang/` 0 `ascend`/`torch.npu`、`src/engine/core/` 0 修改；重建 `prologue-sglang` 与 `prologue-control` 镜像并核对安装哈希。
+2. **Step B — TP4 定向复验与观察器分段漏扣修复（Step A 已验收通过，修完漏扣过线即直推 Step C）**：
+   - **Step A 验收结论**：绑核已 100% 生效——Rank 0 流同步挂起从 `85.46 ms` 降至 `0.10 ms`，同 NUMA 节点内 rank 差距仅 `0.03%`（NUMA 6）与 `0.79%`（NUMA 4），TP4 TTFT MAPE 从 `10.92%` 降至 `5.11%`；跨 NUMA 6 vs NUMA 4 的 `5.01%` Prefill 差距经 AGY 独立微基准证实为本机物理 DRAM 写带宽差异（NUMA 6 `155.6 ms` vs NUMA 4 `143.0 ms`，物理慢 `+8.8%`），已由按 rank 成本库忠实建模，不再作为放行阻塞项；
+   - **Step B2 定向修复（纯 Python 约 20 行，0 C++ 重编）**：AGY 离线拉取 `B02 Layer 5` 微秒时间线实锤 `TPOT 6.02%`（以及 TP2/TP4 共同的纯 Decode `+7.2–8.4 ms` 系统正偏）中有约 `3.5 ms/批` 来自 `src/python/prologue/integrations/frameworks/sglang/observation/communications.py` 与 `host_timing.py` 的分段 `with self.auxiliary():` 缝隙（单次 `all_reduce` 切出 5 段 `auxiliary`/scope 区间，段间漏扣 `8.1 + 9.4 + 10.9 + ~10 ≈ 38 us`，×74 次 ≈ `2.81 ms`，加 `layer`/`attention` 外层包装 ≈ `0.7 ms`）。修改要求：在 `DeviceCollectiveCuts.invoke / distributed` 与 `NativeHostSamples.module / run_batch / forward / sample` 的**最外层入口第一行**打 `enter_ns`、**`timed_call` 返回后退出前最后一行**打 `exit_ns`，将观察器准备与收尾合并为连续的前后两段 `auxiliary`（消灭段间缝隙），并在 `host-timing` 热路径避免无谓的 `inspect.signature.bind` 开销；重建双镜像；
+   - **复验与直推放行线**：**无需再跑额外 `batch-timing` 诊断**，直接在已绑核的 TP4 上**仅重录一轮 `host-timing`**（复用本轮已录制的绑核 `detailed` 与 `latency-only` 参考，超时 `>= 900s`），核对 TP4 开发流自主 **TTFT / TPOT MAPE 双双 `< 6%`**（预期 TPOT 降至 `~3.0%–3.5%`、TTFT 降至 `~4.5%`）。**一旦 TP4 双指标 `< 6%`，不停顿直接进入 Step C**；仅当修完仍未 `< 6%` 时停机汇报。
+3. **Step C — 第二枪（全四配置同口径刷新 + M1 四例正式留出，完后强停）**：
+   - 在统一「绑核 + 连续 `auxiliary` 修复」镜像下，刷新 Qwen3-8B `TP2`、`TP8` 与 Mistral-7B `TP2` 干净宿主成本（复用既有设备/通信/拷贝资产与模板，所有多卡运行硬性设置超时 `>= 900s`，TP8 建议 `1,200s–1,800s`，彻底杜绝 `exit 137`）；TP4 若开发库已覆盖留出所需全部短 Prefill/合批特征可直接复用，否则按同口径补齐；
+   - 冻结 M1 四例盲测留出清单（每例预登记 `K=2` 独立轻量参考，Qwen TP2/TP4/TP8 共用同一未见请求序列以核验跨 TP 排序），先完成四例盲测预测并封存哈希，再录制双参考并跑完三路核验与跨 TP 排序总表；完成后**立即在 M1 强制停机**，保持零提交交回 AGY 与用户审查。
+
 ### 交接与强停机条件
 - **交付物**：`data/multi-config-prediction/holdout/m1/acceptance-summary.json`（含跨 TP 排序表）、`single-device-assembly-report.json`、M1 卡时/后处理账本、`git diff --stat` 与全仓静态品质自查（`ruff`、AST、NE/25L 代码墙、四维隔离）。
-- **单点止损**：任一配置/问题超过 2 轮不同根因修复或单点消耗 > 3,000 卡秒立即停机汇报。
+- **单点止损与超时纪律**：多卡运行单次容器超时硬性 `>= 900s`；同一未收口根因连续超过 3 轮不同修复方案或单点累计消耗 `> 12,000 卡秒` 仍无明确改善时立即停机汇报。
 - **强制停机**：M1 汇总完成（或触发止损）后立即停机，交回 AGY 与用户审阅后再启动 M2。
 
 ---
@@ -53,7 +68,7 @@
 
 ### 交接与强停机条件
 - **交付物**：`data/multi-config-prediction/holdout/m2/acceptance-summary.json`、M2 卡时账本与源码 diff 审视。
-- **单点止损**：单拓扑/单问题 > 2 轮修复或 > 3,000 卡秒立即停机汇报。
+- **单点止损与超时纪律**：多卡运行单次容器超时硬性 `>= 900s`（MoE-EP / 长拓扑建议 `1,200s–1,800s`）；同一未收口根因超过 3 轮修复或单点 `> 12,000 卡秒` 无明确进展立即停机汇报。
 - **强制停机**：M2 完成后立即停机，等待 AGY 与用户确认放行 M3。
 
 ---
@@ -78,3 +93,33 @@
 ## 阶段演进与 Bigger-Picture Overview 记录
 
 （由 Codex 在每个里程碑 M1 / M2 / M3 完成停机前追加全局复盘记录。）
+
+### 2026-11-27 — M1 验收前止损
+
+原生采集、来源核验、成本拟合和预测保持现有入口，两个已补齐配置的训练记录可追溯到修正镜像。TP8 配对需要按两次容器成功退出的实耗统筹，观测窗口结束和原始清单写出都是中间步骤。当前单点余额低于最近一次详细录制所耗，停在冻结前。TP4 固定图证据支持优先分析宿主耗时，定位错峰首批时应维持开发流输入和观测口径一致。重新冻结以三种配置的干净训练资产和 TP4 开发门槛同时通过为前提，独立三路核验、双轻量参考、排序和隔离门槛照常执行。M2 待审查放行。
+
+TP4 后续诊断使用同一八请求及其预热输入，在现有轻量采集入口记录选批、`run_batch`、结果处理和首 token 发布。先核对墙钟和线程 CPU 时间，再按证据判断哪一段需要修复。固定图校验使用原生输入、唤醒和依赖条件，准入继续使用自主预测对纯轻量参照的误差。TP8 恢复前须为两次成功录制与四例正式参考同时复核额度。
+
+### 2026-11-27 — AGY 审查放行与预算放宽
+
+经 AGY 离线取证，已直接查明 TP4 首批误差与波动来自 Kunpeng-920 8-NUMA 未绑核/未绑内存引发的慢卡木桶效应（Rank 3 较 Rank 0 慢 `13.6%`，导致快卡在每层 `aclrtSynchronizeStream` 上阻塞等待），无需再在未绑核环境下做 TP4 轻量诊断重录；TP8 两次失败为短超时 `exit 137` 误杀。现经用户批准将三里程碑预算统一放宽至各 `60,000 卡秒`（全窗 `180,000 卡秒`），解除 TP8 旧熔断并放宽单点止损至 3 轮 / `12,000 卡秒`，按上述「M1 恢复与两步收口路线」交由 Codex 推进至 M1 完成停机。
+
+### 2026-11-27 — TP4 定向复验停机
+
+平台部署层从内核枚举物理卡所在 NUMA 节点并划分核段，原生 worker 在初始化调度器前应用同一放置数据，来源解释、模板和预测核心继续使用既有接口。TP4 三种录制的内核绑定一致，首批差距显著缩小但为 5.01%，自主 TPOT MAPE 为 6.02%。Step B 未通过，Step C 等待审查。现有配对结果可复核绑核后的残余等待和误差，四例留出仍按原门槛验收。
+
+离线复核将残余差异定位到 Prefill CPU 服务和录制模式间的逐批时差。若获准续做 Step B，复用现有关闭 `LD_PRELOAD` 的 `batch-timing` 入口，在同四卡、同八请求及同预热下对齐选批、原生调用及发布边界。以同一批次身份区分真实服务时差和计时探针影响，再判断是否有通用的采样口径需要修正。该录制用于开发归因，正式轻量参考仍按冻结清单独立录制。
+
+### 2026-11-27 — AGY Step B 离线定案与直推 Step C 放行
+
+AGY 离线复核确认两项事实：① 本机 NUMA 6 物理内存写带宽较 NUMA 4 慢 `+8.8%`（独立 `4 MiB × 40` 微基准 `155.6 ms` vs `143.0 ms`），TP4 绑核后同 NUMA 内 rank 差距已收至 `0.03% / 0.79%`，Step A 验收通过，不再以跨 NUMA 硬件差卡关；② Decode `B02 Layer 5` 微秒时间线实锤 `communications.py` 与 `host_timing.py` 的分段 `auxiliary` 区间存在约 `38 us × 74 + 0.7 ms ≈ 3.5 ms/批` 的未扣缝隙，直接解释了 TP2/TP4 共同的纯 Decode 高估与 TP4 TPOT `6.02%`。经用户批准，跳过额外 `batch-timing` 诊断，由 Codex 直接完成 Step B2（合并外层连续 `auxiliary` 区间并简化 `host-timing` 通信热路径 → 仅重录 TP4 `host-timing` 复验双 `< 6%`）后不停顿直推 Step C 收口 M1，完成后在 M1 强制停机。
+
+### 2026-11-28 — Step B2 通过
+
+同一绑核 TP4 纯时延参考上的 TTFT／TPOT MAPE 为 4.68%／4.72%，已通过 Step B2 放行。Step C 用开发流独立刷新各物理拓扑的宿主样本，覆盖原错峰流和短单请求 Prefill 锚点。预测模板和已经合格的非宿主样本按其原来源复用，冻结与独立参考仍按原顺序进行。
+
+### 2026-11-28 — M1 验收收口与整体复核
+
+正式留出 4/4 通过。结构对照使用真实边界时间并核验动作及依赖，固定图对照核验实测边界复现和成本覆盖，自主预测使用独立于时延参考的成本库。Qwen 三档 TP 的吞吐、P95 TTFT、平均 TPOT 排序均一致。固定图代入模型成本后的逐例误差随总表保留。 [正式验收](../../../data/multi-config-prediction/holdout/m1/acceptance-summary.json)
+
+原生观察器持有 SGLang 调用边界，Ascend 适配层持有物理放置，核心通过原接口消费模板与成本。本轮保留严格零外推与来源隔离。正式四例初始热命中为 0/4，Mistral 的串行局部补采花费高于独立参考。M1 交付齐备，停在审查门槛，M2 待 AGY 和用户放行。 [资源账本](../../../data/multi-config-prediction/dev/m1/resource-accounting.json) · [全仓静态检查](../../../data/multi-config-prediction/dev/m1/bootstrap/continuous-auxiliary/static-final.log)
