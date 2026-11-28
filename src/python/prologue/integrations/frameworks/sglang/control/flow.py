@@ -31,10 +31,11 @@ class FlowExecution(CallSegments):
         self.clocks.install()
 
         HostReads(self).install()
+
+        # Ordinary dense decode can merge cohorts with different admission histories too.
         retain = (
-            scheduler.ps.tp_size == scheduler.ps.pp_size == 1 and scheduler.experts is None
+            scheduler.ps.pp_size == 1 and scheduler.experts is None
             and scheduler.server_args.disaggregation_mode == "null"
-            and (scheduler.chunked_prefill_size is not None or not scheduler.server_args.disable_radix_cache)
         )
         self.selection = BatchSelection(self, retain_preparation=retain)
         self.selection.install()

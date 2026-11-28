@@ -259,33 +259,10 @@ class SchedulerBatch:
             self.preparation["model_batch"] = warmed
 
     def prepare_cohort(self, cohort, requests, tokens, receiver):
-        identities = cohort["admit"]
-        self.scheduler.process_input_requests([requests[identity] for identity in identities])
-        queued = {req.rid: req for req in self.scheduler.waiting_queue}
-        admitted = [queued[identity] for identity in identities]
-        frontier = cohort.get("prefill_until", {r.rid: len(r.origin_input_ids) for r in admitted})
-
-        # Native selection and result processing own every allocation and chunk transition.
-        while (before := {r.rid: r.kv_committed_len for r in admitted}) != frontier:
-            self.prime_batch(tokens, receiver)
-            after = {r.rid: r.kv_committed_len for r in admitted}
-            if after == before or any(after[rid] > length for rid, length in frontier.items()):
-                raise ValueError("native priming did not reach the requested prefill frontier")
-
+        self.scheduler.process_input_requests([requests[identity] for identity in cohort["admit"]])
+        self.prime_batch(tokens, receiver)
         for _ in range(cohort["decode_steps"]):
             self.prime_batch(tokens, receiver)
-
-    def seed_cache(self, rows, receiver):
-        requests, tokens = self.operands(rows)
-        for identity in requests:
-            self.prepare_cohort({"admit": [identity], "decode_steps": 0}, requests, tokens, receiver)
-            batch = self.scheduler.get_next_batch_to_run()
-            self.scheduler.cur_batch = self.scheduler.last_batch = batch
-            if batch is not None or not self.scheduler.is_fully_idle():
-                raise ValueError("prefix seeding left a live native request")
-
-        # Keep the populated native prefix tree and discard the preparation request aliases.
-        self.aliases.clear()
 
     def replay(self, plan, inputs, receiver):
         requests, tokens = self.operands([*plan["prior_requests"], *inputs["requests"]])
@@ -303,8 +280,6 @@ class SchedulerBatch:
     def prepare(self, inputs, receiver):
         scheduler = self.scheduler
         self.expected = [row["id"] for row in inputs["requests"]]
-        if seeds := inputs.get("cache_seeds"):
-            self.seed_cache(seeds, receiver)
 
         if plan := inputs.get("replay"):
             ingress, tokens = self.replay(plan, inputs, receiver)
@@ -397,7 +372,7 @@ class SchedulerBatch:
                 phase = batch_input["phase"]
                 warm = warm_cost and batch_input["requests"] and phase != "admission"
                 needs_output = phase in {"prefill", "mixed"} and not self.model_cut
-                prepares_requests = any(batch_input.get(name) for name in ("priming", "cache_seeds", "replay"))
+                prepares_requests = bool(batch_input.get("priming") or batch_input.get("replay"))
                 if self.publishes and (warm or prepares_requests or needs_output):
                     ctx = stack.enter_context(zmq.Context())
                     receiver = stack.enter_context(ctx.socket(zmq.PULL))
