@@ -20,6 +20,7 @@ import torch
 import torch_npu
 
 from prologue.common.io import read_jsonl, write_json
+from prologue.integrations.platforms.ascend.placement import WorkerPlacement, read_cpu_list
 
 
 def native_function(library, symbol, result, *operands):
@@ -86,10 +87,7 @@ class AscendThreadActivity:
 
     @staticmethod
     def online_cpus():
-        cpus = []
-        for interval in Path("/sys/devices/system/cpu/online").read_text().strip().split(","):
-            first, _, last = interval.partition("-")
-            cpus.extend(range(int(first), int(last or first) + 1))
+        cpus = read_cpu_list(WorkerPlacement.online_cpus)
         return (ctypes.c_int * len(cpus))(*cpus)
 
     def start(self, *, detailed=False):

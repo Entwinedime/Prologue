@@ -6,7 +6,9 @@ from . import CaptureProbe
 
 
 def copy(invocation):
-    device_runtime().copy_sampler().sample(invocation.job, invocation.output, invocation.revision)
+    runtime = device_runtime()
+    runtime.bind_worker(0)
+    runtime.copy_sampler().sample(invocation.job, invocation.output, invocation.revision)
 
 
 def attention(invocation):

@@ -187,7 +187,7 @@ class LocalRule:
     def prepare(self, queries, deployment, arguments, limit):
         session = self.common_session(queries, deployment)
         cut = self.cut(queries, session, deployment, arguments)
-        selection = {"acquisition_mode": deployment.get("acquisition_mode", "full"), "physical_devices": cut.cards}
+        selection = {**deployment, "physical_devices": cut.cards}
         platform = platform_backend().deployment(selection, len(cut.cards), False)
         image = DockerImage.inspect(arguments.source_image)
         revision = WorkerDomain.image_revision(image)

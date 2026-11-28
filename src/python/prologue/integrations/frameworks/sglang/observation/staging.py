@@ -17,6 +17,7 @@ from prologue.integrations.bindings import device_runtime, platform_domain
 from prologue.integrations.frameworks.sglang.abi.hooks import HookTable
 from prologue.integrations.frameworks.sglang.abi.registry import resolve, symbols
 from prologue.integrations.frameworks.sglang.observation.model import ModelScopes
+from prologue.integrations.frameworks.sglang.observation.window import activate_device
 
 
 class LayerWeights:
@@ -290,23 +291,10 @@ class ShardTransport:
 
 def run_staged_scheduler(server_args, port_args, gpu_id, tp_rank, attn_cp_rank, moe_dp_rank, moe_ep_rank,
                                pp_rank, dp_rank, pipe_writer):
-    run_scheduler_process = resolve(symbols().run_scheduler_process)
-
-    device = torch.get_device_module(server_args.device)
-    if device.device_count() != 1:
-        raise ValueError("logical shard workers require exactly one visible accelerator")
-    device.set_device(0)
-
     world_size = server_args.tp_size * server_args.pp_size
     rank = pp_rank * server_args.tp_size + tp_rank
+    device = activate_device(rank, world_size, staged=True)
     ShardTransport.world(world_size, rank, "env://")
 
-    run_scheduler_process(server_args, port_args, 0, tp_rank, attn_cp_rank, moe_dp_rank, moe_ep_rank,
-                          pp_rank, dp_rank, pipe_writer)
-
-
-def staged_engine():
-    class StagedEngine(resolve(symbols().engine)):
-        run_scheduler_process_func = staticmethod(run_staged_scheduler)
-
-    return StagedEngine
+    resolve(symbols().run_scheduler_process)(server_args, port_args, device, tp_rank, attn_cp_rank, moe_dp_rank,
+                                             moe_ep_rank, pp_rank, dp_rank, pipe_writer)

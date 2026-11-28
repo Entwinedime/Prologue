@@ -1,6 +1,10 @@
 """Allocate physical Ascend devices for a native capture."""
 
+import json
+from dataclasses import asdict
 from pathlib import Path
+
+from ..placement import WorkerPlacement
 
 
 class AscendDeployment:
@@ -24,9 +28,14 @@ class AscendDeployment:
         return mode == "single_device"
 
     def __init__(self, source: dict, workers: int, transfer: bool) -> None:
-        if source.keys() - {"acquisition_mode", "physical_devices", "store_url", "transfer_protocol"}:
+        if source.keys() - {"acquisition_mode", "physical_devices", "store_url", "transfer_protocol", "compiler_cache"}:
             raise ValueError("Ascend deployment contains unsupported fields")
         self.single_device = self.is_single_device(source)
+        self.compiler_cache = source.get("compiler_cache")
+        if self.compiler_cache is not None and not (
+            isinstance(self.compiler_cache, str) and Path(self.compiler_cache).is_absolute()
+        ):
+            raise ValueError("Ascend compiler_cache must be an absolute host directory")
 
         # Local shard peers share a container. Only physical groups and PD need the host fabric or store.
         self.network = "bridge" if self.single_device and not transfer else "host"
@@ -56,25 +65,42 @@ class AscendDeployment:
             if protocol not in ("sdma", "device_rdma"):
                 raise ValueError("Ascend transfer_protocol must be sdma or device_rdma")
 
-            self.environment["ASCEND_MF_STORE_URL"] = source["store_url"]
-            self.environment["ASCEND_MF_TRANSFER_PROTOCOL"] = protocol
+            if transfer:
+                self.environment["ASCEND_MF_STORE_URL"] = source["store_url"]
+                self.environment["ASCEND_MF_TRANSFER_PROTOCOL"] = protocol
 
     def card(self, logical_rank):
         return self.devices[0 if self.single_device else logical_rank]
 
     def options(self, *, detailed_timing=False, host_timing=False, latency_only=False) -> list[str]:
-        arguments = ["--runtime", self.source_docker_runtime(), "--ipc", "host", "--network", self.network]
+        placement = WorkerPlacement.select(self.devices)
+        cpus = sorted({cpu for worker in placement for cpu in worker.cpus})
+        nodes = sorted({worker.numa_node for worker in placement})
+        arguments = [
+            "--runtime", self.source_docker_runtime(), "--ipc", "host", "--network", self.network,
+            "--cpuset-cpus", ",".join(map(str, cpus)), "--cpuset-mems", ",".join(map(str, nodes)),
+            "--env", f"{WorkerPlacement.environment}={json.dumps([asdict(worker) for worker in placement])}",
+        ]
         if not self.single_device:
             arguments.append("--privileged")
-        elif detailed_timing or host_timing:
+        else:
 
-            # Perf pins one ring per worker thread. Docker's default memlock limit fails for larger groups.
-            arguments.extend(["--cap-add", "PERFMON", "--ulimit", "memlock=-1:-1"])
+            # Docker's default seccomp profile allows NUMA memory policy with SYS_NICE.
+            arguments.extend(["--cap-add", "SYS_NICE"])
+            if detailed_timing or host_timing:
+                arguments.extend(["--cap-add", "PERFMON", "--ulimit", "memlock=-1:-1"])
 
         # Offline placement comparison needs only the declaration. Native execution needs the driver mounts.
         for path in self.driver_mounts:
             mounted = Path(path).resolve(strict=True)
             arguments.extend(["--mount", f"type=bind,src={mounted},dst={path},readonly"])
+
+        if self.compiler_cache:
+
+            # Persist compiler outputs across fresh runtime processes and their normal warmup.
+            destination = "/opt/prologue/compiler-cache"
+            arguments.extend(["--mount", f"type=bind,src={self.compiler_cache},dst={destination}",
+                              "--env", f"TRITON_CACHE_DIR={destination}"])
 
         if detailed_timing:
 

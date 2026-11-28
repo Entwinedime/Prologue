@@ -46,6 +46,7 @@ COPY src/python/prologue/integrations/frameworks/__init__.py ./python/prologue/i
 COPY src/python/prologue/integrations/frameworks/sglang/__init__.py ./python/prologue/integrations/frameworks/sglang/
 COPY src/python/prologue/integrations/platforms/__init__.py ./python/prologue/integrations/platforms/
 COPY src/python/prologue/integrations/platforms/ascend/__init__.py src/python/prologue/integrations/platforms/ascend/backend.py src/python/prologue/integrations/platforms/ascend/trace_store.py ./python/prologue/integrations/platforms/ascend/
+COPY src/python/prologue/integrations/platforms/ascend/placement.py ./python/prologue/integrations/platforms/ascend/
 COPY src/python/prologue/integrations/platforms/ascend/abi ./python/prologue/integrations/platforms/ascend/abi/
 # The capture worker records and interprets traces. Independent reference checks run on the host.
 COPY src/python/prologue/integrations/platforms/ascend/runtime ./python/prologue/integrations/platforms/ascend/runtime/

@@ -31,6 +31,11 @@ from prologue.integrations.frameworks.sglang.shared.configuration import (
 )
 
 
+def run_native_scheduler(server_args, port_args, gpu_id, *args):
+    device_runtime().bind_worker(gpu_id)
+    resolve(symbols().run_scheduler_process)(server_args, port_args, gpu_id, *args)
+
+
 @dataclass(frozen=True, slots=True)
 class ServingObservation:
     """Hold the same observation policy across spawned processes and the native plugin boundary."""
@@ -198,12 +203,14 @@ class NativeServingInstance:
     def engine_configuration(self, mode, bootstrap, rendezvous):
         """Check native topology before allowing the serving engine to start."""
 
+        scheduler = run_native_scheduler
         if self.local_shards:
-            from prologue.integrations.frameworks.sglang.observation.staging import staged_engine
+            from prologue.integrations.frameworks.sglang.observation.staging import run_staged_scheduler
 
-            Engine = staged_engine()
-        else:
-            Engine = resolve(symbols().engine)
+            scheduler = run_staged_scheduler
+
+        class Engine(resolve(symbols().engine)):
+            run_scheduler_process_func = staticmethod(scheduler)
 
         options = self.instance.configuration.runner_options(self.model)
         options.update(

@@ -16,6 +16,7 @@ from prologue.integrations.frameworks.sglang.observation.call_ports import (
 from prologue.integrations.frameworks.sglang.observation.serving import FlowScopes
 from prologue.integrations.frameworks.sglang.observation.window import (
     LocalProbe,
+    activate_device,
     publish_facts,
 )
 from prologue.integrations.frameworks.sglang.shared.batches import BatchTensors
@@ -160,7 +161,7 @@ class PrebuiltRunner(LocalProbe):
         ScheduleBatch = resolve(symbols().schedule_batch)
 
         started = monotonic_ns()
-        device_runtime().api.set_device(0)
+        activate_device(0, 1, staged=False)
         pools = ReceiverPools(self.job)
         initialized = monotonic_ns()
         warmup, _ = pools.batch(self.job["batches"][0])

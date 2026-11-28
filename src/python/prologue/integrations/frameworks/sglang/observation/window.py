@@ -354,11 +354,13 @@ class LocalProbe:
 
 
 def activate_device(rank, world, staged):
-
-    if device_runtime().api.device_count() != (1 if staged else world):
-        raise ValueError("visible device count differs from the requested placement")
     device = 0 if staged else rank
-    device_runtime().api.set_device(device)
+    runtime = device_runtime()
+    runtime.bind_worker(device)
+
+    if runtime.api.device_count() != (1 if staged else world):
+        raise ValueError("visible device count differs from the requested placement")
+    runtime.api.set_device(device)
     return device
 
 
